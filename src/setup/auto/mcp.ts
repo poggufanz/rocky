@@ -67,6 +67,24 @@ function messageOf(error: unknown): string | undefined {
   return error instanceof Error ? error.message : undefined;
 }
 
+/** Keep the exposure Rocky wrote earlier; an unrecognized value keeps the request. */
+function withStoredExposure(registration: McpRegistration, stored: string | undefined): McpRegistration {
+  if (stored !== "raw" && stored !== "sanitized") return registration;
+  return { ...registration, env: { ...registration.env, ROCKY_MCP_EXPOSURE: stored } };
+}
+
+/** Reads the exposure line from an owned Codex block; `withStoredExposure` validates it. */
+function tomlStoredExposure(blockText: string): string | undefined {
+  const line = blockText.split("\n").find((candidate) => /^\s*env_ROCKY_MCP_EXPOSURE\s*=/.test(candidate));
+  if (line === undefined) return undefined;
+  try {
+    const value: unknown = JSON.parse(line.slice(line.indexOf("=") + 1).trim());
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function jsonHarnessFor(harness: McpHarnessId): {
   containerKey: string;
   toEntry(registration: McpRegistration): Record<string, unknown>;
@@ -318,11 +336,9 @@ export function applyMcp(
   if (t.legacy === true) {
     return { report: removeJsonEntry(t, read, reg, ownership, LEGACY_MOVED) };
   }
-  let registration = reg;
-  const storedExposure = inspected.stored?.env.ROCKY_MCP_EXPOSURE;
-  if (inspected.report.state === "stale" && storedExposure !== undefined) {
-    registration = { ...reg, env: { ...reg.env, ROCKY_MCP_EXPOSURE: storedExposure } };
-  }
+  const registration = inspected.report.state === "stale"
+    ? withStoredExposure(reg, inspected.stored?.env.ROCKY_MCP_EXPOSURE)
+    : reg;
   const value = read.status === "present" ? read.value : {};
   try {
     const merged = t.harness === "opencode"
@@ -487,7 +503,11 @@ function applyToml(
   }
   const lines = read.status === "present" ? read.text.split("\n") : [];
   const block = read.status === "present" ? read.block : ABSENT_BLOCK;
-  const replacement = codexRockyBlock(registration);
+  const replacement = codexRockyBlock(
+    inspected.report.state === "stale" && read.status === "present"
+      ? withStoredExposure(registration, tomlStoredExposure(read.blockText))
+      : registration,
+  );
   const next = block.status === "absent"
     ? [...lines, ...(lines.length > 0 && lines[lines.length - 1] !== "" ? [""] : []), ...replacement]
     : [...lines.slice(0, block.start), ...replacement, ...lines.slice(block.end)];

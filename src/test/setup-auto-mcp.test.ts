@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { McpRegistration } from "../setup/clients.js";
 import { toClaudeEntry } from "../setup/harness-claude-code.js";
+import { codexRockyBlock } from "../setup/harness-codex.js";
 import { toCopilotEntry } from "../setup/harness-copilot-cli.js";
 import { toGeminiEntry } from "../setup/harness-gemini-cli.js";
 import { toOpencodeEntry } from "../setup/harness-opencode.js";
@@ -104,6 +105,29 @@ test("auto mcp: a stale entry from history is replaced and keeps raw exposure", 
   assert.equal((entry.env as Record<string, string>).ROCKY_MCP_EXPOSURE, "raw");
   assert.equal(entry.command, f.reg.command);
   assert.deepEqual(entry.args, [...f.reg.args]);
+});
+
+test("auto mcp: a stale codex block keeps its raw exposure", (t) => {
+  const f = fixture(t);
+  const codex = targetOf(f, "codex");
+  mkdirSync(dirname(codex.path));
+  const stale: McpRegistration = {
+    ...f.reg,
+    command: "/old/node",
+    args: [join(f.root, "old", "index.js"), "mcp"],
+    env: { ...f.reg.env, ROCKY_MCP_EXPOSURE: "raw" },
+  };
+  const staleBlock = codexRockyBlock(stale).join("\n");
+  writeFileSync(codex.path, `${staleBlock}\n`);
+  const effective: McpRegistration = { ...f.reg, env: { ...f.reg.env, ROCKY_MCP_EXPOSURE: "raw" } };
+
+  const out = applyMcp(codex, f.reg, [staleBlock]);
+  assert.equal(out.report.state, "written");
+  assert.equal(out.wroteKey, codexRockyBlock(effective).join("\n"));
+  const text = readFileSync(codex.path, "utf8");
+  assert.match(text, /env_ROCKY_MCP_EXPOSURE = "raw"/);
+  assert.ok(text.includes(`command = ${JSON.stringify(f.reg.command)}`));
+  assert.equal(inspectMcp(codex, effective, []).state, "ok");
 });
 
 test("auto mcp: a rocky entry outside history is foreign and untouched by apply and remove", (t) => {
