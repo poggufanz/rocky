@@ -14,7 +14,7 @@ import {
   type Dirent,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROCKY_HOOK_PROTOCOL_VERSION } from "../commands/hook.js";
 import { addHookBlockBytes, removeHookBlockBytes } from "../core/hook-block.js";
@@ -362,6 +362,48 @@ test("auto command: plan reports targets without writing", async (t) => {
   assert.ok(kinds.includes("shell/shell-hook"));
   assert.deepEqual(snapshotTree(f.home), before);
   assert.equal(existsSync(consentFile(f.rh)), false);
+});
+
+test("auto command: remove prunes retained copies beside PowerShell profiles", async (t) => {
+  const f = fixture(t);
+  const profile = join(f.home, "profile.ps1");
+  writeFileSync(profile, "# profile\n");
+  f.ctx.shell.powerShellProfiles = () => [profile];
+  const retained = join(f.home, `.${basename(profile)}.transaction-1234-abcd`);
+  mkdirSync(retained);
+  writeFileSync(
+    join(retained, "manifest.json"),
+    JSON.stringify({ version: 1, state: "committed", target: profile }),
+  );
+  const res = await run(f, ["remove", "--json"]);
+  assert.equal(res.code, 0);
+  assert.equal(existsSync(retained), false);
+  assert.equal(existsSync(profile), true);
+});
+
+test("auto command: an internal write failure still prints one result object", async (t) => {
+  const f = fixture(t);
+  writeFileSync(join(f.rh, "setup"), "not a directory");
+  const res = await run(f, ["consent", "approve", "--json"]);
+  assert.equal(res.code, 1);
+  assert.equal(res.json.v, 1);
+  assert.equal(res.json.action, "consent approve");
+  assert.ok((res.json.notes ?? []).some((note) => note.startsWith("internal error:")));
+  assert.deepEqual(res.json.targets, []);
+});
+
+test("auto command: an unsafe desk hook path stays refused and still prints one result", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("the desk hook fixture uses a Windows binary name");
+    return;
+  }
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  f.ctx.paths = { ...f.ctx.paths, deskHookBin: join(f.root, "100%", "rocky-hook.exe") };
+  const res = await run(f, ["consent", "approve", "--json"]);
+  assert.equal(res.code, 0);
+  assert.ok((res.json.targets ?? []).some((target) => target.kind === "desk-hooks" && target.state === "refused"));
+  assert.ok(!readFileSync(claudeSettings(f), "utf8").includes("desk-hook"));
 });
 
 test("auto command: the built CLI prints exactly one JSON object on stdout", (t) => {

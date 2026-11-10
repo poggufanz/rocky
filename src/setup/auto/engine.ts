@@ -267,6 +267,8 @@ export function removeAll(ctx: AutoContext, record: ConsentRecord | undefined): 
   }
   reports.push(removeShell(ctx.shell));
   touched.add(ctx.shell.bashrcPath());
+  // The installer retains a recovery copy beside every profile it edits too.
+  for (const profile of ctx.shell.powerShellProfiles()) touched.add(profile);
   for (const path of touched) pruneSupersededTransactions(path);
   writeExpected(ctx.rockyHome, { v: 1, files: [], history: expected.history });
   return reports;

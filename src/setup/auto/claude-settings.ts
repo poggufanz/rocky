@@ -199,6 +199,14 @@ export function removeClaudeSettings(settingsPath: string): AutoTargetReport[] {
 export function claudeSettingsSnippets(paths: Paths, keptGate: boolean): string[] {
   const snippets = [JSON.stringify(rockyHookCommand("claude-code", paths.nodePath, paths.entryPath))];
   if (keptGate) snippets.push(JSON.stringify(rockyGateHookCommand(paths.nodePath, paths.entryPath)));
-  if (paths.deskHookBin !== undefined) snippets.push(JSON.stringify(deskHookCommand(paths.deskHookBin)));
+  if (paths.deskHookBin !== undefined) {
+    // A refused desk target (unsafe or vanished binary) writes no bytes, and
+    // callers still need the agent snippets; the target report carries why.
+    try {
+      snippets.push(JSON.stringify(deskHookCommand(paths.deskHookBin)));
+    } catch {
+      // Omitted on purpose: there is no desk command to expect.
+    }
+  }
   return snippets;
 }

@@ -115,6 +115,26 @@ export async function runAutoCommand(
     notes: [],
   };
 
+  try {
+    executeAction(parsed, ctx, result, record);
+  } catch (error) {
+    // A valid action owes the caller one result object even when a Rocky-home
+    // write fails after a partial pass.
+    result.notes.push(`internal error: ${error instanceof Error ? error.message : String(error)}`);
+    out(JSON.stringify(result));
+    return 1;
+  }
+
+  out(JSON.stringify(result));
+  return 0;
+}
+
+function executeAction(
+  parsed: Parsed,
+  ctx: AutoContext,
+  result: AutoResult,
+  record: ConsentRecord | undefined,
+): void {
   switch (parsed.kind) {
     case "plan":
     case "status":
@@ -211,9 +231,6 @@ export async function runAutoCommand(
       break;
     }
   }
-
-  out(JSON.stringify(result));
-  return 0;
 }
 
 export function defaultAutoContext(): AutoContext {
