@@ -65,7 +65,9 @@ Host recovery behavior is deliberately host-specific:
 - Claude Code's `settings.json` and `.claude.json`, one pair per config directory the harness was found at.
 - The MCP config of opencode, gemini-cli, copilot-cli, and Codex (`config.toml`).
 - The Bash rc file, each PowerShell profile the hook installer edits, and the hook assets it installs under `ROCKY_HOME`.
-- `<ROCKY_HOME>/setup/consent.json`, `<ROCKY_HOME>/setup/expected.json`, and `<ROCKY_HOME>/bin/cli.json`.
+- `<ROCKY_HOME>/setup/consent.json` and `<ROCKY_HOME>/setup/expected.json`.
+
+Any bare `rocky` or `rocky setup`, including `--auto`, records the CLI location in `<ROCKY_HOME>/bin/cli.json` when it runs from a package install whose entry ends in `node_modules/@poggufanz/rocky-cli/dist/index.js`; that record is not consent-gated.
 
 It never creates a config directory: a target whose parent directory is missing is reported and left alone. It never runs a harness executable; the registration is written into the config file, not applied by the harness. `rocky setup --auto remove --json` removes Rocky's entries from every target and deletes the recovery copies Rocky retained beside the files it edited, so a completed removal leaves no Rocky block and no retained previous-bytes copy behind.
 

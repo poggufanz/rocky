@@ -369,9 +369,13 @@ the value it would write has moved.
 
 `node` and `entry` are absolute paths and `version` is the package version.
 Bare `rocky` and `rocky setup` write it; no other command does. The write is
-skipped unless `entry` sits inside the installed global
-`@poggufanz/rocky-cli` package, so a repository checkout, a shim, or an npx
-copy records nothing. An identical record is left byte-identical.
+skipped unless the last five path segments of `entry` are `node_modules`,
+`@poggufanz`, `rocky-cli`, `dist`, and `index.js` (compared
+case-insensitively on Windows), so a repository checkout or a shim records
+nothing. That rule matches only those five segments, so an install whose
+entry ends the same way is recorded too, including an npx cache copy under
+`_npx` and a project-local `node_modules` copy. An identical record is left
+byte-identical.
 
 ### Repo capture consent
 
