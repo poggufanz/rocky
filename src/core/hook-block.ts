@@ -20,10 +20,11 @@
 
 export type HookBlockClassification = "absent" | "managed" | "corrupt";
 
-const HOOK_BEGIN = "# >>> rocky hook >>>";
+/** The begin marker alone, for callers that report the bytes a file must keep. */
+export const HOOK_BLOCK_BEGIN = "# >>> rocky hook >>>";
 const HOOK_END = "# <<< rocky hook <<<";
 
-const BEGIN_BYTES = Buffer.from(HOOK_BEGIN, "utf8");
+const BEGIN_BYTES = Buffer.from(HOOK_BLOCK_BEGIN, "utf8");
 const END_BYTES = Buffer.from(HOOK_END, "utf8");
 const SEPARATOR_BYTES = Buffer.from("\n", "utf8");
 const LINE_FEED = 0x0a;
@@ -71,7 +72,7 @@ export interface HookBlockCodec {
  * audited once, shared by every caller instead of forked per shell.
  */
 export function createHookBlockCodec(hookLine: string): HookBlockCodec {
-  const blockBytes = Buffer.from(`${HOOK_BEGIN}\n${hookLine}\n${HOOK_END}\n`, "utf8");
+  const blockBytes = Buffer.from(`${HOOK_BLOCK_BEGIN}\n${hookLine}\n${HOOK_END}\n`, "utf8");
 
   function classify(content: Buffer): HookBlockClassification {
     const begins = countOccurrences(content, BEGIN_BYTES);
