@@ -20,7 +20,7 @@ function freshHome(): string {
 function grantedRepo(home: string): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-listen-repo-")));
   execFileSync("git", ["init", "-q"], { cwd: root });
-  const granted = setRepoCapture(root, true, { yes: true, actor: "cli" }, home);
+  const granted = setRepoCapture(root, true, { yes: true, actor: "cli", onRevoke: "delete" }, home);
   assert.equal(granted.ok, true);
   return root;
 }

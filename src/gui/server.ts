@@ -878,7 +878,7 @@ async function handleApi(
       }
       if (action === "purge") {
         try {
-          const purged = purgeRepoCapture(target, { yes: true, actor: "gui" });
+          const purged = purgeRepoCapture(target, { yes: true, actor: "gui", onRevoke: "delete" });
           // revoke inside purge releases the lease on the next tick
           collectors?.kick();
           if (!purged.ok) return sendJson(response, 400, { ok: false, reason: purged.reason });
@@ -888,7 +888,7 @@ async function handleApi(
         }
       }
       try {
-        const result = setRepoCapture(target, action === "allow", { yes: true, actor: "gui" });
+        const result = setRepoCapture(target, action === "allow", { yes: true, actor: "gui", onRevoke: "delete" });
         if (!result.ok) return sendJson(response, 400, { ok: false, reason: result.reason });
         // allow starts capture on the next tick now; revoke releases the lease
         collectors?.kick();

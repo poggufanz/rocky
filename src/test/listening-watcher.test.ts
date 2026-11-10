@@ -18,7 +18,7 @@ function freshHome(): string {
 function consentedRepo(home: string): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-watch-repo-")));
   execFileSync("git", ["init", "-q"], { cwd: root });
-  assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
   return root;
 }
 

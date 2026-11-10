@@ -4,8 +4,8 @@
  * lives in consent.ts, which MCP must never import. See also
  * src/test/mcp-import-boundary.test.ts.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
 import { consentsPath } from "./store-paths.js";
 
@@ -14,15 +14,16 @@ export function normalizeRepoRoot(value: string): string {
   return canonicalPath(value);
 }
 
-function readConsents(home?: string): Record<string, true> {
+/** Both stored answers. `false` is a remembered decline, not an absent key. */
+function readRawConsents(home?: string): Record<string, boolean> {
   try {
     if (home !== undefined && !isAbsolute(home)) return {};
     const raw = readFileSync(consentsPath(home), "utf8");
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
-    const out: Record<string, true> = {};
+    const out: Record<string, boolean> = {};
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (value === true && typeof key === "string" && key.length > 0) out[key] = true;
+      if ((value === true || value === false) && key.length > 0) out[key] = value;
     }
     return out;
   } catch {
@@ -30,11 +31,76 @@ function readConsents(home?: string): Record<string, true> {
   }
 }
 
-/** Fail-closed: corrupt/missing store means no consent. */
+function readConsents(home?: string): Record<string, true> {
+  const out: Record<string, true> = {};
+  for (const [key, value] of Object.entries(readRawConsents(home))) {
+    if (value) out[key] = true;
+  }
+  return out;
+}
+
+// Git itself treats the `.git`/`worktrees` spelling case-insensitively on
+// Windows, and so does canonicalPath for every other root key here.
+const SEGMENTS_CASE_INSENSITIVE = process.platform === "win32";
+
+/**
+ * Main repository root behind a linked worktree, or undefined. The `.git`
+ * here is a file naming a gitdir inside `<main>/.git/worktrees/<name>`;
+ * submodules (`<main>/.git/modules/<name>`) and junk name no main repo.
+ * Parsed from disk because this module may never run Git.
+ */
+export function mainRepoRootOf(root: string): string | undefined {
+  try {
+    const entry = lstatSync(join(root, ".git"));
+    if (!entry.isFile()) return undefined;
+    const firstLine = (readFileSync(join(root, ".git"), "utf8").split("\n", 1)[0] ?? "").trim();
+    const match = /^gitdir:\s*(.+)$/u.exec(firstLine);
+    if (match === null) return undefined;
+    const gitDir = match[1].trim();
+    if (gitDir.length === 0) return undefined;
+    const segments = (isAbsolute(gitDir) ? gitDir : resolve(root, gitDir)).replaceAll("\\", "/").split("/");
+    const compared = SEGMENTS_CASE_INSENSITIVE ? segments.map((segment) => segment.toLowerCase()) : segments;
+    for (let index = 0; index + 1 < compared.length; index += 1) {
+      if (compared[index] !== ".git" || compared[index + 1] !== "worktrees") continue;
+      const holder = segments.slice(0, index).join("/");
+      if (holder.length === 0) return undefined;
+      // Same spelling the caller would see for the main root; the folder can
+      // be gone while the gitdir file survives, so fall back to the parsed path.
+      try {
+        return realpathSync.native(resolve(holder));
+      } catch {
+        return resolve(holder);
+      }
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One repo's stored answer, reported against the root that owns the decision. */
+export function readRepoDecision(
+  root: string,
+  home?: string,
+): { key: string; main: string; decision: "allowed" | "declined" | "undecided" } {
+  const main = mainRepoRootOf(root) ?? root;
+  const key = normalizeRepoRoot(main);
+  if (key.length === 0) return { key, main, decision: "undecided" };
+  const value = readRawConsents(home)[key];
+  return { key, main, decision: value === true ? "allowed" : value === false ? "declined" : "undecided" };
+}
+
+/** Fail-closed: corrupt/missing store means no consent. A linked worktree
+ *  inherits the main repository's grant, never a decline. */
 export function isRepoCaptureAllowed(canonicalRoot: string, home?: string): boolean {
   const normalized = normalizeRepoRoot(canonicalRoot);
   if (normalized.length === 0) return false;
-  return readConsents(home)[normalized] === true;
+  const consents = readConsents(home);
+  if (consents[normalized] === true) return true;
+  const main = mainRepoRootOf(canonicalRoot);
+  if (main === undefined) return false;
+  const mainKey = normalizeRepoRoot(main);
+  return mainKey.length > 0 && consents[mainKey] === true;
 }
 
 export function getRepoConsentDetail(

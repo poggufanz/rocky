@@ -69,7 +69,7 @@ test("collector loop captures a consented repo with no manual step and skips git
     await loop?.stop();
     cleanup(home, repo);
   });
-  assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
   // a long tick proves the first capture comes from the start-up tick alone
   loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
   assert.ok(await until(() => capturedFiles(repo, home).includes("kept.txt")), "consented file must be captured automatically");
@@ -88,11 +88,11 @@ test("collector loop releases a revoked repo and keeps its history", { skip: noG
     await loop?.stop();
     cleanup(home, repo);
   });
-  setRepoCapture(repo, true, { yes: true, actor: "cli" }, home);
+  setRepoCapture(repo, true, { yes: true, actor: "cli", onRevoke: "delete" }, home);
   loop = startCollectorLoop({ proc: "gui", home, tickMs: 60_000 });
   assert.ok(await until(() => capturedFiles(repo, home).includes("kept.txt")));
   assert.ok((leaseExpires(repo, home) ?? 0) > Date.now(), "owner holds a live lease while listening");
-  assert.equal(setRepoCapture(repo, false, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(setRepoCapture(repo, false, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
   loop.kick();
   assert.ok(await until(() => leaseExpires(repo, home) === 0), "revoke releases the lease on the next tick");
   assert.ok(capturedFiles(repo, home).includes("kept.txt"), "revoke keeps history");
@@ -131,7 +131,7 @@ function wait() {
 wait();
 `, { mode: 0o755 });
   execFileSync("git", ["config", "core.fsmonitor", hook.replace(/\\/g, "/")], { cwd: repo, stdio: "ignore" });
-  assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli" }).ok, true);
+  assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli", onRevoke: "delete" }).ok, true);
   handle = await startGui({ port: 0, root: repo, collect: true });
   const base = `http://127.0.0.1:${handle.port}`;
   const started = performance.now();
@@ -167,7 +167,7 @@ test("gui picker lists consented repos as id and label and resolves picks withou
     else process.env.ROCKY_HOME = previous;
     cleanup(home, launch, other);
   });
-  setRepoCapture(other, true, { yes: true, actor: "cli" });
+  setRepoCapture(other, true, { yes: true, actor: "cli", onRevoke: "delete" });
   // launched from a subfolder: the picker still offers the repo root
   const handle = await startGui({ port: 0, root: join(launch, "src") });
   t.after(() => handle.close());

@@ -43,11 +43,13 @@ function isGitRoot(canonicalRoot: string): boolean {
  * Grant or revoke capture for one canonical Git root. `yes` is the explicit
  * consent switch: without it the call reports requires-confirmation and
  * writes nothing. Revoke stops future capture; history stays on disk.
+ * `onRevoke: "delete"` forgets the repo, while `"decline"` remembers the
+ * refusal as `false` so a later grant of another repo cannot erase it.
  */
 export function setRepoCapture(
   canonicalRoot: string,
   allow: boolean,
-  opts: { yes: boolean; actor: "cli" | "gui" },
+  opts: { yes: boolean; actor: "cli" | "gui" | "desk"; onRevoke: "delete" | "decline" },
   home?: string,
 ): { ok: boolean; root?: string; reason?: string } {
   if (opts.yes !== true) return { ok: false, reason: "requires-confirmation" };
@@ -83,12 +85,14 @@ export function setRepoCapture(
   } catch {
     current = {};
   }
-  const next: Record<string, true> = {};
+  const next: Record<string, boolean> = {};
   for (const [key, value] of Object.entries(current)) {
-    if (value === true && typeof key === "string" && key.length > 0) next[normalizeRepoRoot(key)] = true;
+    if ((value === true || value === false) && key.length > 0) next[normalizeRepoRoot(key)] = value;
   }
   if (allow) {
     next[root] = true;
+  } else if (opts.onRevoke === "decline") {
+    next[root] = false;
   } else {
     delete next[root];
   }
@@ -113,7 +117,7 @@ export function setRepoCapture(
  */
 export function purgeRepoCapture(
   target: string,
-  opts: { yes: boolean; actor: "cli" | "gui" },
+  opts: { yes: boolean; actor: "cli" | "gui" | "desk"; onRevoke: "delete" | "decline" },
   home?: string,
 ): { ok: boolean; freedBytes: number; root?: string; reason?: string } {
   if (opts.yes !== true) return { ok: false, freedBytes: 0, reason: "requires-confirmation" };

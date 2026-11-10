@@ -31,7 +31,7 @@ function gitRepo(): string {
 
 function grantedRepo(home: string): string {
   const root = gitRepo();
-  const granted = setRepoCapture(root, true, { yes: true, actor: "cli" }, home);
+  const granted = setRepoCapture(root, true, { yes: true, actor: "cli", onRevoke: "delete" }, home);
   assert.equal(granted.ok, true);
   return granted.root ?? root;
 }
@@ -105,7 +105,7 @@ test("purge after revoke deletes the repo store and reports freed bytes", () => 
   const home = freshHome();
   const root = grantedRepo(home);
   storeListeningObject(root, Buffer.from("alpha"), home);
-  assert.equal(setRepoCapture(root, false, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(setRepoCapture(root, false, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
   const purged = purgeListeningStore(root, home);
   assert.equal(purged.ok, true);
   assert.equal(purged.freedBytes, 5);

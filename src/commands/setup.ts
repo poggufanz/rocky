@@ -449,7 +449,7 @@ async function runPurgeCapture(
     say("Consent withheld. Setup stopped and nothing changed.");
     return 1;
   }
-  const purged = purgeRepoCapture(repo, { yes: true, actor: "cli" }, home);
+  const purged = purgeRepoCapture(repo, { yes: true, actor: "cli", onRevoke: "delete" }, home);
   if (!purged.ok) {
     detail(purged.reason ?? "Purge failed.");
     return 1;
@@ -503,7 +503,7 @@ async function runRepoCaptureAction(
       return 1;
     }
   }
-  const result = setRepoCapture(target, action === "allow-capture", { yes: true, actor: "cli" }, home);
+  const result = setRepoCapture(target, action === "allow-capture", { yes: true, actor: "cli", onRevoke: "delete" }, home);
   if (!result.ok) {
     detail(result.reason ?? "Capture action failed.");
     return result.reason === "requires-confirmation" ? 2 : 1;
