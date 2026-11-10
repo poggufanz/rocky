@@ -22,6 +22,11 @@ The experimental desk shows subagents under their main agent and opens a timelin
 
 The experimental desk and its daemon run on Linux: a per-user Unix socket with lock files beside it, autostart at login through an XDG autostart file, and desktop notifications on the session bus. CI builds and tests the Rust workspace on Linux. The desk's Settings view has a Quit row, so the desk can be closed on a desktop that shows no tray icon.
 
+- `rocky setup --auto <action> --json`: a prompt-free setup path for the desktop app. It writes only under a recorded consent, never runs a harness executable, never creates a config directory, and removes everything it wrote with `remove`.
+- Claude Code MCP registration under `CLAUDE_CONFIG_DIR` now writes `.claude.json`, the file Claude Code reads there.
+- An empty `ROCKY_HOME` is treated as unset.
+- Repo capture consent can record a decline, and a Git worktree follows its main repository's decision.
+
 ## 2.0.0 — 6 November 2026
 
 Major release: Rocky retires its mascot persona. CLI, hook, GUI, and MCP output is plain, neutral English, following [docs/output-principles.md](docs/output-principles.md). Evidence rules, hedges, coverage disclosures, `--quiet`, exit codes, and JSON shapes are unchanged.

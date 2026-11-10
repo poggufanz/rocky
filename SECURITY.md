@@ -50,15 +50,24 @@ Knowing the blast radius helps you judge whether something you found matters.
 
 Rocky's local state lives under `ROCKY_HOME`, or `~/.rocky` by default. It can include `memory.jsonl`, config, watch logs, a transient agent spool, labels, hook assets, and guard rules. `memory.jsonl` is append-only, private where the platform supports POSIX modes, and not encrypted. Rocky does not make an automatic backup of it; use `rocky export` or your normal backup tooling if you need another copy.
 
-`rocky hook install` is the only setup command that adds a managed block to `~/.bashrc`; plain `rocky setup` never edits shell configuration. A `.bashrc` write keeps the previous bytes, when they exist, in a sibling transaction directory under your home directory. Completed transactions prune older completed copies, while pending or ambiguous recovery artifacts are retained. `rocky hook status` does not edit the managed block, but it can settle an interrupted transaction and restore `.bashrc`.
+`rocky hook install` and a consented `rocky setup --auto` are the only setup routes that add a managed block to `~/.bashrc`; plain `rocky setup` never edits shell configuration. A `.bashrc` write keeps the previous bytes, when they exist, in a sibling transaction directory under your home directory. Completed transactions prune older completed copies, while pending or ambiguous recovery artifacts are retained. `rocky hook status` does not edit the managed block, but it can settle an interrupted transaction and restore `.bashrc`.
 
 Host recovery behavior is deliberately host-specific:
 
 - Codex replacement or removal saves the prior Rocky MCP entry, not the full TOML file, under `~/.rocky-setup-recovery/`. A verified replacement removes that copy; a successful removal retains it as a manual undo. An initial add has no prior entry to save.
 - Claude Desktop keeps a full timestamped sibling backup of an existing config and also uses a conditional-write transaction. Those timestamped backups are not automatically pruned.
-- Claude Code MCP automation is inactive in this release and normally returns manual instructions before publishing a config change.
+- Claude Code MCP automation in the interactive setup flow is inactive in this release and normally returns manual instructions before publishing a config change; `rocky setup --auto` writes Claude Code's MCP config only under the consent record.
 - Claude Code hook setup keeps a full copy of the `settings.json` it replaced in `.settings.json.transaction-*/displaced`, inside the Claude config directory (`$CLAUDE_CONFIG_DIR`, or `~/.claude` when that variable is unset). Only the latest completed copy is kept. The copy can include secrets the settings file held, such as credentials under `env`. Setup reports the copy only when its bytes differ from what setup read, so a normal install or uninstall leaves it without a notice.
 - Removing a legacy managed voice skill with `rocky setup --remove` moves the old directory into that host's `.rocky/backups/voice-skills/` area. Those backups are not automatically pruned.
+
+`rocky setup --auto` writes only after a recorded consent, and only to the targets it names on each run:
+
+- Claude Code's `settings.json` and `.claude.json`, one pair per config directory the harness was found at.
+- The MCP config of opencode, gemini-cli, copilot-cli, and Codex (`config.toml`).
+- The Bash rc file, each PowerShell profile the hook installer edits, and the hook assets it installs under `ROCKY_HOME`.
+- `<ROCKY_HOME>/setup/consent.json`, `<ROCKY_HOME>/setup/expected.json`, and `<ROCKY_HOME>/bin/cli.json`.
+
+It never creates a config directory: a target whose parent directory is missing is reported and left alone. It never runs a harness executable; the registration is written into the config file, not applied by the harness. `rocky setup --auto remove --json` removes Rocky's entries from every target and deletes the recovery copies Rocky retained beside the files it edited, so a completed removal leaves no Rocky block and no retained previous-bytes copy behind.
 
 These artifacts can contain sensitive host configuration and are not encrypted. Changing `ROCKY_HOME` does not relocate `.bashrc`, host configuration, or their recovery artifacts.
 
