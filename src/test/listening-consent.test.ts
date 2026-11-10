@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { setRepoCapture } from "../listening/consent.js";
+import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import {
   getRepoConsentDetail,
   isRepoCaptureAllowed,
@@ -13,6 +13,7 @@ import {
   normalizeRepoRoot,
   readRepoDecision,
 } from "../listening/repo-consent-read.js";
+import { storeListeningObject } from "../listening/event-log.js";
 import { consentsPath } from "../listening/store-paths.js";
 
 function freshHome(): string {
@@ -25,6 +26,18 @@ function gitRepo(): string {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-consent-repo-")));
   execFileSync("git", ["init", "-q"], { cwd: root });
   return root;
+}
+
+function worktree(): { main: string; wt: string } {
+  const main = gitRepo();
+  execFileSync(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "x"],
+    { cwd: main, stdio: "pipe" },
+  );
+  const wt = join(realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-consent-wt-"))), "wt");
+  execFileSync("git", ["worktree", "add", wt], { cwd: main, stdio: "pipe" });
+  return { main, wt };
 }
 
 // A .git that Git cannot read (a stub left in a workspace) used to pass the
@@ -127,13 +140,35 @@ test("repo consent: cli revoke still deletes the key", () => {
 
 test("repo consent: a worktree inherits its main repo decision", () => {
   const home = freshHome();
-  const main = gitRepo();
-  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "x"], { cwd: main });
-  const wt = join(realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-consent-wt-"))), "wt");
-  execFileSync("git", ["worktree", "add", wt], { cwd: main });
+  const { main, wt } = worktree();
   setRepoCapture(main, true, { yes: true, actor: "desk", onRevoke: "decline" }, home);
   assert.equal(isRepoCaptureAllowed(wt, home), true);
+  assert.equal(getRepoConsentDetail(wt, home).allowed, true);
   assert.equal(readRepoDecision(wt, home).main, main);
+});
+
+test("repo consent: revoke at a worktree clears the main repo decision", () => {
+  const home = freshHome();
+  const { main, wt } = worktree();
+  setRepoCapture(main, true, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  const revoked = setRepoCapture(wt, false, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(revoked.ok, true);
+  assert.equal(revoked.root, normalizeRepoRoot(main));
+  assert.equal(isRepoCaptureAllowed(wt, home), false);
+  assert.equal(readRepoDecision(main, home).decision, "undecided");
+  assert.equal(readRepoDecision(wt, home).decision, "undecided");
+});
+
+test("repo consent: purge at a worktree clears the inherited decision and its history", () => {
+  const home = freshHome();
+  const { main, wt } = worktree();
+  setRepoCapture(main, true, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(storeListeningObject(wt, Buffer.from("alpha"), home).ok, true);
+  const purged = purgeRepoCapture(wt, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(purged.ok, true);
+  assert.equal(purged.freedBytes, 5);
+  assert.equal(isRepoCaptureAllowed(wt, home), false);
+  assert.equal(readRepoDecision(main, home).decision, "undecided");
 });
 
 test("repo consent: submodule and malformed .git files inherit nothing", () => {

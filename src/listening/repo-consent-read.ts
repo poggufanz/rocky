@@ -109,7 +109,9 @@ export function getRepoConsentDetail(
 ): { allowed: boolean; root: string } {
   const root = normalizeRepoRoot(canonicalRoot);
   if (root.length === 0) return { allowed: false, root: "" };
-  return { allowed: readConsents(home)[root] === true, root };
+  // A worktree is allowed through its main repo's key, so the check command
+  // and the GUI card must report the same decision the collector obeys.
+  return { allowed: isRepoCaptureAllowed(canonicalRoot, home), root };
 }
 /** Read-only list of canonical roots with capture consent. Listing names
  *  grants nothing and starts no capture: it only lets the GUI suggest. */
