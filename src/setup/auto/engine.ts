@@ -17,7 +17,7 @@ import {
   inspectClaudeSettings,
   removeClaudeSettings,
 } from "./claude-settings.js";
-import { detectHarnesses, type DetectEnv } from "./detect.js";
+import { detectHarnesses, validateConfigLocation, type DetectEnv } from "./detect.js";
 import {
   applyMcp,
   inspectMcp,
@@ -78,7 +78,7 @@ export interface AutoResult {
 
 interface Scope {
   harnesses: readonly McpHarnessId[];
-  claudeSettings: readonly string[];
+  claudeSettings: readonly SettingsTarget[];
   mcp: readonly McpTarget[];
   shell: boolean;
 }
@@ -87,13 +87,63 @@ function locationsOf(record: ConsentRecord | undefined, harness: McpHarnessId): 
   return (record?.config_dirs[harness] ?? []).map((entry) => entry.location);
 }
 
-/** The settings file Claude sessions load, plus one per recorded location. */
-function claudeSettingsPaths(ctx: AutoContext, locations: readonly string[]): string[] {
-  const paths: string[] = [];
+interface SettingsTarget {
+  path: string;
+  /** The security refusal decided before any read or write of this target. */
+  refusal?: string;
+}
+
+/** A refused default still names where its hooks would have gone. */
+function refusedSettingsPath(d: DetectEnv): string {
+  const configured = d.env.CLAUDE_CONFIG_DIR;
+  if (typeof configured === "string" && configured.length > 0) return join(configured, "settings.json");
+  return join(d.home, ".claude", "settings.json");
+}
+
+function refusedSettingsReport(target: SettingsTarget): AutoTargetReport {
+  return {
+    harness: "claude-code",
+    kind: "agent-hooks",
+    path: target.path,
+    state: "refused",
+    ...(target.refusal === undefined ? {} : { detail: target.refusal }),
+  };
+}
+
+function settingsRefusal(ctx: AutoContext, location: string): string | undefined {
+  const checked = validateConfigLocation("claude-code", location, ctx.detect);
+  return checked.ok ? undefined : checked.reason;
+}
+
+/**
+ * The settings file Claude sessions load, plus one per recorded location.
+ * Every location is revalidated here, on each inspect, apply, and remove, so a
+ * directory replaced by a symlink cannot redirect a later write.
+ */
+function claudeSettingsTargets(ctx: AutoContext, locations: readonly string[]): SettingsTarget[] {
+  const targets: SettingsTarget[] = [];
+  const seen = new Set<string>();
+  const push = (target: SettingsTarget): void => {
+    if (seen.has(target.path)) return;
+    seen.add(target.path);
+    targets.push(target);
+  };
   const resolved = defaultAgentHooksTarget(ctx.detect.home, ctx.detect.env, process.cwd());
-  if (resolved.status === "resolved") paths.push(resolved.target.settingsPath);
-  for (const location of locations) paths.push(join(location, "settings.json"));
-  return [...new Set(paths)];
+  if (resolved.status === "resolved") {
+    const configured = ctx.detect.env.CLAUDE_CONFIG_DIR;
+    push({
+      path: resolved.target.settingsPath,
+      refusal: typeof configured === "string" && configured.length > 0
+        ? settingsRefusal(ctx, configured)
+        : undefined,
+    });
+  } else {
+    push({ path: refusedSettingsPath(ctx.detect), refusal: resolved.reason });
+  }
+  for (const location of locations) {
+    push({ path: join(location, "settings.json"), refusal: settingsRefusal(ctx, location) });
+  }
+  return targets;
 }
 
 function scopeOf(ctx: AutoContext, record: ConsentRecord | undefined): Scope {
@@ -102,7 +152,7 @@ function scopeOf(ctx: AutoContext, record: ConsentRecord | undefined): Scope {
     .map((harness) => harness.id)
     .filter((harness) => !off.includes(harness));
   const claudeSettings = harnesses.includes("claude-code")
-    ? claudeSettingsPaths(ctx, locationsOf(record, "claude-code"))
+    ? claudeSettingsTargets(ctx, locationsOf(record, "claude-code"))
     : [];
   return {
     harnesses,
@@ -119,7 +169,11 @@ export function inspectAll(ctx: AutoContext, record: ConsentRecord | undefined):
   const reports: AutoTargetReport[] = [];
   for (const harness of scope.harnesses) {
     if (harness === "claude-code") {
-      for (const path of scope.claudeSettings) reports.push(...inspectClaudeSettings(path, ctx.paths));
+      for (const target of scope.claudeSettings) {
+        reports.push(...(target.refusal === undefined
+          ? inspectClaudeSettings(target.path, ctx.paths)
+          : [refusedSettingsReport(target)]));
+      }
     }
     for (const target of scope.mcp) {
       if (target.harness !== harness) continue;
@@ -207,15 +261,19 @@ export function applyAll(ctx: AutoContext, record: ConsentRecord): AutoTargetRep
 
   for (const harness of scope.harnesses) {
     if (harness === "claude-code") {
-      for (const path of scope.claudeSettings) {
-        const settingsReports = applyClaudeSettings(path, ctx.paths);
+      for (const target of scope.claudeSettings) {
+        if (target.refusal !== undefined) {
+          reports.push(refusedSettingsReport(target));
+          continue;
+        }
+        const settingsReports = applyClaudeSettings(target.path, ctx.paths);
         reports.push(...settingsReports);
-        const after = readJsonObject(path);
+        const after = readJsonObject(target.path);
         const keptGate = after.status !== "invalid" && hasOwnedGateGroup(after.value);
         const deskHealthy = settingsReports.some((report) => report.kind === "desk-hooks"
           && (report.state === "ok" || report.state === "written"));
         candidates.push({
-          path,
+          path: target.path,
           snippets: claudeSettingsSnippets(ctx.paths, keptGate)
             .filter((snippet) => deskHealthy || !snippet.includes(DESK_MARKER)),
         });
@@ -255,9 +313,13 @@ export function removeAll(ctx: AutoContext, record: ConsentRecord | undefined): 
   const reports: AutoTargetReport[] = [];
   const touched = new Set<string>();
 
-  for (const path of claudeSettingsPaths(ctx, locationsOf(record, "claude-code"))) {
-    reports.push(...removeClaudeSettings(path));
-    touched.add(path);
+  for (const target of claudeSettingsTargets(ctx, locationsOf(record, "claude-code"))) {
+    if (target.refusal !== undefined) {
+      reports.push(refusedSettingsReport(target));
+      continue;
+    }
+    reports.push(...removeClaudeSettings(target.path));
+    touched.add(target.path);
   }
   for (const harness of AUTO_MCP_HARNESSES) {
     for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
@@ -285,9 +347,13 @@ export function removeHarness(
   const removed = new Set<string>();
 
   if (harness === "claude-code") {
-    for (const path of claudeSettingsPaths(ctx, locationsOf(record, "claude-code"))) {
-      reports.push(...removeClaudeSettings(path));
-      removed.add(path);
+    for (const target of claudeSettingsTargets(ctx, locationsOf(record, "claude-code"))) {
+      if (target.refusal !== undefined) {
+        reports.push(refusedSettingsReport(target));
+        continue;
+      }
+      reports.push(...removeClaudeSettings(target.path));
+      removed.add(target.path);
     }
   }
   for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {

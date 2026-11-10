@@ -333,6 +333,11 @@ and `shell_hook` says whether the shell hook is in scope.
 epoch-millisecond `last_seen` of the last sighting. An entry is a directory
 for claude-code, codex, and copilot-cli, and the config file itself for
 opencode and gemini-cli. A location absent for seven days is forgotten.
+Every recorded location, like a config directory named by the environment, is
+revalidated before each inspect, apply, and remove: it must stay canonical,
+must not be a symlink, must remain inside the user's home, and must still hold
+its harness file. A location that fails is reported as `refused` and nothing
+is written there.
 
 ### Expected record
 

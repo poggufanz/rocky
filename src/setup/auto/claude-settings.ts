@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import {
   hasOwnedAgentHooks,
   hasOwnedGateGroup,
@@ -20,6 +21,7 @@ import {
   removeDeskHooks,
 } from "../desk-hooks.js";
 import { readJsonObject, recoverJsonTransaction, type JsonReadResult } from "../json-config.js";
+import { pathExists } from "../file-transaction.js";
 import type { AutoState, AutoTargetReport, AutoKind, Paths } from "./types.js";
 
 const HARNESS = "claude-code";
@@ -173,6 +175,11 @@ export function applyClaudeSettings(
 
 /** Remove every Rocky-owned hook group from both families in one write. */
 export function removeClaudeSettings(settingsPath: string): AutoTargetReport[] {
+  // Nothing to remove is a success for removal; an unsafe topology still
+  // refuses through prepareMutation below.
+  if (!pathExists(dirname(settingsPath))) {
+    return [report("agent-hooks", settingsPath, "ok"), report("desk-hooks", settingsPath, "ok")];
+  }
   let current: CurrentConfig;
   try {
     // Removal must work after an interrupted write, so settle the target's

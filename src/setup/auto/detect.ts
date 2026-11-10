@@ -15,6 +15,7 @@ export interface DetectEnv {
   platform: NodeJS.Platform;
   appData?: string;
   fileExists(path: string): boolean;
+  isFile(path: string): boolean;
 }
 
 export interface DetectedHarness {
@@ -28,7 +29,8 @@ const WINDOWS_SUFFIXES = [".exe", ".com", ".cmd"] as const;
 
 /**
  * File-existence lookup only: a shim counts as found without being run, so an
- * unfetchable or failing binary cannot make a harness look absent.
+ * unfetchable or failing binary cannot make a harness look absent. A directory
+ * with a matching name is not a binary.
  */
 export function findOnPath(name: string, d: DetectEnv): string | undefined {
   const api = d.platform === "win32" ? win32 : posix;
@@ -40,7 +42,7 @@ export function findOnPath(name: string, d: DetectEnv): string | undefined {
     if (dir.length === 0) continue;
     for (const suffix of suffixes) {
       const candidate = api.join(dir, `${name}${suffix}`);
-      if (d.fileExists(candidate)) return candidate;
+      if (d.isFile(candidate)) return candidate;
     }
   }
   return undefined;
@@ -117,6 +119,25 @@ function isStrictlyUnder(child: string, parent: string, platform: NodeJS.Platfor
   const parentKey = canonicalPath(parent, { platform });
   if (childKey.length === 0 || parentKey.length === 0 || childKey === parentKey) return false;
   return parentKey === "/" || childKey.startsWith(`${parentKey}/`);
+}
+
+/**
+ * A default (non-env) target is created under a directory Rocky derives itself.
+ * That parent must be a canonical absolute path, its own real path, and inside
+ * the user's home; a missing parent stays for the caller's existence check.
+ */
+export function validateDefaultParent(parent: string, d: DetectEnv): LocationRefusal | undefined {
+  const api = d.platform === "win32" ? win32 : posix;
+  if (!isCanonicalAbsoluteDirectory(parent, api)) return "not-canonical";
+  const real = realpath(parent);
+  if (real === undefined) return undefined;
+  if (canonicalPath(real, { platform: d.platform }) !== canonicalPath(parent, { platform: d.platform })) {
+    return "symlink";
+  }
+  const homeReal = realpath(d.home);
+  if (homeReal === undefined) return "outside-home";
+  const atHome = canonicalPath(real, { platform: d.platform }) === canonicalPath(homeReal, { platform: d.platform });
+  return atHome || isStrictlyUnder(real, homeReal, d.platform) ? undefined : "outside-home";
 }
 
 /**

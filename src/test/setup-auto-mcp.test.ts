@@ -8,12 +8,14 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { McpRegistration } from "../setup/clients.js";
-import { toClaudeEntry } from "../setup/harness-claude-code.js";
+import { claudeCodeMcpConfigPath, toClaudeEntry } from "../setup/harness-claude-code.js";
 import { codexRockyBlock } from "../setup/harness-codex.js";
 import { toCopilotEntry } from "../setup/harness-copilot-cli.js";
 import { toGeminiEntry } from "../setup/harness-gemini-cli.js";
@@ -36,6 +38,14 @@ interface Fixture {
   reg: McpRegistration;
 }
 
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function fixture(t: TestContext): Fixture {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-auto-mcp-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -44,7 +54,7 @@ function fixture(t: TestContext): Fixture {
   return {
     root,
     home,
-    d: { home, env: {}, platform: process.platform, fileExists: existsSync },
+    d: { home, env: {}, platform: process.platform, fileExists: existsSync, isFile },
     reg: {
       name: "rocky",
       command: process.execPath,
@@ -164,8 +174,9 @@ test("auto mcp: codex block is written, recognized, and removed", (t) => {
 
 test("auto mcp: leftover claude.json entry is removed and the file kept", (t) => {
   const f = fixture(t);
-  const profile = join(f.root, "profile");
+  const profile = join(f.home, "profile");
   mkdirSync(profile);
+  writeJson(join(profile, "settings.json"), {});
   writeJson(join(profile, "claude.json"), { mcpServers: { rocky: toClaudeEntry(f.reg) }, keep: 1 });
   const d: DetectEnv = { ...f.d, env: { CLAUDE_CONFIG_DIR: profile } };
   const legacy = mcpTargets("claude-code", d, [profile]).find((target) => target.legacy === true);
@@ -173,16 +184,31 @@ test("auto mcp: leftover claude.json entry is removed and the file kept", (t) =>
 
   assert.equal(applyMcp(legacy, f.reg, []).report.detail, "moved to .claude.json");
   assert.deepEqual(readJson(join(profile, "claude.json")), { mcpServers: {}, keep: 1 });
-  assert.equal(existsSync(join(profile, ".claude.json")), false);
+  assert.equal(inspectMcp(legacy, f.reg, []).state, "ok");
 });
 
-test("auto mcp: missing parent dir is refused", (t) => {
+test("auto mcp: a legacy claude.json without rocky reports ok without the moved detail", (t) => {
+  const f = fixture(t);
+  const profile = join(f.home, "profile");
+  mkdirSync(profile);
+  writeJson(join(profile, "settings.json"), {});
+  writeJson(join(profile, "claude.json"), { mcpServers: {}, keep: 1 });
+  const d: DetectEnv = { ...f.d, env: { CLAUDE_CONFIG_DIR: profile } };
+  const legacy = mcpTargets("claude-code", d, [profile]).find((target) => target.legacy === true);
+  assert.ok(legacy);
+
+  const report = inspectMcp(legacy, f.reg, []);
+  assert.equal(report.state, "ok");
+  assert.equal(report.detail, undefined);
+});
+
+test("auto mcp: missing parent dir is refused for writes and ok for removal", (t) => {
   const f = fixture(t);
   const opencode = targetOf(f, "opencode");
 
   assert.equal(inspectMcp(opencode, f.reg, []).state, "refused");
   assert.equal(applyMcp(opencode, f.reg, []).report.state, "refused");
-  assert.equal(removeMcp(opencode, f.reg, []).state, "refused");
+  assert.equal(removeMcp(opencode, f.reg, []).state, "ok");
   assert.equal(existsSync(dirname(opencode.path)), false);
 });
 
@@ -257,8 +283,9 @@ test("auto mcp: opencode entries are owned only by the shared rule or history", 
 
 test("auto mcp: claude-code targets deduplicate a location equal to CLAUDE_CONFIG_DIR", (t) => {
   const f = fixture(t);
-  const profile = join(f.root, "profile");
+  const profile = join(f.home, "profile");
   mkdirSync(profile);
+  writeJson(join(profile, "settings.json"), {});
   writeJson(join(profile, "claude.json"), { mcpServers: {} });
   const d: DetectEnv = { ...f.d, env: { CLAUDE_CONFIG_DIR: profile } };
 
@@ -267,6 +294,89 @@ test("auto mcp: claude-code targets deduplicate a location equal to CLAUDE_CONFI
     targets.map((target) => [target.path, target.legacy === true]),
     [[join(profile, ".claude.json"), false], [join(profile, "claude.json"), true]],
   );
+});
+
+test("auto mcp: the claude-code default target is the adapter's config path", (t) => {
+  const f = fixture(t);
+  const d: DetectEnv = { ...f.d, env: { CLAUDE_CONFIG_DIR: join(f.home, "cfg") } };
+  assert.equal(mcpTargets("claude-code", d, [])[0]?.path, claudeCodeMcpConfigPath(d.env, f.home));
+  assert.equal(mcpTargets("claude-code", f.d, [])[0]?.path, claudeCodeMcpConfigPath(f.d.env, f.home));
+});
+
+test("auto mcp: a recorded claude-code location gets its own .claude.json target", (t) => {
+  const f = fixture(t);
+  const profile = join(f.home, "profile");
+  mkdirSync(profile);
+  writeFileSync(join(profile, "settings.json"), "{}");
+
+  const targets = mcpTargets("claude-code", f.d, [profile]);
+  assert.deepEqual(
+    targets.map((target) => target.path),
+    [join(f.home, ".claude.json"), join(profile, ".claude.json")],
+  );
+  const target = targets[1];
+  assert.ok(target);
+  assert.equal(applyMcp(target, f.reg, []).report.state, "written");
+  assert.deepEqual(container(readJson(join(profile, ".claude.json")), "mcpServers"), { rocky: toClaudeEntry(f.reg) });
+  assert.equal(removeMcp(target, f.reg, []).state, "written");
+  assert.equal(container(readJson(join(profile, ".claude.json")), "mcpServers").rocky, undefined);
+});
+
+test("auto mcp: a relative CODEX_HOME is refused and nothing is written", (t) => {
+  const f = fixture(t);
+  const relative = `relative-codex-${basename(f.root)}`;
+  const d: DetectEnv = { ...f.d, env: { CODEX_HOME: relative } };
+  const [target] = mcpTargets("codex", d, []);
+  assert.ok(target);
+  assert.equal(target.path, join(relative, "config.toml"));
+
+  for (const report of [
+    inspectMcp(target, f.reg, []),
+    applyMcp(target, f.reg, []).report,
+    removeMcp(target, f.reg, []),
+  ]) {
+    assert.equal(report.state, "refused");
+    assert.equal(report.detail, "not-canonical");
+  }
+  assert.equal(existsSync(join(process.cwd(), relative)), false);
+});
+
+test("auto mcp: a symlinked env config directory is refused", (t) => {
+  const f = fixture(t);
+  const real = join(f.home, "codex-real");
+  mkdirSync(real);
+  writeFileSync(join(real, "config.toml"), "");
+  const link = join(f.home, "codex-link");
+  try {
+    symlinkSync(real, link, "junction");
+  } catch {
+    t.skip("the platform cannot create a directory symlink");
+    return;
+  }
+  const d: DetectEnv = { ...f.d, env: { CODEX_HOME: link } };
+  const [target] = mcpTargets("codex", d, []);
+  assert.ok(target);
+  const report = applyMcp(target, f.reg, []).report;
+  assert.equal(report.state, "refused");
+  assert.equal(report.detail, "symlink");
+  assert.equal(readFileSync(join(real, "config.toml"), "utf8"), "");
+});
+
+test("auto mcp: a symlinked default parent is refused", (t) => {
+  const f = fixture(t);
+  const outside = join(f.root, "outside-gemini");
+  mkdirSync(outside);
+  try {
+    symlinkSync(outside, join(f.home, ".gemini"), "junction");
+  } catch {
+    t.skip("the platform cannot create a directory symlink");
+    return;
+  }
+  const gemini = targetOf(f, "gemini-cli");
+  const report = applyMcp(gemini, f.reg, []).report;
+  assert.equal(report.state, "refused");
+  assert.equal(report.detail, "symlink");
+  assert.equal(existsSync(join(outside, "settings.json")), false);
 });
 
 test("auto mcp: snippets carry the command and first argument", (t) => {

@@ -6,10 +6,9 @@
  * foreign and is never touched.
  */
 import { readFileSync, statSync } from "node:fs";
-import { dirname, join, posix, win32 } from "node:path";
+import { dirname, join } from "node:path";
 import { canonicalPath } from "../../core/memory-read.js";
 import type { McpRegistration } from "../clients.js";
-import { isCanonicalAbsoluteDirectory } from "../claude-code.js";
 import {
   atomicWriteBytesIfUnchanged,
   pathExists,
@@ -42,7 +41,7 @@ import {
   registrationKey,
   type RegistrationOwnership,
 } from "../registration.js";
-import type { DetectEnv } from "./detect.js";
+import { validateConfigLocation, validateDefaultParent, type DetectEnv } from "./detect.js";
 import type { McpHarnessId } from "./state.js";
 import type { AutoState, AutoTargetReport } from "./types.js";
 
@@ -51,11 +50,14 @@ export interface McpTarget {
   path: string;
   format: "json" | "toml";
   legacy?: boolean;
+  /** The environment value or recorded location this path was derived from. */
+  source?: string;
+  /** A security refusal decided when the target was resolved, before any write. */
+  refusal?: string;
 }
 
 const LEGACY_MOVED = "moved to .claude.json";
 const MANUAL_RECOVERY = "a pending MCP transaction needs manual recovery";
-const PATH_API = process.platform === "win32" ? win32 : posix;
 
 function report(t: McpTarget, state: AutoState, detail?: string): AutoTargetReport {
   return detail === undefined
@@ -120,6 +122,33 @@ function defaultTargetPath(harness: McpHarnessId, d: DetectEnv): string {
   }
 }
 
+/** The environment value that relocates a default target, when one is set. */
+function envConfigLocation(harness: McpHarnessId, d: DetectEnv): string | undefined {
+  const value = harness === "claude-code"
+    ? d.env.CLAUDE_CONFIG_DIR
+    : harness === "codex"
+      ? d.env.CODEX_HOME
+      : harness === "copilot-cli"
+        ? d.env.COPILOT_HOME
+        : harness === "opencode"
+          ? d.env.OPENCODE_CONFIG
+          : d.env.GEMINI_SETTINGS;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Env-derived and recorded locations are untrusted input, so they are checked
+ * with the same validateConfigLocation rule the `config-dir` action uses. A
+ * default target instead gets its own parent checked for real-path identity.
+ */
+function refusalOf(t: McpTarget, d: DetectEnv): string | undefined {
+  if (t.source !== undefined) {
+    const checked = validateConfigLocation(t.harness, t.source, d);
+    return checked.ok ? undefined : checked.reason;
+  }
+  return validateDefaultParent(dirname(t.path), d);
+}
+
 function locationTargetPath(harness: McpHarnessId, location: string): string {
   if (harness === "codex") return join(location, "config.toml");
   if (harness === "copilot-cli") return join(location, "config.json");
@@ -127,9 +156,10 @@ function locationTargetPath(harness: McpHarnessId, location: string): string {
 }
 
 /**
- * Default path first, then one target per validated location. Legacy
- * `claude.json` targets come only from `CLAUDE_CONFIG_DIR` and the supplied
- * locations, never from home, and identical paths are reported once.
+ * Default path first, then one target per recorded location. Every recorded
+ * claude-code location gets its own `.claude.json`, and legacy `claude.json`
+ * cleanup comes only from an env or recorded directory that really holds one.
+ * Identical paths are reported once.
  */
 export function mcpTargets(
   harness: McpHarnessId,
@@ -139,25 +169,31 @@ export function mcpTargets(
   const format = harness === "codex" ? "toml" as const : "json" as const;
   const targets: McpTarget[] = [];
   const seen = new Set<string>();
-  const push = (target: McpTarget): void => {
-    const key = canonicalPath(target.path, { platform: d.platform });
+  const push = (path: string, extra: { legacy?: boolean; source?: string } = {}): void => {
+    const key = canonicalPath(path, { platform: d.platform });
     if (key.length === 0 || seen.has(key)) return;
     seen.add(key);
+    const target: McpTarget = { harness, path, format };
+    if (extra.legacy === true) target.legacy = true;
+    if (extra.source !== undefined) target.source = extra.source;
+    const refusal = refusalOf(target, d);
+    if (refusal !== undefined) target.refusal = refusal;
     targets.push(target);
   };
-  push({ harness, path: defaultTargetPath(harness, d), format });
+  push(defaultTargetPath(harness, d), { source: envConfigLocation(harness, d) });
   if (harness === "claude-code") {
     const configured = d.env.CLAUDE_CONFIG_DIR;
     const dirs = typeof configured === "string" && configured.length > 0
       ? [configured, ...locations]
       : locations;
+    for (const dir of dirs) push(join(dir, ".claude.json"), { source: dir });
     for (const dir of dirs) {
       const path = join(dir, "claude.json");
-      if (d.fileExists(path)) push({ harness, path, format, legacy: true });
+      if (d.fileExists(path)) push(path, { legacy: true, source: dir });
     }
     return targets;
   }
-  for (const location of locations) push({ harness, path: locationTargetPath(harness, location), format });
+  for (const location of locations) push(locationTargetPath(harness, location), { source: location });
   return targets;
 }
 
@@ -167,13 +203,11 @@ interface Refusal {
 }
 
 /**
- * Non-canonical Claude Code directories never fall back to the home path, and
- * an existing directory where a config file belongs is an error, not a write.
+ * The security refusal decided at resolution time wins; an existing directory
+ * where a config file belongs is an error, and a missing parent is refused.
  */
 function pathRefusal(t: McpTarget): Refusal | undefined {
-  if (t.harness === "claude-code" && !isCanonicalAbsoluteDirectory(dirname(t.path), PATH_API)) {
-    return { state: "refused", detail: "not-canonical" };
-  }
+  if (t.refusal !== undefined) return { state: "refused", detail: t.refusal };
   try {
     if (statSync(t.path).isDirectory()) {
       return { state: "error", detail: `MCP config path is a directory: ${t.path}` };
@@ -254,9 +288,8 @@ function inspectJsonTarget(
   if (read.status === "refused") return { report: report(t, "refused", read.detail) };
   if (read.status === "error") return { report: report(t, "error", read.detail) };
   const entry = read.status === "present" ? read.container.rocky : undefined;
-  const legacyDetail = t.legacy === true ? LEGACY_MOVED : undefined;
   if (entry === undefined) {
-    return { report: report(t, t.legacy === true ? "ok" : "missing", legacyDetail), read };
+    return { report: report(t, t.legacy === true ? "ok" : "missing"), read };
   }
   const ownershipOf = entryOwnership(entry, t.harness, registration, ownership);
   if (!ownershipOf.owned) return { report: report(t, "foreign"), read };
@@ -364,6 +397,8 @@ export function removeMcp(
 ): AutoTargetReport {
   const ownership: RegistrationOwnership = { mode: "history", history };
   if (t.format === "toml") return removeToml(t, reg, ownership);
+  if (t.refusal !== undefined) return report(t, "refused", t.refusal);
+  if (!pathExists(dirname(t.path)) || !pathExists(t.path)) return report(t, "ok");
   const refusal = pathRefusal(t);
   if (refusal !== undefined) return report(t, refusal.state, refusal.detail);
   if (recoverJsonTransaction(t.path).status === "manual") {
@@ -379,11 +414,11 @@ function removeJsonEntry(
   ownership: RegistrationOwnership,
   detail: string | undefined,
 ): AutoTargetReport {
-  if (read.status === "missing") return report(t, "ok", detail);
+  if (read.status === "missing") return report(t, "ok");
   if (read.status !== "present") {
     return report(t, read.status === "refused" ? "refused" : "error", read.detail);
   }
-  if (read.container.rocky === undefined) return report(t, "ok", detail);
+  if (read.container.rocky === undefined) return report(t, "ok");
   try {
     if (t.harness === "opencode") {
       const removed = removeOpencode(read.value, registration, ownership);
@@ -533,6 +568,8 @@ function removeToml(
   registration: McpRegistration,
   ownership: RegistrationOwnership,
 ): AutoTargetReport {
+  if (t.refusal !== undefined) return report(t, "refused", t.refusal);
+  if (!pathExists(dirname(t.path)) || !pathExists(t.path)) return report(t, "ok");
   const refusal = pathRefusal(t);
   if (refusal !== undefined) return report(t, refusal.state, refusal.detail);
   if (recoverFileTransaction(t.path).status === "manual") {
@@ -541,6 +578,7 @@ function removeToml(
   const inspected = inspectToml(t, registration, ownership);
   const read = inspected.read;
   if (read === undefined || read.status !== "present") return inspected.report;
+  if (inspected.report.state === "missing") return report(t, "ok");
   if (inspected.report.state !== "ok" && inspected.report.state !== "stale") return inspected.report;
   const lines = read.text.split("\n");
   const next = [...lines.slice(0, read.block.start), ...lines.slice(read.block.end)];

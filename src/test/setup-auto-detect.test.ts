@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -23,8 +23,16 @@ function tempRoot(t: TestContext, prefix: string): string {
   return dir;
 }
 
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function envFor(home: string, overrides: Partial<DetectEnv> = {}): DetectEnv {
-  return { home, env: {}, platform: process.platform, fileExists: existsSync, ...overrides };
+  return { home, env: {}, platform: process.platform, fileExists: existsSync, isFile, ...overrides };
 }
 
 /** A shim that exits non-zero: finding it without running it is the point. */
@@ -65,6 +73,13 @@ test("findOnPath skips empty PATH entries and missing directories", (t) => {
   const path = `${PATH_DELIMITER}${join(home, "nope")}${PATH_DELIMITER}${bin}${PATH_DELIMITER}`;
   assert.equal(findOnPath("codex", { ...envFor(home), env: { PATH: path } }), shim);
   assert.equal(findOnPath("codex", { ...envFor(home), env: { PATH: "" } }), undefined);
+});
+
+test("findOnPath ignores a directory whose name matches the binary", (t) => {
+  const home = tempRoot(t, "rocky-auto-detect-home-");
+  const bin = tempRoot(t, "rocky-auto-detect-bin-");
+  mkdirSync(join(bin, "gemini" + (IS_WINDOWS ? ".exe" : "")));
+  assert.equal(findOnPath("gemini", { ...envFor(home), env: { PATH: bin } }), undefined);
 });
 
 test("detectHarnesses reports config-only when no binary is on PATH", (t) => {
