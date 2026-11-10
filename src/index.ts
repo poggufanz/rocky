@@ -16,6 +16,7 @@
 // `await import()` inside its `case`, so `rocky --version`, each shell-hook
 // spawn and each agent-hook call do not parse the whole command graph first.
 // cli-startup-boundary.test.ts walks the static import closure and keeps it so.
+import { fileURLToPath } from "node:url";
 import { CliUsageError, parseExactCommand, reportCliUsage } from "./commands/cli-args.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./core/package-info.js";
 import { detail, flushHookSpeech, say } from "./ui/rocky.js";
@@ -437,8 +438,28 @@ async function runGateEvent(vendor: string): Promise<number> {
   return 0;
 }
 
+/**
+ * Remember where the installed CLI lives so setup can pin the hook to it.
+ * The imports stay dynamic on purpose: these modules must not join the
+ * startup closure that cli-startup-boundary.test.ts holds to argv parsing.
+ */
+async function recordCliLocation(): Promise<void> {
+  try {
+    const { resolveRockyPaths } = await import("./core/state-paths.js");
+    const { recordCli } = await import("./setup/auto/cli-record.js");
+    recordCli(resolveRockyPaths().home, {
+      node: process.execPath,
+      entry: fileURLToPath(import.meta.url),
+      version: PACKAGE_VERSION,
+    });
+  } catch {
+    // A location record only informs setup; no command fails for it.
+  }
+}
+
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
+  if (command === undefined) await recordCliLocation();
   if (command === undefined || command === "--no-open" || command?.startsWith("--port=")) {
     const flags = command === undefined ? [] : [command, ...rest];
     // A browser needs a human at the keyboard, so a pipe falls through to the
@@ -478,8 +499,10 @@ async function main(): Promise<number> {
         return (await import("./commands/repl.js")).replCommand(rest);
       case "mcp":
         return (await import("./commands/mcp.js")).mcp(rest);
-      case "setup":
+      case "setup": {
+        await recordCliLocation();
         return (await import("./commands/setup.js")).setup(rest);
+      }
       case "check":
         return (await import("./commands/check.js")).check(rest);
       case "what":
