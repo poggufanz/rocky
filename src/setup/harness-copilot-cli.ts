@@ -55,17 +55,30 @@ function storedRegistration(entry: unknown): McpRegistration | undefined {
   return { name: "rocky", command: record.command, args: record.args as string[], env };
 }
 
-function resolveConfigPath(deps: HarnessCopilotDeps): string {
-  if (deps.configPath !== undefined) return deps.configPath;
-  const env = deps.env ?? process.env;
-  if (typeof env.COPILOT_HOME === "string" && env.COPILOT_HOME.length > 0) {
-    return join(env.COPILOT_HOME, "config.json");
+export function resolveCopilotConfigPath(input: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  platform: NodeJS.Platform;
+  appData?: string;
+}): string {
+  if (typeof input.env.COPILOT_HOME === "string" && input.env.COPILOT_HOME.length > 0) {
+    return join(input.env.COPILOT_HOME, "config.json");
   }
-  return join(deps.home ?? deps.platform.home, ".copilot", "config.json");
+  return join(input.home, ".copilot", "config.json");
+}
+
+function configPathFor(deps: HarnessCopilotDeps): string {
+  if (deps.configPath !== undefined) return deps.configPath;
+  return resolveCopilotConfigPath({
+    env: deps.env ?? process.env,
+    home: deps.home ?? deps.platform.home,
+    platform: deps.platform.platform,
+    appData: deps.platform.appData,
+  });
 }
 
 export function createHarnessCopilotAdapter(deps: HarnessCopilotDeps): SetupClientAdapter {
-  const configPath = resolveConfigPath(deps);
+  const configPath = configPathFor(deps);
 
   async function executablePath(): Promise<string | undefined> {
     const { executable } = await resolveCanonicalExecutable({

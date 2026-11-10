@@ -996,7 +996,7 @@ export function resolveClaudeCodeUserConfig(
   };
 }
 
-function isCanonicalAbsoluteDirectory(path: string, pathApi: PlatformPath): boolean {
+export function isCanonicalAbsoluteDirectory(path: string, pathApi: PlatformPath): boolean {
   if (!pathApi.isAbsolute(path) || pathApi.normalize(path) !== path) return false;
   const root = pathApi.parse(path).root;
   if (root.length === 0 || (path !== root && /[\\/]$/.test(path))) return false;

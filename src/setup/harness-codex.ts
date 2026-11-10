@@ -28,11 +28,24 @@ const VERSION_TIMEOUT_MS = 5_000;
 const LIST_TIMEOUT_MS = 10_000;
 const ROCKY_SECTION = "[mcp_servers.rocky]";
 
-function resolveCodexHome(deps: HarnessCodexDeps): string {
-  const env = deps.env ?? process.env;
+export function resolveCodexHome(input: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  platform: NodeJS.Platform;
+  appData?: string;
+}): string {
+  if (typeof input.env.CODEX_HOME === "string" && input.env.CODEX_HOME.length > 0) return input.env.CODEX_HOME;
+  return join(input.home, ".codex");
+}
+
+function codexHomeFor(deps: HarnessCodexDeps): string {
   if (deps.codexHome !== undefined) return deps.codexHome;
-  if (typeof env.CODEX_HOME === "string" && env.CODEX_HOME.length > 0) return env.CODEX_HOME;
-  return join(deps.home ?? deps.platform.home, ".codex");
+  return resolveCodexHome({
+    env: deps.env ?? process.env,
+    home: deps.home ?? deps.platform.home,
+    platform: deps.platform.platform,
+    appData: deps.platform.appData,
+  });
 }
 
 async function executablePath(deps: HarnessCodexDeps): Promise<string | undefined> {
@@ -102,7 +115,7 @@ function blockMatchesRegistration(block: TomlBlock, text: string, registration: 
 }
 
 export function createHarnessCodexAdapter(deps: HarnessCodexDeps): SetupClientAdapter {
-  const codexHome = resolveCodexHome(deps);
+  const codexHome = codexHomeFor(deps);
   const configPath = join(codexHome, "config.toml");
 
   function readToml(): { text: string } | { error: "missing" | "unreadable" } {

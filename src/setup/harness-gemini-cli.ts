@@ -54,19 +54,31 @@ function storedRegistration(entry: unknown): McpRegistration | undefined {
   return { name: "rocky", command: record.command, args: record.args as string[], env };
 }
 
-function resolveSettingsPath(deps: HarnessGeminiDeps): string {
-  if (deps.settingsPath !== undefined) return deps.settingsPath;
-  const env = deps.env ?? process.env;
-  if (typeof env.GEMINI_SETTINGS === "string" && env.GEMINI_SETTINGS.length > 0) return env.GEMINI_SETTINGS;
-  const home = deps.home ?? deps.platform.home;
-  if (deps.platform.platform === "win32" && typeof deps.platform.appData === "string") {
-    return join(deps.platform.appData, "gemini", "settings.json");
+export function resolveGeminiSettingsPath(input: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  platform: NodeJS.Platform;
+  appData?: string;
+}): string {
+  if (typeof input.env.GEMINI_SETTINGS === "string" && input.env.GEMINI_SETTINGS.length > 0) return input.env.GEMINI_SETTINGS;
+  if (input.platform === "win32" && typeof input.appData === "string") {
+    return join(input.appData, "gemini", "settings.json");
   }
-  return join(home, ".gemini", "settings.json");
+  return join(input.home, ".gemini", "settings.json");
+}
+
+function settingsPathFor(deps: HarnessGeminiDeps): string {
+  if (deps.settingsPath !== undefined) return deps.settingsPath;
+  return resolveGeminiSettingsPath({
+    env: deps.env ?? process.env,
+    home: deps.home ?? deps.platform.home,
+    platform: deps.platform.platform,
+    appData: deps.platform.appData,
+  });
 }
 
 export function createHarnessGeminiAdapter(deps: HarnessGeminiDeps): SetupClientAdapter {
-  const settingsPath = resolveSettingsPath(deps);
+  const settingsPath = settingsPathFor(deps);
 
   async function executablePath(): Promise<string | undefined> {
     const { executable } = await resolveCanonicalExecutable({

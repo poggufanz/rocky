@@ -58,19 +58,31 @@ function sameRegistration(left: McpRegistration, right: McpRegistration): boolea
     && JSON.stringify(left.env) === JSON.stringify(right.env);
 }
 
-function resolveConfigPath(deps: HarnessOpencodeDeps): string {
-  if (deps.configPath !== undefined) return deps.configPath;
-  const env = deps.env ?? process.env;
-  if (typeof env.OPENCODE_CONFIG === "string" && env.OPENCODE_CONFIG.length > 0) return env.OPENCODE_CONFIG;
-  const home = deps.home ?? deps.platform.home;
-  if (deps.platform.platform === "win32" && typeof deps.platform.appData === "string") {
-    return join(deps.platform.appData, "opencode", "opencode.json");
+export function resolveOpencodeConfigPath(input: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  platform: NodeJS.Platform;
+  appData?: string;
+}): string {
+  if (typeof input.env.OPENCODE_CONFIG === "string" && input.env.OPENCODE_CONFIG.length > 0) return input.env.OPENCODE_CONFIG;
+  if (input.platform === "win32" && typeof input.appData === "string") {
+    return join(input.appData, "opencode", "opencode.json");
   }
-  return join(home, ".config", "opencode", "opencode.json");
+  return join(input.home, ".config", "opencode", "opencode.json");
+}
+
+function configPathFor(deps: HarnessOpencodeDeps): string {
+  if (deps.configPath !== undefined) return deps.configPath;
+  return resolveOpencodeConfigPath({
+    env: deps.env ?? process.env,
+    home: deps.home ?? deps.platform.home,
+    platform: deps.platform.platform,
+    appData: deps.platform.appData,
+  });
 }
 
 export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupClientAdapter {
-  const configPath = resolveConfigPath(deps);
+  const configPath = configPathFor(deps);
 
   async function executablePath(): Promise<string | undefined> {
     const { executable } = await resolveCanonicalExecutable({
