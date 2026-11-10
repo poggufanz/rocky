@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarnessClaudeCodeAdapter } from "../setup/harness-claude-code.js";
+import {
+  claudeCodeMcpConfigPath,
+  createHarnessClaudeCodeAdapter,
+} from "../setup/harness-claude-code.js";
 import type { McpRegistration } from "../setup/clients.js";
 import type { PlatformServices } from "../setup/platform.js";
 
@@ -169,4 +172,19 @@ test("replace swaps only a Rocky-owned entry; remove drops only the rocky key", 
     command: "/bin/impostor",
   });
   assert.equal(removed.status, "failed");
+});
+
+test("claude-code MCP config under CLAUDE_CONFIG_DIR is the dotted file", (t) => {
+  const home = tempHome(t);
+  const profile = join(home, "claude-profile");
+  assert.equal(
+    claudeCodeMcpConfigPath({ CLAUDE_CONFIG_DIR: profile }, home),
+    join(profile, ".claude.json"),
+  );
+});
+
+test("claude-code MCP config without CLAUDE_CONFIG_DIR is ~/.claude.json", (t) => {
+  const home = tempHome(t);
+  assert.equal(claudeCodeMcpConfigPath({}, home), join(home, ".claude.json"));
+  assert.equal(claudeCodeMcpConfigPath({ CLAUDE_CONFIG_DIR: "" }, home), join(home, ".claude.json"));
 });
