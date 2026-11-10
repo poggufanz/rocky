@@ -137,17 +137,25 @@ test("loadMemory returns promptly for a FIFO memory path", (t) => {
     return;
   }
 
+  // The child times loadMemory alone. Node start and the module import slow
+  // down with CPU load, so the spawn timeout is only a hang guard; a blocking
+  // open of the FIFO still fails, at the guard.
   const modulePath = fileURLToPath(new URL("../core/memory-read.js", import.meta.url));
   const script = `import { loadMemory } from ${JSON.stringify(pathToFileURL(modulePath).href)};\n` +
+    `const started = performance.now();\n` +
     `const records = loadMemory(${JSON.stringify(fifo)});\n` +
-    `if (records.length !== 0) process.exit(2);\n`;
+    `const elapsed = performance.now() - started;\n` +
+    `process.stdout.write(JSON.stringify({ count: records.length, elapsed }));\n`;
   const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
     encoding: "utf8",
-    timeout: 1_000,
+    timeout: 10_000,
   });
 
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, result.stderr);
+  const observed = JSON.parse(result.stdout) as { count: number; elapsed: number };
+  assert.equal(observed.count, 0);
+  assert.ok(observed.elapsed < 1_000, `loadMemory took ${observed.elapsed} ms`);
 });
 
 test("run() of a succeeding command keeps the wrapped exit code when memory is non-regular", async () => {
