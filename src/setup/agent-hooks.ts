@@ -535,6 +535,71 @@ export function removeClaudeHooks(existing: Record<string, unknown>): Record<str
   return removeOwnedHooks(existing, isRockyHook);
 }
 
+function ownedHookGroupsByEvent(
+  root: Record<string, unknown>,
+  isOwned: (hook: JsonObject) => boolean,
+): JsonObject {
+  const hooks = validateHooks(root) ?? {};
+  const owned: JsonObject = {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    const kept = groups.filter((groupValue) => isObject(groupValue)
+      && Array.isArray(groupValue.hooks)
+      && (groupValue.hooks as unknown[]).some((hookValue) => isObject(hookValue) && isOwned(hookValue)));
+    if (kept.length > 0) owned[event] = kept;
+  }
+  return owned;
+}
+
+/**
+ * True when any hook group holds a command `isOwned` accepts. Malformed hook
+ * containers hold nothing readable and report false; a merge or removal
+ * refuses them on its own.
+ */
+export function hasOwnedHookCommand(
+  root: Record<string, unknown>,
+  isOwned: (command: string) => boolean,
+  events?: readonly string[],
+): boolean {
+  let owned: JsonObject;
+  try {
+    owned = ownedHookGroupsByEvent(root, (hook) => {
+      const command = hookCommand(hook);
+      return command !== undefined && isOwned(command);
+    });
+  } catch {
+    return false;
+  }
+  return (events ?? Object.keys(owned)).some((event) => owned[event] !== undefined);
+}
+
+/** True when any event holds a Rocky agent-event hook, wherever its paths point. */
+export function hasOwnedAgentHooks(root: Record<string, unknown>): boolean {
+  return hasOwnedHookCommand(root, isRockyClaudeHookCommand);
+}
+
+/** True when a PreToolUse group holds a Rocky rationale-gate hook, wherever its paths point. */
+export function hasOwnedGateGroup(root: Record<string, unknown>): boolean {
+  return hasOwnedHookCommand(root, isRockyGateHookCommand, ["PreToolUse"]);
+}
+
+/**
+ * The hook groups `isOwned` accepts, keyed by event, in file order. Every
+ * other group and root key is dropped, so two families sharing an event can
+ * be compared without one family's order deciding the other's result.
+ */
+export function ownedHookProjection(
+  root: Record<string, unknown>,
+  isOwned: (hook: JsonObject) => boolean,
+): Record<string, unknown> {
+  return { hooks: ownedHookGroupsByEvent(root, isOwned) };
+}
+
+/** Projection of the agent-event and gate families; desk groups are foreign here. */
+export function ownedClaudeHookProjection(root: Record<string, unknown>): Record<string, unknown> {
+  return ownedHookProjection(root, isRockyHook);
+}
+
 export function resolveTarget(target: AgentHooksTarget, options: AgentHooksRuntimeOptions): AgentHooksTarget {
   requireSafeAbsolutePath(target.settingsPath, "Claude settings");
   return target;

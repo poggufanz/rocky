@@ -2,8 +2,10 @@ import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import {
   defaultConfirmation,
+  hasOwnedHookCommand,
   inspectCurrent,
   operationDetail,
+  ownedHookProjection,
   parseQuotedCommandPath,
   prepareMutation,
   quotePath,
@@ -82,6 +84,16 @@ export function isRockyDeskHookCommand(command: string): boolean {
 
 function isRockyDeskHook(value: JsonObject): boolean {
   return typeof value.command === "string" && isRockyDeskHookCommand(value.command);
+}
+
+/** True when any event holds a desk hook, wherever its binary path points. */
+export function hasOwnedDeskHooks(root: Record<string, unknown>): boolean {
+  return hasOwnedHookCommand(root, isRockyDeskHookCommand);
+}
+
+/** Projection of the desk family; agent and gate groups are foreign here. */
+export function ownedDeskHookProjection(root: Record<string, unknown>): Record<string, unknown> {
+  return ownedHookProjection(root, isRockyDeskHook);
 }
 
 /** Build the exact Claude Code event entries owned by the desk hook. */
