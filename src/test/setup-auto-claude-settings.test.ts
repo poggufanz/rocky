@@ -152,6 +152,21 @@ test("auto claude settings: a pending transaction is recovered before writing", 
   assert.notEqual(events(value.settings).UserPromptSubmit, undefined);
 });
 
+test("auto claude settings: remove recovers a pending transaction before removing hooks", (t) => {
+  const value = fixture(t);
+  writeFileSync(
+    value.settings,
+    JSON.stringify(mergeClaudeHooks({}, rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath))),
+  );
+  const transaction = join(value.root, `.${basename(value.settings)}.transaction-pending`);
+  mkdirSync(transaction);
+  writeFileSync(join(transaction, "manifest.json"), JSON.stringify({ version: 1, state: "prepared", target: value.settings }));
+  const reports = removeClaudeSettings(value.settings);
+  assert.deepEqual(states(reports), [["agent-hooks", "written"], ["desk-hooks", "written"]]);
+  assert.deepEqual(inspectJsonTransaction(value.settings), { status: "clear" });
+  assert.equal(readJson(value.settings).hooks, undefined);
+});
+
 test("auto claude settings: concurrent write reports changed and keeps the other bytes", (t) => {
   const value = fixture(t);
   const reports = applyClaudeSettings(value.settings, value.paths, {

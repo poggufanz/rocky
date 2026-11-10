@@ -175,6 +175,9 @@ export function applyClaudeSettings(
 export function removeClaudeSettings(settingsPath: string): AutoTargetReport[] {
   let current: CurrentConfig;
   try {
+    // Removal must work after an interrupted write, so settle the target's
+    // transaction before the pending check inside prepareMutation runs.
+    recoverJsonTransaction(settingsPath);
     current = prepareMutation(settingsPath);
   } catch (error) {
     return refusedReports(settingsPath, true, messageOf(error));
