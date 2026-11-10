@@ -147,7 +147,7 @@ export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupCl
           return { client: "opencode" as SetupResult["client"], status: "failed", detail: "refusing to replace a rocky entry not owned by Rocky; resolve manually" };
         }
       }
-      const merged = mergeRockyMcpServer(base, "mcp", registration, toOpencodeEntry);
+      const merged = mergeRockyMcpServer(base, "mcp", registration, toOpencodeEntry, { mode: "exact" });
       if (!merged.changed) return { client: "opencode" as SetupResult["client"], status: "already-configured" };
       const written = writeMergedJsonConfig(configPath, merged.value, prior);
       if (written.status !== "written") {

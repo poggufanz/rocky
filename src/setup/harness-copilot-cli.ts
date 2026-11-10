@@ -119,11 +119,11 @@ export function createHarnessCopilotAdapter(deps: HarnessCopilotDeps): SetupClie
       const base = prior.status === "missing" ? {} : prior.value;
       if (inspection.state === "conflict" && replace) {
         const stored = storedRegistration((base.mcpServers as Record<string, unknown> | undefined)?.rocky);
-        if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
+        if (stored === undefined || !isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
           return { client: "copilot-cli" as SetupResult["client"], status: "failed", detail: "refusing to replace a rocky entry not owned by Rocky; resolve manually" };
         }
       }
-      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toCopilotEntry);
+      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toCopilotEntry, { mode: "exact" });
       if (!merged.changed) return { client: "copilot-cli" as SetupResult["client"], status: "already-configured" };
       const written = writeMergedJsonConfig(configPath, merged.value, prior);
       if (written.status !== "written") {
@@ -148,7 +148,7 @@ export function createHarnessCopilotAdapter(deps: HarnessCopilotDeps): SetupClie
       if (prior.status === "invalid") {
         return { client: "copilot-cli" as SetupResult["client"], status: "failed", detail: `Copilot config is unreadable: ${configPath}` };
       }
-      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration);
+      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration, { mode: "exact" });
       if (!pruned.changed) {
         return (prior.value.mcpServers as Record<string, unknown> | undefined)?.rocky !== undefined
           ? { client: "copilot-cli" as SetupResult["client"], status: "failed", detail: "refusing to remove a rocky entry not owned by Rocky" }

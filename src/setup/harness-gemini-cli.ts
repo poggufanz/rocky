@@ -120,11 +120,11 @@ export function createHarnessGeminiAdapter(deps: HarnessGeminiDeps): SetupClient
       const base = prior.status === "missing" ? {} : prior.value;
       if (inspection.state === "conflict" && replace) {
         const stored = storedRegistration((base.mcpServers as Record<string, unknown> | undefined)?.rocky);
-        if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
+        if (stored === undefined || !isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
           return { client: "gemini-cli" as SetupResult["client"], status: "failed", detail: "refusing to replace a rocky entry not owned by Rocky; resolve manually" };
         }
       }
-      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toGeminiEntry);
+      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toGeminiEntry, { mode: "exact" });
       if (!merged.changed) return { client: "gemini-cli" as SetupResult["client"], status: "already-configured" };
       const written = writeMergedJsonConfig(settingsPath, merged.value, prior);
       if (written.status !== "written") {
@@ -149,7 +149,7 @@ export function createHarnessGeminiAdapter(deps: HarnessGeminiDeps): SetupClient
       if (prior.status === "invalid") {
         return { client: "gemini-cli" as SetupResult["client"], status: "failed", detail: `Gemini settings are unreadable: ${settingsPath}` };
       }
-      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration);
+      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration, { mode: "exact" });
       if (!pruned.changed) {
         return (prior.value.mcpServers as Record<string, unknown> | undefined)?.rocky !== undefined
           ? { client: "gemini-cli" as SetupResult["client"], status: "failed", detail: "refusing to remove a rocky entry not owned by Rocky" }

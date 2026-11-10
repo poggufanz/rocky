@@ -8,10 +8,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import type { McpRegistration } from "../setup/clients.js";
 import {
   isEphemeralInstall,
   isIdenticalMcpRegistration,
   isOwnedRockyRegistration,
+  registrationKey,
   resolveMcpRegistration,
 } from "../setup/registration.js";
 import { PROCESS_CAPTURE_LIMIT_BYTES, createProcessRunner } from "../setup/process.js";
@@ -126,12 +128,12 @@ test("ownership accepts either lowercase exposure but protects command args and 
     env: { ROCKY_MCP_EXPOSURE: "raw", ROCKY_HOME: "/home/ada/state/../.rocky", UNRELATED: "kept" },
   };
 
-  assert.equal(isOwnedRockyRegistration(storedRaw, expected), true);
+  assert.equal(isOwnedRockyRegistration(storedRaw, expected, { mode: "exact" }), true);
   assert.equal(isIdenticalMcpRegistration(storedRaw, expected), false);
-  assert.equal(isOwnedRockyRegistration({ ...storedRaw, command: "/opt/other" }, expected), false);
-  assert.equal(isOwnedRockyRegistration({ ...storedRaw, args: ["/opt/other.js", "mcp"] }, expected), false);
-  assert.equal(isOwnedRockyRegistration({ ...storedRaw, env: { ...storedRaw.env, ROCKY_HOME: "/tmp/.rocky" } }, expected), false);
-  assert.equal(isOwnedRockyRegistration({ ...storedRaw, env: { ...storedRaw.env, ROCKY_MCP_EXPOSURE: "RAW" } }, expected), false);
+  assert.equal(isOwnedRockyRegistration({ ...storedRaw, command: "/opt/other" }, expected, { mode: "exact" }), false);
+  assert.equal(isOwnedRockyRegistration({ ...storedRaw, args: ["/opt/other.js", "mcp"] }, expected, { mode: "exact" }), false);
+  assert.equal(isOwnedRockyRegistration({ ...storedRaw, env: { ...storedRaw.env, ROCKY_HOME: "/tmp/.rocky" } }, expected, { mode: "exact" }), false);
+  assert.equal(isOwnedRockyRegistration({ ...storedRaw, env: { ...storedRaw.env, ROCKY_MCP_EXPOSURE: "RAW" } }, expected, { mode: "exact" }), false);
 });
 
 test("requested registration equality compares exposure and complete environment", () => {
@@ -144,6 +146,31 @@ test("requested registration equality compares exposure and complete environment
   assert.equal(isIdenticalMcpRegistration({ ...expected, env: { ...expected.env } }, expected), true);
   assert.equal(isIdenticalMcpRegistration({ ...expected, env: { ...expected.env, ROCKY_MCP_EXPOSURE: "raw" } }, expected), false);
   assert.equal(isIdenticalMcpRegistration({ ...expected, env: { ...expected.env, EXTRA: "value" } }, expected), false);
+});
+
+const stale: McpRegistration = {
+  name: "rocky",
+  command: "/opt/node/bin/node18",
+  args: ["/opt/rocky/dist/index.js", "mcp"],
+  env: { ROCKY_MCP_EXPOSURE: "sanitized", ROCKY_HOME: "/home/ada/.rocky" },
+};
+const current: McpRegistration = { ...stale, command: "/opt/node/bin/node20" };
+const foreign: McpRegistration = { ...stale, command: "/usr/local/bin/other" };
+
+test("exact ownership still refuses a stale node path", () => {
+  assert.equal(isOwnedRockyRegistration(stale, current, { mode: "exact" }), false);
+});
+test("history ownership accepts a registration Rocky wrote before", () => {
+  assert.equal(isOwnedRockyRegistration(stale, current, { mode: "history", history: [registrationKey(stale)] }), true);
+});
+test("history ownership refuses a rocky entry Rocky never wrote", () => {
+  assert.equal(isOwnedRockyRegistration(foreign, current, { mode: "history", history: [registrationKey(stale)] }), false);
+});
+test("registrationKey ignores env key order", () => {
+  assert.equal(
+    registrationKey({ ...stale, env: { B: "2", A: "1" } }),
+    registrationKey({ ...stale, env: { A: "1", B: "2" } }),
+  );
 });
 
 test("process runner preserves exact argv and stdin without invoking a shell", async () => {

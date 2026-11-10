@@ -22,7 +22,7 @@ function stdioEntry(r: McpRegistration): Record<string, unknown> {
 
 test("merge preserves foreign servers and key order, appends rocky last", () => {
   const existing = { mcpServers: { other: { command: "x" } } };
-  const { value, changed } = mergeRockyMcpServer(existing, "mcpServers", REGISTRATION, stdioEntry);
+  const { value, changed } = mergeRockyMcpServer(existing, "mcpServers", REGISTRATION, stdioEntry, { mode: "exact" });
   assert.equal(changed, true);
   assert.deepEqual(Object.keys((value.mcpServers as Record<string, unknown>)), ["other", "rocky"]);
   assert.deepEqual((value.mcpServers as Record<string, unknown>).other, { command: "x" });
@@ -30,7 +30,7 @@ test("merge preserves foreign servers and key order, appends rocky last", () => 
 
 test("merge is a no-op when an identical rocky entry already exists", () => {
   const existing = { mcpServers: { rocky: stdioEntry(REGISTRATION) } };
-  const { changed } = mergeRockyMcpServer(existing, "mcpServers", REGISTRATION, stdioEntry);
+  const { changed } = mergeRockyMcpServer(existing, "mcpServers", REGISTRATION, stdioEntry, { mode: "exact" });
   assert.equal(changed, false);
 });
 
@@ -38,7 +38,7 @@ test("remove deletes only the rocky-owned entry and reports ownership", () => {
   const existing = {
     mcpServers: { other: { command: "x" }, rocky: { command: "impostor" } },
   };
-  const { value, changed, owned } = removeRockyMcpServer(existing, "mcpServers", REGISTRATION);
+  const { value, changed, owned } = removeRockyMcpServer(existing, "mcpServers", REGISTRATION, { mode: "exact" });
   assert.equal(changed, false);
   assert.equal(owned, false);
   assert.deepEqual(Object.keys((value.mcpServers as Record<string, unknown>)), ["other", "rocky"]);

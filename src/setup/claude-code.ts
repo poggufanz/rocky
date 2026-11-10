@@ -1689,7 +1689,7 @@ export function createClaudeCodeAdapter(
         return failed(inspection.public.detail ?? "Unable to read Claude Code user config");
       }
       const stored = parseRegistration(inspection.snapshot);
-      if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
+      if (stored === undefined || !isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
         return failed("Claude Code rocky registration is not owned by Rocky");
       }
       return runMutation("remove", inspection, registration, false);
@@ -1703,7 +1703,7 @@ export function createClaudeCodeAdapter(
       }
       if (inspection.public.state === "identical" || inspection.public.state === "conflict") {
         const stored = parseRegistration(inspection.snapshot);
-        if (stored !== undefined && isOwnedRockyRegistration(stored, registration)) {
+        if (stored !== undefined && isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
           return { client: "claude-code", status: "healthy", healthRegistration: stored };
         }
       }

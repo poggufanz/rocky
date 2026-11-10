@@ -86,8 +86,25 @@ function validExposure(value: string | undefined): value is Exposure {
   return value === "sanitized" || value === "raw";
 }
 
-export function isOwnedRockyRegistration(stored: McpRegistration, expected: McpRegistration): boolean {
-  return stored.name === "rocky"
+export type RegistrationOwnership =
+  | { readonly mode: "exact" }
+  | { readonly mode: "history"; readonly history: readonly string[] };
+
+export function registrationKey(registration: McpRegistration): string {
+  const env = registration.env;
+  return JSON.stringify({
+    command: registration.command,
+    args: registration.args,
+    env: Object.fromEntries(Object.keys(env).sort().map((key) => [key, env[key]])),
+  });
+}
+
+export function isOwnedRockyRegistration(
+  stored: McpRegistration,
+  expected: McpRegistration,
+  ownership: RegistrationOwnership,
+): boolean {
+  const exact = stored.name === "rocky"
     && expected.name === "rocky"
     && sameNormalizedAbsolutePath(stored.command, expected.command)
     && sameArgs(stored.args, expected.args)
@@ -96,6 +113,8 @@ export function isOwnedRockyRegistration(stored: McpRegistration, expected: McpR
     && typeof stored.env.ROCKY_HOME === "string"
     && typeof expected.env.ROCKY_HOME === "string"
     && sameNormalizedAbsolutePath(stored.env.ROCKY_HOME, expected.env.ROCKY_HOME);
+  if (ownership.mode === "exact") return exact;
+  return exact || ownership.history.includes(registrationKey(stored));
 }
 
 function sameEnvironment(left: Readonly<Record<string, string>>, right: Readonly<Record<string, string>>): boolean {
@@ -106,5 +125,6 @@ function sameEnvironment(left: Readonly<Record<string, string>>, right: Readonly
 }
 
 export function isIdenticalMcpRegistration(stored: McpRegistration, expected: McpRegistration): boolean {
-  return isOwnedRockyRegistration(stored, expected) && sameEnvironment(stored.env, expected.env);
+  return isOwnedRockyRegistration(stored, expected, { mode: "exact" })
+    && sameEnvironment(stored.env, expected.env);
 }
