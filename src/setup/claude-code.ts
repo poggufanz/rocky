@@ -996,7 +996,7 @@ export function resolveClaudeCodeUserConfig(
   };
 }
 
-function isCanonicalAbsoluteDirectory(path: string, pathApi: PlatformPath): boolean {
+export function isCanonicalAbsoluteDirectory(path: string, pathApi: PlatformPath): boolean {
   if (!pathApi.isAbsolute(path) || pathApi.normalize(path) !== path) return false;
   const root = pathApi.parse(path).root;
   if (root.length === 0 || (path !== root && /[\\/]$/.test(path))) return false;
@@ -1014,7 +1014,7 @@ function isCanonicalAbsoluteDirectory(path: string, pathApi: PlatformPath): bool
   return !path.includes("\\");
 }
 
-function isCanonicalAbsoluteFile(path: string, pathApi: PlatformPath): boolean {
+export function isCanonicalAbsoluteFile(path: string, pathApi: PlatformPath): boolean {
   if (!pathApi.isAbsolute(path) || pathApi.normalize(path) !== path || /[\\/]$/.test(path)) return false;
   const parent = pathApi.dirname(path);
   return isCanonicalAbsoluteDirectory(parent, pathApi)
@@ -1689,7 +1689,7 @@ export function createClaudeCodeAdapter(
         return failed(inspection.public.detail ?? "Unable to read Claude Code user config");
       }
       const stored = parseRegistration(inspection.snapshot);
-      if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
+      if (stored === undefined || !isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
         return failed("Claude Code rocky registration is not owned by Rocky");
       }
       return runMutation("remove", inspection, registration, false);
@@ -1703,7 +1703,7 @@ export function createClaudeCodeAdapter(
       }
       if (inspection.public.state === "identical" || inspection.public.state === "conflict") {
         const stored = parseRegistration(inspection.snapshot);
-        if (stored !== undefined && isOwnedRockyRegistration(stored, registration)) {
+        if (stored !== undefined && isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
           return { client: "claude-code", status: "healthy", healthRegistration: stored };
         }
       }

@@ -9,7 +9,7 @@ import { lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, writeFile
 import { isAbsolute, join } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
 import { consentsPath, listeningHome } from "./store-paths.js";
-import { normalizeRepoRoot } from "./repo-consent-read.js";
+import { mainRepoRootOf, normalizeRepoRoot } from "./repo-consent-read.js";
 import { purgeListeningStore } from "./event-log.js";
 
 function isGitRoot(canonicalRoot: string): boolean {
@@ -43,11 +43,13 @@ function isGitRoot(canonicalRoot: string): boolean {
  * Grant or revoke capture for one canonical Git root. `yes` is the explicit
  * consent switch: without it the call reports requires-confirmation and
  * writes nothing. Revoke stops future capture; history stays on disk.
+ * `onRevoke: "delete"` forgets the repo, while `"decline"` remembers the
+ * refusal as `false` so a later grant of another repo cannot erase it.
  */
 export function setRepoCapture(
   canonicalRoot: string,
   allow: boolean,
-  opts: { yes: boolean; actor: "cli" | "gui" },
+  opts: { yes: boolean; actor: "cli" | "gui" | "desk"; onRevoke: "delete" | "decline" },
   home?: string,
 ): { ok: boolean; root?: string; reason?: string } {
   if (opts.yes !== true) return { ok: false, reason: "requires-confirmation" };
@@ -83,14 +85,22 @@ export function setRepoCapture(
   } catch {
     current = {};
   }
-  const next: Record<string, true> = {};
+  const next: Record<string, boolean> = {};
   for (const [key, value] of Object.entries(current)) {
-    if (value === true && typeof key === "string" && key.length > 0) next[normalizeRepoRoot(key)] = true;
+    if ((value === true || value === false) && key.length > 0) next[normalizeRepoRoot(key)] = value;
   }
+  // A linked worktree has no decision of its own: the main repo's key is what
+  // lets capture run. Revoking here must clear that key too, or capture keeps
+  // running through the inherited grant and purge never passes revoke-first.
+  const decisionRoot = allow ? root : normalizeRepoRoot(mainRepoRootOf(real) ?? root);
   if (allow) {
     next[root] = true;
+  } else if (opts.onRevoke === "decline") {
+    next[root] = false;
+    next[decisionRoot] = false;
   } else {
     delete next[root];
+    delete next[decisionRoot];
   }
   void opts.actor;
   try {
@@ -101,19 +111,20 @@ export function setRepoCapture(
   } catch {
     return { ok: false, reason: "store-unavailable" };
   }
-  return { ok: true, root };
+  return { ok: true, root: decisionRoot };
 }
 
 /**
  * Stop capture and delete one repo's Listening history; the setup CLI and
  * the GUI share it. Revoke always runs first (idempotent, and it clears a
  * key stored under the realpath spelling), so no writer starts again. The
- * store is then deleted under both the typed and the realpath spelling,
- * which can hash to different directories.
+ * target's own store is deleted under both the typed and the realpath
+ * spelling, which can hash to different directories; a worktree keeps its
+ * own history even when the revoke names its main repo.
  */
 export function purgeRepoCapture(
   target: string,
-  opts: { yes: boolean; actor: "cli" | "gui" },
+  opts: { yes: boolean; actor: "cli" | "gui" | "desk"; onRevoke: "delete" | "decline" },
   home?: string,
 ): { ok: boolean; freedBytes: number; root?: string; reason?: string } {
   if (opts.yes !== true) return { ok: false, freedBytes: 0, reason: "requires-confirmation" };
@@ -122,8 +133,14 @@ export function purgeRepoCapture(
   const revoked = setRepoCapture(target, false, opts, home);
   if (!revoked.ok) return { ok: false, freedBytes: 0, reason: revoked.reason };
   const root = revoked.root ?? typed;
+  let own = typed;
+  try {
+    own = canonicalPath(realpathSync(target));
+  } catch {
+    own = typed;
+  }
   let freedBytes = 0;
-  for (const spelling of new Set([typed, root])) {
+  for (const spelling of new Set([typed, own])) {
     const purged = purgeListeningStore(spelling, home);
     if (!purged.ok) return { ok: false, freedBytes, reason: purged.reason };
     freedBytes += purged.freedBytes;

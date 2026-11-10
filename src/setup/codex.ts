@@ -801,7 +801,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
           return failed("Codex rocky registration provenance is not base user config");
         }
         if (snapshot.registration === undefined
-          || !isOwnedRockyRegistration(snapshot.registration, registration)) {
+          || !isOwnedRockyRegistration(snapshot.registration, registration, { mode: "exact" })) {
           return failed("Codex rocky registration is not owned by Rocky");
         }
 
@@ -893,7 +893,7 @@ export function createCodexAdapter(dependencies: CodexAdapterDependencies): Setu
         && snapshot.entry !== undefined
         && entryHasOnlyRegistrationFields(snapshot.entry)
         && snapshot.registration !== undefined
-        && isOwnedRockyRegistration(snapshot.registration, registration)) {
+        && isOwnedRockyRegistration(snapshot.registration, registration, { mode: "exact" })) {
         return {
           client: "codex",
           status: "healthy",

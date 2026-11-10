@@ -307,6 +307,91 @@ X-GNOME-Autostart-enabled=true
   tray that cannot be built is logged under `tray` while the desk keeps
   running without one; the Windows-only `aumid` kind is not used.
 
+## Setup records v1
+
+`rocky setup --auto` keeps its consent and the bytes it wrote under
+`<ROCKY_HOME>/setup/`. Both files are written by a sibling temporary file
+renamed over the target. A missing, unparsable, or wrongly shaped store
+reads as empty, so the next write replaces it.
+
+### Consent record
+
+`<ROCKY_HOME>/setup/consent.json`:
+
+```json
+{"v":1,"scope":1,"state":"approved","at":1794000000123,
+ "harness_off":["opencode"],"shell_hook":true,
+ "config_dirs":{"claude-code":[{"location":"/home/u/.claude","last_seen":1794000000123}]}}
+```
+
+`v` is the file version and `scope` the version of what the answer covers;
+both must be 1. `state` is `approved`, `later`, or `removed`. `at` is epoch
+milliseconds. `harness_off` names the MCP harnesses the answer leaves out,
+and `shell_hook` says whether the shell hook is in scope.
+
+`config_dirs` holds the locations a harness was found at, each with the
+epoch-millisecond `last_seen` of the last sighting. An entry is a directory
+for claude-code, codex, and copilot-cli, and the config file itself for
+opencode and gemini-cli. A location absent for seven days is forgotten.
+Every recorded location, like a config directory named by the environment, is
+revalidated before each inspect, apply, and remove: it must stay canonical,
+must not be a symlink, must remain inside the user's home, and must still hold
+its harness file. A location that fails is reported as `refused` and nothing
+is written there.
+
+### Expected record
+
+`<ROCKY_HOME>/setup/expected.json`:
+
+```json
+{"v":1,
+ "files":[{"path":"/home/u/.claude/settings.json","snippets":["rocky hook"]}],
+ "history":{"/home/u/.codex/config.toml":["[mcp_servers.rocky]\ncommand = \"node\""]}}
+```
+
+`files[].snippets` are byte substrings a reader checks for presence, not a
+diff. A snippet is listed only after it was found in the file, so every
+write Rocky reports is followed by a read that found its bytes. A target
+that reports success while an expected snippet is missing is reported as an
+error instead.
+
+`history` is keyed by the target path and capped at 20 values per path,
+newest last, with older duplicates dropped. A value is a `registrationKey`
+string for a JSON MCP config — the JSON object `{command,args,env}`, with
+the `env` keys sorted — and the exact block text for the Codex TOML. Both
+forms name what Rocky wrote, so a later run recognizes its own entry after
+the value it would write has moved.
+
+### CLI record
+
+`<ROCKY_HOME>/bin/cli.json`:
+
+```json
+{"v":1,"node":"C:\\Program Files\\nodejs\\node.exe",
+ "entry":"C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@poggufanz\\rocky-cli\\dist\\index.js",
+ "version":"2.0.0"}
+```
+
+`node` and `entry` are absolute paths and `version` is the package version.
+Bare `rocky` and `rocky setup` write it; no other command does. The write is
+skipped unless the last five path segments of `entry` are `node_modules`,
+`@poggufanz`, `rocky-cli`, `dist`, and `index.js` (compared
+case-insensitively on Windows), so a repository checkout or a shim records
+nothing. That rule matches only those five segments, so an install whose
+entry ends the same way is recorded too, including an npx cache copy under
+`_npx` and a project-local `node_modules` copy. An identical record is left
+byte-identical.
+
+### Repo capture consent
+
+`<ROCKY_HOME>/listening/repo-consents.json` maps a canonical repo root to a
+boolean. `true` is a grant. `false` is a remembered decline, kept so that an
+answer about another repository cannot erase it. Readers count only `true`:
+a missing store, an unreadable one, or a value that is not a boolean is no
+consent. A linked Git worktree has no decision of its own; it inherits its
+main repository's grant, and a revoke clears both that root and the root
+that owns the decision.
+
 ## Pipe v2
 
 One JSON object per line over the daemon pipe. Every message carries `v`

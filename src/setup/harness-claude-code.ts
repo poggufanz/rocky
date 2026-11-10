@@ -57,16 +57,20 @@ function storedRegistration(entry: unknown): McpRegistration | undefined {
   return { name: "rocky", command: record.command, args: record.args as string[], env };
 }
 
+export function claudeCodeMcpConfigPath(env: NodeJS.ProcessEnv, home: string): string {
+  const configured = env.CLAUDE_CONFIG_DIR;
+  return configured !== undefined && configured.length > 0
+    ? join(configured, ".claude.json")
+    : join(home, ".claude.json");
+}
+
 export function createHarnessClaudeCodeAdapter(deps: HarnessClaudeCodeDeps): SetupClientAdapter {
   const home = deps.home ?? deps.platform.home;
   const env = deps.env ?? process.env;
   const scope = deps.scope ?? "user";
   const configPath = scope === "project"
     ? deps.projectConfigPath
-    : (deps.userConfigPath
-      ?? (typeof env.CLAUDE_CONFIG_DIR === "string" && env.CLAUDE_CONFIG_DIR.length > 0
-        ? join(env.CLAUDE_CONFIG_DIR, "claude.json")
-        : join(home, ".claude.json")));
+    : (deps.userConfigPath ?? claudeCodeMcpConfigPath(env, home));
 
   async function executablePath(): Promise<string | undefined> {
     const { executable } = await resolveCanonicalExecutable({
@@ -148,11 +152,11 @@ export function createHarnessClaudeCodeAdapter(deps: HarnessClaudeCodeDeps): Set
         const stored = storedRegistration(
           (base.mcpServers as Record<string, unknown> | undefined)?.rocky,
         );
-        if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
+        if (stored === undefined || !isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
           return { client: "claude-code", status: "failed", detail: "refusing to replace a rocky entry not owned by Rocky; resolve manually" };
         }
       }
-      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toClaudeEntry);
+      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toClaudeEntry, { mode: "exact" });
       if (!merged.changed) return { client: "claude-code", status: "already-configured" };
       const written = writeMergedJsonConfig(configPath, merged.value, prior);
       if (written.status !== "written") {
@@ -175,7 +179,7 @@ export function createHarnessClaudeCodeAdapter(deps: HarnessClaudeCodeDeps): Set
       if (prior.status === "invalid") {
         return { client: "claude-code", status: "failed", detail: `Claude Code config is unreadable: ${configPath}` };
       }
-      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration);
+      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration, { mode: "exact" });
       if (!pruned.changed) {
         return pruned.owned === false
           && (prior.value.mcpServers as Record<string, unknown> | undefined)?.rocky !== undefined

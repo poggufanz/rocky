@@ -35,7 +35,7 @@ export function toOpencodeEntry(registration: McpRegistration): Record<string, u
   };
 }
 
-function storedRegistration(entry: unknown): McpRegistration | undefined {
+export function fromOpencodeEntry(entry: unknown): McpRegistration | undefined {
   if (typeof entry !== "object" || entry === null) return undefined;
   const record = entry as Record<string, unknown>;
   if (!Array.isArray(record.command) || !record.command.every((a) => typeof a === "string")) return undefined;
@@ -58,19 +58,31 @@ function sameRegistration(left: McpRegistration, right: McpRegistration): boolea
     && JSON.stringify(left.env) === JSON.stringify(right.env);
 }
 
-function resolveConfigPath(deps: HarnessOpencodeDeps): string {
-  if (deps.configPath !== undefined) return deps.configPath;
-  const env = deps.env ?? process.env;
-  if (typeof env.OPENCODE_CONFIG === "string" && env.OPENCODE_CONFIG.length > 0) return env.OPENCODE_CONFIG;
-  const home = deps.home ?? deps.platform.home;
-  if (deps.platform.platform === "win32" && typeof deps.platform.appData === "string") {
-    return join(deps.platform.appData, "opencode", "opencode.json");
+export function resolveOpencodeConfigPath(input: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  platform: NodeJS.Platform;
+  appData?: string;
+}): string {
+  if (typeof input.env.OPENCODE_CONFIG === "string" && input.env.OPENCODE_CONFIG.length > 0) return input.env.OPENCODE_CONFIG;
+  if (input.platform === "win32" && typeof input.appData === "string") {
+    return join(input.appData, "opencode", "opencode.json");
   }
-  return join(home, ".config", "opencode", "opencode.json");
+  return join(input.home, ".config", "opencode", "opencode.json");
+}
+
+function configPathFor(deps: HarnessOpencodeDeps): string {
+  if (deps.configPath !== undefined) return deps.configPath;
+  return resolveOpencodeConfigPath({
+    env: deps.env ?? process.env,
+    home: deps.home ?? deps.platform.home,
+    platform: deps.platform.platform,
+    appData: deps.platform.appData,
+  });
 }
 
 export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupClientAdapter {
-  const configPath = resolveConfigPath(deps);
+  const configPath = configPathFor(deps);
 
   async function executablePath(): Promise<string | undefined> {
     const { executable } = await resolveCanonicalExecutable({
@@ -93,7 +105,7 @@ export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupCl
     }
     const entry = (container as Record<string, unknown> | undefined)?.rocky;
     if (entry === undefined) return { state: "absent" };
-    const stored = storedRegistration(entry);
+    const stored = fromOpencodeEntry(entry);
     if (stored !== undefined && sameRegistration(stored, registration)) {
       return { state: "identical" };
     }
@@ -142,12 +154,12 @@ export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupCl
       }
       const base = prior.status === "missing" ? {} : prior.value;
       if (inspection.state === "conflict" && replace) {
-        const stored = storedRegistration((base.mcp as Record<string, unknown> | undefined)?.rocky);
+        const stored = fromOpencodeEntry((base.mcp as Record<string, unknown> | undefined)?.rocky);
         if (stored === undefined || stored.command !== registration.command) {
           return { client: "opencode" as SetupResult["client"], status: "failed", detail: "refusing to replace a rocky entry not owned by Rocky; resolve manually" };
         }
       }
-      const merged = mergeRockyMcpServer(base, "mcp", registration, toOpencodeEntry);
+      const merged = mergeRockyMcpServer(base, "mcp", registration, toOpencodeEntry, { mode: "exact" });
       if (!merged.changed) return { client: "opencode" as SetupResult["client"], status: "already-configured" };
       const written = writeMergedJsonConfig(configPath, merged.value, prior);
       if (written.status !== "written") {
@@ -168,7 +180,7 @@ export function createHarnessOpencodeAdapter(deps: HarnessOpencodeDeps): SetupCl
       if (prior.status === "invalid") {
         return { client: "opencode" as SetupResult["client"], status: "failed", detail: `OpenCode config is unreadable: ${configPath}` };
       }
-      const stored = storedRegistration((prior.value.mcp as Record<string, unknown> | undefined)?.rocky);
+      const stored = fromOpencodeEntry((prior.value.mcp as Record<string, unknown> | undefined)?.rocky);
       if (stored === undefined) {
         return (prior.value.mcp as Record<string, unknown> | undefined)?.rocky !== undefined
           ? { client: "opencode" as SetupResult["client"], status: "failed", detail: "refusing to remove a rocky entry not owned by Rocky" }

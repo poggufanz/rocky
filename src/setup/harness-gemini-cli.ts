@@ -54,19 +54,31 @@ function storedRegistration(entry: unknown): McpRegistration | undefined {
   return { name: "rocky", command: record.command, args: record.args as string[], env };
 }
 
-function resolveSettingsPath(deps: HarnessGeminiDeps): string {
-  if (deps.settingsPath !== undefined) return deps.settingsPath;
-  const env = deps.env ?? process.env;
-  if (typeof env.GEMINI_SETTINGS === "string" && env.GEMINI_SETTINGS.length > 0) return env.GEMINI_SETTINGS;
-  const home = deps.home ?? deps.platform.home;
-  if (deps.platform.platform === "win32" && typeof deps.platform.appData === "string") {
-    return join(deps.platform.appData, "gemini", "settings.json");
+export function resolveGeminiSettingsPath(input: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  platform: NodeJS.Platform;
+  appData?: string;
+}): string {
+  if (typeof input.env.GEMINI_SETTINGS === "string" && input.env.GEMINI_SETTINGS.length > 0) return input.env.GEMINI_SETTINGS;
+  if (input.platform === "win32" && typeof input.appData === "string") {
+    return join(input.appData, "gemini", "settings.json");
   }
-  return join(home, ".gemini", "settings.json");
+  return join(input.home, ".gemini", "settings.json");
+}
+
+function settingsPathFor(deps: HarnessGeminiDeps): string {
+  if (deps.settingsPath !== undefined) return deps.settingsPath;
+  return resolveGeminiSettingsPath({
+    env: deps.env ?? process.env,
+    home: deps.home ?? deps.platform.home,
+    platform: deps.platform.platform,
+    appData: deps.platform.appData,
+  });
 }
 
 export function createHarnessGeminiAdapter(deps: HarnessGeminiDeps): SetupClientAdapter {
-  const settingsPath = resolveSettingsPath(deps);
+  const settingsPath = settingsPathFor(deps);
 
   async function executablePath(): Promise<string | undefined> {
     const { executable } = await resolveCanonicalExecutable({
@@ -120,11 +132,11 @@ export function createHarnessGeminiAdapter(deps: HarnessGeminiDeps): SetupClient
       const base = prior.status === "missing" ? {} : prior.value;
       if (inspection.state === "conflict" && replace) {
         const stored = storedRegistration((base.mcpServers as Record<string, unknown> | undefined)?.rocky);
-        if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
+        if (stored === undefined || !isOwnedRockyRegistration(stored, registration, { mode: "exact" })) {
           return { client: "gemini-cli" as SetupResult["client"], status: "failed", detail: "refusing to replace a rocky entry not owned by Rocky; resolve manually" };
         }
       }
-      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toGeminiEntry);
+      const merged = mergeRockyMcpServer(base, "mcpServers", registration, toGeminiEntry, { mode: "exact" });
       if (!merged.changed) return { client: "gemini-cli" as SetupResult["client"], status: "already-configured" };
       const written = writeMergedJsonConfig(settingsPath, merged.value, prior);
       if (written.status !== "written") {
@@ -149,7 +161,7 @@ export function createHarnessGeminiAdapter(deps: HarnessGeminiDeps): SetupClient
       if (prior.status === "invalid") {
         return { client: "gemini-cli" as SetupResult["client"], status: "failed", detail: `Gemini settings are unreadable: ${settingsPath}` };
       }
-      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration);
+      const pruned = removeRockyMcpServer(prior.value, "mcpServers", registration, { mode: "exact" });
       if (!pruned.changed) {
         return (prior.value.mcpServers as Record<string, unknown> | undefined)?.rocky !== undefined
           ? { client: "gemini-cli" as SetupResult["client"], status: "failed", detail: "refusing to remove a rocky entry not owned by Rocky" }

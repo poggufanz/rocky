@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { basename, join, posix, resolve, win32 } from "node:path";
+import { configuredRockyHome } from "../core/state-paths.js";
 import type {
   InspectionResult,
   McpRegistration,
@@ -28,6 +29,7 @@ import {
   PROPOSAL_MAX_OBJECT_STORE_BYTES_PER_REPO,
 } from "../listening/types.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
+import { defaultAutoContext, runAutoSetup } from "../setup/auto/command.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
 import { createPromptPort, type PromptInput } from "../setup/prompt.js";
@@ -448,7 +450,7 @@ async function runPurgeCapture(
     say("Consent withheld. Setup stopped and nothing changed.");
     return 1;
   }
-  const purged = purgeRepoCapture(repo, { yes: true, actor: "cli" }, home);
+  const purged = purgeRepoCapture(repo, { yes: true, actor: "cli", onRevoke: "delete" }, home);
   if (!purged.ok) {
     detail(purged.reason ?? "Purge failed.");
     return 1;
@@ -502,7 +504,7 @@ async function runRepoCaptureAction(
       return 1;
     }
   }
-  const result = setRepoCapture(target, action === "allow-capture", { yes: true, actor: "cli" }, home);
+  const result = setRepoCapture(target, action === "allow-capture", { yes: true, actor: "cli", onRevoke: "delete" }, home);
   if (!result.ok) {
     detail(result.reason ?? "Capture action failed.");
     return result.reason === "requires-confirmation" ? 2 : 1;
@@ -510,7 +512,9 @@ async function runRepoCaptureAction(
   detail(action === "allow-capture" ? `capture allowed: ${result.root ?? probe.root}` : `capture revoked: ${result.root ?? probe.root}`);
   if (action === "revoke-capture") {
     detail("History is kept. Revoking stops new capture only.");
-    detail(`Delete it with: rocky setup --repo ${result.root ?? probe.root} --purge-capture`);
+    // The listening store is per worktree, so purge must name the path given
+    // here; the decision root may be the main repository instead.
+    detail(`Delete it with: rocky setup --repo ${target} --purge-capture`);
   }
   return 0;
 }
@@ -779,6 +783,11 @@ function usageMessage(message: string): string {
 }
 
 export async function setup(argv: readonly string[], deps?: SetupDependencies): Promise<number> {
+  if (argv[0] === "--auto") {
+    // Hidden, prompt-free entry for the desktop app: one JSON object on
+    // stdout, no parser, no prompt, and no harness executable.
+    return runAutoSetup(argv.slice(1), defaultAutoContext, (json) => process.stdout.write(`${json}\n`));
+  }
   let options;
   try {
     options = parseSetupArgs(argv);
@@ -852,7 +861,7 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
       exposure: options.exposure,
       nodePath: dependencies.nodePath,
       entryPath: dependencies.entryPath,
-      rockyHome: dependencies.rockyHome ?? process.env.ROCKY_HOME,
+      rockyHome: dependencies.rockyHome ?? configuredRockyHome(process.env),
       home: dependencies.platform.home,
       fileExists: dependencies.platform.fileExists,
     });

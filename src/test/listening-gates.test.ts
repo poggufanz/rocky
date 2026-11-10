@@ -38,7 +38,7 @@ test("projection drops a crafted runtime_observed envelope from durable JSON", (
   mkdirSync(join(home, "listening"), { recursive: true });
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gates-repo-")));
   execFileSync("git", ["init", "-q"], { cwd: root });
-  assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli" }, home).ok, true);
+  assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
   appendListeningEvent(
     root,
     envelope({ eventId: "ok", edge: { kind: "read_from", from: "a", to: "b", basis: "direct" } }),

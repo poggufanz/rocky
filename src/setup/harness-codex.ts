@@ -28,11 +28,24 @@ const VERSION_TIMEOUT_MS = 5_000;
 const LIST_TIMEOUT_MS = 10_000;
 const ROCKY_SECTION = "[mcp_servers.rocky]";
 
-function resolveCodexHome(deps: HarnessCodexDeps): string {
-  const env = deps.env ?? process.env;
+export function resolveCodexHome(input: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  platform: NodeJS.Platform;
+  appData?: string;
+}): string {
+  if (typeof input.env.CODEX_HOME === "string" && input.env.CODEX_HOME.length > 0) return input.env.CODEX_HOME;
+  return join(input.home, ".codex");
+}
+
+function codexHomeFor(deps: HarnessCodexDeps): string {
   if (deps.codexHome !== undefined) return deps.codexHome;
-  if (typeof env.CODEX_HOME === "string" && env.CODEX_HOME.length > 0) return env.CODEX_HOME;
-  return join(deps.home ?? deps.platform.home, ".codex");
+  return resolveCodexHome({
+    env: deps.env ?? process.env,
+    home: deps.home ?? deps.platform.home,
+    platform: deps.platform.platform,
+    appData: deps.platform.appData,
+  });
 }
 
 async function executablePath(deps: HarnessCodexDeps): Promise<string | undefined> {
@@ -61,13 +74,13 @@ async function nativeListShows(
   }
 }
 
-interface TomlBlock {
+export interface TomlBlock {
   status: "absent" | "owned" | "foreign" | "malformed";
   start: number;
   end: number;
 }
 
-function scanRockyBlock(lines: string[]): TomlBlock {
+export function scanCodexRockyBlock(lines: string[]): TomlBlock {
   const start = lines.findIndex((line) => line.trim() === ROCKY_SECTION);
   if (start === -1) return { status: "absent", start: -1, end: -1 };
   let end = lines.length;
@@ -86,7 +99,7 @@ function scanRockyBlock(lines: string[]): TomlBlock {
   return { status: commandLine.includes("rocky") || commandLine.includes("node") ? "owned" : "foreign", start, end };
 }
 
-function desiredBlock(registration: McpRegistration): string[] {
+export function codexRockyBlock(registration: McpRegistration): string[] {
   const lines = [ROCKY_SECTION, `command = ${JSON.stringify(registration.command)}`];
   lines.push(`args = [${registration.args.map((a) => JSON.stringify(a)).join(", ")}]`);
   for (const [k, v] of Object.entries(registration.env)) {
@@ -98,11 +111,11 @@ function desiredBlock(registration: McpRegistration): string[] {
 function blockMatchesRegistration(block: TomlBlock, text: string, registration: McpRegistration): boolean {
   if (block.status !== "owned") return false;
   const actual = text.split("\n").slice(block.start, block.end).join("\n").trimEnd();
-  return actual === desiredBlock(registration).join("\n");
+  return actual === codexRockyBlock(registration).join("\n");
 }
 
 export function createHarnessCodexAdapter(deps: HarnessCodexDeps): SetupClientAdapter {
-  const codexHome = resolveCodexHome(deps);
+  const codexHome = codexHomeFor(deps);
   const configPath = join(codexHome, "config.toml");
 
   function readToml(): { text: string } | { error: "missing" | "unreadable" } {
@@ -122,7 +135,7 @@ export function createHarnessCodexAdapter(deps: HarnessCodexDeps): SetupClientAd
     const seen = await nativeListShows(deps, exe);
     const file = readToml();
     if ("text" in file) {
-      const block = scanRockyBlock(file.text.split("\n"));
+      const block = scanCodexRockyBlock(file.text.split("\n"));
       if (block.status === "malformed") return { state: "unreadable", detail: `Codex config is unreadable: ${configPath}` };
       if (block.status === "foreign") return { state: "conflict", detail: "Codex already has a different rocky registration" };
       if (block.status === "owned" && !blockMatchesRegistration(block, file.text, registration)) {
@@ -141,8 +154,8 @@ export function createHarnessCodexAdapter(deps: HarnessCodexDeps): SetupClientAd
     const next = remove
       ? [...lines.slice(0, block.start), ...lines.slice(block.end)]
       : block.status === "absent"
-        ? [...lines, ...(lines.length > 0 && lines[lines.length - 1] !== "" ? [""] : []), ...desiredBlock(registration)]
-        : [...lines.slice(0, block.start), ...desiredBlock(registration), ...lines.slice(block.end)];
+        ? [...lines, ...(lines.length > 0 && lines[lines.length - 1] !== "" ? [""] : []), ...codexRockyBlock(registration)]
+        : [...lines.slice(0, block.start), ...codexRockyBlock(registration), ...lines.slice(block.end)];
     const prior = pathExists(configPath)
       ? { status: "valid" as const, bytes: Buffer.from(text, "utf8") }
       : { status: "missing" as const };
@@ -169,7 +182,7 @@ export function createHarnessCodexAdapter(deps: HarnessCodexDeps): SetupClientAd
       }
       const file = readToml();
       const text = file !== undefined && "text" in file ? file.text : "";
-      const block = scanRockyBlock(text === "" ? [] : text.split("\n"));
+      const block = scanCodexRockyBlock(text === "" ? [] : text.split("\n"));
       if (block.status === "malformed") {
         return { client: "codex", status: "failed", detail: `Codex config is unreadable: ${configPath}` };
       }
@@ -197,7 +210,7 @@ export function createHarnessCodexAdapter(deps: HarnessCodexDeps): SetupClientAd
       if (!("text" in file)) {
         return { client: "codex", status: "failed", detail: `Codex config is unreadable: ${configPath}` };
       }
-      const block = scanRockyBlock(file.text.split("\n"));
+      const block = scanCodexRockyBlock(file.text.split("\n"));
       if (block.status === "absent") return { client: "codex", status: "not-configured" };
       if (block.status === "malformed") {
         return { client: "codex", status: "failed", detail: `Codex config is unreadable: ${configPath}` };

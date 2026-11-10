@@ -176,7 +176,7 @@ function isOwnedDesktopRegistration(
   expected: McpRegistration,
 ): boolean {
   if (!isWslDesktopRegistration(expected)) {
-    return isOwnedRockyRegistration(stored, expected);
+    return isOwnedRockyRegistration(stored, expected, { mode: "exact" });
   }
   return isWslDesktopRegistration(stored)
     && sameWindowsCommand(stored.command, expected.command)

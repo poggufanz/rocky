@@ -15,7 +15,7 @@ import {
   recoverJsonTransaction,
   type JsonReadResult,
 } from "./json-config.js";
-import { isOwnedRockyRegistration } from "./registration.js";
+import { isOwnedRockyRegistration, type RegistrationOwnership } from "./registration.js";
 
 export interface CanonicalExecutable {
   path: string;
@@ -87,7 +87,7 @@ export function notFoundDetection(
   };
 }
 
-function entryToStoredRegistration(entry: unknown): McpRegistration | undefined {
+export function entryToStoredRegistration(entry: unknown): McpRegistration | undefined {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
   const record = entry as Record<string, unknown>;
   if (typeof record.command !== "string") return undefined;
@@ -117,12 +117,13 @@ export function mergeRockyMcpServer(
   containerKey: string,
   registration: McpRegistration,
   toEntry: (r: McpRegistration) => Record<string, unknown>,
+  ownership: RegistrationOwnership,
 ): { value: Record<string, unknown>; changed: boolean } {
   const container = containerOf(existing, containerKey);
   const stored = container.rocky === undefined
     ? undefined
     : entryToStoredRegistration(container.rocky);
-  if (stored !== undefined && isOwnedRockyRegistration(stored, registration)
+  if (stored !== undefined && isOwnedRockyRegistration(stored, registration, ownership)
     && JSON.stringify(container.rocky) === JSON.stringify(toEntry(registration))) {
     return { value: { ...existing, [containerKey]: container }, changed: false };
   }
@@ -133,13 +134,14 @@ export function removeRockyMcpServer(
   existing: Record<string, unknown>,
   containerKey: string,
   registration: McpRegistration,
+  ownership: RegistrationOwnership,
 ): { value: Record<string, unknown>; changed: boolean; owned: boolean } {
   const container = containerOf(existing, containerKey);
   if (container.rocky === undefined) {
     return { value: { ...existing, [containerKey]: container }, changed: false, owned: false };
   }
   const stored = entryToStoredRegistration(container.rocky);
-  if (stored === undefined || !isOwnedRockyRegistration(stored, registration)) {
+  if (stored === undefined || !isOwnedRockyRegistration(stored, registration, ownership)) {
     return { value: { ...existing, [containerKey]: container }, changed: false, owned: false };
   }
   const { rocky: _removed, ...rest } = container;

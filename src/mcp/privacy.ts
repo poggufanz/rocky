@@ -8,6 +8,7 @@ import { hasCanonicalKnowledgeProof } from "../core/memory-query.js";
 import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible } from "../core/memory-query.js";
 import type { ExplainRecord } from "../core/memory-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
+import { configuredRockyHome } from "../core/state-paths.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -215,7 +216,7 @@ export function truncateUtf8(value: string, maxBytes: number): { value: string; 
   return { value: output.join(""), truncated: true };
 }
 
-export function redactText(value: string, rockyHome = process.env.ROCKY_HOME ?? homedir()): string {
+export function redactText(value: string, rockyHome = configuredRockyHome(process.env) ?? homedir()): string {
   let output = normalizeOutputText(redactSecretsAtBoundary(value))
     .replace(/\[redacted (?!ambiguous continuation\])[^\]]+\]/g, "[redacted]");
   const home = normalizeOutputText(rockyHome);
