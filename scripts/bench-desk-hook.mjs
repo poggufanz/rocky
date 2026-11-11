@@ -92,10 +92,16 @@ function makeBash4KiBPayloadBytes() {
 // What one run executes: argv after the exe, stdin, and the environment.
 // desk-hook keeps the caller's environment. shell-env clears the five shell
 // variables first, so exactly one of them (CLAUDE_CONFIG_DIR) is set on every run.
+// Windows treats environment names case-insensitively, and a copy of process.env
+// keeps each key's original spelling, so the scrub matches on the upper-cased key.
+function shellEnvKeys(env) {
+  return Object.keys(env).filter((key) => SHELL_ENV_NAMES.includes(key.toUpperCase()));
+}
+
 function invocationFor(mode, payload) {
   if (mode === "shell-env") {
     const env = { ...process.env };
-    for (const name of SHELL_ENV_NAMES) delete env[name];
+    for (const key of shellEnvKeys(env)) delete env[key];
     env.CLAUDE_CONFIG_DIR = SHELL_ENV_BENCH_VALUE;
     return { argv: ["shell-env"], input: NO_INPUT, env };
   }
@@ -167,7 +173,7 @@ function selfTest() {
   const se = invocationFor("shell-env", NO_INPUT);
   assert.deepEqual(se.argv, ["shell-env"]);
   assert.equal(se.input.length, 0);
-  assert.deepEqual(SHELL_ENV_NAMES.filter((name) => name in se.env), ["CLAUDE_CONFIG_DIR"]);
+  assert.deepEqual(shellEnvKeys(se.env), ["CLAUDE_CONFIG_DIR"]);
   console.log("self-test: OK (percentile=nearest-rank, payloads=Write/1MiB,Bash/4KiB, shell-env=one variable)");
 }
 

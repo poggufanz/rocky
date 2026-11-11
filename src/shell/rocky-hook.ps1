@@ -33,8 +33,8 @@ $global:__rockyHookLoaded = $true
 # Report the config dirs to the desktop app once per session, here at load only
 # (never from prompt). The hook binary is optional: a missing or failing one is
 # ignored. Process.Start rather than `&`, so $LASTEXITCODE is untouched. The
-# child inherits this session's standard handles; shell-env reads none of them,
-# and nothing here waits on it.
+# helper starts with no console window and no redirected streams. By contract it
+# reads no input and prints nothing, and nothing here waits on it.
 $__rockyShellEnvErrors = $Error.Count
 $__rockyShellEnvHome = $null
 $__rockyShellEnvExe = $null
