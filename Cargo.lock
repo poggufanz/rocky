@@ -4541,6 +4541,7 @@ dependencies = [
  "libc",
  "notify",
  "rocky-proto",
+ "serde",
  "serde_json",
  "tempfile",
  "widestring",
