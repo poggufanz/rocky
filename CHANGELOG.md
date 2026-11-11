@@ -32,8 +32,9 @@ The experimental desk and its daemon run on Linux: a per-user Unix socket with l
 - Repo capture consent can record a decline, and a Git worktree follows its main repository's decision.
 - A version tag runs the release workflow in CI, and npm trusts the workflow's OIDC identity instead of a stored token.
 - On Windows, the git and setup helper commands Rocky starts no longer open a console window.
-- The experimental desk daemon restores a missing Rocky entry in a guarded config file through the CLI, under approved consent. Its health reports the setup status, and it answers the desk's `setup` and `repo_decision` requests.
-- Shell hooks start the desktop hook binary once per shell, at load, so the desktop app learns the config directories the shell uses. Hook protocol is now 0.6.0: run `rocky hook install` once so installed hook files pick up the change; `rocky hook status` names the mismatch until then.
+- The desktop app's background process now restores Rocky's hook and MCP entries when another program removes them, backs off when a file keeps losing them, and shows every failure in the health strip.
+- The shell hooks report config directory variables once per shell, so entries also reach profiles that use `CLAUDE_CONFIG_DIR` and similar variables. Shell hook protocol is now 0.6.0: run `rocky hook install` once so installed hook files pick up the change; `rocky hook status` names the mismatch until then.
+- Breaking: the desk groups a session under the repo where it started; a later prompt in another directory no longer moves it.
 
 ## 2.0.0 — 6 November 2026
 
