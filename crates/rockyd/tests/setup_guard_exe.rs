@@ -110,9 +110,9 @@ fn fake_config(settings: &Path) -> Value {
     })
 }
 
-/// Seeds the records the guard reads and the fake CLI's config. `bin_version`
-/// writes `binaries.json` when it is given.
-fn seed(layout: &Layout, cli_version: &str, bin_version: Option<&str>) {
+/// Seeds the records the guard reads and the fake CLI's config. `cli_version`
+/// writes `cli.json` when it is given, and `bin_version` writes `binaries.json`.
+fn seed(layout: &Layout, cli_version: Option<&str>, bin_version: Option<&str>) {
     let setup = layout.home.join("setup");
     let bin = layout.home.join("bin");
     write_json(
@@ -126,15 +126,17 @@ fn seed(layout: &Layout, cli_version: &str, bin_version: Option<&str>) {
             "files": [{ "path": path_str(&layout.settings), "snippets": [MARK] }]
         }),
     );
-    write_json(
-        &bin.join("cli.json"),
-        &json!({
-            "v": 1,
-            "node": path_str(&node_on_path()),
-            "entry": path_str(&fake_entry()),
-            "version": cli_version
-        }),
-    );
+    if let Some(version) = cli_version {
+        write_json(
+            &bin.join("cli.json"),
+            &json!({
+                "v": 1,
+                "node": path_str(&node_on_path()),
+                "entry": path_str(&fake_entry()),
+                "version": version
+            }),
+        );
+    }
     if let Some(version) = bin_version {
         write_json(
             &bin.join("binaries.json"),
@@ -251,7 +253,7 @@ fn repaired(health: &Health, restores: usize) -> bool {
 #[test]
 fn guard_repairs_a_wiped_target() {
     let layout = layout();
-    seed(&layout, "9.0.0", None);
+    seed(&layout, Some("9.0.0"), None);
     let _daemon = spawn_daemon(&layout);
     let mut client = subscribe(&layout.home);
 
@@ -272,7 +274,7 @@ fn guard_repairs_a_wiped_target() {
 
     let log = fs::read_to_string(log_path(&layout.home)).expect("read daemon log");
     assert!(
-        log.contains("setup apply: 1 targets, 0 not ok"),
+        log.lines().any(|line| line == "apply: 1 targets, 0 not ok"),
         "log: {log}"
     );
     assert!(
@@ -284,7 +286,7 @@ fn guard_repairs_a_wiped_target() {
 #[test]
 fn setup_plan_request_returns_consent_plan() {
     let layout = layout();
-    seed(&layout, "9.0.0", None);
+    seed(&layout, Some("9.0.0"), None);
     let _daemon = spawn_daemon(&layout);
 
     let mut client = subscribe(&layout.home);
@@ -327,7 +329,7 @@ fn setup_plan_request_returns_consent_plan() {
 #[test]
 fn version_mismatch_reaches_health() {
     let layout = layout();
-    seed(&layout, "9.0.0", Some("8.0.0"));
+    seed(&layout, Some("9.0.0"), Some("8.0.0"));
     let _daemon = spawn_daemon(&layout);
 
     let mut client = subscribe(&layout.home);
@@ -335,6 +337,53 @@ fn version_mismatch_reaches_health() {
         &mut client,
         "a health with a version mismatch",
         |msg| matches!(health_of(msg), Some(health) if health.setup.version_mismatch),
+    );
+}
+
+#[test]
+fn setup_without_a_cli_record_is_refused_and_the_connection_stays_up() {
+    let layout = layout();
+    seed(&layout, None, None);
+    let _daemon = spawn_daemon(&layout);
+    let mut client = subscribe(&layout.home);
+
+    client.send(&ClientMsg::Setup {
+        id: 4,
+        action: SetupAction::Plan,
+    });
+    let refused = read_until(&mut client, "the refusal of request 4", |msg| {
+        matches!(msg, ServerMsg::Ack { id: 4, .. })
+    });
+    assert!(
+        matches!(
+            refused,
+            ServerMsg::Ack {
+                id: 4,
+                ok: false,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+
+    client.send(&ClientMsg::RepoDecision {
+        id: 6,
+        root: "C:/work/repo".into(),
+        allow: true,
+    });
+    let answered = read_until(&mut client, "the answer to request 6", |msg| {
+        matches!(msg, ServerMsg::Ack { id: 6, .. })
+    });
+    assert!(
+        matches!(
+            answered,
+            ServerMsg::Ack {
+                id: 6,
+                ok: false,
+                ..
+            }
+        ),
+        "{answered:?}"
     );
 }
 

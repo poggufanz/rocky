@@ -246,6 +246,36 @@ fn changed_target_retries_with_backoff() {
 }
 
 #[test]
+fn changed_retries_stop_after_the_backoff_list() {
+    let consts = GuardConsts {
+        changed_backoff_ms: [10, 20, 30, 40, 50],
+        ..GuardConsts::default()
+    };
+    let mut guard = Guard::new(consts, 0);
+    guard.observe(approved(&[]), 0);
+    assert_eq!(guard.next_job(0), Some(Job::Apply));
+    let changed = vec![target("mcp", OTHER, TargetState::Changed, None)];
+    guard.finish(&Job::Apply, applied(changed.clone()), 0);
+    let mut now = 0;
+    for delay in consts.changed_backoff_ms {
+        now += delay;
+        assert_eq!(
+            guard.next_job(now),
+            Some(Job::Apply),
+            "a retry is due {delay} ms after the Changed result before it"
+        );
+        guard.finish(&Job::Apply, applied(changed.clone()), now);
+    }
+    // The five steps have run. The sixth Changed result schedules nothing.
+    assert_eq!(guard.next_job(now + 1_000), None);
+    // Other triggers still run an apply: a new CLI record is one.
+    let mut newer = approved(&[]);
+    newer.cli = Some(cli("/n/node-2"));
+    guard.observe(newer, now + 1_000);
+    assert_eq!(guard.next_job(now + 1_000), Some(Job::Apply));
+}
+
+#[test]
 fn cli_change_triggers_apply() {
     let mut guard = Guard::new(GuardConsts::default(), 0);
     guard.observe(approved(&[]), 0);
@@ -346,6 +376,80 @@ fn job_args_follow_the_node_grammar() {
     };
     assert_eq!(decide(true), vec!["repo", "allow", "/r"]);
     assert_eq!(decide(false), vec!["repo", "decline", "/r"]);
+}
+
+#[test]
+fn job_log_labels_name_the_kind_and_never_a_path() {
+    let root = "/home/u/private/repo";
+    let location = "/home/u/.codex";
+    let setup = |action| Job::Setup {
+        token: 1,
+        id: 2,
+        action,
+    };
+    let cases = [
+        (Job::Apply, "apply".to_string()),
+        (
+            Job::ConfigDir {
+                harness: "codex".into(),
+                location: location.into(),
+            },
+            "config-dir codex".to_string(),
+        ),
+        (
+            Job::RepoStatus { root: root.into() },
+            "repo status".to_string(),
+        ),
+        (
+            Job::RepoDecision {
+                token: 1,
+                id: 2,
+                root: root.into(),
+                allow: true,
+            },
+            "repo allow".to_string(),
+        ),
+        (
+            Job::RepoDecision {
+                token: 1,
+                id: 2,
+                root: root.into(),
+                allow: false,
+            },
+            "repo decline".to_string(),
+        ),
+        (setup(SetupAction::Plan), "setup plan".to_string()),
+        (setup(SetupAction::Apply), "setup apply".to_string()),
+        (setup(SetupAction::Remove), "setup remove".to_string()),
+        (
+            setup(SetupAction::ConsentApprove),
+            "setup consent approve".to_string(),
+        ),
+        (
+            setup(SetupAction::ConsentLater),
+            "setup consent later".to_string(),
+        ),
+        (
+            setup(SetupAction::HarnessOn {
+                harness: "codex".into(),
+            }),
+            "setup harness codex on".to_string(),
+        ),
+        (
+            setup(SetupAction::HarnessOff {
+                harness: "codex".into(),
+            }),
+            "setup harness codex off".to_string(),
+        ),
+    ];
+    for (job, label) in cases {
+        let got = job.log_label();
+        assert_eq!(got, label);
+        assert!(
+            !got.contains(root) && !got.contains(location),
+            "{got} names a path"
+        );
+    }
 }
 
 #[test]

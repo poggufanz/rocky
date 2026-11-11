@@ -234,10 +234,14 @@ pub fn run_setup(
     let (sender, receiver) = mpsc::channel();
     // Not joined. A grandchild can keep the pipe open after the child is gone,
     // so the reader is left to finish on its own.
-    thread::spawn(move || {
+    let reader = thread::Builder::new().spawn(move || {
         // A failed send means the runner already returned, so nothing is lost.
         let _ = sender.send(drain_capped(stdout));
     });
+    if let Err(error) = reader {
+        stop(&mut child);
+        return Err(RunError::Spawn(error.to_string()));
+    }
 
     let status = wait_for_exit(&mut child, timeout)?;
     let captured = receiver

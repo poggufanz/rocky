@@ -34,7 +34,8 @@ pub struct GuardConsts {
     pub debounce_ms: u64,
     /// Time between detection runs when nothing else is pending.
     pub detect_every_ms: u64,
-    /// Retry delays after a `Changed` result. The last value repeats.
+    /// Retry delays after `Changed` results, one per consecutive result. Once they are
+    /// used up, no changed retry is scheduled.
     pub changed_backoff_ms: [u64; 5],
     /// Cap on config-dir pairs queued in one daemon run.
     pub seen_cap: usize,
@@ -104,6 +105,19 @@ impl Job {
                 let verb = if *allow { "allow" } else { "decline" };
                 to_args(&["repo", verb, root.as_str()])
             }
+        }
+    }
+
+    /// The label a log line starts with for this job: the kind, and for setup the
+    /// action words. It never carries a root, a location, or a config path.
+    pub fn log_label(&self) -> String {
+        match self {
+            Self::Apply => "apply".to_string(),
+            Self::ConfigDir { harness, .. } => format!("config-dir {harness}"),
+            Self::RepoStatus { .. } => "repo status".to_string(),
+            Self::RepoDecision { allow: true, .. } => "repo allow".to_string(),
+            Self::RepoDecision { allow: false, .. } => "repo decline".to_string(),
+            Self::Setup { action, .. } => format!("setup {}", setup_args(action).join(" ")),
         }
     }
 }
@@ -441,17 +455,21 @@ impl Guard {
         }
     }
 
-    /// Sets the retry for `Changed` targets. A result without them resets the backoff.
+    /// Sets the retry for `Changed` targets. Each consecutive `Changed` result takes the
+    /// next backoff step. Once the steps run out, no changed retry is scheduled, and
+    /// other triggers still run an apply. A result without `Changed` resets the streak.
     fn schedule_changed_retry(&mut self, changed: bool, now_ms: u64) {
         if !changed {
             self.changed_streak = 0;
             self.changed_retry = None;
             return;
         }
-        let steps = self.c.changed_backoff_ms;
-        let delay = steps[self.changed_streak.min(steps.len() - 1)];
+        self.changed_retry = self
+            .c
+            .changed_backoff_ms
+            .get(self.changed_streak)
+            .map(|delay| now_ms.saturating_add(*delay));
         self.changed_streak = self.changed_streak.saturating_add(1);
-        self.changed_retry = Some(now_ms.saturating_add(delay));
     }
 
     fn missing_paths(&self) -> Vec<PathBuf> {

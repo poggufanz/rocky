@@ -4,12 +4,13 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::pipe::{ConsentState, ServerMsg, SetupAction, TargetState};
 use rockyd::guard::check::{Debounce, missing_paths, watch_dirs};
 use rockyd::guard::node::{AutoResult, NODE_TIMEOUT, RunError, run_setup};
@@ -55,12 +56,18 @@ impl GuardLoop {
         let (ping_tx, pings) = mpsc::channel();
         let watcher =
             match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                let _ = res;
-                let _ = ping_tx.send(());
+                let relevant = match &res {
+                    Ok(event) => is_change(&event.kind),
+                    // A watcher fault still checks the files.
+                    Err(_) => true,
+                };
+                if relevant {
+                    let _ = ping_tx.send(());
+                }
             }) {
                 Ok(watcher) => Some(watcher),
-                Err(error) => {
-                    log.line(&format!("setup watcher unavailable, polling only: {error}"));
+                Err(_) => {
+                    log.line("setup watcher unavailable, polling only");
                     None
                 }
             };
@@ -181,11 +188,11 @@ impl GuardLoop {
                 Ok(()) => {
                     self.watched.insert(dir);
                 }
-                Err(error) => {
+                Err(_) => {
                     if self.warned.insert(dir) {
-                        log.line(&format!(
-                            "setup watch failed, the 60 s check still runs: {error}"
-                        ));
+                        log.line(
+                            "cannot watch one setup directory; the 60 s check still covers it",
+                        );
                     }
                 }
             }
@@ -217,7 +224,7 @@ impl GuardLoop {
             .spawn(move || {
                 // ponytail: a daemon exit mid-apply leaves Node running to completion;
                 // the next apply's transaction recovery covers a kill.
-                let out = run_setup(&cli, &home, &job.args(), NODE_TIMEOUT);
+                let out = run_contained(|| run_setup(&cli, &home, &job.args(), NODE_TIMEOUT));
                 // A failed send means the loop has exited, so nothing is lost.
                 let _ = results.send((job, out));
             })
@@ -312,10 +319,10 @@ impl GuardLoop {
     }
 }
 
-/// The log line for one finished job. It names the action and counts. It never
-/// carries config text or Node's notes.
+/// The log line for one finished job. It names the job kind and counts. It never
+/// carries a path, config text, or Node's notes.
 fn log_outcome(job: &Job, out: &Result<AutoResult, RunError>, log: &RotatingLog) {
-    let action = job.args().join(" ");
+    let label = job.log_label();
     let line = match out {
         Ok(result) => {
             let not_ok = result
@@ -323,12 +330,9 @@ fn log_outcome(job: &Job, out: &Result<AutoResult, RunError>, log: &RotatingLog)
                 .iter()
                 .filter(|target| !is_ok(target.state))
                 .count();
-            format!(
-                "setup {action}: {} targets, {not_ok} not ok",
-                result.targets.len()
-            )
+            format!("{label}: {} targets, {not_ok} not ok", result.targets.len())
         }
-        Err(error) => format!("setup {action} failed: {error}"),
+        Err(error) => format!("{label} failed: {error}"),
     };
     log.line(&line);
 }
@@ -336,4 +340,69 @@ fn log_outcome(job: &Job, out: &Result<AutoResult, RunError>, log: &RotatingLog)
 /// Whether a target needs no repair: it is in place, or Node just wrote it.
 fn is_ok(state: TargetState) -> bool {
     matches!(state, TargetState::Ok | TargetState::Written)
+}
+
+/// Whether a watcher event can change a guarded file or record. Access events are
+/// opens, reads, and closes. The check itself opens these files, so counting them
+/// would re-run the check forever on inotify.
+fn is_change(kind: &EventKind) -> bool {
+    !matches!(kind, EventKind::Access(_))
+}
+
+/// Runs one Node job and turns a panic into an internal error result, so a finished
+/// job always reaches the loop. The daemon's panic hook aborts the process before a
+/// panic unwinds, so this catches only the panics that unwind.
+fn run_contained(
+    run: impl FnOnce() -> Result<AutoResult, RunError>,
+) -> Result<AutoResult, RunError> {
+    panic::catch_unwind(AssertUnwindSafe(run))
+        .unwrap_or_else(|_| Err(RunError::Internal("worker stopped".to_string())))
+}
+
+#[cfg(test)]
+mod tests {
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind};
+    use rockyd::guard::node::RunError;
+
+    use super::{is_change, run_contained};
+
+    #[test]
+    fn opens_reads_and_closes_are_not_changes() {
+        assert!(!is_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Read
+        ))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Write
+        ))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Read)));
+    }
+
+    #[test]
+    fn creates_modifies_and_removes_are_changes() {
+        assert!(is_change(&EventKind::Create(CreateKind::File)));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Content
+        ))));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Any)));
+        assert!(is_change(&EventKind::Remove(RemoveKind::File)));
+    }
+
+    #[test]
+    fn a_panicking_run_reports_an_internal_error() {
+        let out = run_contained(|| panic!("simulated worker panic"));
+        assert_eq!(out, Err(RunError::Internal("worker stopped".to_string())));
+    }
+
+    #[test]
+    fn a_finished_run_passes_its_result_through() {
+        let out = run_contained(|| Err(RunError::Timeout));
+        assert_eq!(out, Err(RunError::Timeout));
+    }
 }
