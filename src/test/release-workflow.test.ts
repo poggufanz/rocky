@@ -21,7 +21,7 @@ function releaseWorkflow(): string {
 
 // One job block: from its two-space key to the next two-space key or the end.
 function jobBlock(workflow: string, job: string): string {
-  const lines = workflow.split("\n");
+  const lines = workflow.split(/\r?\n/u);
   const start = lines.findIndex((line) => line === `  ${job}:`);
   assert.notEqual(start, -1, `release.yml has no ${job} job`);
   let end = lines.length;
