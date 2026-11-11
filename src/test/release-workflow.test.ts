@@ -60,22 +60,25 @@ test("release workflow: publish runs only for pushed v tags", () => {
 });
 
 test("release workflow: platforms publish before the main package and pins are checked", () => {
-  const publish = jobBlock(releaseWorkflow(), "publish");
+  const lines = jobBlock(releaseWorkflow(), "publish").split("\n");
+  // A step command is the whole `- run:` line (or a bare line inside a script),
+  // so a command only matches itself, never a longer command with the same prefix.
+  const indexOfCommand = (command: string): number =>
+    lines.findIndex((line) => line.trim().replace(/^- run: /u, "") === command);
   const order = [
-    "platform/win32-x64",
-    "platform/linux-x64",
-    "platform-packages.mjs inject",
-    "platform-packages.mjs check",
+    "npm publish ./platform/win32-x64 --ignore-scripts",
+    "npm publish ./platform/linux-x64 --ignore-scripts",
+    "node scripts/platform-packages.mjs inject package.json",
+    "node scripts/platform-packages.mjs check package.json",
+    "npm publish --ignore-scripts",
   ];
-  const indexes = order.map((token) => publish.indexOf(token));
+  const indexes = order.map(indexOfCommand);
   indexes.forEach((index, position) => {
-    assert.notEqual(index, -1, `publish job never mentions ${order[position]}`);
+    assert.notEqual(index, -1, `publish job never runs: ${order[position]}`);
     if (position > 0) {
-      assert.ok(indexes[position - 1] < index, `${order[position - 1]} must come before ${order[position]}`);
+      assert.ok(indexes[position - 1] < index, `${order[position - 1]} must run before ${order[position]}`);
     }
   });
-  const rootPublish = publish.lastIndexOf("npm publish");
-  assert.ok(rootPublish > indexes[indexes.length - 1], "the root package publishes last");
 });
 
 test("release workflow: verify needs a green CI run and matching versions", () => {
