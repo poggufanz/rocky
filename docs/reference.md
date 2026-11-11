@@ -196,10 +196,10 @@ Snapshots are copies of tracked source text, bounded and redacted, though a secr
 
 ## `rocky` and `rocky dash` (local GUI, implemented)
 
-Both open the same local page in your browser. There is one link and one route; the two commands differ only in which segment starts active.
+`rocky dash` opens the local browser page on the Dash segment. Bare `rocky` opens the same page on Main, except on Windows x64 and Linux x64 with a desktop session and the optional platform package installed: there bare `rocky` opens the desktop app, and the browser page stays the fallback.
 
 ```bash
-rocky           # opens on Main
+rocky           # opens on Main, or the desktop app where it is installed
 rocky dash      # opens on Dash
 rocky --no-open # print the URL, do not launch a browser
 rocky --port=8123
