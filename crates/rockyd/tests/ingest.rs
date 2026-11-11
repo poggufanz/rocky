@@ -47,6 +47,7 @@ fn record(recv_ms: u64, ev: HookEvent) -> SpoolRecord {
         v: SPOOL_VERSION,
         harness: "claude-code".into(),
         recv_ms,
+        config_dir: None,
         body: SpoolBody::Event { event: ev },
     }
 }
@@ -163,6 +164,7 @@ fn dropped_and_bad_files_become_gaps() {
             v: SPOOL_VERSION,
             harness: "claude-code".into(),
             recv_ms: 7,
+            config_dir: None,
             body: SpoolBody::Dropped {
                 reason: DropReason::Parse,
                 bytes: 10,
@@ -433,6 +435,7 @@ fn dropped_record_counts() {
             v: SPOOL_VERSION,
             harness: "claude-code".into(),
             recv_ms: 1,
+            config_dir: None,
             body: SpoolBody::Dropped {
                 reason: DropReason::Parse,
                 bytes: 10,

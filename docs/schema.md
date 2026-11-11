@@ -84,10 +84,32 @@ Dropped record:
 `reason` is `oversize` (stdin exceeded 8 MiB) or `parse` (payload was not a
 valid hook object). `bytes` is the rejected input size.
 
+Shell record:
+
+```json
+{"v":1,"harness":"shell","recv_ms":1794000000789,"kind":"shell_env","env":{"CLAUDE_CONFIG_DIR":"/home/u/work/.claude"}}
+```
+
+`rocky-hook shell-env` writes it once per shell, when the shell hook loads. It
+reads no stdin. `env` holds only the variables of this list that are set,
+non-empty, and at most 4096 bytes: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`OPENCODE_CONFIG`, `GEMINI_SETTINGS`, and `COPILOT_HOME`. When none qualifies,
+no record is written. The daemon maps each name to its harness (`claude-code`,
+`codex`, `opencode`, `gemini-cli`, `copilot-cli`) and hands the value to the
+setup guard as a config location to record.
+
+Any record may carry `config_dir`, the config directory the hook saw for that
+event. `rocky-hook desk-hook claude-code` sets it to the value of
+`CLAUDE_CONFIG_DIR` when that is set, non-empty, and at most 4096 bytes, and
+leaves the field out otherwise. Other harnesses never carry it. The value is
+what the shell held, not a checked path: setup validates a reported location
+before it records or writes anything there.
+
 ### Version rule
 
 `v` starts at 1. Additive fields keep `v`. `v` rises only for breaking
-changes. Readers must tolerate unknown fields and unknown `kind` values.
+changes. Readers must tolerate unknown fields and unknown `kind` values. The
+`shell_env` kind and the `config_dir` field are additive within `v` 1.
 
 ### Allowlist
 
@@ -100,6 +122,10 @@ Only these fields are kept from a hook payload: `session_id`, `cwd`,
 chars, absent when `desk/tool-text-off` exists). Ids and names cap at 256
 bytes, paths at 4 KiB; truncation cuts at a char boundary and sets
 `truncated: true`.
+
+A `shell_env` record keeps only the five variable names listed under Record
+shapes, and `config_dir` only the value of `CLAUDE_CONFIG_DIR`. No other
+environment value is read.
 
 Redaction counts Unicode scalar values where the reference counts UTF-16 code
 units, so a secret value built from characters outside the Basic Multilingual
@@ -314,6 +340,13 @@ X-GNOME-Autostart-enabled=true
 renamed over the target. A missing, unparsable, or wrongly shaped store
 reads as empty, so the next write replaces it.
 
+`rockyd` reads `consent.json`, `expected.json`, `bin/cli.json`, and
+`bin/binaries.json` and writes none of them. It looks for each snippet of
+`expected.json` as a byte substring of its file. A file it cannot read, or one
+that lacks a snippet, counts as missing, and the repair runs through Node, not
+through code in the daemon. What the daemon reports about it is under Setup
+guard messages.
+
 ### Consent record
 
 `<ROCKY_HOME>/setup/consent.json`:
@@ -428,9 +461,9 @@ disconnected, reconnects, and receives a fresh snapshot.
 | daemon → desk | `hello` | `daemon_version`, `pid` |
 | daemon → desk | `error` | `code: "version"`, then the connection closes when the major differs |
 | desk → daemon | `subscribe` | — |
-| daemon → desk | `snapshot` | `agents[]`, `aggregate`, `health`, `settings` |
+| daemon → desk | `snapshot` | `agents[]`, `aggregate`, `health`, `settings`, `repo_pending[]` |
 | daemon → desk | `status` | `op: "upsert" \| "remove"`, `agent` |
-| daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon`, `gaps[]`, `settings_unreadable` |
+| daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon`, `gaps[]`, `settings_unreadable`, `setup` |
 | daemon → desk | `settings` | full settings object, broadcast after every successful `set` |
 | desk → daemon | `set` | `id`, `name`, `value` |
 | desk → daemon | `timeline` | `id`, `key` |
@@ -439,12 +472,22 @@ disconnected, reconnects, and receives a fresh snapshot.
 | daemon → desk | `show` | — (broadcast to every desk after a `cmd` `show`) |
 | daemon → desk | `quit` | — (broadcast to every desk after a `cmd` `quit`) |
 | daemon → desk | `ack` | `id`, `ok`, `error?` |
+| desk → daemon | `setup` | `id`, `action` (an object tagged by `name`) |
+| desk → daemon | `repo_decision` | `id`, `root`, `allow` |
+| daemon → desk | `consent_plan` | `id`, `consent`, `targets[]` |
+| daemon → desk | `repo_pending` | `repos[]` (broadcast when the pending list changes) |
 
 `agent` carries `key` (`session_id`, `agent_id`; empty `agent_id` means the
 main agent), `agent_type?`, `status` (`idle` | `working` | `needs_you` |
 `done` | `failed` | `ended`), `action?` (`tool_name`, `target_path?`,
 `tool_use_id?`, `command?`), `summary?`, `description?`, `failures`,
-`last_event_ms`, `quiet_10m`, and `repo` (`root?`, `name`, `branch?`).
+`last_event_ms`, `quiet_10m`, and `repo` (`root?`, `name`, `branch?`). `repo`
+is the repo of the session's start. A `SessionStart` event that carries a
+`cwd` always sets it, so a session resumed or cleared in another directory
+moves. Any other event sets it only while the session has no repo yet or holds
+the placeholder a session has before any `cwd` is known, and an event without
+a `cwd` leaves the placeholder. A prompt from another directory does not move
+the session.
 
 `description` is the task text from the main agent's one unpaired `Agent` or
 `Task` tool call, attached to the child that starts next. It stays absent
@@ -455,11 +498,15 @@ when zero or several calls are open, or when tool text is off.
 `snapshot.health.gaps` carries the same list; there is no top-level `gaps`
 field. A gap is `{from_ms, to_ms, count, reason}`; `reason` is `spool_full`
 (dropped spool files), `history_full` (dropped history segments),
-`hook_dropped` (a `dropped` spool record), or `bad_file` (a quarantined
-spool file).
+`hook_dropped` (a `dropped` spool record), `bad_file` (a quarantined spool
+file), or `hooks_restored` (the setup guard put Rocky's desk hook entries back
+after they went missing; `from_ms` is when the daemon saw them missing, `to_ms`
+when the repair finished, and `count` is 0, because the daemon cannot count
+hook events it never received).
 
 `snapshot` is sent once after `subscribe`, and once at daemon startup for
-desks that connected while it was replaying.
+desks that connected while it was replaying. `snapshot.repo_pending` lists the
+repos that wait for a capture decision, as under Setup guard messages.
 
 `timeline` replies with up to the last 50 entries for `key`, oldest first;
 an unknown key gives an empty `entries`. Entries are `{ms, kind, tool_name?,
@@ -477,6 +524,100 @@ broadcast as `show` to every desk, then the sender gets `ack` with `ok:
 true`. `cmd` with `name: "quit"` is broadcast as `quit` to every desk, the
 sender included, before the sender gets `ack` with `ok: true`; the daemon
 then exits.
+
+### Setup guard messages
+
+The daemon guards Rocky's entries in agent config files. It reads the setup
+records and checks the guarded files by bytes. It never parses or writes an
+agent config. A repair or a client request runs the Node CLI named by
+`<ROCKY_HOME>/bin/cli.json` (`rocky setup --auto`), one job at a time. Without a
+`consent.json` in state `approved`, the daemon starts no repair and no
+config-directory run; `setup` and `repo_decision` requests still run, because
+Node enforces consent itself. One more run is not gated on consent: once
+`cli.json` points at a `node` and an `entry` that exist, the daemon runs
+`repo status <root>` once per daemon run for each repo root a session started
+in, to read that repo's capture decision. That run writes nothing.
+
+`health.setup` is `{consent_state, cli_found, cli_missing, version_mismatch,
+targets[]}`. A frame without `setup` reads as the default: no consent, no CLI,
+no targets.
+
+- `consent_state` is `none` (no `consent.json`), `approved`, `later`,
+  `removed`, or `invalid` (unreadable, another version, or a state Node never
+  writes).
+- `cli_found` is true when both the `node` and `entry` paths of `cli.json` are
+  regular files. When one is not, `cli_missing` names the first such path.
+  Otherwise `cli_missing` is `null`, which includes the case of no `cli.json`
+  (`cli_found` is then false).
+- `version_mismatch` is true when the `version` in `cli.json` differs from the
+  one in `binaries.json`. It is false when either file is missing or
+  unreadable.
+- `targets` is empty unless `consent_state` is `approved`. A target is
+  `{harness, kind, path, state, last_repair_ms, fights_10m, error}`; unset
+  `last_repair_ms` and `error` are `null`.
+  `harness` is a harness id or `shell`; `kind` is `agent-hooks`, `desk-hooks`,
+  `mcp`, or `shell-hook`. A path that is missing but belongs to no stored
+  target appears with empty `harness` and `kind`.
+- `last_repair_ms` is when the daemon last saw a repair of that path stick.
+  `fights_10m` counts the losses in the last 10 minutes that came within 30 s
+  of a repair. More than 5 of them, or a failed last attempt, hold the next
+  repair until 60 s after the last attempt. `error` is the latest repair error
+  for a missing path, or Node's detail for a `foreign`, `refused`, or `error`
+  target.
+
+`state` is one of:
+
+| `state` | Meaning |
+|---|---|
+| `ok` | The entry is present and current. |
+| `missing` | The entry is gone. A path the daemon still finds without Rocky's entry shows `missing` even when Node reported `ok` or `written`. |
+| `stale` | Rocky's entry is present but not current, or the desk binary it points at is not installed. |
+| `written` | The run wrote the entry. |
+| `changed` | The file changed while the run was writing it, so the run backed off. The daemon retries after 2, 4, 8, 16, and 30 s, then stops retrying for this reason. |
+| `foreign` | The slot holds an entry Rocky does not own. It is left alone. |
+| `refused` | The location failed validation, so nothing was written there. |
+| `not_consented` | No approved consent covers the target. |
+| `error` | The run failed for this target. |
+
+Client `setup` is `{"v":3,"type":"setup","id":7,"action":{"name":"plan"}}`.
+`action` is tagged by `name`:
+
+| `name` | Extra field | Node command |
+|---|---|---|
+| `plan` | — | `plan`, an inspection that writes nothing |
+| `apply` | — | `apply`, which writes every in-scope entry under approved consent |
+| `remove` | — | `remove`, which takes out everything Rocky wrote |
+| `consent_approve` | — | `consent approve` |
+| `consent_later` | — | `consent later` |
+| `harness_on` | `harness` | `harness <id> on` |
+| `harness_off` | `harness` | `harness <id> off` |
+
+`plan` is answered with `consent_plan`, `{id, consent, targets[]}`: `consent`
+is a consent state, and each target is `{harness, kind, path, state,
+detail?}` with a `state` from the table above; `detail` is absent when Node
+gave none. Every other action is answered with `ack`. A failed run of any
+action, `plan` included, is answered with `ack` and `ok: false`, and an
+`error` that names the cause, such as a missing CLI record, a Node run that
+timed out, or `daemon stopping`. A `setup` request for an unknown harness id
+is refused without a Node run.
+
+Client `repo_decision` is `{"v":3,"type":"repo_decision","id":8,"root":"<repo
+root>","allow":true}`. Node records the capture decision for that repo
+(`allow` true grants it, false records a decline), and the daemon answers with
+`ack`.
+
+`repo_pending` is `{repos[]}`, and `snapshot.repo_pending` carries the same
+list. A repo is `{key, main, name}`: `key` is the normalized consent key, `main`
+the path of the repo's main working tree, and `name` the last segment of
+`main`. A repo is listed once it is the root of a session and has no recorded
+capture decision. It leaves the list when `repo_decision` records a decision.
+The daemon reads decisions through Node and never edits
+`repo-consents.json`.
+
+These messages, `health.setup`, `snapshot.repo_pending`, and the
+`hooks_restored` gap reason are additive within protocol 3. `PROTOCOL_VERSION`
+stays 3, and a `health` or `snapshot` frame without the new fields decodes to
+their defaults: no setup status and an empty `repo_pending`.
 
 Example:
 

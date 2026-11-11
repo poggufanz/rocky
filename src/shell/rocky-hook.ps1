@@ -21,12 +21,46 @@
 # src/core/fingerprint.ts) that the Bash hook has used since v0.4.0, via the
 # same `origin: "hook"` record shape -- no new schema, no new CLI surface.
 #
-# ROCKY_HOOK_VERSION="0.5.0" -- same hook-protocol version as rocky-hook.bash;
+# ROCKY_HOOK_VERSION="0.6.0" -- same hook-protocol version as rocky-hook.bash;
 # `rocky hook status` reads this exact literal via the same regex both hosts
 # share (src/commands/hook.ts), so this line's shape must stay byte-parseable.
 
-if (Get-Variable -Name __rockyHookLoaded -Scope Global -ErrorAction SilentlyContinue) { return }
+# Ignore, not SilentlyContinue: SilentlyContinue still records a not-found error
+# in $Error on a fresh load, and the start below must not shift $Error.
+if (Get-Variable -Name __rockyHookLoaded -Scope Global -ErrorAction Ignore) { return }
 $global:__rockyHookLoaded = $true
+
+# Report the config dirs to the desktop app once per session, here at load only
+# (never from prompt). The hook binary is optional: a missing or failing one is
+# ignored. Process.Start rather than `&`, so $LASTEXITCODE is untouched. The
+# helper starts with no console window and no redirected streams. By contract it
+# reads no input and prints nothing, and nothing here waits on it.
+$__rockyShellEnvErrors = $Error.Count
+$__rockyShellEnvHome = $null
+$__rockyShellEnvExe = $null
+$__rockyShellEnvBin = $null
+$__rockyShellEnvInfo = $null
+$__rockyShellEnvProc = $null
+try {
+    $__rockyShellEnvHome = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' -ErrorAction Stop }
+    $__rockyShellEnvExe = if ($env:OS -eq 'Windows_NT') { 'rocky-hook.exe' } else { 'rocky-hook' }
+    $__rockyShellEnvBin = Join-Path (Join-Path $__rockyShellEnvHome 'bin' -ErrorAction Stop) $__rockyShellEnvExe -ErrorAction Stop
+    if (Test-Path -LiteralPath $__rockyShellEnvBin -PathType Leaf -ErrorAction Stop) {
+        $__rockyShellEnvInfo = New-Object System.Diagnostics.ProcessStartInfo -ErrorAction Stop
+        $__rockyShellEnvInfo.FileName = $__rockyShellEnvBin
+        $__rockyShellEnvInfo.Arguments = 'shell-env'
+        $__rockyShellEnvInfo.UseShellExecute = $false
+        $__rockyShellEnvInfo.CreateNoWindow = $true
+        $__rockyShellEnvProc = [System.Diagnostics.Process]::Start($__rockyShellEnvInfo)
+        if ($__rockyShellEnvProc) { $__rockyShellEnvProc.Dispose() }
+    }
+} catch {
+    # A missing or failing hook is ignored. Drop the entries this block added to $Error.
+    while ($Error.Count -gt $__rockyShellEnvErrors) { $Error.RemoveAt(0) }
+}
+# The temporaries are removed last. Each was assigned above, so every name exists
+# here, and -ErrorAction Ignore keeps the removal from adding to the error list.
+Remove-Variable -Name __rockyShellEnvErrors, __rockyShellEnvHome, __rockyShellEnvExe, __rockyShellEnvBin, __rockyShellEnvInfo, __rockyShellEnvProc -ErrorAction Ignore
 
 # Every hook-speech file name this
 # session's own __rockySpawnDetached has ever handed to a child, so

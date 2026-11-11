@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::pipe::{Gap, GapReason, Health, RepoInfo};
-use rocky_proto::spool::{SPOOL_VERSION, SpoolBody, SpoolRecord, peek_spool_version};
+use rocky_proto::spool::{
+    SHELL_ENV_VARS, SPOOL_VERSION, SpoolBody, SpoolRecord, peek_spool_version,
+};
 
 use crate::history::History;
 use crate::state::{ApplyOutcome, Changes, StatusState};
@@ -99,6 +101,8 @@ pub struct IngestOutput {
     pub changes: Changes,
     pub gaps: Vec<Gap>,
     pub history_errors: u64,
+    /// `(harness, location)` pairs from shell records and claude-code events, in file-name order.
+    pub config_locations: Vec<(String, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -122,7 +126,8 @@ impl Ingestor {
 
     /// Scan `spool` once: apply every top-level `*.json` in file-name order,
     /// write one history line per consumed file, delete what was applied, and
-    /// quarantine the rest to `bad/`. Returns merged [`Changes`] and gaps.
+    /// quarantine the rest to `bad/`. Returns merged [`Changes`], gaps, and the
+    /// config locations the pass saw.
     pub fn ingest_once(
         &mut self,
         spool: &Path,
@@ -136,6 +141,7 @@ impl Ingestor {
         let mut history_errors = 0u64;
         let mut seen_upserted = HashSet::new();
         let mut seen_removed = HashSet::new();
+        let mut config_locations = Vec::new();
         for path in json_files(spool) {
             if self.applied.contains(&path) {
                 // Applied earlier, history line already written; only re-try
@@ -156,6 +162,13 @@ impl Ingestor {
                 Ok(rec) if rec.v == SPOOL_VERSION => {
                     match rec.body {
                         SpoolBody::Event { event } => {
+                            let config_dir = rec
+                                .config_dir
+                                .as_deref()
+                                .filter(|_| rec.harness == "claude-code");
+                            if let Some(dir) = config_dir {
+                                config_locations.push(("claude-code".to_string(), dir.to_string()));
+                            }
                             let ev = state.prepare(event);
                             if let ApplyOutcome::Changed(c) = state.apply(&ev, rec.recv_ms, repo_of)
                             {
@@ -199,6 +212,13 @@ impl Ingestor {
                                 history_errors += 1;
                             }
                         }
+                        SpoolBody::ShellEnv { env } => {
+                            for (var, harness) in SHELL_ENV_VARS {
+                                if let Some(value) = env.get(var) {
+                                    config_locations.push((harness.to_string(), value.clone()));
+                                }
+                            }
+                        }
                     }
                     if !try_delete(&path) {
                         self.applied.insert(path);
@@ -239,6 +259,7 @@ impl Ingestor {
             changes,
             gaps,
             history_errors,
+            config_locations,
         }
     }
 
@@ -343,5 +364,54 @@ fn try_delete(path: &Path) -> bool {
         Ok(()) => true,
         Err(e) if e.kind() == io::ErrorKind::NotFound => true,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use rocky_proto::pipe::RepoInfo;
+
+    use super::Ingestor;
+    use crate::history::{HISTORY_CAP_BYTES, History};
+    use crate::state::StatusState;
+
+    #[test]
+    fn ingest_collects_config_locations_and_deletes_shell_env() {
+        let spool = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(history_dir.path(), HISTORY_CAP_BYTES, true);
+        let mut state = StatusState::new();
+        let mut ingestor = Ingestor::new();
+        let shell_env = r#"{"v":1,"harness":"shell","recv_ms":1,"kind":"shell_env","env":{"CLAUDE_CONFIG_DIR":"/h/claude","SOME_OTHER":"x"}}"#;
+        let event = r#"{"v":1,"harness":"claude-code","recv_ms":2,"config_dir":"/h/other","kind":"event","event":{"hook_event_name":"SessionStart","session_id":"S1"}}"#;
+        fs::write(spool.path().join("0000000000001-1.json"), shell_env).unwrap();
+        fs::write(spool.path().join("0000000000002-1.json"), event).unwrap();
+
+        let out = ingestor.ingest_once(
+            spool.path(),
+            &mut state,
+            &mut |_: &str| RepoInfo {
+                root: None,
+                name: "repo".into(),
+                branch: None,
+            },
+            &mut history,
+            1_700_000_000_000,
+        );
+
+        assert_eq!(
+            out.config_locations,
+            vec![
+                ("claude-code".to_string(), "/h/claude".to_string()),
+                ("claude-code".to_string(), "/h/other".to_string()),
+            ]
+        );
+        assert!(!spool.path().join("0000000000001-1.json").exists());
+        assert_eq!(out.changes.upserted.len(), 1);
+        assert_eq!(out.changes.upserted[0].session_id, "S1");
+        assert!(out.gaps.is_empty());
+        assert_eq!(out.history_errors, 0);
     }
 }

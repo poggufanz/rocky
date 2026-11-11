@@ -301,6 +301,45 @@ test("auto command: remove from 'later' still clears CLI-installed entries and p
   assert.equal(record.record.state, "removed");
 });
 
+test("auto command: remove records consent before it removes anything", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  const approved = await run(f, ["consent", "approve", "--json"]);
+  assert.equal(approved.json.consent, "approved");
+  assert.equal(hasOwnedAgentHooks(JSON.parse(readFileSync(claudeSettings(f), "utf8"))), true);
+
+  // Observe the stored consent state at the first read of the home directory,
+  // which happens before any settings file is touched, and again when the
+  // shell hook is removed, which is the last removal step.
+  const seen: string[] = [];
+  const observe = (): void => {
+    const read = readConsentRecord(f.rh);
+    seen.push(read.status === "valid" ? read.record.state : read.status);
+  };
+  const { home } = f.ctx.detect;
+  f.ctx.detect = {
+    ...f.ctx.detect,
+    get home(): string {
+      observe();
+      return home;
+    },
+  };
+  const uninstall = f.ctx.shell.uninstall;
+  f.ctx.shell = {
+    ...f.ctx.shell,
+    uninstall: () => {
+      observe();
+      return uninstall();
+    },
+  };
+
+  const res = await run(f, ["remove", "--json"]);
+  assert.equal(res.code, 0);
+  assert.ok(seen.length >= 2, "both observation points ran");
+  assert.deepEqual([...new Set(seen)], ["removed"], "no removal step ran while consent was still approved");
+  assert.equal(hasOwnedAgentHooks(JSON.parse(readFileSync(claudeSettings(f), "utf8"))), false);
+});
+
 test("auto command: remove keeps values semantically equal to the pre-install file", async (t) => {
   const f = fixture(t);
   mkdirSync(join(f.home, ".claude"));

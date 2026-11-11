@@ -413,7 +413,7 @@ fn stop_cmd_exits_zero_and_hook_keeps_spooling() {
         name: CmdName::Stop,
         id: 9,
     }));
-    let ack: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    let ack = ack_for(&mut client, 9);
     assert_eq!(
         ack,
         ServerMsg::Ack {
@@ -456,9 +456,16 @@ fn quit_exits_the_daemon_process() {
         name: CmdName::Quit,
         id: 9,
     }));
-    let quit: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    // A desk that connected during startup also gets the startup snapshot and
+    // health broadcasts; anything else before `quit` breaks the order.
+    let quit = loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if !matches!(msg, ServerMsg::Snapshot { .. } | ServerMsg::Health { .. }) {
+            break msg;
+        }
+    };
     assert_eq!(quit, ServerMsg::Quit);
-    let ack: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    let ack = ack_for(&mut client, 9);
     assert_eq!(
         ack,
         ServerMsg::Ack {

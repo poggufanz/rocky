@@ -1,17 +1,26 @@
 //! `rocky-hook desk-hook <harness>`: spool one stdin payload, always exit 0.
+//! `rocky-hook shell-env`: spool the config-directory variables set in this
+//! shell, always exit 0.
 //!
 //! Claude Code treats a non-zero exit as "block", so every failure path —
 //! including panics — ends here with exit 0 and empty stdout/stderr.
 
 mod write;
 
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::panic::{self, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rocky_proto::hook::{DropReason, ID_CAP, STDIN_CAP, parse_hook_payload};
 use rocky_proto::paths::{rocky_home, spool_dir, tool_text_off_marker};
-use rocky_proto::spool::{SPOOL_VERSION, SpoolBody, SpoolRecord};
+use rocky_proto::spool::{ENV_VALUE_CAP, SHELL_ENV_VARS, SPOOL_VERSION, SpoolBody, SpoolRecord};
+
+/// What one invocation was asked to do.
+enum Cmd {
+    DeskHook(String),
+    ShellEnv,
+}
 
 fn main() {
     // The default panic hook prints to stderr; silence it before catch_unwind.
@@ -21,9 +30,16 @@ fn main() {
 }
 
 fn run() {
-    let Some(harness) = parse_argv() else {
+    let Some(cmd) = parse_argv() else {
         return;
     };
+    match cmd {
+        Cmd::DeskHook(harness) => desk_hook(harness),
+        Cmd::ShellEnv => shell_env(),
+    }
+}
+
+fn desk_hook(harness: String) {
     let (data, oversize) = read_stdin();
     let home = rocky_home();
     let capture = !tool_text_off_marker(&home).exists();
@@ -40,25 +56,63 @@ fn run() {
             },
         },
     };
+    // Only Claude Code's config directory is reported; other harnesses never carry one.
+    let config_dir = if harness == "claude-code" {
+        env_value("CLAUDE_CONFIG_DIR")
+    } else {
+        None
+    };
     let rec = SpoolRecord {
         v: SPOOL_VERSION,
         harness,
         recv_ms: now_ms(),
+        config_dir,
         body,
     };
     let _ = write::write_record(&spool_dir(&home), &rec);
 }
 
-/// Exactly `desk-hook <harness>`; anything else means "write nothing".
-fn parse_argv() -> Option<String> {
+/// Spools the shell's config-directory variables. Reads no stdin, and writes
+/// nothing when none of the five is set.
+fn shell_env() {
+    let env: BTreeMap<String, String> = SHELL_ENV_VARS
+        .iter()
+        .filter_map(|&(name, _)| env_value(name).map(|value| (name.to_owned(), value)))
+        .collect();
+    if env.is_empty() {
+        return;
+    }
+    let home = rocky_home();
+    let rec = SpoolRecord {
+        v: SPOOL_VERSION,
+        harness: "shell".to_owned(),
+        recv_ms: now_ms(),
+        config_dir: None,
+        body: SpoolBody::ShellEnv { env },
+    };
+    let _ = write::write_record(&spool_dir(&home), &rec);
+}
+
+/// The variable's value when it is set, non-empty, and at most `ENV_VALUE_CAP` bytes.
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty() && value.len() <= ENV_VALUE_CAP)
+}
+
+/// Exactly `desk-hook <harness>` or exactly `shell-env`; anything else means "write nothing".
+fn parse_argv() -> Option<Cmd> {
     let mut args = std::env::args_os().skip(1);
     let cmd = args.next()?;
+    if cmd == "shell-env" {
+        return args.next().is_none().then_some(Cmd::ShellEnv);
+    }
     let harness = args.next()?;
     if args.next().is_some() || cmd != "desk-hook" {
         return None;
     }
     let harness = harness.into_string().ok()?;
-    Some(cut_id(&harness))
+    Some(Cmd::DeskHook(cut_id(&harness)))
 }
 
 /// Cap the harness id at [`ID_CAP`] bytes on a char boundary.

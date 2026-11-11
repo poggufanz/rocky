@@ -171,9 +171,12 @@ function executeAction(
         : refusalReports(inspectAll(ctx, record));
       break;
     case "remove":
-      result.targets = removeAll(ctx, record);
+      // Record the decision first: a daemon re-applies while consent reads
+      // approved, so a slow removal must not run under that state. Removal
+      // itself is safe in any consent state.
       writeConsentRecord(ctx.rockyHome, consentRecord(record, "removed", ctx.now()));
       result.consent = "removed";
+      result.targets = removeAll(ctx, record);
       break;
     case "consent":
       if (parsed.decision === "approve") {

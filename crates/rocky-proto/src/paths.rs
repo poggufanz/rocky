@@ -50,6 +50,30 @@ pub fn tool_text_off_marker(rocky_home: &Path) -> PathBuf {
     desk_dir(rocky_home).join("tool-text-off")
 }
 
+pub fn bin_dir(rocky_home: &Path) -> PathBuf {
+    rocky_home.join("bin")
+}
+
+pub fn cli_record_path(rocky_home: &Path) -> PathBuf {
+    bin_dir(rocky_home).join("cli.json")
+}
+
+pub fn binaries_record_path(rocky_home: &Path) -> PathBuf {
+    bin_dir(rocky_home).join("binaries.json")
+}
+
+pub fn setup_dir(rocky_home: &Path) -> PathBuf {
+    rocky_home.join("setup")
+}
+
+pub fn expected_path(rocky_home: &Path) -> PathBuf {
+    setup_dir(rocky_home).join("expected.json")
+}
+
+pub fn consent_path(rocky_home: &Path) -> PathBuf {
+    setup_dir(rocky_home).join("consent.json")
+}
+
 pub fn home_hash(rocky_home: &Path) -> String {
     let normalized = rocky_home
         .to_string_lossy()
@@ -134,8 +158,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        absolutize, bad_dir, desk_mutex_name, history_dir, home_hash, log_path, pipe_name,
-        rocky_home_from, settings_path, spool_dir, tool_text_off_marker,
+        absolutize, bad_dir, bin_dir, binaries_record_path, cli_record_path, consent_path,
+        desk_mutex_name, expected_path, history_dir, home_hash, log_path, pipe_name,
+        rocky_home_from, settings_path, setup_dir, spool_dir, tool_text_off_marker,
     };
 
     #[test]
@@ -199,6 +224,16 @@ mod tests {
         assert_eq!(tool_text_off_marker(p), desk.join("tool-text-off"));
         assert_eq!(settings_path(p), desk.join("settings.json"));
         assert_eq!(history_dir(p), desk.join("history"));
+    }
+    #[test]
+    fn setup_layout() {
+        let p = Path::new(r"C:\h");
+        assert_eq!(bin_dir(p), p.join("bin"));
+        assert_eq!(cli_record_path(p), p.join("bin").join("cli.json"));
+        assert_eq!(binaries_record_path(p), p.join("bin").join("binaries.json"));
+        assert_eq!(setup_dir(p), p.join("setup"));
+        assert_eq!(expected_path(p), p.join("setup").join("expected.json"));
+        assert_eq!(consent_path(p), p.join("setup").join("consent.json"));
     }
 }
 

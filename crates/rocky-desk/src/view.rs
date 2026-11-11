@@ -7,6 +7,7 @@ use rocky_proto::settings::Settings;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::i18n::{Msg, UiLang, tr};
+use crate::setup_lines::setup_lines;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Conn {
@@ -388,6 +389,7 @@ impl Model {
         if h.settings_unreadable {
             w.push(Msg::SettingsUnreadable);
         }
+        w.extend(setup_lines(&h.setup));
         let mut gaps: Vec<_> = h.gaps.iter().collect();
         gaps.sort_by_key(|g| std::cmp::Reverse(g.to_ms));
         for gap in gaps.iter().take(GAP_LINES) {
@@ -527,6 +529,7 @@ mod tests {
             aggregate: Status::Idle,
             health: Health::default(),
             settings: Settings::default(),
+            repo_pending: Vec::new(),
         }
     }
 
@@ -832,6 +835,7 @@ mod tests {
             ],
             aggregate: Status::Idle,
             health: Health::default(),
+            repo_pending: Vec::new(),
             settings: Settings {
                 subagent_tree: false,
                 ..Settings::default()

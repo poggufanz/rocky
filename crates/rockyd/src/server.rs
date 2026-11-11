@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 
 use rocky_proto::pipe::CLIENT_QUEUE_CAP;
 use rocky_proto::pipe::{
-    AgentKey, ClientMsg, CmdName, LINE_CAP, ServerMsg, WireError, decode, encode,
+    AgentKey, ClientMsg, CmdName, LINE_CAP, ServerMsg, SetupAction, WireError, decode, encode,
 };
 use serde_json::Value;
 
@@ -61,6 +61,19 @@ pub enum Control {
     Timeline {
         id: u64,
         key: AgentKey,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A `setup` request; the daemon replies with the ack or the consent plan.
+    Setup {
+        id: u64,
+        action: SetupAction,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A `repo_decision` request; the daemon replies with the ack.
+    RepoDecision {
+        id: u64,
+        root: String,
+        allow: bool,
         reply: SyncSender<ServerMsg>,
     },
 }
@@ -357,43 +370,40 @@ fn handle_client<S>(
                     }
                 }
                 Ok(ClientMsg::Set { id, name, value }) => {
-                    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-                    if control
-                        .send(Control::Set {
-                            id,
-                            name,
-                            value,
-                            reply: reply_tx,
-                        })
-                        .is_err()
-                    {
-                        if !hub.send_to(client_id, &daemon_stopping(id)) {
-                            break;
-                        }
-                        continue;
-                    }
-                    let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
-                    if !hub.send_to(client_id, &replied) {
+                    if !relay(control, hub, client_id, id, |reply| Control::Set {
+                        id,
+                        name,
+                        value,
+                        reply,
+                    }) {
                         break;
                     }
                 }
                 Ok(ClientMsg::Timeline { id, key }) => {
-                    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-                    if control
-                        .send(Control::Timeline {
-                            id,
-                            key,
-                            reply: reply_tx,
-                        })
-                        .is_err()
-                    {
-                        if !hub.send_to(client_id, &daemon_stopping(id)) {
-                            break;
-                        }
-                        continue;
+                    if !relay(control, hub, client_id, id, |reply| Control::Timeline {
+                        id,
+                        key,
+                        reply,
+                    }) {
+                        break;
                     }
-                    let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
-                    if !hub.send_to(client_id, &replied) {
+                }
+                Ok(ClientMsg::Setup { id, action }) => {
+                    if !relay(control, hub, client_id, id, |reply| Control::Setup {
+                        id,
+                        action,
+                        reply,
+                    }) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::RepoDecision { id, root, allow }) => {
+                    if !relay(control, hub, client_id, id, |reply| Control::RepoDecision {
+                        id,
+                        root,
+                        allow,
+                        reply,
+                    }) {
                         break;
                     }
                 }
@@ -474,6 +484,23 @@ fn daemon_stopping(id: u64) -> ServerMsg {
         ok: false,
         error: Some("daemon stopping".into()),
     }
+}
+
+/// Hands one request to the daemon loop, then writes the loop's reply to this
+/// client. Returns false when the client has gone.
+fn relay(
+    control: &Sender<Control>,
+    hub: &Hub,
+    client_id: u64,
+    id: u64,
+    request: impl FnOnce(SyncSender<ServerMsg>) -> Control,
+) -> bool {
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if control.send(request(reply_tx)).is_err() {
+        return hub.send_to(client_id, &daemon_stopping(id));
+    }
+    let replied = reply_rx.recv().unwrap_or_else(|_| daemon_stopping(id));
+    hub.send_to(client_id, &replied)
 }
 
 fn write_line<S>(stream: &S, buf: &[u8]) -> io::Result<()>

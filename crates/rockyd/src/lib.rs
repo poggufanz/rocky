@@ -1,4 +1,5 @@
 pub mod gaps;
+pub mod guard;
 pub mod history;
 pub mod log;
 pub mod repo;
