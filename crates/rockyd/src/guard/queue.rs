@@ -9,7 +9,7 @@ use rocky_proto::pipe::{ConsentState, PendingRepo, ServerMsg, SetupAction};
 use super::node::{AutoResult, RepoDecisionState, RepoVerdict, RunError};
 use super::{Effect, Guard, Job};
 
-/// Harness ids a `setup` request may name. Matches the Node MCP harness list.
+/// Harness ids the `setup` and discovery paths accept. Matches the Node MCP harness list.
 const HARNESS_IDS: [&str; 5] = [
     "claude-code",
     "codex",
@@ -17,6 +17,11 @@ const HARNESS_IDS: [&str; 5] = [
     "gemini-cli",
     "copilot-cli",
 ];
+
+/// Whether `harness` is one of the ids Node's `setup --auto` accepts.
+fn is_known_harness(harness: &str) -> bool {
+    HARNESS_IDS.contains(&harness)
+}
 
 impl Guard {
     /// Queues a client `setup` request. A harness outside the known list is
@@ -57,11 +62,11 @@ impl Guard {
 
     /// Queues a config-dir job for a `(harness, location)` pair a harness reported.
     ///
-    /// Queues only under approved consent, and only for a pair that is not
-    /// recorded yet and was not queued before in this daemon run. Empty input
-    /// is ignored.
+    /// Queues only under approved consent, for a known harness id, and only for a
+    /// pair that is not recorded yet and was not queued before in this daemon run.
+    /// An empty location is ignored.
     pub fn discovered(&mut self, harness: &str, location: &str) {
-        if harness.is_empty() || location.is_empty() {
+        if !is_known_harness(harness) || location.is_empty() {
             return;
         }
         if self.observed.consent.state != ConsentState::Approved {
@@ -134,9 +139,7 @@ impl Guard {
                     cached.1 = decision;
                 }
             }
-            if self.pending_repos.remove(&main).is_some() {
-                effects.push(Effect::PendingChanged);
-            }
+            effects.extend(self.drop_pending(&main));
         }
         let msg = ServerMsg::Ack {
             id,
@@ -147,9 +150,10 @@ impl Guard {
         effects
     }
 
-    /// The outcome of a `RepoStatus` job. A verdict is cached for its root, and an
-    /// undecided main becomes one pending entry. A failure or a missing verdict
-    /// leaves the root unknown; the root is not queued again.
+    /// The outcome of a `RepoStatus` job. A verdict is cached for its root. An
+    /// undecided main becomes one pending entry, and a decided main leaves the
+    /// pending list. A failure or a missing verdict leaves the root unknown; the
+    /// root is not queued again.
     pub(super) fn finish_repo_status(
         &mut self,
         root: &str,
@@ -169,7 +173,10 @@ impl Guard {
         } = verdict;
         self.root_verdicts
             .insert(root.to_string(), (main.clone(), decision));
-        if decision != RepoDecisionState::Undecided || self.pending_repos.contains_key(&main) {
+        if decision != RepoDecisionState::Undecided {
+            return self.drop_pending(&main);
+        }
+        if self.pending_repos.contains_key(&main) {
             return Vec::new();
         }
         let name = last_segment(&main);
@@ -178,8 +185,8 @@ impl Guard {
         vec![Effect::PendingChanged]
     }
 
-    /// The outcome of a `ConfigDir` job. A success replaces the stored targets and
-    /// logs any notes. A failure is logged.
+    /// The outcome of a `ConfigDir` job. A success replaces the stored targets. When Node
+    /// reported notes, the log records how many, never their text. A failure is logged.
     pub(super) fn finish_config_dir(
         &mut self,
         harness: &str,
@@ -188,13 +195,33 @@ impl Guard {
         match out {
             Ok(result) => {
                 self.targets = result.targets;
-                if result.notes.is_empty() {
+                let count = result.notes.len();
+                if count == 0 {
                     return Vec::new();
                 }
-                let notes = result.notes.join("; ");
-                vec![Effect::Log(format!("config dir {harness}: {notes}"))]
+                vec![Effect::Log(format!(
+                    "config dir {harness}: {count} note(s)"
+                ))]
             }
             Err(err) => vec![Effect::Log(format!("config dir {harness}: {err}"))],
+        }
+    }
+
+    /// Puts a config-dir or repo status job back at the front of its queue, for a run
+    /// that found no CLI. Its pair or root stays marked as queued.
+    pub(super) fn requeue(&mut self, job: &Job) {
+        match job {
+            Job::ConfigDir { .. } => self.config_dirs.push_front(job.clone()),
+            Job::RepoStatus { .. } => self.repo_status.push_front(job.clone()),
+            Job::Apply | Job::Setup { .. } | Job::RepoDecision { .. } => {}
+        }
+    }
+
+    /// Drops the pending entry for `main`. Reports a change only when an entry was removed.
+    fn drop_pending(&mut self, main: &str) -> Vec<Effect> {
+        match self.pending_repos.remove(main) {
+            Some(_) => vec![Effect::PendingChanged],
+            None => Vec::new(),
         }
     }
 }
@@ -203,7 +230,7 @@ impl Guard {
 fn unknown_harness(action: &SetupAction) -> Option<&str> {
     match action {
         SetupAction::HarnessOn { harness } | SetupAction::HarnessOff { harness }
-            if !HARNESS_IDS.contains(&harness.as_str()) =>
+            if !is_known_harness(harness) =>
         {
             Some(harness.as_str())
         }

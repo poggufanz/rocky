@@ -93,10 +93,12 @@ fn discovered_pair_already_recorded_queues_nothing() {
 }
 
 #[test]
-fn discovery_ignores_empty_harness_or_location() {
+fn discovery_ignores_empty_and_unknown_input() {
     let mut guard = settled(approved(&[]));
     guard.discovered("", "/x/.codex");
     guard.discovered("codex", "");
+    assert_eq!(guard.next_job(0), None);
+    guard.discovered("cursor", "/x/.cursor");
     assert_eq!(guard.next_job(0), None);
 }
 
@@ -345,13 +347,21 @@ fn finish_for_a_job_not_in_flight_is_ignored() {
     assert_eq!(guard.next_job(2), Some(stray));
 }
 
+/// Approved consent with no CLI found, as when setup has not written a CLI record.
+fn without_cli() -> Observation {
+    let mut obs = approved(&[]);
+    obs.cli = None;
+    obs.cli_found = false;
+    obs.cli_missing = Some("/n/node".to_string());
+    obs
+}
+
 #[test]
-fn no_cli_finishes_each_request_kind_with_its_error() {
-    let mut guard = settled(approved(&[]));
+fn no_cli_finishes_client_requests_with_an_error() {
+    let mut guard = Guard::new(GuardConsts::default(), 0);
+    guard.observe(without_cli(), 0);
     guard.setup_request(1, 2, SetupAction::Apply);
     guard.repo_request(3, 4, "/w/a".to_string(), true);
-    guard.session_root("/w/a");
-    guard.discovered("codex", "/x/.codex");
     let no_cli = RunError::NoCli.to_string();
 
     let setup = guard.next_job(0).expect("setup job");
@@ -367,26 +377,50 @@ fn no_cli_finishes_each_request_kind_with_its_error() {
     let msg = ServerMsg::Ack {
         id: 4,
         ok: false,
-        error: Some(no_cli.clone()),
+        error: Some(no_cli),
     };
     let effects = guard.finish(&decide, Err(RunError::NoCli), 0);
     assert_eq!(effects, vec![Effect::Reply { token: 3, msg }]);
-
-    let config = guard.next_job(0).expect("config dir job");
-    let effects = guard.finish(&config, Err(RunError::NoCli), 0);
-    assert_eq!(
-        effects,
-        vec![Effect::Log(format!("config dir codex: {no_cli}"))]
-    );
-
-    let status = guard.next_job(0).expect("status job");
-    assert!(guard.finish(&status, Err(RunError::NoCli), 0).is_empty());
-    guard.session_root("/w/a");
     assert_eq!(guard.next_job(0), None);
 }
 
 #[test]
-fn config_dir_result_logs_notes_and_replaces_targets() {
+fn config_dir_and_repo_jobs_wait_for_the_cli() {
+    let mut guard = settled(approved(&[]));
+    guard.observe(without_cli(), 1);
+    guard.discovered("codex", "/x/.codex");
+    guard.session_root("/r");
+    assert_eq!(guard.next_job(1), None);
+    guard.observe(approved(&[]), 2);
+    let config = config_job("codex", "/x/.codex");
+    assert_eq!(guard.next_job(2), Some(config.clone()));
+    guard.finish(&config, applied(Vec::new()), 2);
+    let status = Job::RepoStatus {
+        root: "/r".to_string(),
+    };
+    assert_eq!(guard.next_job(2), Some(status));
+}
+
+#[test]
+fn no_cli_at_run_time_keeps_queued_discovery() {
+    let mut guard = settled(approved(&[]));
+    guard.discovered("codex", "/x/.codex");
+    guard.session_root("/r");
+    let config = config_job("codex", "/x/.codex");
+    assert_eq!(guard.next_job(0), Some(config.clone()));
+    assert!(guard.finish(&config, Err(RunError::NoCli), 0).is_empty());
+    assert_eq!(guard.next_job(0), Some(config.clone()), "offered again");
+    guard.finish(&config, applied(Vec::new()), 0);
+    let status = Job::RepoStatus {
+        root: "/r".to_string(),
+    };
+    assert_eq!(guard.next_job(0), Some(status.clone()));
+    assert!(guard.finish(&status, Err(RunError::NoCli), 0).is_empty());
+    assert_eq!(guard.next_job(0), Some(status), "offered again");
+}
+
+#[test]
+fn config_dir_result_logs_note_count_and_replaces_targets() {
     let mut guard = settled(approved(&[]));
     guard.discovered("codex", "/x/.codex");
     let job = guard.next_job(0).expect("config dir job");
@@ -395,9 +429,7 @@ fn config_dir_result_logs_notes_and_replaces_targets() {
     let effects = guard.finish(&job, result_with(hooks, &notes), 1);
     assert_eq!(
         effects,
-        vec![Effect::Log(
-            "config dir codex: bad location; harness not detected: codex".to_string()
-        )]
+        vec![Effect::Log("config dir codex: 2 note(s)".to_string())]
     );
     assert_eq!(guard.health(1).targets[0].path, CFG);
 
@@ -409,4 +441,34 @@ fn config_dir_result_logs_notes_and_replaces_targets() {
         effects,
         vec![Effect::Log(format!("config dir opencode: {timeout}"))]
     );
+}
+
+#[test]
+fn decided_status_clears_pending_for_its_main() {
+    let mut guard = settled(approved(&[]));
+    for root in ["/w/a", "/w/b", "/w/c", "/w/d"] {
+        guard.session_root(root);
+    }
+    let undecided = RepoDecisionState::Undecided;
+    let first = guard.next_job(0).expect("first root");
+    guard.finish(&first, with_repo(verdict("k1", "/code/repo", undecided)), 1);
+    let second = guard.next_job(1).expect("second root");
+    guard.finish(
+        &second,
+        with_repo(verdict("k2", "/code/other", undecided)),
+        2,
+    );
+    let third = guard.next_job(2).expect("third root");
+    let allowed = verdict("k1", "/code/repo", RepoDecisionState::Allowed);
+    let effects = guard.finish(&third, with_repo(allowed), 3);
+    assert_eq!(effects, vec![Effect::PendingChanged]);
+    assert_eq!(
+        guard.pending(),
+        vec![pending_repo("k2", "/code/other", "other")]
+    );
+    let cached = ("/code/repo".to_string(), RepoDecisionState::Allowed);
+    assert_eq!(guard.root_verdicts.get("/w/c"), Some(&cached));
+    let fourth = guard.next_job(3).expect("fourth root");
+    let declined = verdict("k3", "/code/clean", RepoDecisionState::Declined);
+    assert!(guard.finish(&fourth, with_repo(declined), 4).is_empty());
 }

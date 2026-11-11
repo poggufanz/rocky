@@ -232,6 +232,7 @@ impl Guard {
 
     /// The next job to run, if one is due. One job is out at a time. Client
     /// requests go first, then the apply, then config-dir and repo status jobs.
+    /// The last two wait until a CLI was found, and stay queued until then.
     pub fn next_job(&mut self, now_ms: u64) -> Option<Job> {
         if self.in_flight.is_some() {
             return None;
@@ -241,7 +242,7 @@ impl Guard {
             .pop_front()
             .or_else(|| self.apply_job(now_ms))
             .or_else(|| self.config_dir_job())
-            .or_else(|| self.repo_status.pop_front())?;
+            .or_else(|| self.repo_status_job())?;
         self.in_flight = Some(job.clone());
         Some(job)
     }
@@ -267,6 +268,13 @@ impl Guard {
                 }
                 Vec::new()
             }
+            Job::ConfigDir { .. } | Job::RepoStatus { .. }
+                if matches!(out, Err(RunError::NoCli)) =>
+            {
+                // Not run for want of a CLI: the job stays owed, at the front of its queue.
+                self.requeue(job);
+                Vec::new()
+            }
             Job::ConfigDir { harness, .. } => self.finish_config_dir(harness, out),
             Job::RepoStatus { root } => self.finish_repo_status(root, out),
             Job::Setup { token, id, action } => self.finish_setup(*token, *id, action, out),
@@ -284,13 +292,27 @@ impl Guard {
         Some(Job::Apply)
     }
 
-    /// The next queued config-dir job. Held back until consent is approved, so no
-    /// config write starts without it.
+    /// The next queued config-dir job. Held back until consent is approved and a CLI
+    /// was found, so no config write starts without both.
     fn config_dir_job(&mut self) -> Option<Job> {
-        if self.observed.consent.state != ConsentState::Approved {
+        if !self.approved_with_cli() {
             return None;
         }
         self.config_dirs.pop_front()
+    }
+
+    /// The next queued repo status job. Held back until a CLI was found. Consent does
+    /// not gate it: Node's repo status reads the decision and writes nothing.
+    fn repo_status_job(&mut self) -> Option<Job> {
+        if !self.observed.cli_found {
+            return None;
+        }
+        self.repo_status.pop_front()
+    }
+
+    /// Approved consent and a CLI that was found: what an apply or a config-dir run needs.
+    fn approved_with_cli(&self) -> bool {
+        self.observed.consent.state == ConsentState::Approved && self.observed.cli_found
     }
 
     /// The setup status the desk shows.
@@ -312,9 +334,7 @@ impl Guard {
 
     /// Whether an apply is due now. Needs approved consent and a CLI that was found.
     fn apply_due(&self, now_ms: u64) -> bool {
-        let ready =
-            self.observed.consent.state == ConsentState::Approved && self.observed.cli_found;
-        ready
+        self.approved_with_cli()
             && (now_ms >= self.next_detect
                 || self.cli_changed()
                 || self.changed_retry.is_some_and(|at| now_ms >= at)
