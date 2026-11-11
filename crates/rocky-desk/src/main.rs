@@ -13,6 +13,15 @@ use rocky_proto::paths::{desk_dir, desk_lock_path};
 #[cfg(windows)]
 fn main() {
     let home = rocky_home();
+    let opts = rocky_desk::autostart::parse_args(std::env::args());
+    // Decided before the instance lock is taken and before any window exists:
+    // exit 0 = desk and daemon gone, 2 = they outlasted the wait.
+    if opts.quit {
+        std::process::exit(rocky_desk::quit::quit_running(
+            &home,
+            rocky_desk::quit::QUIT_WAIT,
+        ));
+    }
     install_panic_log(&home);
     // Single instance: if the mutex already exists, another desk owns it.
     let _mutex = match single_instance(&desk_mutex_name(&home)) {
@@ -23,7 +32,6 @@ fn main() {
         }
         Err(InstanceError::Failed) => std::process::exit(1),
     };
-    let opts = rocky_desk::autostart::parse_args(std::env::args());
     rocky_desk::app::run(home, opts);
     // `_mutex` drops here, releasing the instance lock.
 }
@@ -31,6 +39,15 @@ fn main() {
 #[cfg(unix)]
 fn main() {
     let home = rocky_home();
+    let opts = rocky_desk::autostart::parse_args(std::env::args());
+    // Decided before the instance lock is taken and before any window exists:
+    // exit 0 = desk and daemon gone, 2 = they outlasted the wait.
+    if opts.quit {
+        std::process::exit(rocky_desk::quit::quit_running(
+            &home,
+            rocky_desk::quit::QUIT_WAIT,
+        ));
+    }
     install_panic_log(&home);
     // Single instance: if the lock is already held, another desk owns it and
     // gets asked to come forward instead.
@@ -42,7 +59,6 @@ fn main() {
         }
         Err(InstanceError::Failed) => std::process::exit(1),
     };
-    let opts = rocky_desk::autostart::parse_args(std::env::args());
     rocky_desk::app::run(home, opts);
     // `_lock` drops here, releasing the instance lock.
 }

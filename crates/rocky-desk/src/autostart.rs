@@ -243,17 +243,23 @@ pub fn disable() -> std::io::Result<()> {
 /// Startup switches for the desk.
 pub struct RunOptions {
     pub tray: bool,
+    /// Close a running desk and its daemon instead of starting one.
+    pub quit: bool,
 }
 
-/// `--tray` starts the desk with its window hidden. Unknown arguments are ignored.
+/// `--tray` starts the desk with its window hidden; `--quit` closes a running
+/// desk and daemon. Unknown arguments are ignored.
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> RunOptions {
     let mut tray = false;
+    let mut quit = false;
     for arg in args {
-        if arg == "--tray" {
-            tray = true;
+        match arg.as_str() {
+            "--tray" => tray = true,
+            "--quit" => quit = true,
+            _ => {}
         }
     }
-    RunOptions { tray }
+    RunOptions { tray, quit }
 }
 
 #[cfg(test)]
@@ -381,6 +387,16 @@ mod tests {
     fn tray_flag_parses() {
         assert!(parse_args(["rocky-desk".into(), "--tray".into()]).tray);
         assert!(!parse_args(["rocky-desk".into()]).tray);
+    }
+
+    #[test]
+    fn parse_args_reads_quit() {
+        let quit = parse_args(["rocky-desk".into(), "--quit".into()]);
+        assert!(quit.quit);
+        assert!(!quit.tray);
+        let tray = parse_args(["rocky-desk".into(), "--tray".into()]);
+        assert!(tray.tray);
+        assert!(!tray.quit);
     }
 
     #[cfg(unix)]

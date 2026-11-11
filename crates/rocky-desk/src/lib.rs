@@ -9,6 +9,7 @@ pub mod i18n;
 pub mod icons;
 pub mod notify;
 pub mod os_notice;
+pub mod quit;
 pub mod relay;
 pub mod respawn;
 pub mod settings_view;
