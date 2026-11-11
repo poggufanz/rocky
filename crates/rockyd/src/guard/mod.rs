@@ -6,18 +6,19 @@
 pub mod brake;
 pub mod check;
 pub mod node;
+mod queue;
 pub mod records;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use rocky_proto::pipe::{
-    ConsentState, Gap, GapReason, ServerMsg, SetupAction, SetupHealth, SetupTarget, TargetHealth,
-    TargetState,
+    ConsentState, Gap, GapReason, PendingRepo, ServerMsg, SetupAction, SetupHealth, SetupTarget,
+    TargetHealth, TargetState,
 };
 
 use self::brake::{Brake, BrakeConsts};
-use self::node::{AutoResult, RunError};
+use self::node::{AutoResult, RepoDecisionState, RunError};
 use self::records::{CliRecord, ConsentView};
 
 /// The target kind that carries Rocky's desk hook entries.
@@ -35,7 +36,7 @@ pub struct GuardConsts {
     pub detect_every_ms: u64,
     /// Retry delays after a `Changed` result. The last value repeats.
     pub changed_backoff_ms: [u64; 5],
-    /// Cap on remembered client request ids.
+    /// Cap on config-dir pairs queued in one daemon run.
     pub seen_cap: usize,
     /// Repair limits for each config path.
     pub brake: BrakeConsts,
@@ -158,7 +159,22 @@ pub struct Guard {
     changed_streak: usize,
     /// When to retry after `Changed` targets.
     changed_retry: Option<u64>,
-    in_flight: bool,
+    /// The job handed out and not yet finished. `None` when the guard is idle.
+    in_flight: Option<Job>,
+    /// Client `setup` and `repo_decision` requests, oldest first.
+    requests: VecDeque<Job>,
+    /// Config-dir jobs from discovery, oldest first.
+    config_dirs: VecDeque<Job>,
+    /// Repo status jobs for session roots, oldest first.
+    repo_status: VecDeque<Job>,
+    /// `(harness, location)` pairs queued in this daemon run.
+    queued_pairs: BTreeSet<(String, String)>,
+    /// Roots queued for a repo status job. Each root is queued once.
+    queued_roots: BTreeSet<String>,
+    /// The last repo verdict for each root: its main path and decision.
+    root_verdicts: BTreeMap<String, (String, RepoDecisionState)>,
+    /// Repos that still need a Listening decision, keyed by main path.
+    pending_repos: BTreeMap<String, PendingRepo>,
     /// Paths that are missing now, with the time each went missing.
     missing_since: BTreeMap<PathBuf, u64>,
     /// Paths an apply attempted, awaiting the next observation: path to finish time.
@@ -180,7 +196,14 @@ impl Guard {
             applied_under: None,
             changed_streak: 0,
             changed_retry: None,
-            in_flight: false,
+            in_flight: None,
+            requests: VecDeque::new(),
+            config_dirs: VecDeque::new(),
+            repo_status: VecDeque::new(),
+            queued_pairs: BTreeSet::new(),
+            queued_roots: BTreeSet::new(),
+            root_verdicts: BTreeMap::new(),
+            pending_repos: BTreeMap::new(),
             missing_since: BTreeMap::new(),
             pending: BTreeMap::new(),
             errors: BTreeMap::new(),
@@ -207,34 +230,67 @@ impl Guard {
         effects
     }
 
-    /// The next job to run, if one is due. One job is out at a time.
+    /// The next job to run, if one is due. One job is out at a time. Client
+    /// requests go first, then the apply, then config-dir and repo status jobs.
     pub fn next_job(&mut self, now_ms: u64) -> Option<Job> {
-        if self.in_flight || !self.apply_due(now_ms) {
+        if self.in_flight.is_some() {
             return None;
         }
-        self.in_flight = true;
-        self.applied_under = Some(self.observed.cli.clone());
-        self.changed_retry = None;
-        Some(Job::Apply)
+        let job = self
+            .requests
+            .pop_front()
+            .or_else(|| self.apply_job(now_ms))
+            .or_else(|| self.config_dir_job())
+            .or_else(|| self.repo_status.pop_front())?;
+        self.in_flight = Some(job.clone());
+        Some(job)
     }
 
-    /// Records the outcome of a job the guard handed out.
+    /// Records the outcome of a job the guard handed out. A job that is not the
+    /// one out now is ignored.
     pub fn finish(
         &mut self,
         job: &Job,
         out: Result<AutoResult, RunError>,
         now_ms: u64,
     ) -> Vec<Effect> {
-        self.in_flight = false;
-        if matches!(job, Job::Apply) {
-            self.next_detect = now_ms.saturating_add(self.c.detect_every_ms);
-            match out {
-                Ok(result) => self.apply_succeeded(result, now_ms),
-                Err(err) => self.apply_failed(&err, now_ms),
-            }
+        if self.in_flight.as_ref() != Some(job) {
+            return Vec::new();
         }
-        // Setup and repo jobs have no effects yet. Their replies come with the client requests.
-        Vec::new()
+        self.in_flight = None;
+        match job {
+            Job::Apply => {
+                self.next_detect = now_ms.saturating_add(self.c.detect_every_ms);
+                match out {
+                    Ok(result) => self.apply_succeeded(result, now_ms),
+                    Err(err) => self.apply_failed(&err, now_ms),
+                }
+                Vec::new()
+            }
+            Job::ConfigDir { harness, .. } => self.finish_config_dir(harness, out),
+            Job::RepoStatus { root } => self.finish_repo_status(root, out),
+            Job::Setup { token, id, action } => self.finish_setup(*token, *id, action, out),
+            Job::RepoDecision { token, id, .. } => self.finish_repo_decision(*token, *id, out),
+        }
+    }
+
+    /// The apply job, when one is due. Handing it out records the CLI it runs under.
+    fn apply_job(&mut self, now_ms: u64) -> Option<Job> {
+        if !self.apply_due(now_ms) {
+            return None;
+        }
+        self.applied_under = Some(self.observed.cli.clone());
+        self.changed_retry = None;
+        Some(Job::Apply)
+    }
+
+    /// The next queued config-dir job. Held back until consent is approved, so no
+    /// config write starts without it.
+    fn config_dir_job(&mut self) -> Option<Job> {
+        if self.observed.consent.state != ConsentState::Approved {
+            return None;
+        }
+        self.config_dirs.pop_front()
     }
 
     /// The setup status the desk shows.

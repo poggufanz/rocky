@@ -1,6 +1,6 @@
 //! Per-agent status machine: hook events in, agent statuses out.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rocky_proto::hook::HookEvent;
 use rocky_proto::pipe::{
@@ -129,6 +129,26 @@ impl StatusState {
         self.tool_text
     }
 
+    /// Sets a session's repo from an event's cwd. `SessionStart` with a cwd
+    /// always sets it. Any other event sets it only while the session has no
+    /// repo or only the placeholder, so a later prompt elsewhere does not move it.
+    fn set_session_repo(&mut self, ev: &HookEvent, repo_of: &mut dyn FnMut(&str) -> RepoInfo) {
+        let cwd = ev.cwd.as_deref();
+        let is_start = ev.hook_event_name == "SessionStart" && cwd.is_some();
+        let needs_repo = match self.repos.get(&ev.session_id) {
+            None => true,
+            Some(repo) => cwd.is_some() && *repo == placeholder(),
+        };
+        if !is_start && !needs_repo {
+            return;
+        }
+        let repo = match cwd {
+            Some(cwd) => repo_of(cwd),
+            None => placeholder(),
+        };
+        self.repos.insert(ev.session_id.clone(), repo);
+    }
+
     pub fn apply(
         &mut self,
         ev: &HookEvent,
@@ -156,29 +176,12 @@ impl StatusState {
         {
             return ApplyOutcome::Changed(Changes::default());
         }
-        if matches!(
-            ev.hook_event_name.as_str(),
-            "SessionStart" | "UserPromptSubmit"
-        ) {
-            if let Some(cwd) = ev.cwd.as_deref() {
-                self.repos.insert(ev.session_id.clone(), repo_of(cwd));
-            }
-        } else if !self.repos.contains_key(&ev.session_id) {
-            let repo = match ev.cwd.as_deref() {
-                Some(cwd) => repo_of(cwd),
-                None => RepoInfo {
-                    root: None,
-                    name: String::new(),
-                    branch: None,
-                },
-            };
-            self.repos.insert(ev.session_id.clone(), repo);
-        }
-        let repo = self.repos.get(&ev.session_id).cloned().unwrap_or(RepoInfo {
-            root: None,
-            name: String::new(),
-            branch: None,
-        });
+        self.set_session_repo(ev, repo_of);
+        let repo = self
+            .repos
+            .get(&ev.session_id)
+            .cloned()
+            .unwrap_or_else(placeholder);
         if is_session_end {
             let keys: Vec<AgentKey> = self
                 .agents
@@ -435,6 +438,16 @@ impl StatusState {
         finished
     }
 
+    /// Distinct repo roots of the sessions seen so far, sorted.
+    pub fn session_roots(&self) -> Vec<String> {
+        let roots: BTreeSet<&str> = self
+            .repos
+            .values()
+            .filter_map(|repo| repo.root.as_deref())
+            .collect();
+        roots.into_iter().map(str::to_owned).collect()
+    }
+
     pub fn agents(&self) -> Vec<AgentStatus> {
         self.agents.values().map(|a| a.status.clone()).collect()
     }
@@ -562,6 +575,15 @@ fn relative_to(target: &str, root: &str) -> Option<String> {
         None
     } else {
         Some(rest.to_owned())
+    }
+}
+
+/// The repo a session has before any cwd is known.
+fn placeholder() -> RepoInfo {
+    RepoInfo {
+        root: None,
+        name: String::new(),
+        branch: None,
     }
 }
 
@@ -1296,5 +1318,88 @@ mod tests {
     fn unknown_key_has_empty_timeline() {
         let st = StatusState::new();
         assert!(st.timeline(&key("x", "")).is_empty());
+    }
+
+    /// Resolves a cwd to a repo whose root is the cwd itself.
+    fn repo_at(cwd: &str) -> RepoInfo {
+        RepoInfo {
+            root: Some(cwd.into()),
+            name: cwd.into(),
+            branch: None,
+        }
+    }
+
+    /// The event with its cwd set, or with no cwd at all.
+    fn in_dir(mut e: HookEvent, cwd: Option<&str>) -> HookEvent {
+        e.cwd = cwd.map(str::to_string);
+        e
+    }
+
+    fn root_of(st: &StatusState, sid: &str) -> Option<String> {
+        st.get(&main_key(sid)).unwrap().repo.root
+    }
+
+    #[test]
+    fn session_repo_follows_session_start_not_later_prompts() {
+        let mut st = StatusState::new();
+        st.apply(
+            &in_dir(ev("SessionStart", "S1", None), Some("/a")),
+            1,
+            &mut repo_at,
+        );
+        st.apply(
+            &in_dir(ev("UserPromptSubmit", "S1", None), Some("/b")),
+            2,
+            &mut repo_at,
+        );
+        assert_eq!(root_of(&st, "S1").as_deref(), Some("/a"));
+    }
+
+    #[test]
+    fn first_event_with_cwd_names_session_without_start() {
+        let mut st = StatusState::new();
+        let bare = tool_ev("PreToolUse", "S1", None, "Read", "t1", None);
+        st.apply(&in_dir(bare, None), 1, &mut repo_at);
+        let with_cwd = tool_ev("PreToolUse", "S1", None, "Read", "t2", None);
+        st.apply(&in_dir(with_cwd, Some("/c")), 2, &mut repo_at);
+        assert_eq!(root_of(&st, "S1").as_deref(), Some("/c"));
+    }
+
+    #[test]
+    fn session_start_with_cwd_always_sets_the_repo() {
+        let mut st = StatusState::new();
+        st.apply(
+            &in_dir(ev("SessionStart", "S1", None), Some("/a")),
+            1,
+            &mut repo_at,
+        );
+        st.apply(
+            &in_dir(ev("SessionStart", "S1", None), Some("/b")),
+            2,
+            &mut repo_at,
+        );
+        assert_eq!(root_of(&st, "S1").as_deref(), Some("/b"));
+    }
+
+    #[test]
+    fn session_roots_lists_distinct_roots() {
+        let mut st = StatusState::new();
+        st.apply(
+            &in_dir(ev("SessionStart", "S1", None), Some("/a")),
+            1,
+            &mut repo_at,
+        );
+        st.apply(
+            &in_dir(ev("SessionStart", "S2", None), Some("/a")),
+            2,
+            &mut repo_at,
+        );
+        st.apply(
+            &in_dir(ev("SessionStart", "S3", None), Some("/b")),
+            3,
+            &mut repo_at,
+        );
+        st.apply(&in_dir(ev("PreToolUse", "S4", None), None), 4, &mut repo_at);
+        assert_eq!(st.session_roots(), vec!["/a".to_string(), "/b".to_string()]);
     }
 }
