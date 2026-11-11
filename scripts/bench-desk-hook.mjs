@@ -1,10 +1,15 @@
 #!/usr/bin/env node
-// Bench rocky-hook desk-hook latency vs the noop baseline.
+// Bench rocky-hook latency vs the noop baseline.
 //
 // Usage:
 //   node scripts/bench-desk-hook.mjs --hook <exe> --noop <exe> --payload <file|write-1mib> --n 1000 [--via-bash]
+//   node scripts/bench-desk-hook.mjs --hook <exe> --noop <exe> --mode shell-env --n 1000 [--via-bash]
 //   node scripts/bench-desk-hook.mjs --make-write-payload <file>
 //   node scripts/bench-desk-hook.mjs --self-test
+//
+// --mode desk-hook (default) runs `desk-hook claude-code` with the payload on stdin.
+// --mode shell-env runs `shell-env` with CLAUDE_CONFIG_DIR as the only one of the five
+// shell variables set and no stdin; --payload does not apply to it.
 //
 // Design: hook and noop calls interleave (pair order alternates each
 // iteration) so machine drift affects both equally. Each call is one
@@ -18,6 +23,10 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 const SPOOL_CLEAR_EVERY = 100;
+// The five variables rocky-hook shell-env reads (SHELL_ENV_VARS in rocky-proto).
+const SHELL_ENV_NAMES = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG", "GEMINI_SETTINGS", "COPILOT_HOME"];
+const SHELL_ENV_BENCH_VALUE = "C:\\bench\\claude-config";
+const NO_INPUT = Buffer.alloc(0);
 
 // Percentile method: nearest-rank. rank = ceil(p/100 * n), 1-based into the
 // ascending-sorted values. Documented here so self-test and bench agree.
@@ -80,31 +89,47 @@ function makeBash4KiBPayloadBytes() {
   );
 }
 
+// What one run executes: argv after the exe, stdin, and the environment.
+// desk-hook keeps the caller's environment. shell-env clears the five shell
+// variables first, so exactly one of them (CLAUDE_CONFIG_DIR) is set on every run.
+function invocationFor(mode, payload) {
+  if (mode === "shell-env") {
+    const env = { ...process.env };
+    for (const name of SHELL_ENV_NAMES) delete env[name];
+    env.CLAUDE_CONFIG_DIR = SHELL_ENV_BENCH_VALUE;
+    return { argv: ["shell-env"], input: NO_INPUT, env };
+  }
+  return { argv: ["desk-hook", "claude-code"], input: payload, env: process.env };
+}
+
 function usage() {
   return [
     "usage:",
     "  bench-desk-hook.mjs --hook <exe> --noop <exe> --payload <file|write-1mib|bash-4kib> --n <n> [--via-bash]",
+    "  bench-desk-hook.mjs --hook <exe> --noop <exe> --mode shell-env --n <n> [--via-bash]",
     "  bench-desk-hook.mjs --make-write-payload <file>",
     "  bench-desk-hook.mjs --self-test",
   ].join("\n");
 }
 
 function parseArgs(argv) {
-  const out = { hook: null, noop: null, payload: null, n: null, viaBash: false, makeWritePayload: null, selfTest: false };
+  const out = { hook: null, noop: null, payload: null, n: null, viaBash: false, makeWritePayload: null, selfTest: false, mode: "desk-hook" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--via-bash") out.viaBash = true;
     else if (a === "--self-test") out.selfTest = true;
-    else if (a === "--hook" || a === "--noop" || a === "--payload" || a === "--n" || a === "--make-write-payload") {
+    else if (a === "--hook" || a === "--noop" || a === "--payload" || a === "--n" || a === "--make-write-payload" || a === "--mode") {
       const v = argv[++i];
       if (v === undefined) throw new Error(`missing value for ${a}`);
       if (a === "--hook") out.hook = v;
       else if (a === "--noop") out.noop = v;
       else if (a === "--payload") out.payload = v;
       else if (a === "--n") out.n = Number(v);
+      else if (a === "--mode") out.mode = v;
       else out.makeWritePayload = v;
     } else throw new Error(`unknown arg: ${a}\n${usage()}`);
   }
+  if (out.mode !== "desk-hook" && out.mode !== "shell-env") throw new Error(`--mode must be desk-hook or shell-env\n${usage()}`);
   return out;
 }
 
@@ -137,7 +162,13 @@ function selfTest() {
   assert.equal((b.tool_input.command.match(/ghp_/g) ?? []).length, 2);
   assert.ok(b.tool_input.command.includes("password="));
   assert.ok(b.tool_input.command.includes("\u001b["));
-  console.log("self-test: OK (percentile=nearest-rank, payloads=Write/1MiB,Bash/4KiB)");
+  // invocations: desk-hook keeps its argv; shell-env runs with no stdin and exactly one of the five names set
+  assert.deepEqual(invocationFor("desk-hook", NO_INPUT).argv, ["desk-hook", "claude-code"]);
+  const se = invocationFor("shell-env", NO_INPUT);
+  assert.deepEqual(se.argv, ["shell-env"]);
+  assert.equal(se.input.length, 0);
+  assert.deepEqual(SHELL_ENV_NAMES.filter((name) => name in se.env), ["CLAUDE_CONFIG_DIR"]);
+  console.log("self-test: OK (percentile=nearest-rank, payloads=Write/1MiB,Bash/4KiB, shell-env=one variable)");
 }
 
 // Locate Git for Windows bash.exe. NEVER WSL's C:\Windows\System32\bash.exe:
@@ -162,31 +193,31 @@ function findGitBash() {
   throw new Error("Git Bash bash.exe not found (and WSL System32 bash is not acceptable); install Git for Windows");
 }
 
-// Run one exe the way Claude Code would: args + stdin payload, ROCKY_HOME set.
-function runOnce(exe, payload, rockyHome, bashExe) {
-  const env = { ...process.env, ROCKY_HOME: rockyHome };
+// Run one exe the way Claude Code would: args + stdin for the invocation, ROCKY_HOME set.
+function runOnce(exe, inv, rockyHome, bashExe) {
+  const env = { ...inv.env, ROCKY_HOME: rockyHome };
   const start = process.hrtime.bigint();
   let r;
   if (bashExe) {
     // Git Bash understands C:/... paths; quote for spaces. No shell: argv direct.
     const posix = exe.replace(/\\/g, "/");
-    r = spawnSync(bashExe, ["-c", `"${posix}" desk-hook claude-code`], { input: payload, env });
+    r = spawnSync(bashExe, ["-c", `"${posix}" ${inv.argv.join(" ")}`], { input: inv.input, env });
   } else {
-    r = spawnSync(exe, ["desk-hook", "claude-code"], { input: payload, env });
+    r = spawnSync(exe, inv.argv, { input: inv.input, env });
   }
   const elapsed = process.hrtime.bigint() - start;
   return { ms: ms(elapsed), status: r.status, error: r.error ? String(r.error) : null };
 }
 
 // First-run on a freshly copied exe so Defender scans a new image.
-function firstRun(exe, payload, bashExe) {
+function firstRun(exe, inv, bashExe) {
   const dir = mkdtempSync(join(tmpdir(), "bench-first-"));
   try {
     const copy = join(dir, `first-${process.pid}-${basename(exe)}`);
     copyFileSync(exe, copy);
     const home = join(dir, "home");
     mkdirSync(join(home, "desk", "spool"), { recursive: true });
-    return runOnce(copy, payload, home, bashExe);
+    return runOnce(copy, inv, home, bashExe);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -203,32 +234,41 @@ function main() {
     console.log(`wrote ${args.makeWritePayload}`);
     return;
   }
-  if (!args.hook || !args.noop || !args.payload || !args.n) throw new Error(`missing required args\n${usage()}`);
+  if (!args.hook || !args.noop || !args.n) throw new Error(`missing required args\n${usage()}`);
+  if (args.mode === "desk-hook" && !args.payload) throw new Error(`--payload is required for --mode desk-hook\n${usage()}`);
+  if (args.mode === "shell-env" && args.payload) throw new Error("--payload does not apply to --mode shell-env");
   if (!Number.isInteger(args.n) || args.n < 1) throw new Error("--n must be a positive integer");
   const hook = resolve(args.hook);
   const noop = resolve(args.noop);
   if (!existsSync(hook)) throw new Error(`hook exe not found: ${hook}`);
   if (!existsSync(noop)) throw new Error(`noop exe not found: ${noop}`);
 
-  let payload;
-  let payloadLabel;
-  if (args.payload === "write-1mib") {
-    payload = makeWritePayloadBytes();
-    payloadLabel = "write-1mib (generated)";
-  } else if (args.payload === "bash-4kib") {
-    payload = makeBash4KiBPayloadBytes();
-    payloadLabel = "bash-4kib (generated)";
-  } else {
-    payload = readFileSync(resolve(args.payload));
-    payloadLabel = args.payload;
+  let payload = NO_INPUT;
+  let payloadLabel = "";
+  if (args.mode === "desk-hook") {
+    if (args.payload === "write-1mib") {
+      payload = makeWritePayloadBytes();
+      payloadLabel = "write-1mib (generated)";
+    } else if (args.payload === "bash-4kib") {
+      payload = makeBash4KiBPayloadBytes();
+      payloadLabel = "bash-4kib (generated)";
+    } else {
+      payload = readFileSync(resolve(args.payload));
+      payloadLabel = args.payload;
+    }
   }
+  const inv = invocationFor(args.mode, payload);
 
   const bashExe = args.viaBash ? findGitBash() : null;
   if (bashExe) console.log(`via-bash: ${bashExe}`);
 
-  const firstHook = firstRun(hook, payload, bashExe);
-  const firstNoop = firstRun(noop, payload, bashExe);
-  console.log(`payload: ${payloadLabel} (${payload.length} bytes); n=${args.n} per exe; interleaved`);
+  const firstHook = firstRun(hook, inv, bashExe);
+  const firstNoop = firstRun(noop, inv, bashExe);
+  const subject =
+    args.mode === "shell-env"
+      ? "mode shell-env (CLAUDE_CONFIG_DIR set, no stdin)"
+      : `payload: ${payloadLabel} (${payload.length} bytes)`;
+  console.log(`${subject}; n=${args.n} per exe; interleaved`);
   console.log(`first-run (freshly-copied exe, Defender scan included): hook=${fmt(firstHook.ms)}ms noop=${fmt(firstNoop.ms)}ms`);
 
   const home = mkdtempSync(join(tmpdir(), "bench-spool-"));
@@ -248,13 +288,13 @@ function main() {
       let q;
       for (const which of order) {
         if (which === "hook") {
-          h = runOnce(hook, payload, home, bashExe);
+          h = runOnce(hook, inv, home, bashExe);
           if (h.status !== 0) {
             hookFail++;
             if (!firstErr) firstErr = `hook status=${h.status} err=${h.error}`;
           }
         } else {
-          q = runOnce(noop, payload, home, bashExe);
+          q = runOnce(noop, inv, home, bashExe);
           if (q.status !== 0) {
             noopFail++;
             if (!firstErr) firstErr = `noop status=${q.status} err=${q.error}`;

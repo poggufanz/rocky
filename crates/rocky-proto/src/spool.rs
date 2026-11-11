@@ -17,7 +17,8 @@ pub const SHELL_ENV_VARS: [(&str, &str); 5] = [
     ("COPILOT_HOME", "copilot-cli"),
 ];
 
-/// Byte cap for one environment value in a shell record.
+/// Byte cap for one environment value a hook records: each value of a shell
+/// record, and the `config_dir` of a desk-hook record.
 pub const ENV_VALUE_CAP: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

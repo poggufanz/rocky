@@ -1,16 +1,29 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rocky_proto::hook::{DropReason, STDIN_CAP};
-use rocky_proto::spool::{SpoolBody, SpoolRecord};
+use rocky_proto::spool::{ENV_VALUE_CAP, SpoolBody, SpoolRecord};
 
 const EDIT_FIXTURE: &[u8] = include_bytes!("fixtures/edit.json");
 
 fn run(args: &[&str], stdin: &[u8], home: &Path) -> (i32, Vec<u8>, Vec<u8>) {
+    run_with_env(args, stdin, &[], home)
+}
+
+/// Runs the hook with a cleared environment: only `env` and `ROCKY_HOME` are set.
+fn run_with_env(
+    args: &[&str],
+    stdin: &[u8],
+    env: &[(&str, &str)],
+    home: &Path,
+) -> (i32, Vec<u8>, Vec<u8>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocky-hook"))
         .args(args)
+        .env_clear()
+        .envs(env.iter().copied())
         .env("ROCKY_HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -220,4 +233,196 @@ fn multibyte_command_crossing_the_scan_cut_stays_well_formed() {
     let event = event(read_record(&files[0]));
     assert!(event.command.as_deref().unwrap().chars().count() <= 200);
     assert!(event.truncated);
+}
+
+fn shell_env_map(rec: SpoolRecord) -> BTreeMap<String, String> {
+    match rec.body {
+        SpoolBody::ShellEnv { env } => env,
+        other => panic!("expected a shell_env record, got {other:?}"),
+    }
+}
+
+#[test]
+fn shell_env_writes_one_record_with_only_the_five_names() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_with_env(
+        &["shell-env"],
+        b"",
+        &[
+            ("CLAUDE_CONFIG_DIR", "/a"),
+            ("CODEX_HOME", "/b"),
+            ("PATH", "/usr/bin"),
+            ("SECRET_TOKEN", "x"),
+        ],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let rec = read_record(&files[0]);
+    assert_eq!(rec.v, 1);
+    assert_eq!(rec.harness, "shell");
+    assert_eq!(
+        shell_env_map(rec),
+        BTreeMap::from([
+            ("CLAUDE_CONFIG_DIR".to_owned(), "/a".to_owned()),
+            ("CODEX_HOME".to_owned(), "/b".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn shell_env_without_known_vars_writes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_with_env(
+        &["shell-env"],
+        b"",
+        &[("PATH", "/usr/bin"), ("SECRET_TOKEN", "x")],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    assert!(spool_files(home.path()).is_empty());
+}
+
+#[test]
+fn shell_env_drops_oversized_values() {
+    let home = tempfile::tempdir().unwrap();
+    let oversized = "x".repeat(ENV_VALUE_CAP + 1);
+    let (code, out, err) = run_with_env(
+        &["shell-env"],
+        b"",
+        &[("CODEX_HOME", oversized.as_str()), ("COPILOT_HOME", "/c")],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        shell_env_map(read_record(&files[0])),
+        BTreeMap::from([("COPILOT_HOME".to_owned(), "/c".to_owned())])
+    );
+
+    let only_oversized = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_with_env(
+        &["shell-env"],
+        b"",
+        &[("CODEX_HOME", oversized.as_str())],
+        only_oversized.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    assert!(spool_files(only_oversized.path()).is_empty());
+}
+
+#[test]
+fn shell_env_keeps_a_value_of_exactly_the_cap() {
+    let home = tempfile::tempdir().unwrap();
+    let at_cap = "y".repeat(ENV_VALUE_CAP);
+    let (code, out, err) = run_with_env(
+        &["shell-env"],
+        b"",
+        &[("OPENCODE_CONFIG", at_cap.as_str())],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        shell_env_map(read_record(&files[0])).get("OPENCODE_CONFIG"),
+        Some(&at_cap)
+    );
+}
+
+#[test]
+fn shell_env_drops_empty_values() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_with_env(
+        &["shell-env"],
+        b"",
+        &[("CLAUDE_CONFIG_DIR", "")],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    assert!(spool_files(home.path()).is_empty());
+}
+
+#[test]
+fn shell_env_with_extra_argv_writes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_with_env(
+        &["shell-env", "extra"],
+        b"",
+        &[("CLAUDE_CONFIG_DIR", "/a")],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    assert!(spool_files(home.path()).is_empty());
+}
+
+#[test]
+fn desk_hook_records_claude_config_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_with_env(
+        &["desk-hook", "claude-code"],
+        EDIT_FIXTURE,
+        &[("CLAUDE_CONFIG_DIR", "/p")],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    assert_eq!(read_record(&files[0]).config_dir.as_deref(), Some("/p"));
+}
+
+#[test]
+fn desk_hook_omits_config_dir_without_the_variable() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run(&["desk-hook", "claude-code"], EDIT_FIXTURE, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let text = String::from_utf8(fs::read(&files[0]).unwrap()).unwrap();
+    assert!(!text.contains("config_dir"), "{text}");
+}
+
+#[test]
+fn desk_hook_ignores_claude_config_dir_for_other_harnesses() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_with_env(
+        &["desk-hook", "codex"],
+        EDIT_FIXTURE,
+        &[("CLAUDE_CONFIG_DIR", "/p")],
+        home.path(),
+    );
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    assert_eq!(read_record(&files[0]).config_dir, None);
+}
+
+#[test]
+fn desk_hook_config_dir_follows_the_value_cap() {
+    let at_cap = "p".repeat(ENV_VALUE_CAP);
+    let over_cap = "p".repeat(ENV_VALUE_CAP + 1);
+    for (value, kept) in [
+        (at_cap.as_str(), true),
+        (over_cap.as_str(), false),
+        ("", false),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let (code, out, err) = run_with_env(
+            &["desk-hook", "claude-code"],
+            EDIT_FIXTURE,
+            &[("CLAUDE_CONFIG_DIR", value)],
+            home.path(),
+        );
+        assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+        let files = spool_files(home.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            read_record(&files[0]).config_dir.is_some(),
+            kept,
+            "CLAUDE_CONFIG_DIR of {} bytes",
+            value.len()
+        );
+    }
 }
