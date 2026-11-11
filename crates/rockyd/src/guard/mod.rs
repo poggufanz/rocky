@@ -423,7 +423,8 @@ impl Guard {
         }
     }
 
-    /// One target's health row. A stored entry at a missing path shows as `Missing`.
+    /// One target's health row. A stored Ok or Written entry at a missing path shows as `Missing`.
+    /// At a missing path the kept repair error comes before the stored detail.
     fn target_health(&self, target: &SetupTarget, now_ms: u64) -> TargetHealth {
         let path = Path::new(&target.path);
         let missing = self.missing_since.contains_key(path);
@@ -431,12 +432,18 @@ impl Guard {
             TargetState::Ok | TargetState::Written if missing => TargetState::Missing,
             other => other,
         };
-        let error = match state {
-            TargetState::Foreign | TargetState::Refused | TargetState::Error => {
-                target.detail.clone()
+        let error = if missing {
+            self.errors
+                .get(path)
+                .cloned()
+                .or_else(|| target.detail.clone())
+        } else {
+            match state {
+                TargetState::Foreign | TargetState::Refused | TargetState::Error => {
+                    target.detail.clone()
+                }
+                _ => None,
             }
-            _ if missing => self.errors.get(path).cloned(),
-            _ => None,
         };
         TargetHealth {
             harness: target.harness.clone(),
@@ -872,5 +879,60 @@ mod tests {
             health.targets[0].error.as_deref(),
             Some("still missing after setup ran")
         );
+    }
+
+    #[test]
+    fn stored_error_target_without_detail_reports_still_missing() {
+        let mut guard = Guard::new(GuardConsts::default(), 0);
+        guard.observe(approved(&[CFG]), 0);
+        assert_eq!(guard.next_job(0), Some(Job::Apply));
+        let unwritable = vec![target("desk-hooks", CFG, TargetState::Error, None)];
+        guard.finish(&Job::Apply, applied(unwritable), 10);
+        guard.observe(approved(&[CFG]), 11);
+        let health = guard.health(11);
+        assert_eq!(health.targets.len(), 1);
+        assert_eq!(health.targets[0].path, CFG);
+        assert_eq!(
+            health.targets[0].error.as_deref(),
+            Some("still missing after setup ran")
+        );
+    }
+
+    #[test]
+    fn later_timeout_error_wins_over_older_stored_detail() {
+        let mut guard = Guard::new(GuardConsts::default(), 0);
+        guard.observe(approved(&[CFG]), 0);
+        assert_eq!(guard.next_job(0), Some(Job::Apply));
+        let stale = vec![target(
+            "desk-hooks",
+            CFG,
+            TargetState::Error,
+            Some("old detail"),
+        )];
+        guard.finish(&Job::Apply, applied(stale), 10);
+        guard.observe(approved(&[CFG]), 11);
+        assert_eq!(guard.next_job(11), None);
+        assert_eq!(guard.next_job(60_010), Some(Job::Apply));
+        guard.finish(&Job::Apply, Err(RunError::Timeout), 60_011);
+        guard.observe(approved(&[CFG]), 60_012);
+        let health = guard.health(60_012);
+        let timeout = RunError::Timeout.to_string();
+        assert_eq!(health.targets[0].error.as_deref(), Some(timeout.as_str()));
+    }
+
+    #[test]
+    fn repaired_path_drops_its_kept_error() {
+        let mut guard = Guard::new(GuardConsts::default(), 0);
+        guard.observe(approved(&[CFG]), 0);
+        assert_eq!(guard.next_job(0), Some(Job::Apply));
+        let hooks = vec![target("desk-hooks", CFG, TargetState::Ok, None)];
+        guard.finish(&Job::Apply, applied(hooks), 10);
+        guard.observe(approved(&[CFG]), 11);
+        assert_eq!(guard.next_job(60_010), Some(Job::Apply));
+        guard.finish(&Job::Apply, Err(RunError::Timeout), 60_011);
+        guard.observe(approved(&[]), 60_012);
+        assert_eq!(guard.health(60_012).targets[0].error, None);
+        guard.observe(approved(&[CFG]), 60_013);
+        assert_eq!(guard.health(60_013).targets[0].error, None);
     }
 }
