@@ -23,6 +23,9 @@ use self::records::{CliRecord, ConsentView};
 /// The target kind that carries Rocky's desk hook entries.
 const DESK_HOOKS_KIND: &str = "desk-hooks";
 
+/// Error text for a path an apply reported as set up that is still missing afterwards.
+const STILL_MISSING: &str = "still missing after setup ran";
+
 /// Tunables for [`Guard`]. The daemon uses `Default`; tests override fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuardConsts {
@@ -238,10 +241,7 @@ impl Guard {
     pub fn health(&self, now_ms: u64) -> SetupHealth {
         let approved = self.observed.consent.state == ConsentState::Approved;
         let targets = if approved {
-            self.targets
-                .iter()
-                .map(|target| self.target_health(target, now_ms))
-                .collect()
+            self.health_targets(now_ms)
         } else {
             Vec::new()
         };
@@ -270,9 +270,11 @@ impl Guard {
         matches!(&self.applied_under, Some(under) if *under != self.observed.cli)
     }
 
+    /// A missing path that an apply attempted, and no observation has judged yet, does not count.
     fn missing_repairable(&self, now_ms: u64) -> bool {
         self.missing_since
             .keys()
+            .filter(|path| !self.pending.contains_key(*path))
             .any(|path| self.brake.may_repair(path, now_ms))
     }
 
@@ -282,6 +284,9 @@ impl Guard {
         for (path, finish_ms) in std::mem::take(&mut self.pending) {
             if missing.contains(&path) {
                 self.brake.failed(&path, finish_ms);
+                self.errors
+                    .entry(path)
+                    .or_insert_with(|| STILL_MISSING.to_string());
             } else {
                 self.brake.repaired(&path, finish_ms);
                 effects.extend(self.restored_gap(&path, finish_ms).map(Effect::Gap));
@@ -383,6 +388,39 @@ impl Guard {
             .iter()
             .find(|target| Path::new(&target.path) == path)
             .and_then(|target| target.detail.clone())
+    }
+
+    /// Stored targets first, then one row for each missing path that no stored target names.
+    fn health_targets(&self, now_ms: u64) -> Vec<TargetHealth> {
+        let stored = self
+            .targets
+            .iter()
+            .map(|target| self.target_health(target, now_ms));
+        let unnamed = self
+            .missing_since
+            .keys()
+            .filter(|path| !self.has_target(path.as_path()))
+            .map(|path| self.missing_row(path, now_ms));
+        stored.chain(unnamed).collect()
+    }
+
+    fn has_target(&self, path: &Path) -> bool {
+        self.targets
+            .iter()
+            .any(|target| Path::new(&target.path) == path)
+    }
+
+    /// A row for a missing path that no stored target names, such as one whose apply failed.
+    fn missing_row(&self, path: &Path, now_ms: u64) -> TargetHealth {
+        TargetHealth {
+            harness: String::new(),
+            kind: String::new(),
+            path: path.to_string_lossy().into_owned(),
+            state: TargetState::Missing,
+            last_repair_ms: self.brake.last_repair(path),
+            fights_10m: self.brake.fights(path, now_ms),
+            error: self.errors.get(path).cloned(),
+        }
     }
 
     /// One target's health row. A stored entry at a missing path shows as `Missing`.
@@ -502,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn no_apply_without_approved_consent() {
+    fn no_apply_or_config_dir_without_approved_consent() {
         for state in [
             ConsentState::None,
             ConsentState::Later,
@@ -773,5 +811,66 @@ mod tests {
         };
         assert_eq!(decide(true), vec!["repo", "allow", "/r"]);
         assert_eq!(decide(false), vec!["repo", "decline", "/r"]);
+    }
+
+    #[test]
+    fn ok_apply_is_not_repeated_before_observation() {
+        let mut guard = Guard::new(GuardConsts::default(), 0);
+        guard.observe(approved(&[CFG]), 0);
+        assert_eq!(guard.next_job(0), Some(Job::Apply));
+        let unwritable = vec![target("desk-hooks", CFG, TargetState::Error, None)];
+        guard.finish(&Job::Apply, applied(unwritable), 10);
+        assert_eq!(guard.next_job(11), None);
+        guard.observe(approved(&[CFG]), 11);
+        assert_eq!(guard.next_job(60_009), None);
+        assert_eq!(guard.next_job(60_010), Some(Job::Apply));
+    }
+
+    #[test]
+    fn first_failed_apply_names_path_and_error() {
+        let mut guard = Guard::new(GuardConsts::default(), 0);
+        guard.observe(approved(&[CFG]), 0);
+        assert_eq!(guard.next_job(0), Some(Job::Apply));
+        guard.finish(&Job::Apply, Err(RunError::Timeout), 10);
+        guard.observe(approved(&[CFG]), 11);
+        let health = guard.health(11);
+        assert_eq!(health.targets.len(), 1);
+        assert_eq!(health.targets[0].path, CFG);
+        assert_eq!(health.targets[0].state, TargetState::Missing);
+        let timeout = RunError::Timeout.to_string();
+        assert_eq!(health.targets[0].error.as_deref(), Some(timeout.as_str()));
+    }
+
+    #[test]
+    fn ok_apply_without_detail_reports_still_missing() {
+        let mut guard = Guard::new(GuardConsts::default(), 0);
+        guard.observe(approved(&[CFG]), 0);
+        assert_eq!(guard.next_job(0), Some(Job::Apply));
+        guard.finish(&Job::Apply, applied(Vec::new()), 10);
+        guard.observe(approved(&[CFG]), 11);
+        let health = guard.health(11);
+        assert_eq!(health.targets.len(), 1);
+        assert_eq!(health.targets[0].path, CFG);
+        assert_eq!(health.targets[0].state, TargetState::Missing);
+        assert_eq!(
+            health.targets[0].error.as_deref(),
+            Some("still missing after setup ran")
+        );
+    }
+
+    #[test]
+    fn ok_target_without_detail_reports_still_missing() {
+        let mut guard = Guard::new(GuardConsts::default(), 0);
+        guard.observe(approved(&[CFG]), 0);
+        assert_eq!(guard.next_job(0), Some(Job::Apply));
+        let hooks = vec![target("desk-hooks", CFG, TargetState::Ok, None)];
+        guard.finish(&Job::Apply, applied(hooks), 10);
+        guard.observe(approved(&[CFG]), 11);
+        let health = guard.health(11);
+        assert_eq!(health.targets.len(), 1);
+        assert_eq!(
+            health.targets[0].error.as_deref(),
+            Some("still missing after setup ran")
+        );
     }
 }
