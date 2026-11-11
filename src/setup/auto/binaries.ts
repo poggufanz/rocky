@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { PACKAGE_NAME } from "../../core/package-info.js";
 import { atomicWriteJson } from "../json-config.js";
 import { binDir } from "./state.js";
 
@@ -25,8 +26,8 @@ export function binaryFileName(name: BinaryName, platform: NodeJS.Platform): str
 
 export function platformPackageName(platform: NodeJS.Platform, arch: string): string | undefined {
   if (arch !== "x64") return undefined;
-  if (platform === "win32") return "@poggufanz/rocky-cli-win32-x64";
-  if (platform === "linux") return "@poggufanz/rocky-cli-linux-x64";
+  if (platform === "win32") return `${PACKAGE_NAME}-win32-x64`;
+  if (platform === "linux") return `${PACKAGE_NAME}-linux-x64`;
   return undefined;
 }
 
