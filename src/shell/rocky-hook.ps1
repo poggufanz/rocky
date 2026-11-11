@@ -32,12 +32,15 @@ $global:__rockyHookLoaded = $true
 
 # Report the config dirs to the desktop app once per session, here at load only
 # (never from prompt). The hook binary is optional: a missing or failing one is
-# ignored, silently. Process.Start rather than `&`, so $LASTEXITCODE is untouched.
-# The child's stdio goes to pipes nothing reads: the hook writes nothing by
-# design, and ProcessStartInfo cannot target the NUL device that Start-Process
-# uses below. $? is captured first and restored last.
-$__rockyShellEnvStatus = $?
+# ignored. Process.Start rather than `&`, so $LASTEXITCODE is untouched. The
+# child inherits this session's standard handles; shell-env reads none of them,
+# and nothing here waits on it.
 $__rockyShellEnvErrors = $Error.Count
+$__rockyShellEnvHome = $null
+$__rockyShellEnvExe = $null
+$__rockyShellEnvBin = $null
+$__rockyShellEnvInfo = $null
+$__rockyShellEnvProc = $null
 try {
     $__rockyShellEnvHome = if ($env:ROCKY_HOME) { $env:ROCKY_HOME } else { Join-Path $HOME '.rocky' -ErrorAction Stop }
     $__rockyShellEnvExe = if ($env:OS -eq 'Windows_NT') { 'rocky-hook.exe' } else { 'rocky-hook' }
@@ -48,25 +51,16 @@ try {
         $__rockyShellEnvInfo.Arguments = 'shell-env'
         $__rockyShellEnvInfo.UseShellExecute = $false
         $__rockyShellEnvInfo.CreateNoWindow = $true
-        $__rockyShellEnvInfo.RedirectStandardInput = $true
-        $__rockyShellEnvInfo.RedirectStandardOutput = $true
-        $__rockyShellEnvInfo.RedirectStandardError = $true
         $__rockyShellEnvProc = [System.Diagnostics.Process]::Start($__rockyShellEnvInfo)
-        if ($__rockyShellEnvProc) {
-            $__rockyShellEnvProc.StandardInput.Close()
-            $__rockyShellEnvProc.Dispose()
-        }
+        if ($__rockyShellEnvProc) { $__rockyShellEnvProc.Dispose() }
     }
 } catch {
     # A missing or failing hook is ignored. Drop the entries this block added to $Error.
     while ($Error.Count -gt $__rockyShellEnvErrors) { $Error.RemoveAt(0) }
 }
-# Restore $? last. The assignment leaves it True. A False start cannot be
-# re-created without the disclosed suppressed error (see the bottom of this file).
-$null = $__rockyShellEnvStatus
-if (-not $__rockyShellEnvStatus) {
-    Write-Error 'rocky-hook internal $? restore (harmless) -- see: rocky hook status' -ErrorAction SilentlyContinue 2>$null
-}
+# The temporaries are removed last. Each was assigned above, so every name exists
+# here, and -ErrorAction Ignore keeps the removal from adding to the error list.
+Remove-Variable -Name __rockyShellEnvErrors, __rockyShellEnvHome, __rockyShellEnvExe, __rockyShellEnvBin, __rockyShellEnvInfo, __rockyShellEnvProc -ErrorAction Ignore
 
 # Every hook-speech file name this
 # session's own __rockySpawnDetached has ever handed to a child, so

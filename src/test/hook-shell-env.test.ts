@@ -11,16 +11,19 @@ import {
   bashAvailable,
   disposeSharedFakeHook,
   installFakeHook,
+  reapShellEnvChildren,
   readShellEnvRecords,
   removeTreeWithRetry,
   toBashPath,
+  waitForShellEnvRecord,
   writeShellEnvScript,
 } from "./shell-env-fixture.js";
 
 // The shell hooks start `rocky-hook shell-env` once, at load. These tests drive
 // the staged shell assets (.test-dist/shell, see shell-assets-fixture.ts) in an
 // interactive bash started with --norc and --noprofile, so the developer's own
-// profile never runs. The detached start is observed through the fake hook.
+// profile never runs. The detached start is observed through the fake hook, and
+// that process is reaped before any record count is asserted.
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const stagedShell = join(packageRoot, ".test-dist", "shell");
@@ -59,10 +62,16 @@ function makeShellHome(t: TestContext, withHook: boolean): ShellHome {
 }
 
 function runInteractiveBash(shellHome: ShellHome, script: string, configDir?: string): SpawnSyncReturns<string> {
+  // Git Bash rewrites POSIX-looking environment values (such as /cfg) for native
+  // children. CLAUDE_CONFIG_DIR is excluded from that rewrite so the hook sees the
+  // value exactly as the test set it; other MSYS exclusions are kept.
+  const msysExclusions = [process.env.MSYS2_ENV_CONV_EXCL, "CLAUDE_CONFIG_DIR"].filter(Boolean).join(";");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: toBashPath(shellHome.userHome),
+    USERPROFILE: shellHome.userHome,
     ROCKY_HOME: toBashPath(shellHome.home),
+    MSYS2_ENV_CONV_EXCL: msysExclusions,
   };
   delete env.BASH_ENV;
   delete env.PROMPT_COMMAND;
@@ -84,10 +93,13 @@ test("bash hook reports config env once at load", { skip: bashOk ? false : bashS
   const run = runInteractiveBash(shellHome, script, "/cfg");
   assert.equal(run.error, undefined, `bash must start: ${run.error?.message}`);
   assert.equal(run.status, 0, `the session must exit cleanly; stderr: ${run.stderr}`);
-  const records = await readShellEnvRecords(shellHome.log);
+  assert.equal(await waitForShellEnvRecord(shellHome.log), true, "the load must start the hook; no record appeared before the guard");
+  const exitedOnItsOwn = await reapShellEnvChildren(readShellEnvRecords(shellHome.log));
+  const records = readShellEnvRecords(shellHome.log);
   assert.equal(records.length, 1, `the load must start the hook exactly once; got: ${JSON.stringify(records)}`);
   assert.equal(records[0]?.configDir, "/cfg", "the hook must inherit CLAUDE_CONFIG_DIR from its shell");
   assert.equal(basename(records[0]?.argv[0] ?? ""), "shell-env", "node must have run the shell-env argument");
+  assert.equal(exitedOnItsOwn, true, "the hook must exit on its own after its one write");
 });
 
 test("bash hook load keeps status and prints nothing", { skip: bashOk ? false : bashSkip }, async (t) => {
@@ -96,15 +108,19 @@ test("bash hook load keeps status and prints nothing", { skip: bashOk ? false : 
   const shellHome = makeShellHome(t, false);
   const script = `. "${toBashPath(shellHome.hook)}"\necho "rc=$?"\nexit\n`;
   const withoutHook = runInteractiveBash(shellHome, script);
+  assert.equal(withoutHook.error, undefined, `bash must start without the hook: ${withoutHook.error?.message}`);
+  assert.equal(readShellEnvRecords(shellHome.log).length, 0, "with no hook binary the load starts nothing");
   installFakeHook(shellHome.home);
   const withHook = runInteractiveBash(shellHome, script);
-  assert.equal(withoutHook.error, undefined, `bash must start without the hook: ${withoutHook.error?.message}`);
   assert.equal(withHook.error, undefined, `bash must start with the hook: ${withHook.error?.message}`);
   assert.match(withHook.stdout, /^rc=\d+$/m, "the load must leave a status line behind");
   assert.equal(withHook.stdout, withoutHook.stdout, "a present hook must not change stdout");
   assert.equal(withHook.stderr, withoutHook.stderr, "a present hook must not change stderr");
-  const records = await readShellEnvRecords(shellHome.log);
-  assert.equal(records.length, 1, "the fake hook must have started, or this comparison proves nothing");
+  assert.equal(await waitForShellEnvRecord(shellHome.log), true, "the fake hook must have started, or this comparison proves nothing");
+  const exitedOnItsOwn = await reapShellEnvChildren(readShellEnvRecords(shellHome.log));
+  const records = readShellEnvRecords(shellHome.log);
+  assert.equal(records.length, 1, `the present hook must start exactly once; got: ${JSON.stringify(records)}`);
+  assert.equal(exitedOnItsOwn, true, "the hook must exit on its own after its one write");
 });
 
 test("shell hook protocol version is 0.6.0", () => {
