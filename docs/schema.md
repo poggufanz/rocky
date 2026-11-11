@@ -482,9 +482,12 @@ main agent), `agent_type?`, `status` (`idle` | `working` | `needs_you` |
 `done` | `failed` | `ended`), `action?` (`tool_name`, `target_path?`,
 `tool_use_id?`, `command?`), `summary?`, `description?`, `failures`,
 `last_event_ms`, `quiet_10m`, and `repo` (`root?`, `name`, `branch?`). `repo`
-is the repo of the session's `SessionStart` event. A later event sets it only
-while the session has no repo yet, so a prompt from another directory does not
-move the session.
+is the repo of the session's start. A `SessionStart` event that carries a
+`cwd` always sets it, so a session resumed or cleared in another directory
+moves. Any other event sets it only while the session has no repo yet or holds
+the placeholder a session has before any `cwd` is known, and an event without
+a `cwd` leaves the placeholder. A prompt from another directory does not move
+the session.
 
 `description` is the task text from the main agent's one unpaired `Agent` or
 `Task` tool call, attached to the child that starts next. It stays absent
@@ -530,9 +533,12 @@ agent config. A repair or a client request runs the Node CLI named by
 `<ROCKY_HOME>/bin/cli.json` (`rocky setup --auto`), one job at a time. Without a
 `consent.json` in state `approved`, the daemon starts no repair and no
 config-directory run; `setup` and `repo_decision` requests still run, because
-Node enforces consent itself.
+Node enforces consent itself. One more run is not gated on consent: once
+`cli.json` points at a `node` and an `entry` that exist, the daemon runs
+`repo status <root>` once per daemon run for each repo root a session started
+in, to read that repo's capture decision. That run writes nothing.
 
-`health.setup` is `{consent_state, cli_found, cli_missing?, version_mismatch,
+`health.setup` is `{consent_state, cli_found, cli_missing, version_mismatch,
 targets[]}`. A frame without `setup` reads as the default: no consent, no CLI,
 no targets.
 
@@ -540,12 +546,15 @@ no targets.
   `removed`, or `invalid` (unreadable, another version, or a state Node never
   writes).
 - `cli_found` is true when both the `node` and `entry` paths of `cli.json` are
-  regular files. When one is not, `cli_missing` names the first such path. With
-  no `cli.json`, `cli_found` is false and `cli_missing` is absent.
+  regular files. When one is not, `cli_missing` names the first such path.
+  Otherwise `cli_missing` is `null`, which includes the case of no `cli.json`
+  (`cli_found` is then false).
 - `version_mismatch` is true when the `version` in `cli.json` differs from the
-  one in `binaries.json`.
+  one in `binaries.json`. It is false when either file is missing or
+  unreadable.
 - `targets` is empty unless `consent_state` is `approved`. A target is
-  `{harness, kind, path, state, last_repair_ms?, fights_10m, error?}`.
+  `{harness, kind, path, state, last_repair_ms, fights_10m, error}`; unset
+  `last_repair_ms` and `error` are `null`.
   `harness` is a harness id or `shell`; `kind` is `agent-hooks`, `desk-hooks`,
   `mcp`, or `shell-hook`. A path that is missing but belongs to no stored
   target appears with empty `harness` and `kind`.
@@ -570,8 +579,8 @@ no targets.
 | `not_consented` | No approved consent covers the target. |
 | `error` | The run failed for this target. |
 
-Client `setup` is `{"type":"setup","id":7,"action":{"name":"plan"}}`. `action`
-is tagged by `name`:
+Client `setup` is `{"v":3,"type":"setup","id":7,"action":{"name":"plan"}}`.
+`action` is tagged by `name`:
 
 | `name` | Extra field | Node command |
 |---|---|---|
@@ -585,13 +594,14 @@ is tagged by `name`:
 
 `plan` is answered with `consent_plan`, `{id, consent, targets[]}`: `consent`
 is a consent state, and each target is `{harness, kind, path, state,
-detail?}` with a `state` from the table above. Every other action is answered
-with `ack`; a failed run gives `ok: false` with an `error` that names the
-cause, such as a missing CLI record, a Node run that timed out, or `daemon
-stopping`. A `setup` request for an unknown harness id is refused without a
-Node run.
+detail?}` with a `state` from the table above; `detail` is absent when Node
+gave none. Every other action is answered with `ack`. A failed run of any
+action, `plan` included, is answered with `ack` and `ok: false`, and an
+`error` that names the cause, such as a missing CLI record, a Node run that
+timed out, or `daemon stopping`. A `setup` request for an unknown harness id
+is refused without a Node run.
 
-Client `repo_decision` is `{"type":"repo_decision","id":8,"root":"<repo
+Client `repo_decision` is `{"v":3,"type":"repo_decision","id":8,"root":"<repo
 root>","allow":true}`. Node records the capture decision for that repo
 (`allow` true grants it, false records a decline), and the daemon answers with
 `ack`.
