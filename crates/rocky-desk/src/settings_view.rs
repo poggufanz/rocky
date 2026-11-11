@@ -179,6 +179,7 @@ mod tests {
             aggregate: Status::Idle,
             health: Health::default(),
             settings,
+            repo_pending: Vec::new(),
         }
     }
 

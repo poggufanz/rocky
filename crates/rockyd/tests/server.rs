@@ -141,6 +141,7 @@ fn snapshot_msg() -> ServerMsg {
         aggregate: Status::Idle,
         health: Health::default(),
         settings: Settings::default(),
+        repo_pending: Vec::new(),
     }
 }
 

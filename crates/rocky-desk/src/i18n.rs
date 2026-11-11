@@ -176,6 +176,12 @@ fn samples() -> Vec<Msg> {
             to: "14:02".into(),
             reason: GapReason::BadFile,
         },
+        Msg::Gap {
+            count: 0,
+            from: "14:00".into(),
+            to: "14:02".into(),
+            reason: GapReason::HooksRestored,
+        },
         Msg::EarlierGaps { n: 2 },
         Msg::SubagentsStillWorking { n: 2 },
         Msg::SubagentsHidden { n: 3, working: 1 },
@@ -631,7 +637,8 @@ fn plural<'a>(n: u64, one: &'a str, many: &'a str) -> &'a str {
 }
 
 /// Missed-events line for a gap: one event is singular, and an empty range
-/// reads "at" instead of "between".
+/// reads "at" instead of "between". A hooks-restored gap says only that events
+/// before its end time may be missing.
 fn gap_en(count: u64, from: &str, to: &str, reason: GapReason) -> String {
     let events = if count == 1 { "event" } else { "events" };
     let reason = match reason {
@@ -639,6 +646,9 @@ fn gap_en(count: u64, from: &str, to: &str, reason: GapReason) -> String {
         GapReason::HistoryFull => "history full",
         GapReason::HookDropped => "hook dropped",
         GapReason::BadFile => "bad file",
+        GapReason::HooksRestored => {
+            return format!("Events before {to} may be missing: Rocky hooks were restored then.");
+        }
     };
     if from == to {
         format!("Missed {count} {events} at {from} ({reason})")
@@ -654,6 +664,11 @@ fn gap_id(count: u64, from: &str, to: &str, reason: GapReason) -> String {
         GapReason::HistoryFull => "riwayat penuh",
         GapReason::HookDropped => "hook terlewat",
         GapReason::BadFile => "berkas rusak",
+        GapReason::HooksRestored => {
+            return format!(
+                "Event sebelum {to} mungkin hilang: hook Rocky baru dipasang ulang saat itu."
+            );
+        }
     };
     if from == to {
         format!("Kehilangan {count} peristiwa di {from} ({reason})")
@@ -754,5 +769,23 @@ mod tests {
     fn translations_follow_the_ui_language() {
         assert_eq!(tr(UiLang::En, &Msg::MenuQuit), "Quit");
         assert_eq!(tr(UiLang::Id, &Msg::MenuQuit), "Keluar");
+    }
+
+    #[test]
+    fn hooks_restored_gap_ends_at_the_restore_time() {
+        let gap = Msg::Gap {
+            count: 0,
+            from: "14:00".into(),
+            to: "14:02".into(),
+            reason: GapReason::HooksRestored,
+        };
+        assert_eq!(
+            en(&gap),
+            "Events before 14:02 may be missing: Rocky hooks were restored then."
+        );
+        assert_eq!(
+            id(&gap),
+            "Event sebelum 14:02 mungkin hilang: hook Rocky baru dipasang ulang saat itu."
+        );
     }
 }

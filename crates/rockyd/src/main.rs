@@ -85,6 +85,7 @@ fn snapshot_of(s: &Shared) -> ServerMsg {
         aggregate: s.state.aggregate(),
         health: s.health.clone(),
         settings: s.settings.clone(),
+        repo_pending: Vec::new(),
     }
 }
 

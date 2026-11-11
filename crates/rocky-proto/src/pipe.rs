@@ -8,6 +8,8 @@ use crate::settings::Settings;
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const LINE_CAP: usize = 64 * 1024;
 pub const CLIENT_QUEUE_CAP: usize = 1024;
+/// Limit for [`TargetHealth::fights_10m`].
+pub const FIGHT_LIMIT: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +66,7 @@ pub enum GapReason {
     HistoryFull,
     HookDropped,
     BadFile,
+    HooksRestored,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +124,97 @@ pub struct Health {
     pub gaps: Vec<Gap>,
     #[serde(default)]
     pub settings_unreadable: bool,
+    #[serde(default)]
+    pub setup: SetupHealth,
+}
+
+/// Where one setup target stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetState {
+    Ok,
+    Missing,
+    Stale,
+    Written,
+    Changed,
+    Foreign,
+    Refused,
+    NotConsented,
+    Error,
+}
+
+/// The owner's consent for setup writes. `None` means no answer yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentState {
+    #[default]
+    None,
+    Approved,
+    Later,
+    Removed,
+    Invalid,
+}
+
+/// One config entry that a setup plan covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupTarget {
+    pub harness: String,
+    pub kind: String,
+    pub path: String,
+    pub state: TargetState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// The daemon's last view of one setup target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetHealth {
+    pub harness: String,
+    pub kind: String,
+    pub path: String,
+    pub state: TargetState,
+    #[serde(default)]
+    pub last_repair_ms: Option<u64>,
+    #[serde(default)]
+    pub fights_10m: u32,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Setup-guard status carried in [`Health`]. A frame without a `setup` key decodes to the default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupHealth {
+    #[serde(default)]
+    pub consent_state: ConsentState,
+    #[serde(default)]
+    pub cli_found: bool,
+    #[serde(default)]
+    pub cli_missing: Option<String>,
+    #[serde(default)]
+    pub version_mismatch: bool,
+    #[serde(default)]
+    pub targets: Vec<TargetHealth>,
+}
+
+/// A repo that is waiting for the owner's capture decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRepo {
+    pub key: String,
+    pub main: String,
+    pub name: String,
+}
+
+/// What a `setup` request asks the daemon to do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "name", rename_all = "snake_case")]
+pub enum SetupAction {
+    Plan,
+    Apply,
+    Remove,
+    ConsentApprove,
+    ConsentLater,
+    HarnessOn { harness: String },
+    HarnessOff { harness: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -159,6 +253,15 @@ pub enum ClientMsg {
         id: u64,
         key: AgentKey,
     },
+    Setup {
+        id: u64,
+        action: SetupAction,
+    },
+    RepoDecision {
+        id: u64,
+        root: String,
+        allow: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,6 +279,8 @@ pub enum ServerMsg {
         aggregate: Status,
         health: Health,
         settings: Settings,
+        #[serde(default)]
+        repo_pending: Vec<PendingRepo>,
     },
     Status {
         op: StatusOp,
@@ -198,6 +303,14 @@ pub enum ServerMsg {
         id: u64,
         ok: bool,
         error: Option<String>,
+    },
+    ConsentPlan {
+        id: u64,
+        consent: ConsentState,
+        targets: Vec<SetupTarget>,
+    },
+    RepoPending {
+        repos: Vec<PendingRepo>,
     },
 }
 
@@ -248,8 +361,9 @@ mod tests {
     use serde_json::json;
 
     use crate::pipe::{
-        AgentKey, AgentStatus, ClientMsg, CmdName, Health, LINE_CAP, Outcome, RepoInfo, ServerMsg,
-        Status, StatusOp, TimelineEntry, TimelineKind, WireError, decode, encode,
+        AgentKey, AgentStatus, ClientMsg, CmdName, ConsentState, GapReason, Health, LINE_CAP,
+        Outcome, PendingRepo, RepoInfo, ServerMsg, SetupAction, SetupHealth, SetupTarget, Status,
+        StatusOp, TargetState, TimelineEntry, TimelineKind, WireError, decode, encode,
     };
     use crate::settings::Settings;
 
@@ -257,6 +371,24 @@ mod tests {
         AgentKey {
             session_id: "s1".into(),
             agent_id: String::new(),
+        }
+    }
+
+    fn pending_repo() -> PendingRepo {
+        PendingRepo {
+            key: "C:/repo".into(),
+            main: "C:/repo".into(),
+            name: "repo".into(),
+        }
+    }
+
+    fn setup_target() -> SetupTarget {
+        SetupTarget {
+            harness: "codex".into(),
+            kind: "mcp".into(),
+            path: "C:/home/.codex/config.toml".into(),
+            state: TargetState::Written,
+            detail: None,
         }
     }
 
@@ -316,6 +448,43 @@ mod tests {
                 name: crate::pipe::CmdName::Quit,
                 id: 5,
             },
+            ClientMsg::Setup {
+                id: 6,
+                action: SetupAction::Plan,
+            },
+            ClientMsg::Setup {
+                id: 7,
+                action: SetupAction::Apply,
+            },
+            ClientMsg::Setup {
+                id: 8,
+                action: SetupAction::Remove,
+            },
+            ClientMsg::Setup {
+                id: 9,
+                action: SetupAction::ConsentApprove,
+            },
+            ClientMsg::Setup {
+                id: 10,
+                action: SetupAction::ConsentLater,
+            },
+            ClientMsg::Setup {
+                id: 11,
+                action: SetupAction::HarnessOn {
+                    harness: "codex".into(),
+                },
+            },
+            ClientMsg::Setup {
+                id: 12,
+                action: SetupAction::HarnessOff {
+                    harness: "codex".into(),
+                },
+            },
+            ClientMsg::RepoDecision {
+                id: 13,
+                root: "C:/repo".into(),
+                allow: true,
+            },
         ];
         for m in msgs {
             assert_eq!(decode::<ClientMsg>(encode(&m).trim_end()).unwrap(), m);
@@ -353,6 +522,22 @@ mod tests {
                 aggregate: Status::Working,
                 health: health.clone(),
                 settings: Settings::default(),
+                repo_pending: Vec::new(),
+            },
+            ServerMsg::Snapshot {
+                agents: Vec::new(),
+                aggregate: Status::Idle,
+                health: Health::default(),
+                settings: Settings::default(),
+                repo_pending: vec![pending_repo()],
+            },
+            ServerMsg::ConsentPlan {
+                id: 14,
+                consent: ConsentState::Approved,
+                targets: vec![setup_target()],
+            },
+            ServerMsg::RepoPending {
+                repos: vec![pending_repo()],
             },
             ServerMsg::Status {
                 op: StatusOp::Upsert,
@@ -413,6 +598,77 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Status::NeedsYou).unwrap(),
             "\"needs_you\""
+        );
+    }
+
+    #[test]
+    fn setup_messages_round_trip_at_protocol_3() {
+        let setup = ClientMsg::Setup {
+            id: 4,
+            action: SetupAction::HarnessOn {
+                harness: "codex".into(),
+            },
+        };
+        assert_eq!(
+            encode(&setup),
+            "{\"v\":3,\"type\":\"setup\",\"id\":4,\"action\":{\"name\":\"harness_on\",\"harness\":\"codex\"}}\n"
+        );
+        let client = [
+            setup,
+            ClientMsg::RepoDecision {
+                id: 5,
+                root: "C:/repo".into(),
+                allow: false,
+            },
+        ];
+        for m in client {
+            assert_eq!(decode::<ClientMsg>(encode(&m).trim_end()).unwrap(), m);
+        }
+        let server = [
+            ServerMsg::ConsentPlan {
+                id: 4,
+                consent: ConsentState::Later,
+                targets: vec![setup_target()],
+            },
+            ServerMsg::RepoPending {
+                repos: vec![pending_repo()],
+            },
+            ServerMsg::Snapshot {
+                agents: Vec::new(),
+                aggregate: Status::Idle,
+                health: Health::default(),
+                settings: Settings::default(),
+                repo_pending: vec![pending_repo()],
+            },
+        ];
+        for m in server {
+            assert_eq!(decode::<ServerMsg>(encode(&m).trim_end()).unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn health_without_setup_decodes_to_default() {
+        let bare = r#"{"v":3,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false}}"#;
+        let ServerMsg::Health { health } = decode::<ServerMsg>(bare).unwrap() else {
+            panic!("expected a health frame");
+        };
+        assert_eq!(health.setup, SetupHealth::default());
+
+        let with_target = r#"{"v":3,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"setup":{"targets":[{"harness":"codex","kind":"mcp","path":"p","state":"foreign"}]}}}"#;
+        let ServerMsg::Health { health } = decode::<ServerMsg>(with_target).unwrap() else {
+            panic!("expected a health frame");
+        };
+        let target = &health.setup.targets[0];
+        assert_eq!(target.state, TargetState::Foreign);
+        assert_eq!(target.fights_10m, 0);
+        assert_eq!(target.last_repair_ms, None);
+    }
+
+    #[test]
+    fn hooks_restored_gap_reason_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&GapReason::HooksRestored).unwrap(),
+            "\"hooks_restored\""
         );
     }
 }

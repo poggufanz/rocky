@@ -44,6 +44,7 @@ fn run() {
         v: SPOOL_VERSION,
         harness,
         recv_ms: now_ms(),
+        config_dir: None,
         body,
     };
     let _ = write::write_record(&spool_dir(&home), &rec);

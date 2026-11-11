@@ -527,6 +527,7 @@ mod tests {
             aggregate: Status::Idle,
             health: Health::default(),
             settings: Settings::default(),
+            repo_pending: Vec::new(),
         }
     }
 
@@ -832,6 +833,7 @@ mod tests {
             ],
             aggregate: Status::Idle,
             health: Health::default(),
+            repo_pending: Vec::new(),
             settings: Settings {
                 subagent_tree: false,
                 ..Settings::default()
