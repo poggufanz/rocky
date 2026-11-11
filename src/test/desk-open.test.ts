@@ -218,10 +218,14 @@ test("desk open: sync error stops before launch", async (t) => {
   assert.ok(source.said[0].includes("disk full"));
 });
 
+// A generous window, not a timing assert: a loaded runner must not turn an
+// early exit into "running". Only the "running" case below bounds a live child.
+const CLASSIFY_WINDOW_MS = 10_000;
+
 test("desk open: launchDesk classifies exit codes", async (t) => {
-  assert.equal(await launchDesk(process.execPath, ["-e", "process.exit(0)"]), "handed-off");
-  assert.equal(await launchDesk(process.execPath, ["-e", "process.exit(3)"]), "failed");
-  assert.equal(await launchDesk(join(sandbox(t), "missing-desk"), []), "failed");
+  assert.equal(await launchDesk(process.execPath, ["-e", "process.exit(0)"], CLASSIFY_WINDOW_MS), "handed-off");
+  assert.equal(await launchDesk(process.execPath, ["-e", "process.exit(3)"], CLASSIFY_WINDOW_MS), "failed");
+  assert.equal(await launchDesk(join(sandbox(t), "missing-desk"), [], CLASSIFY_WINDOW_MS), "failed");
 
   const marker = join(sandbox(t), "child.pid");
   const source = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setTimeout(() => {}, 5000);`;
