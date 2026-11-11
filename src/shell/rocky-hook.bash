@@ -3,12 +3,13 @@
 # Contract: this file must NEVER break the shell. Every path fails silent and
 # returns 0, except an explicit guard cancel (return 1 under extdebug).
 # Hot path is pure bash; node is spawned only in the background, and only when
-# a command fails or a fix-link attempt is worth it (pending flag exists).
+# a command fails or a fix-link attempt is worth it (pending flag exists). The
+# one start outside that path is the shell-env report at load, once per shell.
 
 # interactive shells only — scripts and CI never touched
 [[ $- == *i* ]] || return 0
 
-ROCKY_HOOK_VERSION="0.5.0"
+ROCKY_HOOK_VERSION="0.6.0"
 __rocky_home="${ROCKY_HOME:-$HOME/.rocky}"
 __rocky_bin="${ROCKY_BIN:-rocky}"
 __rocky_disabled=""
@@ -18,6 +19,17 @@ __rocky_last_cwd=""
 __rocky_speech_seq=0
 __rocky_speech_ids=()
 __rocky_speech_file=""
+
+# Report the config dirs to the desktop app once per shell, at load only (never
+# from __rocky_precmd). The hook binary is optional: a missing or failing one is
+# ignored. The start is detached and silent, spawned the same way _hookfail is
+# below. Ends on unset, so $? is 0 here, as it already was after the assignments.
+__rocky_shell_env_bin="$__rocky_home/bin/rocky-hook"
+[[ -x "$__rocky_shell_env_bin" ]] || __rocky_shell_env_bin+=".exe"
+if [[ -x "$__rocky_shell_env_bin" ]]; then
+  { "$__rocky_shell_env_bin" shell-env >/dev/null 2>&1 </dev/null & disown; } 2>/dev/null
+fi
+unset __rocky_shell_env_bin
 
 # bash-preexec gives us preexec/precmd (DEBUG trap + PROMPT_COMMAND, battle-tested)
 if [[ -r "$__rocky_home/bash-preexec.sh" ]]; then

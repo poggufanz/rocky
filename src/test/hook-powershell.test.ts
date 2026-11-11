@@ -27,7 +27,7 @@
  *      of `$?`, wrongly recording a hook failure for a later, wholly
  *      successful cmdlet — fixed by making `$?` the sole failure gate.
  */
-import test, { type TestContext } from "node:test";
+import test, { after, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import fs, {
   chmodSync,
@@ -58,6 +58,7 @@ import {
 import { POWERSHELL_HOOK_LINE, powershellHookBlockCodec } from "../core/hook-block.js";
 import { validateOutputLine } from "../ui/phrases.js";
 import { verifyShellAssetsStaged } from "./shell-assets-fixture.js";
+import { disposeSharedFakeHook, installFakeHook, readShellEnvRecords, writeShellEnvScript } from "./shell-env-fixture.js";
 
 const BEGIN = "# >>> rocky hook >>>";
 const END = "# <<< rocky hook <<<";
@@ -250,7 +251,7 @@ test("PowerShell hook status reports absent, then installed, per host", (t) => {
 
   assert.equal(hookInstall(), 0, sandbox.stderr());
   assert.equal(hookStatus(), 0, sandbox.stderr());
-  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.5\.0, PowerShell 5\.1\.26100\.9168\./);
+  assert.match(sandbox.stderr(), /Windows PowerShell: installed, hook version 0\.6\.0, PowerShell 5\.1\.26100\.9168\./);
   // The $Error[0] shift must be disclosed where a user actually
   // meets it -- rocky hook status for the PowerShell hosts.
   assert.match(sandbox.stderr(), /\$Error/, "status must disclose the $Error shift for a PowerShell host");
@@ -369,7 +370,7 @@ for (const policy of [undefined, "RemoteSigned", "Bypass", "Unrestricted"]) {
 
     const output = sandbox.stderr();
     assert.match(output, /Hook installed in Windows PowerShell\. Open a new shell to activate it\./);
-    assert.match(output, /Windows PowerShell: installed, hook version 0\.5\.0/);
+    assert.match(output, /Windows PowerShell: installed, hook version 0\.6\.0/);
     assert.ok(!output.includes("blocks scripts"), output);
     assert.ok(!output.includes(EXECUTION_POLICY_FIX), output);
   });
@@ -1067,11 +1068,12 @@ const DEFAULT_SMOKE_LINES = (rockyHome: string): string[] => [
  */
 const SESSION_HANG_GUARD_MS = 64_000;
 
-function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[], intervalMs = 400): Promise<FeedResult> {
+function spawnAndFeed(exe: string, rockyHome: string, shim: string, lines?: string[], intervalMs = 400, cwd?: string): Promise<FeedResult> {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
       env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
+      cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -1285,6 +1287,71 @@ test(
   { skip: realPwsh ? false : pwshSkipReason },
   async (t) => {
     await realHostSmoke(t, realPwsh!);
+  },
+);
+
+after(disposeSharedFakeHook);
+
+/**
+ * The shell-env start under a real host. Same $?/$LASTEXITCODE sequence as
+ * `realHostSmoke`, plus two checks: the one line that loads the hook adds
+ * nothing to $Error (measured within that line, so prompt bookkeeping between
+ * lines cannot skew it), and the fake desktop hook starts exactly once. The
+ * session runs in a temp directory holding the fake `shell-env` script, since
+ * the hook is started from the session's working directory.
+ */
+async function realHostShellEnvSmoke(t: TestContext, exe: string): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "rocky-hook-ps-shell-env-"));
+  t.after(() => safeRmSync(root));
+  const rockyHome = join(root, "rocky-home");
+  const sessionCwd = join(root, "cwd");
+  mkdirSync(rockyHome, { recursive: true });
+  mkdirSync(sessionCwd, { recursive: true });
+  writeFileSync(
+    join(rockyHome, "rocky-hook.ps1"),
+    readFileSync(join(packageRoot, ".test-dist", "shell", "rocky-hook.ps1")),
+  );
+  const log = join(rockyHome, "shell-env.log");
+  writeShellEnvScript(sessionCwd, log);
+  installFakeHook(rockyHome);
+  const shim = join(root, "rocky-shim.ps1");
+  const entry = join(packageRoot, "dist", "index.js").replace(/'/g, "''");
+  writeFileSync(shim, `& node '${entry}' @args\nexit $LASTEXITCODE\n`);
+
+  const hook = join(rockyHome, "rocky-hook.ps1");
+  const lines = [
+    `$__rockyErrBefore = $Error.Count; . "${hook}"; echo "LOAD_ERR_DELTA=$($Error.Count - $__rockyErrBefore)"`,
+    "Get-Item ./__rocky_nope__ -ErrorAction SilentlyContinue 2>$null",
+    "echo LIVE1_DOLLARQ=$? LIVE1_EXIT=$LASTEXITCODE",
+    'cmd /c "exit 9" | Out-Null',
+    "echo LIVE2_DOLLARQ=$? LIVE2_EXIT=$LASTEXITCODE",
+    "Get-Item .",
+    "echo LIVE3_DOLLARQ=$? LIVE3_EXIT=$LASTEXITCODE",
+    "exit",
+  ];
+  const result = await spawnAndFeed(exe, rockyHome, shim, lines, 400, sessionCwd);
+  assert.equal(result.timedOut, false, `the session must not hang (${describeFeed(result)})`);
+  assert.match(result.stdout, /LOAD_ERR_DELTA=0\r?\n/, `the profile load must add nothing to $Error; got: ${result.stdout}`);
+  assert.match(result.stdout, /LIVE1_DOLLARQ=False\r?\nLIVE1_EXIT=\r?\n/, `$? must read False after a failing cmdlet; got: ${result.stdout}`);
+  assert.match(result.stdout, /LIVE2_DOLLARQ=False\r?\nLIVE2_EXIT=9\r?\n/, `$?/$LASTEXITCODE must read False/9 after a failing native command; got: ${result.stdout}`);
+  assert.match(result.stdout, /LIVE3_DOLLARQ=True\r?\nLIVE3_EXIT=9\r?\n/, `a later successful cmdlet must not flip $? and must leave stale $LASTEXITCODE alone; got: ${result.stdout}`);
+  const records = await readShellEnvRecords(log);
+  assert.equal(records.length, 1, `the profile load must start the shell-env hook exactly once; got: ${JSON.stringify(records)}`);
+}
+
+test(
+  "real interactive Windows PowerShell 5.1 starts the shell-env hook once and keeps $?/$LASTEXITCODE",
+  { skip: windowsPowerShellAvailable ? false : "Windows PowerShell is unavailable on this machine/platform" },
+  async (t) => {
+    await realHostShellEnvSmoke(t, "powershell.exe");
+  },
+);
+
+test(
+  "real interactive PowerShell 7.x starts the shell-env hook once and keeps $?/$LASTEXITCODE",
+  { skip: realPwsh ? false : pwshSkipReason },
+  async (t) => {
+    await realHostShellEnvSmoke(t, realPwsh!);
   },
 );
 

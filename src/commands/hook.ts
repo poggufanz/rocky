@@ -72,7 +72,7 @@ import { safeTerminalLine } from "../ui/sanitize.js";
  * needed. Both hosts always move together: this names the protocol, not a
  * file. A test asserts both assets carry exactly this literal.
  */
-export const ROCKY_HOOK_PROTOCOL_VERSION = "0.5.0";
+export const ROCKY_HOOK_PROTOCOL_VERSION = "0.6.0";
 
 /**
  * The line `rocky hook status` speaks when the installed hook file is older

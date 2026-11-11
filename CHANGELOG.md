@@ -33,6 +33,7 @@ The experimental desk and its daemon run on Linux: a per-user Unix socket with l
 - A version tag runs the release workflow in CI, and npm trusts the workflow's OIDC identity instead of a stored token.
 - On Windows, the git and setup helper commands Rocky starts no longer open a console window.
 - The experimental desk daemon restores a missing Rocky entry in a guarded config file through the CLI, under approved consent. Its health reports the setup status, and it answers the desk's `setup` and `repo_decision` requests.
+- Shell hooks start the desktop hook binary once per shell, at load, so the desktop app learns the config directories the shell uses. Hook protocol is now 0.6.0: run `rocky hook install` once so installed hook files pick up the change; `rocky hook status` names the mismatch until then.
 
 ## 2.0.0 — 6 November 2026
 
