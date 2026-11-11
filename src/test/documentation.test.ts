@@ -646,7 +646,7 @@ test("no shipped surface still claims the project makes no external network requ
 
 test("README keeps the sanitized-default, raw-opt-in, and loopback-only network contract", () => {
   assert.match(readme, /contains no telemetry/i, "README must state the CLI contains no telemetry");
-  assert.match(readme, /runs no daemon/i, "README must state Rocky runs no daemon");
+  assert.match(readme, /The CLI itself runs no daemon/, "README must state the CLI itself runs no daemon");
   // v0.4 turned the old blanket "no external network requests" claim false:
   // `rocky check` really does call the registry, and the GUI model picker
   // calls models.dev. The claim is scoped and names each host, and the scoping
@@ -803,7 +803,7 @@ test("README and CLI help avoid forbidden universal-support and evidence overcla
 });
 
 test("README states zero runtime/optional dependencies, reusing package metadata as source of truth", () => {
-  assert.match(readmePage, /zero runtime dep/i, "README must state zero runtime dependencies");
+  assert.match(readmePage, /no JavaScript runtime dependencies/i, "README must state there are no JavaScript runtime dependencies");
 });
 
 test("documentation names one canonical source and package root", () => {

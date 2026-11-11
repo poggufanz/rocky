@@ -4,7 +4,11 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
-The experimental desk daemon keeps 24 hours of desk history in `desk/history/` and restores agents and timelines from it after a restart. It places subagents under their main agent and shows the task description supplied when they start. Desk settings live in `desk/settings.json`. The desk pipe protocol is now v3, so the desk and the daemon must come from the same build.
+Windows x64 and Linux x64 installs now carry the desktop app through an optional platform package. Bare `rocky` copies it into `ROCKY_HOME/bin` and opens it, and falls back to the browser view when it cannot.
+
+The experimental desk daemon keeps 24 hours of desk history in `desk/history/` and restores agents and timelines from it after a restart. It places subagents under their main agent and shows the task description supplied when they start. Desk settings live in `desk/settings.json`.
+
+Breaking: the desk and daemon pipe protocol is now version 3. A desk and a daemon from different versions refuse each other.
 
 Hidden `rocky setup --desk-hooks <path>` / `--uninstall-desk-hooks` for the experimental desk.
 
@@ -26,6 +30,7 @@ The experimental desk and its daemon run on Linux: a per-user Unix socket with l
 - Claude Code MCP registration under `CLAUDE_CONFIG_DIR` now writes `.claude.json`, the file Claude Code reads there.
 - An empty `ROCKY_HOME` is treated as unset.
 - Repo capture consent can record a decline, and a Git worktree follows its main repository's decision.
+- A version tag runs the release workflow in CI, and npm trusts the workflow's OIDC identity instead of a stored token.
 
 ## 2.0.0 — 6 November 2026
 

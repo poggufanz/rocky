@@ -382,6 +382,24 @@ entry ends the same way is recorded too, including an npx cache copy under
 `_npx` and a project-local `node_modules` copy. An identical record is left
 byte-identical.
 
+### Binaries
+
+When the optional platform package is installed, `<ROCKY_HOME>/bin/` holds the
+desktop app, its background process, and the hook binary: `rockyd`,
+`rocky-desk`, and `rocky-hook`, with `.exe` on Windows. Beside them,
+`<ROCKY_HOME>/bin/binaries.json` records the version that put them there:
+
+```json
+{"v":1,"version":"2.0.0"}
+```
+
+Bare `rocky` writes that record last, after all three binaries are in place.
+A missing, unparsable, or mismatched record, or a missing binary, means the
+next bare `rocky` copies all three again. Windows swaps each binary by
+renaming the old one aside; POSIX uses an atomic rename. A leftover
+`<name>.<pid>.new` or `<name>.old` file from an interrupted swap is swept on
+the next run.
+
 ### Repo capture consent
 
 `<ROCKY_HOME>/listening/repo-consents.json` maps a canonical repo root to a
