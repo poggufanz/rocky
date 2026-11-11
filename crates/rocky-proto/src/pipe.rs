@@ -1,11 +1,11 @@
-//! Pipe protocol v2 between rockyd and rocky-desk: one JSON object per line.
+//! Pipe protocol v3 between rockyd and rocky-desk: one JSON object per line.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const LINE_CAP: usize = 64 * 1024;
 pub const CLIENT_QUEUE_CAP: usize = 1024;
 
@@ -128,6 +128,7 @@ pub struct Health {
 pub enum CmdName {
     Stop,
     Show,
+    Quit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -192,6 +193,7 @@ pub enum ServerMsg {
         entries: Vec<TimelineEntry>,
     },
     Show,
+    Quit,
     Ack {
         id: u64,
         ok: bool,
@@ -246,8 +248,8 @@ mod tests {
     use serde_json::json;
 
     use crate::pipe::{
-        AgentKey, AgentStatus, ClientMsg, Health, LINE_CAP, Outcome, RepoInfo, ServerMsg, Status,
-        StatusOp, TimelineEntry, TimelineKind, WireError, decode, encode,
+        AgentKey, AgentStatus, ClientMsg, CmdName, Health, LINE_CAP, Outcome, RepoInfo, ServerMsg,
+        Status, StatusOp, TimelineEntry, TimelineKind, WireError, decode, encode,
     };
     use crate::settings::Settings;
 
@@ -259,9 +261,9 @@ mod tests {
     }
 
     #[test]
-    fn encode_uses_v2() {
+    fn encode_uses_v3() {
         let s = encode(&ClientMsg::Subscribe);
-        assert_eq!(s, "{\"v\":2,\"type\":\"subscribe\"}\n");
+        assert_eq!(s, "{\"v\":3,\"type\":\"subscribe\"}\n");
     }
     #[test]
     fn v1_line_is_a_version_error() {
@@ -273,14 +275,14 @@ mod tests {
     #[test]
     fn decode_rejects_other_major_before_body() {
         assert!(matches!(
-            decode::<ClientMsg>(r#"{"v":3,"type":"brand_new"}"#),
-            Err(WireError::Version(3))
+            decode::<ClientMsg>(r#"{"v":4,"type":"brand_new"}"#),
+            Err(WireError::Version(4))
         ));
     }
     #[test]
     fn decode_rejects_long_line() {
         let line = format!(
-            r#"{{"v":2,"type":"hello","client":"{}","version":"x"}}"#,
+            r#"{{"v":3,"type":"hello","client":"{}","version":"x"}}"#,
             "a".repeat(LINE_CAP)
         );
         assert!(matches!(
@@ -290,7 +292,7 @@ mod tests {
     }
     #[test]
     fn show_wire_shape() {
-        assert_eq!(encode(&ServerMsg::Show), "{\"v\":2,\"type\":\"show\"}\n");
+        assert_eq!(encode(&ServerMsg::Show), "{\"v\":3,\"type\":\"show\"}\n");
     }
     #[test]
     fn every_client_msg_roundtrips() {
@@ -309,6 +311,10 @@ mod tests {
             ClientMsg::Cmd {
                 name: crate::pipe::CmdName::Show,
                 id: 4,
+            },
+            ClientMsg::Cmd {
+                name: crate::pipe::CmdName::Quit,
+                id: 5,
             },
         ];
         for m in msgs {
@@ -368,6 +374,7 @@ mod tests {
                 }],
             },
             ServerMsg::Show,
+            ServerMsg::Quit,
             ServerMsg::Ack {
                 id: 7,
                 ok: true,
@@ -378,6 +385,29 @@ mod tests {
             assert_eq!(decode::<ServerMsg>(encode(&m).trim_end()).unwrap(), m);
         }
     }
+    #[test]
+    fn quit_messages_round_trip_at_protocol_3() {
+        assert_eq!(
+            encode(&ClientMsg::Cmd {
+                name: CmdName::Quit,
+                id: 7,
+            }),
+            "{\"v\":3,\"type\":\"cmd\",\"name\":\"quit\",\"id\":7}\n"
+        );
+        assert_eq!(
+            decode::<ServerMsg>(r#"{"v":3,"type":"quit"}"#).unwrap(),
+            ServerMsg::Quit
+        );
+    }
+
+    #[test]
+    fn protocol_2_frames_are_rejected() {
+        assert!(matches!(
+            decode::<ClientMsg>(r#"{"v":2,"type":"subscribe"}"#),
+            Err(WireError::Version(2))
+        ));
+    }
+
     #[test]
     fn status_wire_names() {
         assert_eq!(

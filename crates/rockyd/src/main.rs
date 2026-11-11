@@ -262,7 +262,12 @@ fn main() {
         // burst of sets/timelines never waits for the next rescan.
         loop {
             match control_rx.try_recv() {
-                Ok(Control::Stop { id, reply, flushed }) => {
+                Ok(Control::Stop {
+                    id,
+                    reply,
+                    flushed,
+                    quit,
+                }) => {
                     // Wait for the client thread to flush the ack before
                     // exiting: without this, `process::exit` can race the
                     // writer thread and the client never sees the ack. Only
@@ -279,7 +284,11 @@ fn main() {
                     {
                         let _ = flushed.recv_timeout(Duration::from_secs(5));
                     }
-                    log.line("stop requested, exiting");
+                    log.line(if quit {
+                        "quit requested, exiting"
+                    } else {
+                        "stop requested, exiting"
+                    });
                     std::process::exit(0);
                 }
                 Ok(Control::Set {

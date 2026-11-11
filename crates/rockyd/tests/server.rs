@@ -274,7 +274,7 @@ fn long_line_disconnects_client() {
     // No hello: one over-long line must be dropped without reading it all.
     let big = "x".repeat(LINE_CAP + 100);
     client.send(&format!(
-        "{{\"v\":2,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
+        "{{\"v\":3,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
     ));
     assert!(client.read_line().is_none(), "expected EOF");
 }
@@ -359,10 +359,17 @@ fn stop_cmd_reaches_control_and_acks() {
             Err(mpsc::RecvTimeoutError::Disconnected) => panic!("control gone"),
         }
     };
-    let Control::Stop { id, reply, flushed } = ctrl else {
+    let Control::Stop {
+        id,
+        reply,
+        flushed,
+        quit,
+    } = ctrl
+    else {
         panic!("expected stop, got {ctrl:?}");
     };
     assert_eq!(id, 7);
+    assert!(!quit, "cmd stop is not quit");
     reply
         .send(ServerMsg::Ack {
             id: 7,
@@ -376,6 +383,67 @@ fn stop_cmd_reaches_control_and_acks() {
         ack,
         ServerMsg::Ack {
             id: 7,
+            ok: true,
+            error: None
+        }
+    );
+}
+
+#[test]
+fn quit_broadcasts_to_every_subscriber_then_acks() {
+    let home = home();
+    let hub = Arc::new(Hub::new());
+    let (control_tx, control_rx) = mpsc::channel();
+    let _handle = serve(
+        home.path(),
+        Arc::clone(&hub),
+        Arc::new(snapshot_msg),
+        control_tx,
+    )
+    .unwrap();
+
+    let pipe = pipe_name(home.path());
+    let mut a = connect(&pipe);
+    let mut b = connect(&pipe);
+    hello_subscribe(&mut a);
+    hello_subscribe(&mut b);
+
+    a.send(&encode(&ClientMsg::Cmd {
+        name: CmdName::Quit,
+        id: 5,
+    }));
+
+    // Every subscriber hears quit before the sender's ack.
+    let quit_a: ServerMsg = decode(&a.read_line().unwrap()).unwrap();
+    assert_eq!(quit_a, ServerMsg::Quit);
+    let quit_b: ServerMsg = decode(&b.read_line().unwrap()).unwrap();
+    assert_eq!(quit_b, ServerMsg::Quit);
+
+    let Control::Stop {
+        id,
+        reply,
+        flushed,
+        quit,
+    } = next_control(&control_rx)
+    else {
+        panic!("expected the stop path");
+    };
+    assert_eq!(id, 5);
+    assert!(quit, "quit must reach the daemon as quit");
+    reply
+        .send(ServerMsg::Ack {
+            id: 5,
+            ok: true,
+            error: None,
+        })
+        .unwrap();
+    flushed.recv_timeout(GUARD).unwrap();
+
+    let ack: ServerMsg = decode(&a.read_line().unwrap()).unwrap();
+    assert_eq!(
+        ack,
+        ServerMsg::Ack {
+            id: 5,
             ok: true,
             error: None
         }

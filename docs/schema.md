@@ -392,10 +392,10 @@ consent. A linked Git worktree has no decision of its own; it inherits its
 main repository's grant, and a revoke clears both that root and the root
 that owns the decision.
 
-## Pipe v2
+## Pipe v3
 
 One JSON object per line over the daemon pipe. Every message carries `v`
-(major) first and `type`. This build speaks v2; a peer that sends another
+(major) first and `type`. This build speaks v3; a peer that sends another
 major version gets one `error` with `code: "version"` and the connection
 closes. Minor additions are additive; readers must ignore unknown fields. A
 client line longer than 64 KiB gets the client disconnected. Each client has
@@ -417,8 +417,9 @@ disconnected, reconnects, and receives a fresh snapshot.
 | desk → daemon | `set` | `id`, `name`, `value` |
 | desk → daemon | `timeline` | `id`, `key` |
 | daemon → desk | `timeline` | `id`, `key`, `entries[]` |
-| desk → daemon | `cmd` | `name: "stop" \| "show"`, `id` |
+| desk → daemon | `cmd` | `name: "stop" \| "show" \| "quit"`, `id` |
 | daemon → desk | `show` | — (broadcast to every desk after a `cmd` `show`) |
+| daemon → desk | `quit` | — (broadcast to every desk after a `cmd` `quit`) |
 | daemon → desk | `ack` | `id`, `ok`, `error?` |
 
 `agent` carries `key` (`session_id`, `agent_id`; empty `agent_id` means the
@@ -455,10 +456,12 @@ full path when it does not sit under that root, or the redacted command; a
 `set` errors are the strings documented under Desk settings v1. `cmd` with
 `name: "stop"` acks and the daemon exits. `cmd` with `name: "show"` is
 broadcast as `show` to every desk, then the sender gets `ack` with `ok:
-true`.
+true`. `cmd` with `name: "quit"` is broadcast as `quit` to every desk, the
+sender included, before the sender gets `ack` with `ok: true`; the daemon
+then exits.
 
 Example:
 
 ```json
-{"v":2,"type":"subscribe"}
+{"v":3,"type":"subscribe"}
 ```
