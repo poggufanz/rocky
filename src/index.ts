@@ -5,7 +5,9 @@
  * Public surface:
  *   rocky run "<command>"     run a command; rocky remembers its failures and what followed
  *   rocky recall [--ai] <query> search the memory of past errors
- *   rocky | rocky dash        open the local GUI on 127.0.0.1
+ *   rocky                     open the desktop app where it is installed,
+ *                             otherwise the browser view on Main
+ *   rocky dash                open the browser view on Dash
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
  *   rocky --help [--all]      short grouped view; --all prints every flag and endpoint
@@ -100,11 +102,14 @@ usage:
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
   rocky model off           disable local AI in rocky. Ollama stays untouched.
-  rocky | rocky dash        open the local GUI in a browser. One link, one route;
-                            dash just starts on the Dash segment. Loopback only,
-                            with a fresh token each launch. --no-open prints the
-                            URL instead, --port=<n> picks the port, and ctrl-c
-                            stops the server.
+  rocky
+                            open the desktop app where it is installed,
+                            otherwise the browser view on Main.
+  rocky dash                open the browser view on Dash.
+                            The browser view is one link, one route, loopback
+                            only, with a fresh token each launch. --no-open
+                            prints the URL instead, --port=<n> picks the
+                            port, and ctrl-c stops the server.
   rocky stats [--cycles]    show what rocky holds in memory. --cycles lists the
                             top failure fingerprints with counts, local only.
   rocky journal "<note>"    write one dogfood note as a single line. Local file only.

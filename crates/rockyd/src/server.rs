@@ -341,7 +341,9 @@ fn handle_client<S>(
                     id,
                 }) => {
                     // Broadcast first so every desk sees it, then ack the
-                    // sender through its own queue (one writer per pipe).
+                    // sender through its own queue. The queue is not the
+                    // only writer: the stop ack and the sender's quit below
+                    // go out on this thread, so quit precedes the ack.
                     hub.broadcast(&ServerMsg::Show);
                     if !hub.send_to(
                         client_id,

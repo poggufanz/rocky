@@ -136,7 +136,8 @@ export function defaultDeskOpenDeps(cliChanged: boolean): DeskOpenDeps {
       try {
         await runAutoSetup(["apply", "--json"], defaultAutoContext, () => undefined);
       } catch {
-        // The desk is open either way; setup retries on the next launch.
+        // The desk is open either way. Setup is retried only after a binary
+        // swap or a rewritten cli.json, not on every launch.
       }
     },
     say: (line) => {
