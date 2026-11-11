@@ -441,6 +441,50 @@ fn stop_cmd_exits_zero_and_hook_keeps_spooling() {
     let _ = daemon.wait();
 }
 
+#[test]
+fn quit_exits_the_daemon_process() {
+    let home = home();
+    let mut daemon = Daemon::spawn(home);
+    let mut client = connect(&pipe_name(daemon.home()));
+    let snapshot = client.hello_subscribe();
+    assert!(
+        matches!(snapshot, ServerMsg::Snapshot { .. }),
+        "{snapshot:?}"
+    );
+
+    client.send(&encode(&ClientMsg::Cmd {
+        name: CmdName::Quit,
+        id: 9,
+    }));
+    let quit: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert_eq!(quit, ServerMsg::Quit);
+    let ack: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert_eq!(
+        ack,
+        ServerMsg::Ack {
+            id: 9,
+            ok: true,
+            error: None
+        }
+    );
+
+    let start = Instant::now();
+    let status = loop {
+        if let Some(s) = daemon.try_wait().unwrap() {
+            break s;
+        }
+        assert!(start.elapsed() < GUARD, "daemon never exited");
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(status.code(), Some(0), "status: {status}");
+    let log = fs::read_to_string(log_path(daemon.home())).unwrap();
+    assert!(
+        log.lines().any(|l| l == "quit requested, exiting"),
+        "log missing quit line: {log:?}"
+    );
+    let _ = daemon.wait();
+}
+
 fn main_key(session: &str) -> AgentKey {
     AgentKey {
         session_id: session.into(),

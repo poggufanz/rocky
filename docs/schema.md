@@ -382,6 +382,24 @@ entry ends the same way is recorded too, including an npx cache copy under
 `_npx` and a project-local `node_modules` copy. An identical record is left
 byte-identical.
 
+### Binaries
+
+When the optional platform package is installed, `<ROCKY_HOME>/bin/` holds the
+desktop app, its background process, and the hook binary: `rockyd`,
+`rocky-desk`, and `rocky-hook`, with `.exe` on Windows. Beside them,
+`<ROCKY_HOME>/bin/binaries.json` records the version that put them there:
+
+```json
+{"v":1,"version":"2.0.0"}
+```
+
+Bare `rocky` writes that record last, after all three binaries are in place.
+A missing, unparsable, or mismatched record, or a missing binary, means the
+next bare `rocky` copies all three again. Windows swaps each binary by
+renaming the old one aside; POSIX uses an atomic rename. A leftover
+`<name>.<pid>.new` or `<name>.old` file from an interrupted swap is swept on
+the next run.
+
 ### Repo capture consent
 
 `<ROCKY_HOME>/listening/repo-consents.json` maps a canonical repo root to a
@@ -392,10 +410,10 @@ consent. A linked Git worktree has no decision of its own; it inherits its
 main repository's grant, and a revoke clears both that root and the root
 that owns the decision.
 
-## Pipe v2
+## Pipe v3
 
 One JSON object per line over the daemon pipe. Every message carries `v`
-(major) first and `type`. This build speaks v2; a peer that sends another
+(major) first and `type`. This build speaks v3; a peer that sends another
 major version gets one `error` with `code: "version"` and the connection
 closes. Minor additions are additive; readers must ignore unknown fields. A
 client line longer than 64 KiB gets the client disconnected. Each client has
@@ -417,8 +435,9 @@ disconnected, reconnects, and receives a fresh snapshot.
 | desk → daemon | `set` | `id`, `name`, `value` |
 | desk → daemon | `timeline` | `id`, `key` |
 | daemon → desk | `timeline` | `id`, `key`, `entries[]` |
-| desk → daemon | `cmd` | `name: "stop" \| "show"`, `id` |
+| desk → daemon | `cmd` | `name: "stop" \| "show" \| "quit"`, `id` |
 | daemon → desk | `show` | — (broadcast to every desk after a `cmd` `show`) |
+| daemon → desk | `quit` | — (broadcast to every desk after a `cmd` `quit`) |
 | daemon → desk | `ack` | `id`, `ok`, `error?` |
 
 `agent` carries `key` (`session_id`, `agent_id`; empty `agent_id` means the
@@ -455,10 +474,12 @@ full path when it does not sit under that root, or the redacted command; a
 `set` errors are the strings documented under Desk settings v1. `cmd` with
 `name: "stop"` acks and the daemon exits. `cmd` with `name: "show"` is
 broadcast as `show` to every desk, then the sender gets `ack` with `ok:
-true`.
+true`. `cmd` with `name: "quit"` is broadcast as `quit` to every desk, the
+sender included, before the sender gets `ack` with `ok: true`; the daemon
+then exits.
 
 Example:
 
 ```json
-{"v":2,"type":"subscribe"}
+{"v":3,"type":"subscribe"}
 ```

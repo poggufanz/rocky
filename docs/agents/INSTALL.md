@@ -1,6 +1,6 @@
 # Rocky — Agent Self-Setup (any harness)
 
-You are an AI coding agent. A human asked you to wire Rocky into this environment by fetching and following this file. Rocky is a local, deterministic memory layer: it remembers command failures, what fixed them, and why changes were made. It has no telemetry and no daemon; everything below stays on this machine.
+You are an AI coding agent. A human asked you to wire Rocky into this environment by fetching and following this file. Rocky is a local, deterministic memory layer: it remembers command failures, what fixed them, and why changes were made. It has no telemetry. Its optional desktop app runs a local background process; everything below stays on this machine.
 
 Canonical URL of this file:
 `https://raw.githubusercontent.com/poggufanz/rocky/main/docs/agents/INSTALL.md`

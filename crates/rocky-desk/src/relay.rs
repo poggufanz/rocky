@@ -1,9 +1,9 @@
-//! Second-launch relay: ask the running desk to come to the front.
+//! Second-launch relay: ask the running desk to come to the front, or to close.
 //!
 //! The relay connects without spawning, completes hello and subscribe (the
-//! daemon requires subscribe before commands), sends one `cmd show`, and waits
-//! a bounded time for the ack. Failures are returned to the caller, which
-//! stays silent: the running desk may be starting up or already gone.
+//! daemon requires subscribe before commands), sends one command, and waits a
+//! bounded time for the ack. Failures are returned to the caller, which stays
+//! silent: the running desk may be starting up or already gone.
 
 use std::path::Path;
 use std::sync::mpsc;
@@ -29,20 +29,17 @@ pub enum RelayError {
     Rejected(String),
 }
 
-/// Ask the daemon to broadcast `show` so the running desk reveals its window.
+/// Ask the daemon to broadcast `name` to every subscriber.
 ///
 /// Subscribes first because the daemon rejects commands from unsubscribed
 /// clients. Broadcasts and other acks arriving before the matching
 /// [`ServerMsg::Ack`] are skipped. `timeout` bounds the entire call.
-pub fn send_show(rocky_home: &Path, timeout: Duration) -> Result<(), RelayError> {
+pub fn send_cmd(rocky_home: &Path, name: CmdName, timeout: Duration) -> Result<(), RelayError> {
     let deadline = Instant::now() + timeout;
     let (tx, rx) = mpsc::channel();
     let outbox = connect_and_subscribe(rocky_home, tx, timeout).map_err(RelayError::Connect)?;
     outbox
-        .send(ClientMsg::Cmd {
-            name: CmdName::Show,
-            id: 1,
-        })
+        .send(ClientMsg::Cmd { name, id: 1 })
         .map_err(|_| RelayError::Send)?;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -58,11 +55,16 @@ pub fn send_show(rocky_home: &Path, timeout: Duration) -> Result<(), RelayError>
                 ok: false,
                 error,
             })) => return Err(RelayError::Rejected(error.unwrap_or_default())),
-            // Snapshot, settings, and the show broadcast itself may arrive
+            // Snapshot, settings, and the command's own broadcast may arrive
             // before the ack; the ack is the only message that ends the wait.
             Ok(Some(_)) => {}
             Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(RelayError::NoAck),
             Err(mpsc::RecvTimeoutError::Timeout) => return Err(RelayError::NoAck),
         }
     }
+}
+
+/// Ask the daemon to broadcast `show` so the running desk reveals its window.
+pub fn send_show(rocky_home: &Path, timeout: Duration) -> Result<(), RelayError> {
+    send_cmd(rocky_home, CmdName::Show, timeout)
 }

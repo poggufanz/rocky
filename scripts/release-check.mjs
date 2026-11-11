@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validatePlatformManifests } from "./platform-packages.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
@@ -305,7 +306,7 @@ export function assertReleaseTruth(state, { root = packageRoot, mode = "branch",
   const evidenceEnv = sanitizeReleaseEnvironment(env ?? process.env);
   const evidenceGit = gitExecutable ?? resolveGitExecutable(evidenceEnv);
   const snapshot = readReleaseTruthSnapshot(root, evidenceEnv);
-  const documentErrors = validateReleaseTruth(snapshot);
+  const documentErrors = [...validateReleaseTruth(snapshot), ...validatePlatformManifests(root)];
   const git = readGitReleaseState(root, mode, gitOutput, { env: evidenceEnv, gitExecutable: evidenceGit });
   const gitErrors = validateGitReleaseState(git);
   state.releaseTruth = {

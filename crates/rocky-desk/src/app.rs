@@ -509,12 +509,20 @@ impl DeskView {
         let mut changed = self.ctl.on_worker();
         let mut requests = Vec::new();
         let mut pending_lang = None;
+        let mut quit = false;
         if let Some(inbox) = self.ctl.inbox.take() {
             let mut alive = true;
             loop {
                 match inbox.try_recv() {
                     Ok(Some(msg)) => {
                         let show = matches!(msg, ServerMsg::Show);
+                        if matches!(msg, ServerMsg::Quit) {
+                            // The daemon is closing on request: mark the stop
+                            // before the closing connection is handled, so the
+                            // disconnect that follows never respawns it.
+                            self.ctl.state.on_quit();
+                            quit = true;
+                        }
                         let settings_msg =
                             matches!(msg, ServerMsg::Snapshot { .. } | ServerMsg::Settings { .. });
                         if let ServerMsg::Snapshot { settings, .. }
@@ -555,6 +563,12 @@ impl DeskView {
                 self.ctl.act(action);
                 changed = true;
             }
+        }
+        if quit {
+            // Nothing left to render or relay: close the tray and end the
+            // process. The daemon is already exiting on the same command.
+            self.quit(cx);
+            return;
         }
         if let Some(lang) = pending_lang {
             self.sync_lang(lang, cx);

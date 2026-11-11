@@ -167,7 +167,7 @@ rocky mcp                                # local read-only stdio server
 Memory lives in `~/.rocky/memory.jsonl`. It is a text file you can read, grep, back up, and delete. Rocky records explicit terminal commands and errors plus the operational metadata needed to link them: working directory, time, exit code, fingerprints, origin, record IDs, and fix links. Rocky does not keylog and does not capture the screen.
 Rocky may keep one advisory derived file next to it, `~/.rocky/memory.idx.jsonl` (fingerprint → file offsets plus a versioned header). It is a pure read accelerator: `memory.jsonl` stays the source of truth, and any version, size, timestamp, or corruption mismatch discards the sidecar and falls back to a full scan with explicit coverage. You can delete the sidecar at any time; Rocky rebuilds it lazily.
 
-The CLI contains no telemetry and runs no daemon. Its external network egress is narrow and named. `rocky check`'s package-existence lookup against registry.npmjs.org is consent-gated, package names only, and fail-open when offline. The GUI model picker asks models.dev for its model catalogue: a plain GET of `https://models.dev/api.json`, cached on disk in `models-dev.json` under `ROCKY_HOME` for 24 hours, plus one logo GET whose path names the provider you configured. It sends no prompt, key, memory, or code, has no consent prompt, and fails open: an unreachable models.dev means an empty model list, never an error. The Main chat adds one more, and only when you configure a BYOK model: a code question sends your question, carved excerpts, and memory evidence to that model, redacted and capped; a memory-only question sends nothing. One opt-in ranking engine can also leave the machine: when `config.json` sets `decision.engine` to `jev` and a key is present (`TYPESAFE_API_KEY` or `OPENROUTER_API_KEY`, or one saved in Settings), `rocky teach` and the GUI's teach, ask, and chat answers send the query and at most ten redacted evidence snippets of up to 500 characters each to `api.typesafe.ai`, or to `openrouter.ai` when `decision.jevProvider` is `openrouter`. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
+The CLI contains no telemetry. The CLI itself runs no daemon; the optional desktop app runs one local background process that talks only over a pipe or socket owned by your user. Its external network egress is narrow and named. `rocky check`'s package-existence lookup against registry.npmjs.org is consent-gated, package names only, and fail-open when offline. The GUI model picker asks models.dev for its model catalogue: a plain GET of `https://models.dev/api.json`, cached on disk in `models-dev.json` under `ROCKY_HOME` for 24 hours, plus one logo GET whose path names the provider you configured. It sends no prompt, key, memory, or code, has no consent prompt, and fails open: an unreachable models.dev means an empty model list, never an error. The Main chat adds one more, and only when you configure a BYOK model: a code question sends your question, carved excerpts, and memory evidence to that model, redacted and capped; a memory-only question sends nothing. One opt-in ranking engine can also leave the machine: when `config.json` sets `decision.engine` to `jev` and a key is present (`TYPESAFE_API_KEY` or `OPENROUTER_API_KEY`, or one saved in Settings), `rocky teach` and the GUI's teach, ask, and chat answers send the query and at most ten redacted evidence snippets of up to 500 characters each to `api.typesafe.ai`, or to `openrouter.ai` when `decision.jevProvider` is `openrouter`. Everything else, including the local MCP server, reaches no external host at all. MCP uses local stdio, exposes read-only tools, and projects sanitized memory by default. A configured cloud host may forward selected projected content under that host's own policy, so review the host and choose raw exposure only when you intend to share those fields. Optional AI calls only a separately managed Ollama service over loopback (`127.0.0.1`).
 
 `ROCKY_VERBOSE=1` brings back the internal detail that default output leaves out: the raw counters, the stored record kinds (`triple` where default output says `intent`), record ids, and the labelled provenance line (`id`, `ts`, `source`, `agent`, `coverage`, `confidence`, `reason`) on `what`, `how`, and `why`. It changes wording only, never what Rocky hears or remembers. The surfaces that read it for the memory-coverage line are listed under How the memory works.
 
@@ -196,16 +196,16 @@ Snapshots are copies of tracked source text, bounded and redacted, though a secr
 
 ## `rocky` and `rocky dash` (local GUI, implemented)
 
-Both open the same local page in your browser. There is one link and one route; the two commands differ only in which segment starts active.
+`rocky dash` opens the local browser page on the Dash segment. Bare `rocky` opens the same page on Main, except on Windows x64 and Linux x64 with a desktop session and the optional platform package installed: there bare `rocky` opens the desktop app, and the browser page stays the fallback.
 
 ```bash
-rocky           # opens on Main
+rocky           # opens on Main, or the desktop app where it is installed
 rocky dash      # opens on Dash
 rocky --no-open # print the URL, do not launch a browser
 rocky --port=8123
 ```
 
-Rocky starts an HTTP server on `127.0.0.1`, prints the URL on stderr, and tries to open your browser. If the browser cannot be launched, the printed URL is enough. The process stays in the foreground; Ctrl-C stops it. There is no daemon, no port file, and nothing left running afterwards.
+Rocky starts an HTTP server on `127.0.0.1`, prints the URL on stderr, and tries to open your browser. If the browser cannot be launched, the printed URL is enough. The process stays in the foreground; Ctrl-C stops it. `dash` starts no daemon, writes no port file, and leaves nothing running afterwards.
 
 The default port is `7777`. If that port is busy, Rocky takes any free port rather than failing.
 
@@ -444,7 +444,7 @@ rocky/
 │   └── teach-agent.en.md   # English teach model prompt template
 ├── docs/
 │   └── scientific-grounding.md
-├── package.json            # zero runtime deps
+├── package.json            # no runtime deps; platform binaries ship as optional packages
 └── tsconfig.json
 ```
 

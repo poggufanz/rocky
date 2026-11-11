@@ -1,0 +1,28 @@
+{
+  "name": "@poggufanz/rocky-cli-win32-x64",
+  "version": "2.0.0",
+  "description": "Windows x64 binaries for @poggufanz/rocky-cli: the desktop app, its background process, and the hook.",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/poggufanz/rocky.git"
+  },
+  "homepage": "https://github.com/poggufanz/rocky#readme",
+  "bugs": {
+    "url": "https://github.com/poggufanz/rocky/issues"
+  },
+  "author": "Muhammad Faiq",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

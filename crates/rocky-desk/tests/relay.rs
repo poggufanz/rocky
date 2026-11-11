@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rocky_desk::client::connect_and_subscribe;
+use rocky_desk::quit::quit_running;
 use rocky_desk::relay::{RELAY_TIMEOUT, RelayError, send_show};
 use rocky_proto::pipe::{Health, ServerMsg, Status};
 use rocky_proto::settings::Settings;
@@ -93,4 +94,13 @@ fn show_relay_without_daemon_returns_quickly() {
         elapsed <= RELAY_TIMEOUT + Duration::from_secs(1),
         "took {elapsed:?}"
     );
+}
+
+/// A daemon that keeps answering after the quit command holds the exit code at
+/// 2: only a gone daemon earns 0. `serve` cannot be stopped in-process (the
+/// real daemon exits its process), so this is the daemon-probe half.
+#[test]
+fn quit_running_returns_2_while_the_daemon_answers() {
+    let (home, _server) = start_server();
+    assert_eq!(quit_running(home.path(), Duration::from_millis(300)), 2);
 }

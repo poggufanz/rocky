@@ -5,7 +5,9 @@
  * Public surface:
  *   rocky run "<command>"     run a command; rocky remembers its failures and what followed
  *   rocky recall [--ai] <query> search the memory of past errors
- *   rocky | rocky dash        open the local GUI on 127.0.0.1
+ *   rocky                     open the desktop app where it is installed,
+ *                             otherwise the browser view on Main
+ *   rocky dash                open the browser view on Dash
  *   rocky hook|mcp|model|setup distribution bridge commands
  *   rocky watch|check|what|how|why|digest|quiz|export v0.3–v0.5 surfaces
  *   rocky --help [--all]      short grouped view; --all prints every flag and endpoint
@@ -100,11 +102,14 @@ usage:
   rocky model use [--exposure sanitized|raw] <installed-model>
                             probe an installed Ollama model, then enable local AI.
   rocky model off           disable local AI in rocky. Ollama stays untouched.
-  rocky | rocky dash        open the local GUI in a browser. One link, one route;
-                            dash just starts on the Dash segment. Loopback only,
-                            with a fresh token each launch. --no-open prints the
-                            URL instead, --port=<n> picks the port, and ctrl-c
-                            stops the server.
+  rocky
+                            open the desktop app where it is installed,
+                            otherwise the browser view on Main.
+  rocky dash                open the browser view on Dash.
+                            The browser view is one link, one route, loopback
+                            only, with a fresh token each launch. --no-open
+                            prints the URL instead, --port=<n> picks the
+                            port, and ctrl-c stops the server.
   rocky stats [--cycles]    show what rocky holds in memory. --cycles lists the
                             top failure fingerprints with counts, local only.
   rocky journal "<note>"    write one dogfood note as a single line. Local file only.
@@ -440,26 +445,28 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 /**
  * Remember where the installed CLI lives so setup can pin the hook to it.
- * The imports stay dynamic on purpose: these modules must not join the
- * startup closure that cli-startup-boundary.test.ts holds to argv parsing.
+ * Returns the record state; a bare launch applies setup when a new CLI was
+ * recorded. The imports stay dynamic on purpose: these modules must not join
+ * the startup closure that cli-startup-boundary.test.ts holds to argv parsing.
  */
-async function recordCliLocation(): Promise<void> {
+async function recordCliLocation(): Promise<"written" | "unchanged" | "skipped"> {
   try {
     const { resolveRockyPaths } = await import("./core/state-paths.js");
     const { recordCli } = await import("./setup/auto/cli-record.js");
-    recordCli(resolveRockyPaths().home, {
+    return recordCli(resolveRockyPaths().home, {
       node: process.execPath,
       entry: fileURLToPath(import.meta.url),
       version: PACKAGE_VERSION,
     });
   } catch {
     // A location record only informs setup; no command fails for it.
+    return "skipped";
   }
 }
 
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
-  if (command === undefined) await recordCliLocation();
+  const cliState = command === undefined ? await recordCliLocation() : "skipped";
   if (command === undefined || command === "--no-open" || command?.startsWith("--port=")) {
     const flags = command === undefined ? [] : [command, ...rest];
     // A browser needs a human at the keyboard, so a pipe falls through to the
@@ -467,6 +474,13 @@ async function main(): Promise<number> {
     // URL, so no terminal is needed.
     const { guiWanted, guiCommand } = await import("./commands/gui.js");
     if (guiWanted(flags, process.stdout.isTTY === true, process.stdin.isTTY === true)) {
+      if (command === undefined) {
+        // The desk is the intended screen; the browser view is the fallback
+        // for a home with no package, no desktop session, or a desk that will
+        // not start.
+        const { defaultDeskOpenDeps, openDesk } = await import("./commands/desk-open.js");
+        if (await openDesk(defaultDeskOpenDeps(cliState === "written")) === "opened") return 0;
+      }
       return guiCommand(flags, "main");
     }
     if (command?.startsWith("--port=")) return printHelp("short");

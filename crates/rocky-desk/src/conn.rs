@@ -72,6 +72,13 @@ impl ConnState {
         self.stop_ack_id = Some(id);
     }
 
+    /// The daemon broadcast `quit`, so this desk is closing. It counts as a
+    /// requested stop: no respawn may follow the disconnect that comes with it.
+    pub fn on_quit(&mut self) {
+        self.stopped = true;
+        self.stop_ack_id = None;
+    }
+
     /// An ack arrived. Returns true when the UI should re-render (state changed).
     pub fn on_ack(&mut self, id: u64, ok: bool) -> bool {
         if Some(id) != self.stop_ack_id {
@@ -242,6 +249,16 @@ mod tests {
         s.stop_sent(7);
         assert!(!s.on_ack(8, true));
         assert_eq!(s.on_disconnect(1_000), Action::Show(Conn::Disconnected));
+    }
+
+    #[test]
+    fn received_quit_suppresses_respawn() {
+        let mut s = ConnState::new(3, 300_000);
+        s.on_quit();
+        let action = s.on_disconnect(1_000);
+        assert!(!matches!(action, Action::Respawn | Action::Connect));
+        assert_eq!(action, Action::Show(Conn::Disconnected));
+        assert_eq!(s.conn(), Conn::Disconnected);
     }
 
     #[test]

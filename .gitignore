@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .test-dist/
+/platform/*/bin/
+/platform/*/LICENSE
 /gui.json
 /models-dev.json
 .worktrees/

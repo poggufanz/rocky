@@ -1,4 +1,4 @@
-//! Desk client server (protocol v2): a single-instance user-only connection
+//! Desk client server (protocol v3): a single-instance user-only connection
 //! endpoint (a named pipe on Windows, a unix socket elsewhere), per-client
 //! threads, and a non-blocking broadcast hub.
 
@@ -40,12 +40,15 @@ impl From<io::Error> for BindError {
 
 #[derive(Debug)]
 pub enum Control {
+    /// `cmd stop` and `cmd quit` share this path: the daemon acks and exits.
     Stop {
         id: u64,
         reply: SyncSender<ServerMsg>,
         /// Signalled by the client thread after the ack line is flushed, so
         /// the daemon can exit without racing the client writer thread.
         flushed: Receiver<()>,
+        /// True for `cmd quit`, which also told every desk to close.
+        quit: bool,
     },
     /// A settings change; the daemon replies with the ack to queue.
     Set {
@@ -128,10 +131,19 @@ impl Hub {
     }
 
     pub fn broadcast(&self, msg: &ServerMsg) {
+        self.broadcast_except(0, msg);
+    }
+
+    /// Queues one message to every subscribed client except `skip`. Client
+    /// ids start at 1, so 0 means everyone.
+    fn broadcast_except(&self, skip: u64, msg: &ServerMsg) {
         let line = encode(msg);
         let mut clients = self.clients.lock().unwrap();
         let ids: Vec<u64> = clients.keys().copied().collect();
         for id in ids {
+            if id == skip {
+                continue;
+            }
             let drop = match clients.get_mut(&id) {
                 Some(c) => c.tx.try_send(line.clone()).is_err(),
                 None => false,
@@ -329,7 +341,9 @@ fn handle_client<S>(
                     id,
                 }) => {
                     // Broadcast first so every desk sees it, then ack the
-                    // sender through its own queue (one writer per pipe).
+                    // sender through its own queue. The queue is not the
+                    // only writer: the stop ack and the sender's quit below
+                    // go out on this thread, so quit precedes the ack.
                     hub.broadcast(&ServerMsg::Show);
                     if !hub.send_to(
                         client_id,
@@ -383,10 +397,18 @@ fn handle_client<S>(
                         break;
                     }
                 }
-                Ok(ClientMsg::Cmd {
-                    name: CmdName::Stop,
-                    id,
-                }) => {
+                Ok(ClientMsg::Cmd { name, id })
+                    if matches!(name, CmdName::Stop | CmdName::Quit) =>
+                {
+                    // Quit reaches every desk, the sender included, before
+                    // the ack. The sender's own line is written on this
+                    // thread so the ack can never overtake it on its pipe.
+                    // A broken sender pipe must not cancel the stop.
+                    let quit = name == CmdName::Quit;
+                    if quit {
+                        hub.broadcast_except(client_id, &ServerMsg::Quit);
+                        let _ = write_line(&stream, encode(&ServerMsg::Quit).as_bytes());
+                    }
                     let (reply_tx, reply_rx) = mpsc::sync_channel(1);
                     let (flushed_tx, flushed_rx) = mpsc::channel();
                     if control
@@ -394,6 +416,7 @@ fn handle_client<S>(
                             id,
                             reply: reply_tx,
                             flushed: flushed_rx,
+                            quit,
                         })
                         .is_err()
                     {
