@@ -1,0 +1,192 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check versions
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME does not match v$VERSION" >&2
+            exit 1
+          fi
+          for id in win32-x64 linux-x64; do
+            platform_version="$(node -p "require('./platform/$id/package.json').version")"
+            if [ "$platform_version" != "$VERSION" ]; then
+              echo "platform/$id is $platform_version, expected $VERSION" >&2
+              exit 1
+            fi
+          done
+      - name: Require a successful CI run for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success" --jq .total_count)"
+          if [ "${count:-0}" -lt 1 ]; then
+            echo "no successful CI run for $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+  build-windows:
+    name: build / windows
+    runs-on: windows-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - run: cargo build --release --locked -p rockyd -p rocky-desk -p rocky-hook
+      - uses: actions/upload-artifact@v5
+        with:
+          name: win32-x64
+          path: |
+            target/release/rockyd.exe
+            target/release/rocky-desk.exe
+            target/release/rocky-hook.exe
+          if-no-files-found: error
+
+  build-linux:
+    name: build / linux
+    runs-on: ubuntu-22.04
+    needs: verify
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install GPUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libdbus-1-dev
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - run: cargo build --release --locked -p rockyd -p rocky-desk -p rocky-hook
+      - uses: actions/upload-artifact@v5
+        with:
+          name: linux-x64
+          path: |
+            target/release/rockyd
+            target/release/rocky-desk
+            target/release/rocky-hook
+          if-no-files-found: error
+
+  dry-run:
+    name: dry run
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: [verify, build-windows, build-linux]
+    permissions:
+      contents: read
+    env:
+      npm_config_color: "false"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v5
+        with:
+          name: win32-x64
+          path: platform/win32-x64/bin
+      - uses: actions/download-artifact@v5
+        with:
+          name: linux-x64
+          path: platform/linux-x64/bin
+      - name: Stage platform packages
+        run: |
+          cp LICENSE platform/win32-x64/LICENSE
+          cp LICENSE platform/linux-x64/LICENSE
+          chmod 755 platform/linux-x64/bin/*
+      - run: npm publish ./platform/win32-x64 --dry-run --ignore-scripts
+      - run: npm publish ./platform/linux-x64 --dry-run --ignore-scripts
+      - run: node scripts/platform-packages.mjs inject package.json
+      - run: node scripts/platform-packages.mjs check package.json
+      - run: npm publish --dry-run --ignore-scripts
+
+  publish:
+    name: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [verify, build-windows, build-linux]
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      npm_config_color: "false"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Require npm with trusted publishing
+        run: |
+          npm_version="$(npm --version)"
+          if [ "$(printf '%s\n' 11.5.1 "$npm_version" | sort -V | head -n1)" != "11.5.1" ]; then
+            echo "npm $npm_version is older than 11.5.1" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - name: Test
+        run: env -u FORCE_COLOR -u NO_COLOR npm test
+      - uses: actions/download-artifact@v5
+        with:
+          name: win32-x64
+          path: platform/win32-x64/bin
+      - uses: actions/download-artifact@v5
+        with:
+          name: linux-x64
+          path: platform/linux-x64/bin
+      - name: Stage platform packages
+        run: |
+          cp LICENSE platform/win32-x64/LICENSE
+          cp LICENSE platform/linux-x64/LICENSE
+          chmod 755 platform/linux-x64/bin/*
+      - name: Publish win32-x64 package
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@poggufanz/rocky-cli-win32-x64@$VERSION" version 2>/dev/null | grep -qxF "$VERSION"; then
+            echo "win32-x64 $VERSION is already on the registry"
+          else
+            npm publish ./platform/win32-x64 --ignore-scripts
+          fi
+      - name: Publish linux-x64 package
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@poggufanz/rocky-cli-linux-x64@$VERSION" version 2>/dev/null | grep -qxF "$VERSION"; then
+            echo "linux-x64 $VERSION is already on the registry"
+          else
+            npm publish ./platform/linux-x64 --ignore-scripts
+          fi
+      - run: node scripts/platform-packages.mjs inject package.json
+      - run: node scripts/platform-packages.mjs check package.json
+      - name: Publish root package
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@poggufanz/rocky-cli@$VERSION" version 2>/dev/null | grep -qxF "$VERSION"; then
+            echo "@poggufanz/rocky-cli $VERSION is already on the registry"
+          else
+            npm publish --ignore-scripts
+          fi
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
