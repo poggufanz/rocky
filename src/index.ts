@@ -440,26 +440,28 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 /**
  * Remember where the installed CLI lives so setup can pin the hook to it.
- * The imports stay dynamic on purpose: these modules must not join the
- * startup closure that cli-startup-boundary.test.ts holds to argv parsing.
+ * Returns the record state; a bare launch applies setup when a new CLI was
+ * recorded. The imports stay dynamic on purpose: these modules must not join
+ * the startup closure that cli-startup-boundary.test.ts holds to argv parsing.
  */
-async function recordCliLocation(): Promise<void> {
+async function recordCliLocation(): Promise<"written" | "unchanged" | "skipped"> {
   try {
     const { resolveRockyPaths } = await import("./core/state-paths.js");
     const { recordCli } = await import("./setup/auto/cli-record.js");
-    recordCli(resolveRockyPaths().home, {
+    return recordCli(resolveRockyPaths().home, {
       node: process.execPath,
       entry: fileURLToPath(import.meta.url),
       version: PACKAGE_VERSION,
     });
   } catch {
     // A location record only informs setup; no command fails for it.
+    return "skipped";
   }
 }
 
 async function main(): Promise<number> {
   const [, , command, ...rest] = process.argv;
-  if (command === undefined) await recordCliLocation();
+  const cliState = command === undefined ? await recordCliLocation() : "skipped";
   if (command === undefined || command === "--no-open" || command?.startsWith("--port=")) {
     const flags = command === undefined ? [] : [command, ...rest];
     // A browser needs a human at the keyboard, so a pipe falls through to the
@@ -467,6 +469,13 @@ async function main(): Promise<number> {
     // URL, so no terminal is needed.
     const { guiWanted, guiCommand } = await import("./commands/gui.js");
     if (guiWanted(flags, process.stdout.isTTY === true, process.stdin.isTTY === true)) {
+      if (command === undefined) {
+        // The desk is the intended screen; the browser view is the fallback
+        // for a home with no package, no desktop session, or a desk that will
+        // not start.
+        const { defaultDeskOpenDeps, openDesk } = await import("./commands/desk-open.js");
+        if (await openDesk(defaultDeskOpenDeps(cliState === "written")) === "opened") return 0;
+      }
       return guiCommand(flags, "main");
     }
     if (command?.startsWith("--port=")) return printHelp("short");
