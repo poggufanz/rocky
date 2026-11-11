@@ -13,6 +13,7 @@ pub mod quit;
 pub mod relay;
 pub mod respawn;
 pub mod settings_view;
+pub mod setup_lines;
 pub mod spawn;
 pub mod toast;
 pub mod view;

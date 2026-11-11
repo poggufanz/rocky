@@ -118,6 +118,40 @@ pub enum Msg {
         agent: String,
     },
     NoticeDone,
+    /// A newer Rocky was installed; the running command line must run once.
+    SetupNewVersion,
+    /// The command line is gone (`Some` names the path) or was never learned.
+    SetupCliMissing {
+        path: Option<String>,
+    },
+    SetupRepairing {
+        path: String,
+    },
+    /// `error` is data from the daemon or Node and is shown as received. It may be empty.
+    SetupRepairFailed {
+        path: String,
+        error: String,
+    },
+    SetupChanged {
+        path: String,
+    },
+    SetupForeign {
+        harness: String,
+        path: String,
+    },
+    /// `error` is data from the daemon or Node and is shown as received. It may be empty.
+    SetupRefused {
+        path: String,
+        error: String,
+    },
+    SetupFighting {
+        path: String,
+        n: u32,
+    },
+    /// Target lines cut from the strip.
+    SetupMore {
+        n: u64,
+    },
 }
 
 #[cfg(test)]
@@ -242,6 +276,43 @@ fn samples() -> Vec<Msg> {
             agent: "main".into(),
         },
         Msg::NoticeDone,
+        Msg::SetupNewVersion,
+        Msg::SetupCliMissing {
+            path: Some("C:/rocky/dist/index.js".into()),
+        },
+        Msg::SetupCliMissing { path: None },
+        Msg::SetupRepairing {
+            path: "C:/Users/me/.claude/settings.json".into(),
+        },
+        Msg::SetupRepairFailed {
+            path: "C:/Users/me/.claude/settings.json".into(),
+            error: "still missing after setup ran".into(),
+        },
+        Msg::SetupRepairFailed {
+            path: "C:/Users/me/.claude/settings.json".into(),
+            error: String::new(),
+        },
+        Msg::SetupChanged {
+            path: "C:/Users/me/.claude/settings.json".into(),
+        },
+        Msg::SetupForeign {
+            harness: "gemini-cli".into(),
+            path: "C:/Users/me/.gemini/settings.json".into(),
+        },
+        Msg::SetupRefused {
+            path: "C:/Users/me/.claude/settings.json".into(),
+            error: "path is outside the home folder".into(),
+        },
+        Msg::SetupRefused {
+            path: "C:/Users/me/.claude/settings.json".into(),
+            error: String::new(),
+        },
+        Msg::SetupFighting {
+            path: "C:/Users/me/.claude/settings.json".into(),
+            n: 6,
+        },
+        Msg::SetupMore { n: 3 },
+        Msg::SetupMore { n: 1 },
     ]
 }
 
@@ -333,6 +404,30 @@ pub fn en(m: &Msg) -> String {
         Msg::NoticeNeedsYou { agent, summary } => needs_you_en(agent, summary.as_deref()),
         Msg::NoticeFailed { agent } => format!("{agent} failed"),
         Msg::NoticeDone => "Finished".to_string(),
+        Msg::SetupNewVersion => "New version installed. Run rocky once to use it.".to_string(),
+        Msg::SetupCliMissing { path: Some(path) } => {
+            format!("{path} is gone. Run rocky once so Rocky can repair its entries.")
+        }
+        Msg::SetupCliMissing { path: None } => {
+            "Rocky does not know where its command line is. Run rocky once.".to_string()
+        }
+        Msg::SetupRepairing { path } => format!("Restoring Rocky entries in {path}."),
+        Msg::SetupRepairFailed { path, error } => {
+            format!("Cannot restore Rocky entries in {path}{}.", error_suffix(error))
+        }
+        Msg::SetupChanged { path } => {
+            format!("{path} changed while Rocky was writing it. Trying again.")
+        }
+        Msg::SetupForeign { harness, path } => format!(
+            "{path} has a rocky server Rocky did not write, so Rocky leaves {harness} alone."
+        ),
+        Msg::SetupRefused { path, error } => {
+            format!("Rocky will not write {path}{}.", error_suffix(error))
+        }
+        Msg::SetupFighting { path, n } => {
+            format!("{path} keeps losing Rocky entries ({n} times in 10 minutes).")
+        }
+        Msg::SetupMore { n } => format!("{n} more setup {}.", plural(*n, "problem", "problems")),
     }
 }
 
@@ -429,6 +524,30 @@ pub fn id(m: &Msg) -> String {
         Msg::NoticeNeedsYou { agent, summary } => needs_you_id(agent, summary.as_deref()),
         Msg::NoticeFailed { agent } => format!("{agent} gagal"),
         Msg::NoticeDone => "Selesai".to_string(),
+        Msg::SetupNewVersion => "Versi baru terpasang. Jalankan rocky sekali untuk memakainya.".to_string(),
+        Msg::SetupCliMissing { path: Some(path) } => {
+            format!("{path} sudah tidak ada. Jalankan rocky sekali supaya Rocky bisa memperbaiki entrinya.")
+        }
+        Msg::SetupCliMissing { path: None } => {
+            "Rocky tidak tahu letak command line-nya. Jalankan rocky sekali.".to_string()
+        }
+        Msg::SetupRepairing { path } => format!("Memasang ulang entri Rocky di {path}."),
+        Msg::SetupRepairFailed { path, error } => {
+            format!("Tidak bisa memasang ulang entri Rocky di {path}{}.", error_suffix(error))
+        }
+        Msg::SetupChanged { path } => {
+            format!("{path} berubah saat Rocky menulisnya. Mencoba lagi.")
+        }
+        Msg::SetupForeign { harness, path } => format!(
+            "{path} punya server rocky yang bukan tulisan Rocky, jadi Rocky tidak menyentuh {harness}."
+        ),
+        Msg::SetupRefused { path, error } => {
+            format!("Rocky tidak mau menulis {path}{}.", error_suffix(error))
+        }
+        Msg::SetupFighting { path, n } => {
+            format!("{path} terus kehilangan entri Rocky ({n} kali dalam 10 menit).")
+        }
+        Msg::SetupMore { n } => format!("{n} masalah setup lain."),
     }
 }
 
@@ -634,6 +753,18 @@ fn outcome_id(o: Outcome) -> &'static str {
 /// change with the count, so only the English catalog uses this.
 fn plural<'a>(n: u64, one: &'a str, many: &'a str) -> &'a str {
     if n == 1 { one } else { many }
+}
+
+/// Error text from the daemon or Node, set after a colon and shown as received
+/// because it is data and never translated. A trailing period is dropped so the
+/// sentence's own period does not double. Empty text leaves out the colon.
+fn error_suffix(error: &str) -> String {
+    let error = error.trim().trim_end_matches('.');
+    if error.is_empty() {
+        String::new()
+    } else {
+        format!(": {error}")
+    }
 }
 
 /// Missed-events line for a gap: one event is singular, and an empty range
