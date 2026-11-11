@@ -32,6 +32,7 @@ The experimental desk and its daemon run on Linux: a per-user Unix socket with l
 - Repo capture consent can record a decline, and a Git worktree follows its main repository's decision.
 - A version tag runs the release workflow in CI, and npm trusts the workflow's OIDC identity instead of a stored token.
 - On Windows, the git and setup helper commands Rocky starts no longer open a console window.
+- The experimental desk daemon restores a missing Rocky entry in a guarded config file through the CLI, under approved consent. Its health reports the setup status, and it answers the desk's `setup` and `repo_decision` requests.
 
 ## 2.0.0 — 6 November 2026
 

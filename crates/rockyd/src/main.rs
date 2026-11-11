@@ -2,16 +2,21 @@
 
 //! `rockyd`: drain spool into the status machine, serve desk over a named pipe.
 
+mod guard_loop;
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use guard_loop::GuardLoop;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, settings_path, spool_dir};
-use rocky_proto::pipe::{AgentKey, AgentStatus, Health, ServerMsg, StatusOp};
+use rocky_proto::pipe::{
+    AgentKey, AgentStatus, Health, PendingRepo, ServerMsg, SetupHealth, StatusOp,
+};
 use rocky_proto::settings::Settings;
 use rockyd::gaps::Gaps;
 use rockyd::history::{HISTORY_CAP_BYTES, History, replay};
@@ -46,6 +51,10 @@ struct Shared {
     settings_unreadable: bool,
     gaps: Gaps,
     history: History,
+    /// The setup guard's status. `take_health` carries it into the broadcast health.
+    setup: SetupHealth,
+    /// Repos waiting for a capture decision, as the last broadcast listed them.
+    repo_pending: Vec<PendingRepo>,
 }
 
 impl Shared {
@@ -55,6 +64,7 @@ impl Shared {
         let mut next = self.counters.clone();
         next.gaps = self.gaps.to_vec();
         next.settings_unreadable = self.settings_unreadable;
+        next.setup = self.setup.clone();
         let changed = next != self.health;
         if changed {
             self.health = next.clone();
@@ -85,7 +95,7 @@ fn snapshot_of(s: &Shared) -> ServerMsg {
         aggregate: s.state.aggregate(),
         health: s.health.clone(),
         settings: s.settings.clone(),
-        repo_pending: Vec::new(),
+        repo_pending: s.repo_pending.clone(),
     }
 }
 
@@ -125,6 +135,8 @@ fn main() {
         settings_unreadable: false,
         gaps: Gaps::new(),
         history: History::open(&history_dir(&home), HISTORY_CAP_BYTES, false),
+        setup: SetupHealth::default(),
+        repo_pending: Vec::new(),
     }));
 
     let hub = Arc::new(Hub::new());
@@ -222,8 +234,13 @@ fn main() {
         }
     }
 
-    // 5. Initial ingest through the same path as rescans.
-    rescan(&spool, &shared, &hub, &log, &mut ingest);
+    // 5. Initial ingest through the same path as rescans. Discovery queues config
+    // dirs only under approved consent, so the guard checks before the ingest and
+    // again after it.
+    let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+    guards.check(&shared, &hub, &log);
+    rescan(&spool, &shared, &hub, &log, &mut ingest, &mut guards);
+    guards.check(&shared, &hub, &log);
 
     // 6. Settle what replay and ingest produced, and drop day-old history and
     // gaps. Runs after ingest so pending spool events are never idled away.
@@ -305,6 +322,17 @@ fn main() {
                     let entries = shared.lock().unwrap().state.timeline(&key);
                     let _ = reply.send(ServerMsg::Timeline { id, key, entries });
                 }
+                Ok(Control::Setup { id, action, reply }) => {
+                    guards.setup_request(id, action, reply, &shared, &hub, &log);
+                }
+                Ok(Control::RepoDecision {
+                    id,
+                    root,
+                    allow,
+                    reply,
+                }) => {
+                    guards.repo_request(id, root, allow, reply);
+                }
                 Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
             }
         }
@@ -320,15 +348,17 @@ fn main() {
             last_rescan = now;
         }
         if triggered {
-            rescan(&spool, &shared, &hub, &log, &mut ingest);
+            rescan(&spool, &shared, &hub, &log, &mut ingest, &mut guards);
         }
 
         let now = Instant::now();
         if now.duration_since(last_tick) >= TICK_EVERY {
             last_tick = now;
             tick_once(&shared, &hub, &log);
+            guards.check(&shared, &hub, &log);
         }
 
+        guards.service(&shared, &hub, &log);
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -365,6 +395,7 @@ fn rescan(
     hub: &Hub,
     log: &RotatingLog,
     ingest: &mut Ingestor,
+    guards: &mut GuardLoop,
 ) {
     let mut repo_of = resolve_repo;
     let (msgs, health, upserts, health_changed, history_errors) = {
@@ -376,6 +407,7 @@ fn rescan(
             s.gaps.push(*gap);
             s.state.record_gap(gap);
         }
+        guards.rescanned(&out.config_locations, &s.state.session_roots());
         let mut msgs = Vec::with_capacity(changes.upserted.len() + changes.removed.len() + 1);
         for key in &changes.upserted {
             if let Some(agent) = s.state.get(key) {
