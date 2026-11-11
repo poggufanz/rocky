@@ -31,6 +31,7 @@ The experimental desk and its daemon run on Linux: a per-user Unix socket with l
 - An empty `ROCKY_HOME` is treated as unset.
 - Repo capture consent can record a decline, and a Git worktree follows its main repository's decision.
 - A version tag runs the release workflow in CI, and npm trusts the workflow's OIDC identity instead of a stored token.
+- On Windows, the git and setup helper commands Rocky starts no longer open a console window.
 
 ## 2.0.0 — 6 November 2026
 

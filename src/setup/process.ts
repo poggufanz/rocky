@@ -71,6 +71,7 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
             cwd: options.cwd,
             env: options.env,
             shell: false,
+            windowsHide: true,
             stdio: ["pipe", "pipe", "pipe"] as const,
           }) as ChildProcessWithoutNullStreams;
         } catch (error) {
@@ -153,6 +154,7 @@ export function createProcessRunner(captureLimitBytes = PROCESS_CAPTURE_LIMIT_BY
         cwd: options.cwd,
         env: { ...process.env, ...options.env },
         shell: false,
+        windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"] as const,
       }) as ChildProcessWithoutNullStreams;
 

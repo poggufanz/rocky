@@ -4,4 +4,5 @@
 //! it never parses or writes an agent config.
 
 pub mod check;
+pub mod node;
 pub mod records;

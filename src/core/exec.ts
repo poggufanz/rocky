@@ -127,6 +127,7 @@ export function runGit(
     }
     const child = spawn(command.command, [...command.prefix, ...args], {
       shell: false,
+      windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
@@ -205,6 +206,7 @@ export function runGitSync(
   }
   const result = spawnSync(command.command, [...command.prefix, ...args], {
     shell: false,
+    windowsHide: true,
     input,
     stdio: ["pipe", "pipe", "pipe"],
     encoding: "utf8",
@@ -289,6 +291,7 @@ export function runProcess(cmd: string, options: ExecOptions = {}): Promise<Exec
   let lastActivity = start;
 
   return new Promise((resolve) => {
+    // console kept: runs the user's own command
     const child = spawn(cmd, options.args ?? [], {
       shell: options.shell ?? true,
       stdio: ["inherit", "inherit", "pipe"],
