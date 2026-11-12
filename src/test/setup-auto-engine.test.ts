@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { removeAll, type AutoContext } from "../setup/auto/engine.js";
+import { inspectAll, removeAll, type AutoContext } from "../setup/auto/engine.js";
 import type { ShellHookPort } from "../setup/auto/shell.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
@@ -140,4 +140,51 @@ test("remove keeps the recovery copy beside settings the engine refuses to rewri
 
   assert.equal(reports.some((report) => report.path === settings && report.state === "refused"), true);
   assert.equal(existsSync(retained), true);
+});
+
+function profileWithHome(t: test.TestContext, homeSettings: boolean): { f: Fixture; homeFile: string; profileFile: string } {
+  const f = fixture(t);
+  // `~/.claude.json` makes claude-code detected without creating `~/.claude`.
+  writeFileSync(join(f.home, ".claude.json"), "{}\n");
+  const ownProfile = join(f.home, "profile");
+  mkdirSync(ownProfile);
+  writeFileSync(join(ownProfile, ".claude.json"), "{}\n");
+  f.ctx.detect.env.CLAUDE_CONFIG_DIR = ownProfile;
+  const homeFile = join(f.home, ".claude", "settings.json");
+  if (homeSettings) {
+    mkdirSync(join(f.home, ".claude"));
+    writeFileSync(homeFile, "{}\n");
+  }
+  return { f, homeFile, profileFile: join(ownProfile, "settings.json") };
+}
+
+test("home settings stay a target when CLAUDE_CONFIG_DIR points at a profile", (t) => {
+  const { f, homeFile, profileFile } = profileWithHome(t, true);
+
+  const paths = inspectAll(f.ctx, undefined)
+    .filter((report) => report.harness === "claude-code" && report.kind === "agent-hooks")
+    .map((report) => report.path);
+
+  assert.deepEqual([...paths].sort(), [homeFile, profileFile].sort());
+});
+
+test("a missing home .claude adds no target and no refusal under CLAUDE_CONFIG_DIR", (t) => {
+  const { f, homeFile, profileFile } = profileWithHome(t, false);
+
+  const reports = inspectAll(f.ctx, undefined).filter((report) => report.harness === "claude-code");
+
+  assert.equal(reports.some((report) => report.path === homeFile), false);
+  assert.equal(
+    reports.some((report) => report.path === profileFile && report.kind === "agent-hooks"),
+    true,
+    JSON.stringify(reports.map((report) => [report.kind, report.state, report.path, report.detail])),
+  );
+});
+
+test("removal also covers home settings when CLAUDE_CONFIG_DIR points at a profile", (t) => {
+  const { f, homeFile } = profileWithHome(t, true);
+
+  const reports = removeAll(f.ctx, undefined);
+
+  assert.equal(reports.some((report) => report.path === homeFile && report.kind === "agent-hooks"), true);
 });
