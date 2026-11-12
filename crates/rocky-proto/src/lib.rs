@@ -6,5 +6,6 @@ pub mod paths;
 pub mod peer;
 pub mod pipe;
 pub mod redact;
+pub mod respawn;
 pub mod settings;
 pub mod spool;

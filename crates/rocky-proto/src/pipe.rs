@@ -126,6 +126,31 @@ pub struct Health {
     pub settings_unreadable: bool,
     #[serde(default)]
     pub setup: SetupHealth,
+    #[serde(default)]
+    pub capture: Vec<CaptureHealth>,
+}
+
+/// Where one consented repo's capture stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureState {
+    Starting,
+    Ok,
+    Partial,
+    Elsewhere,
+    Polling,
+    Failed,
+}
+
+/// The daemon's last view of one repo's capture worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureHealth {
+    pub root: String,
+    pub state: CaptureState,
+    #[serde(default)]
+    pub last_reconcile_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Where one setup target stands.
@@ -361,9 +386,10 @@ mod tests {
     use serde_json::json;
 
     use crate::pipe::{
-        AgentKey, AgentStatus, ClientMsg, CmdName, ConsentState, GapReason, Health, LINE_CAP,
-        Outcome, PendingRepo, RepoInfo, ServerMsg, SetupAction, SetupHealth, SetupTarget, Status,
-        StatusOp, TargetState, TimelineEntry, TimelineKind, WireError, decode, encode,
+        AgentKey, AgentStatus, CaptureHealth, CaptureState, ClientMsg, CmdName, ConsentState,
+        GapReason, Health, LINE_CAP, Outcome, PendingRepo, RepoInfo, ServerMsg, SetupAction,
+        SetupHealth, SetupTarget, Status, StatusOp, TargetState, TimelineEntry, TimelineKind,
+        WireError, decode, encode,
     };
     use crate::settings::Settings;
 
@@ -662,6 +688,49 @@ mod tests {
         assert_eq!(target.state, TargetState::Foreign);
         assert_eq!(target.fights_10m, 0);
         assert_eq!(target.last_repair_ms, None);
+    }
+
+    #[test]
+    fn health_without_capture_decodes_to_empty() {
+        let v3 = r#"{"v":3,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"settings_unreadable":false,"setup":{}}}"#;
+        let ServerMsg::Health { health } = decode::<ServerMsg>(v3).unwrap() else {
+            panic!("expected a health frame");
+        };
+        assert!(health.capture.is_empty());
+    }
+
+    #[test]
+    fn capture_state_is_snake_case() {
+        let all = [
+            (CaptureState::Starting, "starting"),
+            (CaptureState::Ok, "ok"),
+            (CaptureState::Partial, "partial"),
+            (CaptureState::Elsewhere, "elsewhere"),
+            (CaptureState::Polling, "polling"),
+            (CaptureState::Failed, "failed"),
+        ];
+        for (state, name) in all {
+            let wire = format!("\"{name}\"");
+            assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<CaptureState>(&wire).unwrap(), state);
+        }
+    }
+
+    #[test]
+    fn capture_health_round_trips_in_a_health_frame() {
+        let row = CaptureHealth {
+            root: "C:/repo".into(),
+            state: CaptureState::Partial,
+            last_reconcile_ms: Some(42),
+            error: Some("scan".into()),
+        };
+        let msg = ServerMsg::Health {
+            health: Health {
+                capture: vec![row],
+                ..Health::default()
+            },
+        };
+        assert_eq!(decode::<ServerMsg>(encode(&msg).trim_end()).unwrap(), msg);
     }
 
     #[test]

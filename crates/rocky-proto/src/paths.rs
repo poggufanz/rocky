@@ -74,6 +74,14 @@ pub fn consent_path(rocky_home: &Path) -> PathBuf {
     setup_dir(rocky_home).join("consent.json")
 }
 
+pub fn listening_dir(rocky_home: &Path) -> PathBuf {
+    rocky_home.join("listening")
+}
+
+pub fn repo_consents_path(rocky_home: &Path) -> PathBuf {
+    listening_dir(rocky_home).join("repo-consents.json")
+}
+
 pub fn home_hash(rocky_home: &Path) -> String {
     let normalized = rocky_home
         .to_string_lossy()
@@ -159,8 +167,9 @@ mod tests {
 
     use super::{
         absolutize, bad_dir, bin_dir, binaries_record_path, cli_record_path, consent_path,
-        desk_mutex_name, expected_path, history_dir, home_hash, log_path, pipe_name,
-        rocky_home_from, settings_path, setup_dir, spool_dir, tool_text_off_marker,
+        desk_mutex_name, expected_path, history_dir, home_hash, listening_dir, log_path, pipe_name,
+        repo_consents_path, rocky_home_from, settings_path, setup_dir, spool_dir,
+        tool_text_off_marker,
     };
 
     #[test]
@@ -234,6 +243,15 @@ mod tests {
         assert_eq!(setup_dir(p), p.join("setup"));
         assert_eq!(expected_path(p), p.join("setup").join("expected.json"));
         assert_eq!(consent_path(p), p.join("setup").join("consent.json"));
+    }
+    #[test]
+    fn listening_paths_live_under_home() {
+        let p = Path::new(r"C:\h");
+        assert_eq!(listening_dir(p), p.join("listening"));
+        assert_eq!(
+            repo_consents_path(p),
+            p.join("listening").join("repo-consents.json")
+        );
     }
 }
 

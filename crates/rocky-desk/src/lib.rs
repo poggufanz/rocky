@@ -11,7 +11,6 @@ pub mod notify;
 pub mod os_notice;
 pub mod quit;
 pub mod relay;
-pub mod respawn;
 pub mod settings_view;
 pub mod setup_lines;
 pub mod spawn;
