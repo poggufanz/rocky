@@ -80,6 +80,8 @@ pub enum SetupMsg {
     },
     /// The daemon never answered a setup request.
     RequestTimedOut,
+    /// The desk has no connection to the daemon, so no plan can be read.
+    ConsentNotConnected,
     /// Settings row that opens the consent screen.
     ConsentInstall,
 }
@@ -158,6 +160,7 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
             error: String::new(),
         },
         SetupMsg::RequestTimedOut,
+        SetupMsg::ConsentNotConnected,
         SetupMsg::ConsentInstall,
     ]
 }
@@ -223,6 +226,9 @@ pub fn setup_en(m: &SetupMsg) -> String {
             format!("Setup did not finish{}. Try again.", error_suffix(error))
         }
         SetupMsg::RequestTimedOut => "Rocky did not answer in time.".to_string(),
+        SetupMsg::ConsentNotConnected => {
+            "Rocky is not connected yet. The plan loads when it is.".to_string()
+        }
         SetupMsg::ConsentInstall => "Install".to_string(),
     }
 }
@@ -291,6 +297,9 @@ pub fn setup_id(m: &SetupMsg) -> String {
             format!("Setup belum selesai{}. Coba lagi.", error_suffix(error))
         }
         SetupMsg::RequestTimedOut => "Rocky tidak menjawab tepat waktu.".to_string(),
+        SetupMsg::ConsentNotConnected => {
+            "Rocky belum terhubung. Rencana dimuat setelah terhubung.".to_string()
+        }
         SetupMsg::ConsentInstall => "Pasang".to_string(),
     }
 }

@@ -5,7 +5,7 @@ use std::io;
 
 use rocky_proto::pipe::{ConsentState, SetupTarget, TargetHealth, TargetState};
 
-use crate::i18n::Msg;
+use crate::i18n::{Msg, SetupMsg};
 use crate::requests::{Outcome, RequestKind};
 use crate::setup_lines::target_line;
 
@@ -51,12 +51,21 @@ pub struct Step {
     pub log: Option<String>,
 }
 
+/// Why no plan is shown. Only a real answer means Node is missing; the other
+/// two say the daemon was unreachable, which a later health message can fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanFailure {
+    CliMissing,
+    TimedOut,
+    NotConnected,
+}
+
 #[derive(Debug)]
 pub struct ConsentModel {
     pub rows: Vec<PlanRow>,
     pub autostart: bool,
     pub stage: Stage,
-    pub plan_failed: bool,
+    pub plan_failure: Option<PlanFailure>,
     consent: ConsentState,
     first_health_seen: bool,
     answered: bool,
@@ -68,11 +77,20 @@ impl Default for ConsentModel {
             rows: Vec::new(),
             autostart: true,
             stage: Stage::Loading,
-            plan_failed: false,
+            plan_failure: None,
             consent: ConsentState::None,
             first_health_seen: false,
             answered: false,
         }
+    }
+}
+
+/// The copy that explains one kind of plan failure.
+pub fn plan_failure_msg(why: PlanFailure) -> SetupMsg {
+    match why {
+        PlanFailure::CliMissing => SetupMsg::CliMissing { path: None },
+        PlanFailure::TimedOut => SetupMsg::RequestTimedOut,
+        PlanFailure::NotConnected => SetupMsg::ConsentNotConnected,
     }
 }
 
@@ -122,8 +140,33 @@ impl ConsentModel {
     /// Start a fresh pass; the caller requests the plan.
     pub fn open(&mut self) {
         self.rows.clear();
-        self.plan_failed = false;
+        self.plan_failure = None;
         self.stage = Stage::Loading;
+    }
+
+    /// The plan request could not be started. With another Plan already
+    /// pending the stage resolves when that one answers or expires; otherwise
+    /// nothing will ever resolve it, so it fails now.
+    pub fn plan_not_sent(&mut self, already_pending: bool) {
+        if !already_pending {
+            self.on_plan_failed(PlanFailure::NotConnected);
+        }
+    }
+
+    /// A health or snapshot arrived while the screen shows an unreachable
+    /// failure: clear it and return true so the caller asks for the plan again.
+    pub fn retry_plan_on_health(&mut self) -> bool {
+        if !matches!(
+            self.plan_failure,
+            Some(PlanFailure::TimedOut | PlanFailure::NotConnected)
+        ) {
+            return false;
+        }
+        self.plan_failure = None;
+        if self.stage == Stage::Ready {
+            self.stage = Stage::Loading;
+        }
+        true
     }
 
     pub fn on_plan(&mut self, targets: &[SetupTarget]) {
@@ -137,23 +180,24 @@ impl ConsentModel {
                 failure: failure_of(t),
             })
             .collect();
-        self.plan_failed = false;
-        self.stage = match self.stage {
-            Stage::Applying => Stage::Result,
-            _ => Stage::Ready,
-        };
+        self.plan_failure = None;
+        self.stage = self.stage_after_plan();
     }
 
-    fn on_plan_failed(&mut self) {
-        self.plan_failed = true;
-        self.stage = match self.stage {
-            Stage::Applying => Stage::Result,
+    fn stage_after_plan(&self) -> Stage {
+        match self.stage {
+            Stage::Applying | Stage::Result => Stage::Result,
             _ => Stage::Ready,
-        };
+        }
+    }
+
+    fn on_plan_failed(&mut self, why: PlanFailure) {
+        self.plan_failure = Some(why);
+        self.stage = self.stage_after_plan();
     }
 
     pub fn can_agree(&self) -> bool {
-        !self.plan_failed && matches!(self.stage, Stage::Ready | Stage::Failed(_))
+        self.plan_failure.is_none() && matches!(self.stage, Stage::Ready | Stage::Failed(_))
     }
 
     pub fn can_later(&self) -> bool {
@@ -193,6 +237,11 @@ impl ConsentModel {
     /// Route one request outcome. `expired` is the error shown when the
     /// daemon never answered. Kinds this screen does not own are ignored.
     pub fn route(&mut self, kind: RequestKind, outcome: Outcome, expired: &str) -> Step {
+        // A plan that went unanswered is not a missing CLI, so it keeps its own failure.
+        if kind == RequestKind::Plan && outcome == Outcome::Expired {
+            self.on_plan_failed(PlanFailure::TimedOut);
+            return Step::default();
+        }
         let outcome = match outcome {
             Outcome::Expired => Outcome::Done {
                 ok: false,
@@ -203,7 +252,9 @@ impl ConsentModel {
         let mut step = Step::default();
         match (kind, outcome) {
             (RequestKind::Plan, Outcome::Plan { targets, .. }) => self.on_plan(&targets),
-            (RequestKind::Plan, Outcome::Done { ok: false, .. }) => self.on_plan_failed(),
+            (RequestKind::Plan, Outcome::Done { ok: false, .. }) => {
+                self.on_plan_failed(PlanFailure::CliMissing);
+            }
             (RequestKind::Approve, Outcome::Done { ok, error }) => {
                 self.on_approve_done(ok, error);
                 step.send_plan = ok;
@@ -220,7 +271,6 @@ impl ConsentModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::SetupMsg;
     use rocky_proto::pipe::TargetState;
 
     fn target(harness: &str, state: TargetState) -> SetupTarget {
@@ -356,7 +406,7 @@ mod tests {
             },
             "late",
         );
-        assert!(m.plan_failed);
+        assert_eq!(m.plan_failure, Some(PlanFailure::CliMissing));
         assert!(!m.can_agree());
         assert!(m.can_later());
         m.later();
@@ -373,7 +423,111 @@ mod tests {
         let mut expired = ConsentModel::default();
         expired.open();
         expired.route(RequestKind::Plan, Outcome::Expired, "late");
-        assert!(expired.plan_failed);
+        assert_eq!(expired.plan_failure, Some(PlanFailure::TimedOut));
+        assert!(expired.can_later() && !expired.can_agree());
+    }
+
+    fn applied_after_ok_approve() -> ConsentModel {
+        let mut m = ConsentModel::default();
+        m.open();
+        m.on_plan(&[target("codex", TargetState::Missing)]);
+        m.begin_agree(&mut ok_enable);
+        let step = m.route(
+            RequestKind::Approve,
+            Outcome::Done {
+                ok: true,
+                error: None,
+            },
+            "late",
+        );
+        assert!(step.send_plan);
+        m
+    }
+
+    #[test]
+    fn post_approve_plan_not_sent_leaves_the_applying_stage() {
+        let mut m = applied_after_ok_approve();
+        assert_eq!(m.stage, Stage::Applying);
+        m.plan_not_sent(false);
+        assert_eq!(m.stage, Stage::Result);
+        assert_eq!(m.plan_failure, Some(PlanFailure::NotConnected));
+        assert!(m.can_later());
+    }
+
+    #[test]
+    fn pending_plan_still_resolves_the_applying_stage() {
+        let mut m = applied_after_ok_approve();
+        m.plan_not_sent(true);
+        assert_eq!(m.stage, Stage::Applying);
+        m.route(RequestKind::Plan, Outcome::Expired, "late");
+        assert_eq!(m.stage, Stage::Result);
+        let mut answered = applied_after_ok_approve();
+        answered.plan_not_sent(true);
+        answered.on_plan(&[target("codex", TargetState::Ok)]);
+        assert_eq!(answered.stage, Stage::Result);
+    }
+
+    #[test]
+    fn opening_without_a_connection_fails_as_not_connected() {
+        let mut m = ConsentModel::default();
+        m.open();
+        m.plan_not_sent(false);
+        assert_eq!(m.plan_failure, Some(PlanFailure::NotConnected));
+        assert_eq!(m.stage, Stage::Ready);
+    }
+
+    #[test]
+    fn health_clears_an_unreachable_failure_and_asks_for_the_plan_again() {
+        let mut m = ConsentModel::default();
+        m.open();
+        m.route(RequestKind::Plan, Outcome::Expired, "late");
+        assert!(m.retry_plan_on_health());
+        assert_eq!(m.plan_failure, None);
+        assert_eq!(m.stage, Stage::Loading);
+        m.plan_not_sent(false);
+        assert!(m.retry_plan_on_health());
+        m.on_plan(&[target("codex", TargetState::Missing)]);
+        assert_eq!(m.stage, Stage::Ready);
+        assert!(!m.retry_plan_on_health());
+    }
+
+    #[test]
+    fn a_real_failed_answer_is_not_retried_on_health() {
+        let mut m = ConsentModel::default();
+        m.open();
+        m.route(
+            RequestKind::Plan,
+            Outcome::Done {
+                ok: false,
+                error: None,
+            },
+            "late",
+        );
+        assert!(!m.retry_plan_on_health());
+        assert_eq!(m.plan_failure, Some(PlanFailure::CliMissing));
+    }
+
+    #[test]
+    fn retry_after_a_post_approve_failure_keeps_the_result_stage() {
+        let mut m = applied_after_ok_approve();
+        m.plan_not_sent(false);
+        assert!(m.retry_plan_on_health());
+        assert_eq!(m.stage, Stage::Result);
+        m.on_plan(&[target("codex", TargetState::Ok)]);
+        assert_eq!(m.stage, Stage::Result);
+        assert!(m.rows[0].installed);
+    }
+
+    #[test]
+    fn plan_failure_copy_differs_by_kind() {
+        let msgs = [
+            plan_failure_msg(PlanFailure::CliMissing),
+            plan_failure_msg(PlanFailure::TimedOut),
+            plan_failure_msg(PlanFailure::NotConnected),
+        ];
+        assert_eq!(msgs[0], SetupMsg::CliMissing { path: None });
+        assert_eq!(msgs[1], SetupMsg::RequestTimedOut);
+        assert_eq!(msgs[2], SetupMsg::ConsentNotConnected);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, Div, IntoElement, SharedString, Stateful, Window, div, rgb};
 
-use crate::consent_view::{ConsentModel, PlanRow, Stage};
+use crate::consent_view::{ConsentModel, PlanRow, Stage, plan_failure_msg};
 use crate::i18n::{Msg, SetupMsg, UiLang, tr};
 use crate::settings_view::toggle_row;
 
@@ -86,12 +86,12 @@ pub fn consent_screen(
                 .text_base()
                 .child(text(lang, SetupMsg::ConsentHeading)),
         );
-    if model.plan_failed {
+    if let Some(why) = model.plan_failure {
         root = root.child(
             div()
                 .text_sm()
                 .text_color(rgb(ERROR_COLOR))
-                .child(text(lang, SetupMsg::CliMissing { path: None })),
+                .child(text(lang, plan_failure_msg(why))),
         );
     }
     match &model.stage {

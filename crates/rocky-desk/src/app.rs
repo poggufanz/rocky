@@ -286,10 +286,19 @@ impl DeskView {
         let expired = tr(self.ctl.ui_lang, &Msg::Setup(SetupMsg::RequestTimedOut));
         let step = self.consent.route(kind, outcome, &expired);
         if step.send_plan {
-            self.start_request(RequestKind::Plan);
+            self.request_plan();
         }
         if let Some(error) = step.log {
             self.log.once("consent-later", &error);
+        }
+    }
+
+    /// Ask for the plan. When it cannot be sent the screen must not keep
+    /// waiting for an answer that will never come.
+    fn request_plan(&mut self) {
+        if !self.start_request(RequestKind::Plan) {
+            let pending = self.requests.pending(&RequestKind::Plan);
+            self.consent.plan_not_sent(pending);
         }
     }
 
@@ -297,9 +306,7 @@ impl DeskView {
     fn open_consent(&mut self, cx: &mut Context<Self>) {
         self.consent.open();
         self.ctl.view = View::Consent;
-        if !self.start_request(RequestKind::Plan) && self.ctl.outbox.is_none() {
-            self.on_outcome(RequestKind::Plan, RequestOutcome::Expired);
-        }
+        self.request_plan();
         cx.notify();
     }
 
@@ -642,6 +649,7 @@ impl DeskView {
         let mut requests = Vec::new();
         let mut outcomes = Vec::new();
         let mut open_consent = false;
+        let mut health_seen = false;
         let mut pending_lang = None;
         let mut quit = false;
         if let Some(inbox) = self.ctl.inbox.take() {
@@ -680,6 +688,7 @@ impl DeskView {
                         if let ServerMsg::Snapshot { health, .. } | ServerMsg::Health { health } =
                             &for_notify
                         {
+                            health_seen = true;
                             let consent = health.setup.consent_state;
                             open_consent |= self.consent.on_health(consent, self.ctl.tray_start);
                         }
@@ -721,6 +730,13 @@ impl DeskView {
         }
         if open_consent {
             self.open_consent(cx);
+        } else if health_seen
+            && self.ctl.view == View::Consent
+            && self.consent.retry_plan_on_health()
+        {
+            // Back from an unreachable daemon: ask for the plan again.
+            self.request_plan();
+            changed = true;
         }
         if let Some(lang) = pending_lang {
             self.sync_lang(lang, cx);
