@@ -405,6 +405,10 @@ fn reason_text_names_known_reasons_only() {
         "Git could not list the files."
     );
     assert_eq!(
+        reason_text(Some("not-a-repo")),
+        "This folder is not a Git repository. Revoke its capture in Settings."
+    );
+    assert_eq!(
         reason_text(Some("root-unusable")),
         "The repo folder cannot be read."
     );

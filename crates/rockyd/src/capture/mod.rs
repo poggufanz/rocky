@@ -137,6 +137,9 @@ pub fn reason_text(reason: Option<&str>) -> &'static str {
     match reason {
         Some("repo-consent-required") => "Capture is not allowed for this repo.",
         Some("git-unreadable") => "Git could not list the files.",
+        Some("not-a-repo") => {
+            "This folder is not a Git repository. Revoke its capture in Settings."
+        }
         Some("root-unusable") => "The repo folder cannot be read.",
         _ => "The capture process reported an error.",
     }
