@@ -273,7 +273,10 @@ test("collect exits when its output pipe closes even if stdin stays open", { ski
   // Closed before the child starts, so its first roots line has nowhere to go.
   const proc = s.listen(home);
   proc.dropOutput();
-  const outcome = await Promise.race([proc.exited, new Promise<string>((done) => setTimeout(() => done("hung"), WAIT_MS))]);
+  const guard = new Promise<string>((done) => {
+    setTimeout(() => done("hung"), WAIT_MS).unref();
+  });
+  const outcome = await Promise.race([proc.exited, guard]);
   assert.equal(outcome, 0, "the process must exit on its own while stdin is still open");
   assert.equal(leaseExpires(repo, home), 0, "its leases are released");
 });

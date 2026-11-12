@@ -450,8 +450,8 @@ consented repo: `{proc, pid, token, expires}`. The holder is the only process
 that writes that repo's history. `proc` is `gui` (`rocky dash`) or `daemon`
 (the capture process the desktop app's background process runs). Readers also
 accept the reserved value `mcp`, which no current process writes: the MCP server
-is read-only and never holds a lease. `expires` is epoch milliseconds. A lease lasts 30 s and its holder renews
-it every 10 s. Another process takes the repo only when the lease is missing,
+is read-only and never holds a lease. `expires` is epoch milliseconds. A lease lasts 30 s and its
+holder renews it every 10 s. Another process takes the repo only when the lease is missing,
 expired, or held by a process that no longer exists.
 
 `rocky dash` skips a repo whose `daemon` lease is live. After `rocky dash`
@@ -497,8 +497,8 @@ stdout carries only these two kinds:
   with `coverage: "unknown"`.
 - The process reconciles each repo it owns every 60 s and on request.
 
-The process exits 0 when stdin ends, after it releases its leases. It exits 1
-when the collector fails and 2 on any other arguments.
+The process exits 0 when stdin ends or its stdout closes, after it releases its
+leases. It exits 1 when the collector fails and 2 on any other arguments.
 
 ## Pipe v3
 
@@ -586,7 +586,7 @@ then exits.
 
 `health.capture` is a list with one row per repo the daemon's capture process
 tracks: `{root, state, last_reconcile_ms, error}`. It is empty while no repo is
-consented and no allowed linked-worktree session exists, because the daemon
+consented and no allowed session root exists, because the daemon
 then runs no capture process. `snapshot.health.capture` carries the same list.
 `root` is the repo path. `last_reconcile_ms` is when the last reconcile of that
 repo finished, epoch milliseconds, or `null` before the first one. `error` is a
@@ -610,7 +610,8 @@ neither holds. It starts it at most 3 times in 5 minutes, counted as a sliding
 window; past that every row is `failed` until the window clears. It watches each
 repo it owns, ignoring `.git/` and access events, waits 300 ms after the first
 change before it asks for a reconcile (later changes do not move that wait), and
-sends at most one request per repo every 2 s. The daemon reads only `<ROCKY_HOME>/listening/repo-consents.json`
+sends at most one watcher-driven request per repo every 2 s (a root with no
+consent key is also sent once per child start). The daemon reads only `<ROCKY_HOME>/listening/repo-consents.json`
 from that directory.
 
 `capture` is additive within protocol 3. A `health` or `snapshot` frame without

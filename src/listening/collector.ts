@@ -1,7 +1,7 @@
 /**
- * Single-owner collector lease. GUI-foreground, MCP-stdio and the
- * desktop daemon's capture process race for one owner per repo; the
- * loser reads durable state only. Ownership hands off after stop/crash
+ * Single-owner collector lease. The GUI (`rocky dash`) and the desktop
+ * daemon's capture process race for one owner per repo; the loser reads
+ * durable state only. The MCP server is read-only and never holds a lease. Ownership hands off after stop/crash
  * with no supervisor: the next process checks the durable lease, steals
  * when expired or owner-dead, then reconciles. Ambiguity yields partial
  * coverage, never dual writers.
@@ -10,7 +10,7 @@ import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "n
 import { join } from "node:path";
 import { collectorPath, repoDir } from "./store-paths.js";
 
-/** Every process kind that may hold a repo's lease. */
+/** Every process kind a lease may name. Only `gui` and `daemon` write one; `mcp` is accepted on read only. */
 const OWNER_PROCS = ["gui", "mcp", "daemon"] as const;
 
 export interface CollectorOwner {
