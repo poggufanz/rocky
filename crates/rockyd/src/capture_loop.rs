@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::paths::{listening_dir, repo_consents_path};
 use rocky_proto::pipe::{CaptureHealth, ServerMsg};
 use rockyd::capture::child::{CHILD_STOP_GRACE, CaptureChild};
@@ -97,8 +97,9 @@ impl CaptureLoop {
             })
             .ok();
         let (repo_tx, repo_events) = mpsc::channel();
-        let repo_watcher =
-            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        // Symlinks are not followed, so a link inside a repo never pulls in a folder outside it.
+        let repo_watcher = RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
                 let paths = match res {
                     // Opens, reads, and closes include the capture's own reads of the repo.
                     // Counting them would wake capture forever.
@@ -108,8 +109,10 @@ impl CaptureLoop {
                     Err(error) => error.paths,
                 };
                 let _ = repo_tx.send(paths);
-            })
-            .ok();
+            },
+            Config::default().with_follow_symlinks(false),
+        )
+        .ok();
         if consent_watcher.is_none() || repo_watcher.is_none() {
             log.line("capture watcher unavailable, polling only");
         }
@@ -139,8 +142,8 @@ impl CaptureLoop {
         let cli = read_cli(&self.home);
         let (cli_found, _) = cli_status(cli.as_ref());
         let consented = consented_roots(&repo_consents_path(&self.home));
-        self.capture
-            .set_inputs(consented, allowed.clone(), cli_found);
+        let extra = extra_roots(allowed, &consented);
+        self.capture.set_inputs(consented, extra, cli_found);
         self.cli = cli;
         self.last_allowed = allowed.clone();
     }
@@ -233,6 +236,11 @@ impl CaptureLoop {
                 continue;
             }
             for path in paths {
+                // Rocky's own files can sit inside a watched repo. Counting them would wake
+                // capture on every lease, store, and log write.
+                if under_home(path, &self.home) {
+                    continue;
+                }
                 if let Some(root) = root_of(path, &roots) {
                     self.capture.fs_event(root, now);
                 }
@@ -322,6 +330,11 @@ impl CaptureLoop {
             if try_watch(self.repo_watcher.as_mut(), root) {
                 self.watched.insert(root.clone());
             } else {
+                // A refused recursive watch can leave the folders it already reached watched.
+                // Drop them so a polling repo does not hold the user's watch budget.
+                if let Some(watcher) = self.repo_watcher.as_mut() {
+                    let _ = watcher.unwatch(Path::new(root));
+                }
                 self.failed_watches.insert(root.clone());
                 self.capture.watch_failed(root);
                 failed += 1;
@@ -384,6 +397,7 @@ fn reap(mut child: CaptureChild) -> Option<i32> {
 }
 
 /// Watches `root` and everything under it. `false` when there is no watcher or it refuses.
+/// The caller drops what a refused watch left behind.
 fn try_watch(watcher: Option<&mut RecommendedWatcher>, root: &str) -> bool {
     watcher.is_some_and(|watcher| {
         watcher
@@ -434,6 +448,37 @@ fn root_of<'a>(path: &Path, roots: &'a BTreeSet<String>) -> Option<&'a str> {
     (!in_git).then_some(root)
 }
 
+/// Whether `path` is the Rocky home or inside it, compared like [`root_of`].
+fn under_home(path: &Path, home: &Path) -> bool {
+    let home_parts = components_of(home);
+    !home_parts.is_empty() && components_of(path).starts_with(&home_parts)
+}
+
+/// A root spelled the way the Node consent store keys it, so the two can be compared: on Windows
+/// backslashes become slashes, case folds, and a trailing slash goes (a drive root keeps its
+/// slash). Elsewhere the root is unchanged.
+fn canonical_root(root: &str) -> String {
+    if !cfg!(windows) {
+        return root.to_string();
+    }
+    let slashed = root.replace('\\', "/").to_lowercase();
+    let trimmed = slashed.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        return slashed;
+    }
+    trimmed.to_string()
+}
+
+/// The allowed session roots that no consent key already covers, in the consent keys' spelling.
+fn extra_roots(allowed: &BTreeSet<String>, consented: &BTreeSet<String>) -> BTreeSet<String> {
+    let known: BTreeSet<String> = consented.iter().map(|root| canonical_root(root)).collect();
+    allowed
+        .iter()
+        .map(|root| canonical_root(root))
+        .filter(|root| !known.contains(root))
+        .collect()
+}
+
 /// The path split into components, folded to lower case on Windows.
 fn components_of(path: &Path) -> Vec<String> {
     path.components()
@@ -454,7 +499,9 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{consented_roots, root_of};
+    use notify::Watcher;
+
+    use super::{canonical_root, consented_roots, extra_roots, root_of, try_watch, under_home};
 
     fn roots(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|item| (*item).to_string()).collect()
@@ -514,6 +561,60 @@ mod tests {
         let found = root_of(Path::new(r"C:/work/repo\src\a.ts"), &roots);
 
         assert_eq!(found, Some("C:/work/repo"));
+    }
+
+    #[test]
+    fn under_home_matches_whole_components_only() {
+        let home = Path::new("/work/repo/.rocky");
+
+        assert!(under_home(
+            Path::new("/work/repo/.rocky/listening/lease"),
+            home
+        ));
+        assert!(under_home(Path::new("/work/repo/.rocky"), home));
+        assert!(!under_home(Path::new("/work/repo/.rocky2/a"), home));
+        assert!(!under_home(Path::new("/work/repo/src/a.ts"), home));
+        assert!(!under_home(Path::new("/work/repo/a.ts"), Path::new("")));
+    }
+
+    #[test]
+    fn extra_roots_drops_roots_a_consent_key_covers() {
+        let consented = roots(&["/a/repo"]);
+        let allowed = roots(&["/a/repo", "/b/wt"]);
+
+        assert_eq!(extra_roots(&allowed, &consented), roots(&["/b/wt"]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_root_matches_the_consent_key_spelling() {
+        assert_eq!(canonical_root(r"C:\Users\Me\Repo\"), "c:/users/me/repo");
+        assert_eq!(canonical_root("C:/Users/Me/Repo"), "c:/users/me/repo");
+        assert_eq!(canonical_root("C:/"), "c:/");
+        let consented = roots(&["c:/users/me/repo"]);
+        let allowed = roots(&["C:/Users/Me/Repo", "D:/other"]);
+        assert_eq!(extra_roots(&allowed, &consented), roots(&["d:/other"]));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn canonical_root_leaves_roots_alone_off_windows() {
+        assert_eq!(canonical_root("/Work/Repo/"), "/Work/Repo/");
+    }
+
+    #[test]
+    fn a_refused_watch_reports_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        let mut watcher = notify::RecommendedWatcher::new(
+            |_res: Result<notify::Event, notify::Error>| {},
+            notify::Config::default().with_follow_symlinks(false),
+        )
+        .unwrap();
+
+        assert!(!try_watch(Some(&mut watcher), missing.to_str().unwrap()));
+        assert!(!try_watch(None, dir.path().to_str().unwrap()));
+        assert!(try_watch(Some(&mut watcher), dir.path().to_str().unwrap()));
     }
 
     #[test]

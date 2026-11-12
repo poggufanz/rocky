@@ -27,8 +27,9 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// The Rocky home (a temp dir), a user home inside it, and the repo capture watches. Each test
-/// declares it before the daemon, so the daemon is killed first.
+/// The Rocky home, a user home, and the repo capture watches, as siblings in one temp dir. The
+/// repo stays outside the Rocky home, whose own writes never wake capture. Each test declares it
+/// before the daemon, so the daemon is killed first.
 struct Layout {
     _dir: TempDir,
     home: PathBuf,
@@ -38,9 +39,10 @@ struct Layout {
 
 fn layout() -> Layout {
     let dir = TempDir::new().expect("temp dir");
-    let home = dir.path().to_path_buf();
-    let user = home.join("user");
-    let repo = home.join("work").join("repo");
+    let home = dir.path().join("rocky-home");
+    let user = dir.path().join("user");
+    let repo = dir.path().join("work").join("repo");
+    fs::create_dir_all(&home).expect("create rocky home");
     fs::create_dir_all(&user).expect("create user home");
     fs::create_dir_all(&repo).expect("create repo");
     Layout {
