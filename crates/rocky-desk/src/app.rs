@@ -26,18 +26,21 @@ use crate::client::Outbox;
 use crate::clock;
 use crate::conn::{Action, ConnState, ConnectOutcome};
 use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
+use crate::consent_view::{ConsentModel, show_install_row};
 use crate::desklog::LogOnce;
-use crate::i18n::{Msg, UiLang, detect_ui_lang, resolve_lang, tr};
+use crate::i18n::{Msg, SetupMsg, UiLang, detect_ui_lang, resolve_lang, tr};
 use crate::icons::tray_icon;
 use crate::notified::NotifiedStore;
 use crate::notify::{Notifier, NotifyCtx, notice_text};
 use crate::os_notice::OsNotices;
+use crate::requests::{Outcome as RequestOutcome, RequestKind, Requests, client_msg};
 use crate::settings_view::{
     self, SettingId, View, set_autostart_asked, set_bool, set_lang, show_autostart_banner,
 };
 use crate::spawn::daemon_exe_name;
 #[cfg(windows)]
 use crate::toast::set_process_aumid;
+use crate::ui::consent::{consent_screen, install_row};
 use crate::view::{Conn, Model};
 
 gpui::actions!(rocky, [OpenRocky, StopRecording, QuitDesk]);
@@ -168,6 +171,10 @@ struct DeskView {
     /// Repos and harnesses already announced, kept in `desk/notified.json`.
     notified: NotifiedStore,
     notified_path: PathBuf,
+    /// Setup requests in flight, matched to their replies by id.
+    requests: Requests,
+    /// First-use consent screen state.
+    consent: ConsentModel,
     /// The tray menu must be rebuilt for the new language. Done by the pump
     /// outside the view lease, since the builder reads this entity.
     menu_stale: bool,
@@ -250,11 +257,80 @@ impl DeskView {
     fn toggle_view(&mut self, cx: &mut Context<Self>) {
         self.ctl.view = match self.ctl.view {
             View::Agents => View::Settings,
-            View::Settings => View::Agents,
+            View::Settings | View::Consent => View::Agents,
         };
         if self.ctl.view == View::Settings {
             self.read_autostart();
         }
+        cx.notify();
+    }
+
+    /// Start a request and send it. Nothing is sent while disconnected or
+    /// while an equal request is already in flight.
+    fn start_request(&mut self, kind: RequestKind) -> bool {
+        if self.ctl.outbox.is_none() {
+            return false;
+        }
+        let id = self.next_id();
+        if !self.requests.start(kind.clone(), id, now_ms()) {
+            return false;
+        }
+        self.ctl
+            .outbox
+            .as_ref()
+            .is_some_and(|outbox| outbox.send(client_msg(&kind, id)).is_ok())
+    }
+
+    /// Route one request outcome to the screen that owns its kind.
+    fn on_outcome(&mut self, kind: RequestKind, outcome: RequestOutcome) {
+        let expired = tr(self.ctl.ui_lang, &Msg::Setup(SetupMsg::RequestTimedOut));
+        let step = self.consent.route(kind, outcome, &expired);
+        if step.send_plan {
+            self.start_request(RequestKind::Plan);
+        }
+        if let Some(error) = step.log {
+            self.log.once("consent-later", &error);
+        }
+    }
+
+    /// Show the consent screen with a fresh plan.
+    fn open_consent(&mut self, cx: &mut Context<Self>) {
+        self.consent.open();
+        self.ctl.view = View::Consent;
+        if !self.start_request(RequestKind::Plan) && self.ctl.outbox.is_none() {
+            self.on_outcome(RequestKind::Plan, RequestOutcome::Expired);
+        }
+        cx.notify();
+    }
+
+    /// Agree: register sign-in start when checked, mark the question asked,
+    /// then ask Node to approve. A failed sign-in write never blocks it.
+    fn agree_consent(&mut self, cx: &mut Context<Self>) {
+        if !self.consent.can_agree() || self.ctl.outbox.is_none() {
+            return;
+        }
+        let error = self
+            .consent
+            .begin_agree(&mut || std::env::current_exe().and_then(|exe| autostart::enable(&exe)));
+        if let Some(e) = error {
+            self.log.once("autostart", &e);
+        }
+        let id = self.next_id();
+        self.send_set(id, set_autostart_asked(id));
+        self.start_request(RequestKind::Approve);
+        cx.notify();
+    }
+
+    /// Later: write nothing but the consent record, and close at once.
+    fn later_consent(&mut self, cx: &mut Context<Self>) {
+        if !self.consent.can_later() {
+            return;
+        }
+        self.consent.later();
+        let id = self.next_id();
+        self.send_set(id, set_autostart_asked(id));
+        self.start_request(RequestKind::Later);
+        self.ctl.view = View::Agents;
         cx.notify();
     }
 
@@ -330,7 +406,11 @@ impl DeskView {
 
     /// The one-time sign-in question, shown while it is unanswered.
     fn banner(&mut self, cx: &mut Context<Self>) -> Option<Div> {
-        if !show_autostart_banner(self.ctl.tray_start, self.ctl.model.settings()) {
+        // The consent screen carries the sign-in question itself.
+        if self.ctl.view == View::Consent
+            || self.consent.answered()
+            || !show_autostart_banner(self.ctl.tray_start, self.ctl.model.settings())
+        {
             return None;
         }
         let lang = self.ctl.ui_lang;
@@ -424,6 +504,12 @@ impl DeskView {
                     .child(tr(lang, &Msg::AutostartFailed)),
             );
         }
+        if show_install_row(self.consent.consent()) {
+            panel = panel.child(install_row(
+                lang,
+                cx.listener(|this, _, _, cx| this.open_consent(cx)),
+            ));
+        }
         if let Some(err) = self.ctl.model.set_error() {
             panel = panel.child(div().text_sm().text_color(rgb(0xD92B2B)).child(tr(
                 lang,
@@ -507,7 +593,10 @@ impl DeskView {
     /// shows only while the window is not active. A click just opens the
     /// window.
     fn notify_once(&mut self, msg: &ServerMsg, window_active: bool) {
-        let notices = self.notified.on_message(msg);
+        // While an approval is in flight its own installs must not toast: the
+        // first health after the answer seeds them instead.
+        let harness_enabled = !self.requests.pending(&RequestKind::Approve);
+        let notices = self.notified.on_message_with(msg, harness_enabled);
         if self.notified.take_dirty()
             && let Err(e) = self.notified.save(&self.notified_path)
         {
@@ -551,6 +640,8 @@ impl DeskView {
         self.drain_notice_errors();
         let mut changed = self.ctl.on_worker();
         let mut requests = Vec::new();
+        let mut outcomes = Vec::new();
+        let mut open_consent = false;
         let mut pending_lang = None;
         let mut quit = false;
         if let Some(inbox) = self.ctl.inbox.take() {
@@ -585,6 +676,13 @@ impl DeskView {
                         }
                         self.notify(&for_notify, window_active);
                         self.notify_once(&for_notify, window_active);
+                        outcomes.extend(self.requests.on_message(&for_notify));
+                        if let ServerMsg::Snapshot { health, .. } | ServerMsg::Health { health } =
+                            &for_notify
+                        {
+                            let consent = health.setup.consent_state;
+                            open_consent |= self.consent.on_health(consent, self.ctl.tray_start);
+                        }
                         if show {
                             self.show_requested = true;
                         }
@@ -614,6 +712,16 @@ impl DeskView {
             self.quit(cx);
             return;
         }
+        outcomes.extend(self.requests.expire(now_ms()));
+        if !outcomes.is_empty() {
+            changed = true;
+        }
+        for (kind, outcome) in outcomes {
+            self.on_outcome(kind, outcome);
+        }
+        if open_consent {
+            self.open_consent(cx);
+        }
         if let Some(lang) = pending_lang {
             self.sync_lang(lang, cx);
         }
@@ -630,6 +738,20 @@ impl Render for DeskView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let warnings = self.ctl.model.warnings(&clock::local_hhmm);
         let lang = self.ctl.ui_lang;
+        if self.ctl.view == View::Consent {
+            return consent_screen(
+                &self.consent,
+                lang,
+                cx.listener(|this, _, _, cx| {
+                    this.consent.autostart = !this.consent.autostart;
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _, cx| this.agree_consent(cx)),
+                cx.listener(|this, _, _, cx| this.later_consent(cx)),
+                cx.listener(|this, _, _, cx| this.toggle_view(cx)),
+            )
+            .into_any_element();
+        }
         // Opaque background: without one, gpui on Windows shows the desktop through.
         let mut root = div()
             .flex()
@@ -643,7 +765,7 @@ impl Render for DeskView {
             root = root.child(banner);
         }
         let other = match self.ctl.view {
-            View::Agents => Msg::ViewSettings,
+            View::Agents | View::Consent => Msg::ViewSettings,
             View::Settings => Msg::ViewAgents,
         };
         root = root.child(
@@ -664,14 +786,17 @@ impl Render for DeskView {
         if self.ctl.view == View::Settings {
             // Outside the panel, which returns early while settings are
             // unknown: Quit must stay reachable when the daemon is down.
-            return root.child(self.settings_panel(cx)).child(
-                div()
-                    .id(SharedString::from("quit"))
-                    .text_sm()
-                    .cursor_pointer()
-                    .child(tr(lang, &Msg::MenuQuit))
-                    .on_click(cx.listener(|this, _, _, cx| this.quit(cx))),
-            );
+            return root
+                .child(self.settings_panel(cx))
+                .child(
+                    div()
+                        .id(SharedString::from("quit"))
+                        .text_sm()
+                        .cursor_pointer()
+                        .child(tr(lang, &Msg::MenuQuit))
+                        .on_click(cx.listener(|this, _, _, cx| this.quit(cx))),
+                )
+                .into_any_element();
         }
         let groups = self.ctl.model.groups(now_ms());
         if groups.is_empty() {
@@ -761,7 +886,7 @@ impl Render for DeskView {
             }
             root = root.child(gdiv);
         }
-        root
+        root.into_any_element()
     }
 }
 
@@ -965,6 +1090,8 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             notices_ready: false,
             notified,
             notified_path,
+            requests: Requests::default(),
+            consent: ConsentModel::default(),
             menu_stale: false,
             #[cfg(not(windows))]
             user_shown: false,
@@ -977,6 +1104,8 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                     // window is opened and then minimized, since a window that
                     // was never shown has no surface to minimize.
                     show: !opts.tray || cfg!(not(windows)),
+                    // The consent and settings views scroll when the window is small.
+                    is_resizable: true,
                     titlebar: Some(TitlebarOptions {
                         title: Some(SharedString::from("rocky")),
                         appears_transparent: false,

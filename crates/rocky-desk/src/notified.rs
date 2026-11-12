@@ -129,17 +129,31 @@ impl NotifiedStore {
 
     /// Notices for one pipe message.
     pub fn on_message(&mut self, msg: &ServerMsg) -> Vec<Notice> {
+        self.on_message_with(msg, true)
+    }
+
+    /// Like `on_message`. With `harness_enabled` false the harness path is
+    /// skipped and nothing is recorded, so an approval in flight never turns
+    /// its own installs into notices: the first health after it seeds them.
+    pub fn on_message_with(&mut self, msg: &ServerMsg, harness_enabled: bool) -> Vec<Notice> {
+        let harness = |store: &mut Self, setup: &SetupHealth| {
+            if harness_enabled {
+                store.harness_notices(setup)
+            } else {
+                Vec::new()
+            }
+        };
         match msg {
             ServerMsg::Snapshot {
                 health,
                 repo_pending,
                 ..
             } => {
-                let mut out = self.harness_notices(&health.setup);
+                let mut out = harness(self, &health.setup);
                 out.extend(self.repo_notices(repo_pending));
                 out
             }
-            ServerMsg::Health { health } => self.harness_notices(&health.setup),
+            ServerMsg::Health { health } => harness(self, &health.setup),
             ServerMsg::RepoPending { repos } => self.repo_notices(repos),
             _ => Vec::new(),
         }
@@ -235,6 +249,30 @@ mod tests {
         assert!(s.seeded);
         assert!(s.harnesses.contains("claude-code"));
         assert!(!s.harnesses.contains("codex"));
+    }
+
+    #[test]
+    fn paused_harness_path_records_nothing_and_next_health_seeds_silently() {
+        let mut s = NotifiedStore::default();
+        let health = |targets| ServerMsg::Health {
+            health: rocky_proto::pipe::Health {
+                setup: setup(ConsentState::Approved, targets),
+                ..Default::default()
+            },
+        };
+        let installed = vec![
+            target("claude-code", TargetState::Ok),
+            target("codex", TargetState::Ok),
+        ];
+        assert!(
+            s.on_message_with(&health(installed.clone()), false)
+                .is_empty()
+        );
+        assert!(!s.seeded && s.harnesses.is_empty());
+        assert!(!s.take_dirty());
+        assert!(s.on_message_with(&health(installed), true).is_empty());
+        assert!(s.seeded);
+        assert!(s.harnesses.contains("codex"));
     }
 
     #[test]

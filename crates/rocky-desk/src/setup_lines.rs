@@ -37,7 +37,7 @@ pub fn setup_lines(setup: &SetupHealth) -> Vec<Msg> {
 /// that keeps losing its entries reports that instead of its current state.
 /// Only `path`, `error`, and (for a foreign entry) `harness` are read: the daemon
 /// may send a row with empty `harness` and `kind` for a path it holds no target for.
-fn target_line(t: &TargetHealth) -> Option<Msg> {
+pub(crate) fn target_line(t: &TargetHealth) -> Option<Msg> {
     let path = t.path.clone();
     let error = t.error.clone().unwrap_or_default();
     if t.fights_10m > FIGHT_LIMIT {

@@ -63,6 +63,25 @@ pub enum SetupMsg {
     HarnessInstalled {
         harness: String,
     },
+    ConsentHeading,
+    ConsentJsonNote,
+    ConsentBackupNote,
+    /// A plan row Rocky already wrote.
+    ConsentInstalled,
+    ConsentAutostart,
+    ConsentAgree,
+    ConsentLater,
+    ConsentDone,
+    ConsentLoading,
+    ConsentApplying,
+    /// Setup did not finish. `error` is data from the daemon or Node and may be empty.
+    ConsentFailed {
+        error: String,
+    },
+    /// The daemon never answered a setup request.
+    RequestTimedOut,
+    /// Settings row that opens the consent screen.
+    ConsentInstall,
 }
 
 #[cfg(test)]
@@ -122,6 +141,24 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         SetupMsg::HarnessInstalled {
             harness: "claude-code".into(),
         },
+        SetupMsg::ConsentHeading,
+        SetupMsg::ConsentJsonNote,
+        SetupMsg::ConsentBackupNote,
+        SetupMsg::ConsentInstalled,
+        SetupMsg::ConsentAutostart,
+        SetupMsg::ConsentAgree,
+        SetupMsg::ConsentLater,
+        SetupMsg::ConsentDone,
+        SetupMsg::ConsentLoading,
+        SetupMsg::ConsentApplying,
+        SetupMsg::ConsentFailed {
+            error: "Node could not start.".into(),
+        },
+        SetupMsg::ConsentFailed {
+            error: String::new(),
+        },
+        SetupMsg::RequestTimedOut,
+        SetupMsg::ConsentInstall,
     ]
 }
 
@@ -168,6 +205,25 @@ pub fn setup_en(m: &SetupMsg) -> String {
             format!("Rocky can record file history for {name}. Open Rocky to answer.")
         }
         SetupMsg::HarnessInstalled { harness } => format!("Rocky is installed in {harness}."),
+        SetupMsg::ConsentHeading => "Rocky wants to set up these agent tools.".to_string(),
+        SetupMsg::ConsentJsonNote => {
+            "JSON files are saved again with 2-space indentation.".to_string()
+        }
+        SetupMsg::ConsentBackupNote => {
+            "One copy of the previous version is kept beside each file for recovery.".to_string()
+        }
+        SetupMsg::ConsentInstalled => "already installed".to_string(),
+        SetupMsg::ConsentAutostart => "Start Rocky at sign-in".to_string(),
+        SetupMsg::ConsentAgree => "Agree".to_string(),
+        SetupMsg::ConsentLater => "Later".to_string(),
+        SetupMsg::ConsentDone => "Done".to_string(),
+        SetupMsg::ConsentLoading => "Reading the setup plan.".to_string(),
+        SetupMsg::ConsentApplying => "Setting up.".to_string(),
+        SetupMsg::ConsentFailed { error } => {
+            format!("Setup did not finish{}. Try again.", error_suffix(error))
+        }
+        SetupMsg::RequestTimedOut => "Rocky did not answer in time.".to_string(),
+        SetupMsg::ConsentInstall => "Install".to_string(),
     }
 }
 
@@ -216,5 +272,25 @@ pub fn setup_id(m: &SetupMsg) -> String {
             format!("Rocky bisa merekam riwayat file {name}. Buka Rocky untuk menjawab.")
         }
         SetupMsg::HarnessInstalled { harness } => format!("Rocky sudah terpasang di {harness}."),
+        SetupMsg::ConsentHeading => "Rocky ingin memasang alat agen berikut.".to_string(),
+        SetupMsg::ConsentJsonNote => {
+            "File JSON disimpan ulang dengan indentasi 2 spasi.".to_string()
+        }
+        SetupMsg::ConsentBackupNote => {
+            "Satu salinan versi sebelumnya disimpan di samping setiap file untuk pemulihan."
+                .to_string()
+        }
+        SetupMsg::ConsentInstalled => "sudah terpasang".to_string(),
+        SetupMsg::ConsentAutostart => "Jalankan Rocky saat masuk".to_string(),
+        SetupMsg::ConsentAgree => "Setuju".to_string(),
+        SetupMsg::ConsentLater => "Nanti".to_string(),
+        SetupMsg::ConsentDone => "Selesai".to_string(),
+        SetupMsg::ConsentLoading => "Membaca rencana setup.".to_string(),
+        SetupMsg::ConsentApplying => "Sedang memasang.".to_string(),
+        SetupMsg::ConsentFailed { error } => {
+            format!("Setup belum selesai{}. Coba lagi.", error_suffix(error))
+        }
+        SetupMsg::RequestTimedOut => "Rocky tidak menjawab tepat waktu.".to_string(),
+        SetupMsg::ConsentInstall => "Pasang".to_string(),
     }
 }
