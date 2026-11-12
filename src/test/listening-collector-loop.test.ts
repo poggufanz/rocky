@@ -264,12 +264,14 @@ test("request for a revoked root writes nothing and releases it", { skip: noGit 
     onResult: (report) => reports.push(report),
   });
   const forRepo = (): ReconcileReport[] => reports.filter((report) => report.root === key);
-  assert.ok(await until(() => forRepo().length === 1), "capture runs while consent stands");
+  // Both first reports in means the worker is idle: it reads the consent file
+  // on every reconcile, and the revoke below rewrites that file.
+  assert.ok(await until(() => reports.length === 2), "capture runs for both repos while consent stands");
+  assert.equal(forRepo().length, 1);
   const before = capturedFiles(repo, home);
   writeFileSync(join(repo, "kept.txt"), "changed after revoke\n");
-  // The loop re-reads the consent file every 50ms and Windows can fail a rename
-  // that races a reader, so the revoke is retried until it lands.
-  assert.ok(await until(() => setRepoCapture(repo, false, CONSENT, home).ok), "revoke must land");
+  const revoked = setRepoCapture(repo, false, CONSENT, home);
+  assert.equal(revoked.ok, true, `revoke failed: ${revoked.reason ?? "no reason given"}`);
   loop.request(repo);
   assert.ok(await until(() => leaseExpires(repo, home) === 0), "the next tick releases the revoked repo");
   assert.ok(await untilLeaseRenewed(witness, home, 2), "loop must keep ticking");
