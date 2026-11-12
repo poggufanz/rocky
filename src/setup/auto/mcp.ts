@@ -398,12 +398,15 @@ export function removeMcp(
   const ownership: RegistrationOwnership = { mode: "history", history };
   if (t.format === "toml") return removeToml(t, reg, ownership);
   if (t.refusal !== undefined) return report(t, "refused", t.refusal);
-  if (!pathExists(dirname(t.path)) || !pathExists(t.path)) return report(t, "ok");
+  if (!pathExists(dirname(t.path))) return report(t, "ok");
   const refusal = pathRefusal(t);
   if (refusal !== undefined) return report(t, refusal.state, refusal.detail);
+  // An interrupted write may have displaced the target; settle it before
+  // deciding the file is absent.
   if (recoverJsonTransaction(t.path).status === "manual") {
     return report(t, "error", MANUAL_RECOVERY);
   }
+  if (!pathExists(t.path)) return report(t, "ok");
   return removeJsonEntry(t, readJsonTarget(t), reg, ownership, t.legacy === true ? LEGACY_MOVED : undefined);
 }
 
@@ -569,12 +572,13 @@ function removeToml(
   ownership: RegistrationOwnership,
 ): AutoTargetReport {
   if (t.refusal !== undefined) return report(t, "refused", t.refusal);
-  if (!pathExists(dirname(t.path)) || !pathExists(t.path)) return report(t, "ok");
+  if (!pathExists(dirname(t.path))) return report(t, "ok");
   const refusal = pathRefusal(t);
   if (refusal !== undefined) return report(t, refusal.state, refusal.detail);
   if (recoverFileTransaction(t.path).status === "manual") {
     return report(t, "error", MANUAL_RECOVERY);
   }
+  if (!pathExists(t.path)) return report(t, "ok");
   const inspected = inspectToml(t, registration, ownership);
   const read = inspected.read;
   if (read === undefined || read.status !== "present") return inspected.report;
