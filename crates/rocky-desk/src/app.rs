@@ -29,6 +29,7 @@ use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
 use crate::desklog::LogOnce;
 use crate::i18n::{Msg, UiLang, detect_ui_lang, resolve_lang, tr};
 use crate::icons::tray_icon;
+use crate::notified::NotifiedStore;
 use crate::notify::{Notifier, NotifyCtx, notice_text};
 use crate::os_notice::OsNotices;
 use crate::settings_view::{
@@ -164,6 +165,9 @@ struct DeskView {
     show_requested: bool,
     /// The notification identity is prepared at most once per process.
     notices_ready: bool,
+    /// Repos and harnesses already announced, kept in `desk/notified.json`.
+    notified: NotifiedStore,
+    notified_path: PathBuf,
     /// The tray menu must be rebuilt for the new language. Done by the pump
     /// outside the view lease, since the builder reads this entity.
     menu_stale: bool,
@@ -444,6 +448,13 @@ impl DeskView {
         if !(settings.notify_needs_you || settings.notify_failed || settings.notify_done) {
             return;
         }
+        self.prepare_notices();
+    }
+
+    fn prepare_notices(&mut self) {
+        if self.notices_ready {
+            return;
+        }
         self.notices_ready = true;
         if let Err(e) = self.notices.prepare() {
             // Windows registers an app identity for its toasts; elsewhere the
@@ -474,6 +485,38 @@ impl DeskView {
             .ctl
             .notifier
             .on_message(msg, self.ctl.model.agents(), &ctx);
+        let lang = self.ctl.ui_lang;
+        for n in &notices {
+            let (title, body) = notice_text(lang, n);
+            let click_tx = self.click_tx.clone();
+            let shown = self.notices.show(
+                &n.session_id,
+                &title,
+                &body,
+                Box::new(move || {
+                    let _ = click_tx.send(());
+                }),
+            );
+            if let Err(e) = shown {
+                self.log.once("toast", &e);
+            }
+        }
+    }
+
+    /// Once-only repo and harness notices. They are always recorded; a toast
+    /// shows only while the window is not active. A click just opens the
+    /// window.
+    fn notify_once(&mut self, msg: &ServerMsg, window_active: bool) {
+        let notices = self.notified.on_message(msg);
+        if self.notified.take_dirty()
+            && let Err(e) = self.notified.save(&self.notified_path)
+        {
+            self.log.once("notified", &e);
+        }
+        if window_active || notices.is_empty() {
+            return;
+        }
+        self.prepare_notices();
         let lang = self.ctl.ui_lang;
         for n in &notices {
             let (title, body) = notice_text(lang, n);
@@ -541,6 +584,7 @@ impl DeskView {
                             self.register_notices();
                         }
                         self.notify(&for_notify, window_active);
+                        self.notify_once(&for_notify, window_active);
                         if show {
                             self.show_requested = true;
                         }
@@ -900,6 +944,15 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                 ctl.set_conn(Conn::Connected);
             }
         }
+        let notified_path = desk_dir(&ctl.rocky_home).join("notified.json");
+        let (notified, notified_unreadable) = NotifiedStore::load(&notified_path);
+        let mut log = log;
+        if notified_unreadable {
+            log.once(
+                "notified-read",
+                &"notified.json is unreadable; starting empty",
+            );
+        }
         let view: Entity<DeskView> = cx.new(|_cx| DeskView {
             ctl,
             window: None,
@@ -910,6 +963,8 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             clicks,
             show_requested: false,
             notices_ready: false,
+            notified,
+            notified_path,
             menu_stale: false,
             #[cfg(not(windows))]
             user_shown: false,

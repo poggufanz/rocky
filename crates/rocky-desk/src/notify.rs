@@ -23,6 +23,8 @@ pub fn notice_text(lang: UiLang, n: &Notice) -> (String, String) {
         },
         NoticeKind::Failed => Msg::NoticeFailed { agent },
         NoticeKind::Done => Msg::NoticeDone,
+        // These carry their finished copy in `agent`.
+        NoticeKind::RepoConsent | NoticeKind::HarnessInstalled => n.agent.clone(),
     };
     let title = if n.repo.is_empty() {
         tr(lang, &Msg::UnknownRepo)
@@ -43,11 +45,18 @@ pub enum NoticeKind {
     NeedsYou,
     Failed,
     Done,
+    /// A repo is waiting for a capture decision; not tied to a session.
+    RepoConsent,
+    /// Rocky was installed into a harness after the first approval; not tied
+    /// to a session.
+    HarnessInstalled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     pub kind: NoticeKind,
+    /// The session, or for the setup kinds the toast key (`repo:<key>`,
+    /// `harness:<id>`).
     pub session_id: String,
     pub repo: String,
     pub agent: Msg,
@@ -66,6 +75,8 @@ impl NotifyCtx<'_> {
             return false;
         }
         match kind {
+            // Gated only by the active window, never by a toggle.
+            NoticeKind::RepoConsent | NoticeKind::HarnessInstalled => true,
             NoticeKind::NeedsYou => self.settings.notify_needs_you,
             NoticeKind::Failed => self.settings.notify_failed,
             NoticeKind::Done => self.settings.notify_done,

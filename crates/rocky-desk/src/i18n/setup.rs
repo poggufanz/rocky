@@ -55,6 +55,14 @@ pub enum SetupMsg {
     CaptureMore {
         n: usize,
     },
+    /// A repo is waiting for the owner's capture decision.
+    RepoConsent {
+        name: String,
+    },
+    /// Rocky was installed into a harness after the first approval.
+    HarnessInstalled {
+        harness: String,
+    },
 }
 
 #[cfg(test)]
@@ -110,6 +118,10 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         },
         SetupMsg::CaptureMore { n: 2 },
         SetupMsg::CaptureMore { n: 1 },
+        SetupMsg::RepoConsent { name: "app".into() },
+        SetupMsg::HarnessInstalled {
+            harness: "claude-code".into(),
+        },
     ]
 }
 
@@ -152,6 +164,10 @@ pub fn setup_en(m: &SetupMsg) -> String {
         SetupMsg::CaptureMore { n } => {
             format!("And {n} more {}.", plural(*n as u64, "repo", "repos"))
         }
+        SetupMsg::RepoConsent { name } => {
+            format!("Rocky can record file history for {name}. Open Rocky to answer.")
+        }
+        SetupMsg::HarnessInstalled { harness } => format!("Rocky is installed in {harness}."),
     }
 }
 
@@ -196,5 +212,9 @@ pub fn setup_id(m: &SetupMsg) -> String {
             format!("Capture untuk {root} dicek setiap 60 detik; pemantauan file gagal.")
         }
         SetupMsg::CaptureMore { n } => format!("Dan {n} repo lagi."),
+        SetupMsg::RepoConsent { name } => {
+            format!("Rocky bisa merekam riwayat file {name}. Buka Rocky untuk menjawab.")
+        }
+        SetupMsg::HarnessInstalled { harness } => format!("Rocky sudah terpasang di {harness}."),
     }
 }
