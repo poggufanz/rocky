@@ -5,7 +5,7 @@
  * expected bytes were found after the write is reported as healthy.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { defaultAgentHooksTarget, hasOwnedGateGroup } from "../agent-hooks.js";
 import type { McpRegistration } from "../clients.js";
 import type { RepoListEntry } from "./repo-list.js";
@@ -114,6 +114,17 @@ function refusedSettingsReport(target: SettingsTarget): AutoTargetReport {
   };
 }
 
+/**
+ * A default MCP target whose config folder does not exist yet belongs to a
+ * harness that was installed but never run. Rocky never creates that folder,
+ * so the target is left out until the folder appears and the hourly detection
+ * picks it up, instead of showing a refusal for something nothing went wrong in.
+ */
+function readyMcpTargets(harness: McpHarnessId, d: DetectEnv, locations: readonly string[]) {
+  return mcpTargets(harness, d, locations)
+    .filter((target) => target.source !== undefined || existsSync(dirname(target.path)));
+}
+
 function settingsRefusal(ctx: AutoContext, location: string): string | undefined {
   const checked = validateConfigLocation("claude-code", location, ctx.detect);
   return checked.ok ? undefined : checked.reason;
@@ -170,7 +181,7 @@ function scopeOf(ctx: AutoContext, record: ConsentRecord | undefined): Scope {
   return {
     harnesses,
     claudeSettings,
-    mcp: harnesses.flatMap((harness) => mcpTargets(harness, ctx.detect, locationsOf(record, harness))),
+    mcp: harnesses.flatMap((harness) => readyMcpTargets(harness, ctx.detect, locationsOf(record, harness))),
     shell: record === undefined || record.shell_hook,
   };
 }
@@ -336,7 +347,7 @@ export function removeAll(ctx: AutoContext, record: ConsentRecord | undefined): 
     if (!removedReports.some((entry) => entry.state === "refused")) touched.add(target.path);
   }
   for (const harness of AUTO_MCP_HARNESSES) {
-    for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
+    for (const target of readyMcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
       const report = removeMcp(target, ctx.registration, expected.history[target.path] ?? []);
       reports.push(report);
       if (report.state !== "refused") touched.add(target.path);
@@ -375,7 +386,7 @@ export function removeHarness(
       if (!removedReports.some((entry) => entry.state === "refused")) removed.add(target.path);
     }
   }
-  for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
+  for (const target of readyMcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
     const report = removeMcp(target, ctx.registration, expected.history[target.path] ?? []);
     reports.push(report);
     if (report.state !== "refused") removed.add(target.path);

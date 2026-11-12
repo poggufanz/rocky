@@ -12,8 +12,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { inspectAll, removeAll, type AutoContext } from "../setup/auto/engine.js";
+import { mcpTargets } from "../setup/auto/mcp.js";
 import type { ShellHookPort } from "../setup/auto/shell.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
@@ -187,4 +188,34 @@ test("removal also covers home settings when CLAUDE_CONFIG_DIR points at a profi
   const reports = removeAll(f.ctx, undefined);
 
   assert.equal(reports.some((report) => report.path === homeFile && report.kind === "agent-hooks"), true);
+});
+
+function geminiOnPath(f: Fixture): string {
+  const bin = join(f.root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, process.platform === "win32" ? "gemini.cmd" : "gemini"), "");
+  f.ctx.detect.env.PATH = bin;
+  const target = mcpTargets("gemini-cli", f.ctx.detect, [])[0];
+  assert.ok(target);
+  return target.path;
+}
+
+test("a detected harness whose config folder does not exist yet gets no target", (t) => {
+  const f = fixture(t);
+  const geminiPath = geminiOnPath(f);
+
+  const gemini = inspectAll(f.ctx, undefined).filter((report) => report.harness === "gemini-cli");
+
+  assert.deepEqual(gemini, []);
+  assert.equal(removeAll(f.ctx, undefined).some((report) => report.path === geminiPath), false);
+});
+
+test("the harness gets its target once its config folder appears", (t) => {
+  const f = fixture(t);
+  const geminiPath = geminiOnPath(f);
+  mkdirSync(dirname(geminiPath), { recursive: true });
+
+  const gemini = inspectAll(f.ctx, undefined).filter((report) => report.harness === "gemini-cli");
+
+  assert.deepEqual(gemini.map((report) => [report.path, report.state]), [[geminiPath, "missing"]]);
 });
