@@ -32,7 +32,7 @@ export interface ReconcileReport {
   coverage: "complete" | "partial" | "unknown";
   gaps: number;
   /** Set only when `coverage` is `"unknown"`. */
-  reason?: "root-unusable" | "repo-consent-required" | "git-unreadable" | "capture-failed";
+  reason?: "root-unusable" | "repo-consent-required" | "git-unreadable" | "not-a-repo" | "capture-failed";
   atMs: number;
 }
 
@@ -234,7 +234,7 @@ function toReport(root: string, result: ReturnType<typeof reconcileRepo>): Recon
   const gaps = result.gaps.length;
   if (result.coverage !== "unknown") return { root, coverage: result.coverage, gaps, atMs };
   const first = result.gaps[0];
-  const reason = first === "root-unusable" || first === "repo-consent-required" || first === "git-unreadable"
+  const reason = first === "root-unusable" || first === "repo-consent-required" || first === "git-unreadable" || first === "not-a-repo"
     ? first
     : "capture-failed";
   return { root, coverage: "unknown", gaps, reason, atMs };

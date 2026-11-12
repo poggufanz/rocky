@@ -6,6 +6,10 @@ Notable changes per release. Dates are the release date.
 
 With `CLAUDE_CONFIG_DIR` set, the desktop app's setup also keeps Rocky's hooks in `~/.claude/settings.json` when that folder holds Claude Code config. Some terminal hosts copy that file over the profile on every new terminal, so hooks written only to the profile were gone before the session read them.
 
+- Automatic setup reads MCP JSON configs that contain `//` or `/* */` comments. After Rocky writes such a file, it is plain JSON and the comments are gone.
+- A detected harness whose config folder does not exist yet gets no setup row and no refusal until the folder appears.
+- Capture names a consented folder whose `.git` is empty as not a Git repository, instead of reporting a Git failure.
+
 The desktop app asks once for setup consent, and its Settings switch harnesses and the shell hook, reinstall, manage repo capture, and remove Rocky.
 
 `rocky setup --auto` adds `shell on|off` and `repo list`.

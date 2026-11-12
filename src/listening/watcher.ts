@@ -10,6 +10,7 @@ import {
   fstatSync,
   lstatSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   statSync,
@@ -250,7 +251,20 @@ export function reconcileRepo(
   const walked = walkFiles(root, Math.min(Math.max(1, Math.floor(cap)), WATCHER_PATH_CAP_FALLBACK * 10));
   // returned before the deletion pass: an unlisted root must never read as
   // every known file having gone
-  if (walked === undefined) return { versions: [], hunks: 0, gaps: ["git-unreadable"], coverage: "unknown" };
+  if (walked === undefined) {
+    // An empty `.git` folder (a leftover) is not a repo at all; say that
+    // instead of blaming Git, so the owner revokes it rather than waits. A
+    // `.git` with any content, or a worktree's `.git` file, keeps the Git reason.
+    const emptyGitDir = (() => {
+      try {
+        return readdirSync(join(root, ".git")).length === 0;
+      } catch {
+        return false;
+      }
+    })();
+    const reason = emptyGitDir ? "not-a-repo" : "git-unreadable";
+    return { versions: [], hunks: 0, gaps: [reason], coverage: "unknown" };
+  }
   const { rels, truncated, gaps } = walked;
   const known = knownVersions(root, home);
   const versions: string[] = [];
