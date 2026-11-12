@@ -224,7 +224,7 @@ fn purge_control<T: 'static>(c: &Ctx<'_, T>, root: &str, name: &str, cx: &mut Co
 fn repo_block<T: 'static>(c: &Ctx<'_, T>, row: &RepoRow, cx: &mut Context<T>) -> Div {
     let control = Control::Repo(row.main.clone());
     let busy = control.busy(c.requests);
-    let declined = row.decision == Msg::Setup(SetupMsg::RepoDeclined);
+    let buttons = row.buttons();
     let mut out = div().flex_col().gap_1().child(
         div()
             .flex()
@@ -249,7 +249,7 @@ fn repo_block<T: 'static>(c: &Ctx<'_, T>, row: &RepoRow, cx: &mut Context<T>) ->
     let (allow_label, revoke_label) = if busy {
         (SetupMsg::SwitchWorking, SetupMsg::SwitchWorking)
     } else {
-        (SetupMsg::RepoAllow, SetupMsg::RepoRevoke)
+        (SetupMsg::RepoAllow, buttons.second)
     };
     out = out.child(
         div()
@@ -258,7 +258,7 @@ fn repo_block<T: 'static>(c: &Ctx<'_, T>, row: &RepoRow, cx: &mut Context<T>) ->
             .child(action_button(
                 format!("repo-allow:{}", row.main),
                 text(c.lang, allow_label),
-                !busy && !row.allowed,
+                !busy && buttons.allow_enabled,
                 SettingsAction::RepoAllow(row.main.clone()),
                 cx,
                 c.on_action,
@@ -266,7 +266,7 @@ fn repo_block<T: 'static>(c: &Ctx<'_, T>, row: &RepoRow, cx: &mut Context<T>) ->
             .child(action_button(
                 format!("repo-revoke:{}", row.main),
                 text(c.lang, revoke_label),
-                !busy && !declined,
+                !busy && buttons.second_enabled,
                 SettingsAction::RepoRevoke(row.main.clone()),
                 cx,
                 c.on_action,
@@ -275,7 +275,7 @@ fn repo_block<T: 'static>(c: &Ctx<'_, T>, row: &RepoRow, cx: &mut Context<T>) ->
     if let Some(error) = c.model.error(&control) {
         out = out.child(error_line(c.lang, error));
     }
-    if row.allowed || declined {
+    if row.offers_delete() {
         out = out.child(purge_control(c, &row.main, &row.name, cx));
     }
     for wt in &row.worktrees {
@@ -284,7 +284,7 @@ fn repo_block<T: 'static>(c: &Ctx<'_, T>, row: &RepoRow, cx: &mut Context<T>) ->
                 .text_xs()
                 .child(format!("{} \u{b7} {}", wt.root, wt.size)),
         );
-        if wt.missing {
+        if wt.offers_delete() {
             line = line
                 .child(
                     div()
@@ -365,7 +365,7 @@ pub fn setup_sections<T: 'static>(
         on_action,
     };
     let mut out = div().flex().flex_col().gap_2();
-    if model.consent() == Some(rocky_proto::pipe::ConsentState::Approved) {
+    if model.shows_agent_tools() {
         out = out.child(heading(lang, SetupMsg::SettingsAgentTools));
         let rows = harness_rows(
             model.targets(),

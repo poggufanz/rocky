@@ -11,6 +11,7 @@ use rocky_proto::pipe::{
 
 use crate::i18n::{Msg, SetupMsg};
 use crate::requests::{Outcome, RequestKind, Requests};
+use crate::root_match::same_root;
 use crate::settings_view::View;
 
 /// The command that removes the command line itself, which Rocky cannot do.
@@ -32,15 +33,54 @@ pub struct WorktreeRow {
     pub missing: bool,
 }
 
+impl WorktreeRow {
+    /// A worktree whose folder is gone still has recorded history to delete.
+    pub fn offers_delete(&self) -> bool {
+        self.missing
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRow {
     pub main: String,
     pub name: String,
     pub decision: Msg,
     pub allowed: bool,
+    pub declined: bool,
     pub size: String,
     pub capture: Option<Msg>,
     pub worktrees: Vec<WorktreeRow>,
+}
+
+/// What the Allow and second buttons of a repo do right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoButtons {
+    pub allow_enabled: bool,
+    /// Revoke for an allowed repo, "No" for one that was not asked.
+    pub second: SetupMsg,
+    pub second_enabled: bool,
+}
+
+impl RepoRow {
+    /// Allow is off once allowed. Revoke needs an allowed repo; a repo not yet
+    /// asked offers "No" instead, and a declined one has nothing to revoke.
+    pub fn buttons(&self) -> RepoButtons {
+        let not_asked = !self.allowed && !self.declined;
+        RepoButtons {
+            allow_enabled: !self.allowed,
+            second: if not_asked {
+                SetupMsg::RepoBannerNo
+            } else {
+                SetupMsg::RepoRevoke
+            },
+            second_enabled: self.allowed || not_asked,
+        }
+    }
+
+    /// History exists to delete only for a repo that was decided.
+    pub fn offers_delete(&self) -> bool {
+        self.allowed || self.declined
+    }
 }
 
 /// One control that owns a request pair and can show its own error.
@@ -223,20 +263,6 @@ pub fn harness_rows(
         .collect()
 }
 
-/// Paths compare slash-agnostic, and case-blind where the filesystem is.
-fn same_root(a: &str, b: &str) -> bool {
-    let norm = |p: &str| {
-        let p = p.replace('\\', "/");
-        let p = p.trim_end_matches('/');
-        if cfg!(windows) {
-            p.to_lowercase()
-        } else {
-            p.to_string()
-        }
-    };
-    norm(a) == norm(b)
-}
-
 fn capture_msg(row: &CaptureHealth) -> Msg {
     Msg::Setup(match row.state {
         CaptureState::Starting => SetupMsg::CaptureStarting,
@@ -262,20 +288,21 @@ pub fn repo_rows(
     let capture_of = |main: &str| {
         capture
             .iter()
-            .find(|c| same_root(&c.root, main))
+            .find(|c| same_root(&c.root, main, cfg!(windows)))
             .map(capture_msg)
     };
     let decided = repos.iter().map(|r| {
-        let (decision, allowed) = match r.decision {
-            RepoDecisionState::Allowed => (SetupMsg::RepoAllowed, true),
-            RepoDecisionState::Declined => (SetupMsg::RepoDeclined, false),
-            RepoDecisionState::Undecided => (SetupMsg::RepoNotAsked, false),
+        let (decision, allowed, declined) = match r.decision {
+            RepoDecisionState::Allowed => (SetupMsg::RepoAllowed, true, false),
+            RepoDecisionState::Declined => (SetupMsg::RepoDeclined, false, true),
+            RepoDecisionState::Undecided => (SetupMsg::RepoNotAsked, false, false),
         };
         RepoRow {
             main: r.main.clone(),
             name: r.name.clone(),
             decision: Msg::Setup(decision),
             allowed,
+            declined,
             size: format_mib(r.bytes),
             capture: capture_of(&r.main),
             worktrees: r
@@ -297,6 +324,7 @@ pub fn repo_rows(
             name: p.name.clone(),
             decision: Msg::Setup(SetupMsg::RepoNotAsked),
             allowed: false,
+            declined: false,
             size: format_mib(0),
             capture: capture_of(&p.main),
             worktrees: Vec::new(),
@@ -386,6 +414,21 @@ impl SetupSettings {
         } else {
             RequestKind::HarnessOn(harness.to_string())
         }
+    }
+
+    /// The request for the shell switch's next state: the opposite of `on`.
+    pub fn shell_request(on: bool) -> RequestKind {
+        if on {
+            RequestKind::ShellOff
+        } else {
+            RequestKind::ShellOn
+        }
+    }
+
+    /// The agent tools section (harness rows, shell, reinstall) shows only once
+    /// the owner approved setup.
+    pub fn shows_agent_tools(&self) -> bool {
+        self.consent() == Some(ConsentState::Approved)
     }
 
     /// A control's request is about to start: its old error goes away.

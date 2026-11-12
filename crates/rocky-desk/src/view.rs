@@ -442,7 +442,6 @@ fn priority(s: Status) -> u8 {
     }
 }
 
-/// First 8 chars, char-safe.
 /// Distinct non-empty repo roots across a group's agents, first-seen order.
 fn distinct_roots(sessions: &BTreeMap<String, Vec<&AgentStatus>>) -> Vec<String> {
     let mut roots: Vec<String> = Vec::new();
@@ -459,6 +458,7 @@ fn distinct_roots(sessions: &BTreeMap<String, Vec<&AgentStatus>>) -> Vec<String>
     roots
 }
 
+/// First 8 chars, char-safe.
 fn short8(s: &str) -> String {
     s.chars().take(8).collect()
 }

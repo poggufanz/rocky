@@ -372,7 +372,7 @@ pub fn setup_en(m: &SetupMsg) -> String {
         SetupMsg::CaptureElsewhere => "another process captures this repo".to_string(),
         SetupMsg::DeleteHistory => "Delete history".to_string(),
         SetupMsg::DeleteHistoryAsk { name } => {
-            format!("Delete the recorded history for {name}? This cannot be undone.")
+            format!("Delete the recorded history for {name} and stop recording it? This cannot be undone.")
         }
         SetupMsg::DeleteConfirm => "Delete".to_string(),
         SetupMsg::DeleteCancel => "Cancel".to_string(),
@@ -491,7 +491,7 @@ pub fn setup_id(m: &SetupMsg) -> String {
         SetupMsg::CaptureElsewhere => "proses lain merekam repo ini".to_string(),
         SetupMsg::DeleteHistory => "Hapus riwayat".to_string(),
         SetupMsg::DeleteHistoryAsk { name } => {
-            format!("Hapus riwayat yang terekam untuk {name}? Ini tidak bisa dibatalkan.")
+            format!("Hapus riwayat yang terekam untuk {name} dan berhenti merekamnya? Ini tidak bisa dibatalkan.")
         }
         SetupMsg::DeleteConfirm => "Hapus".to_string(),
         SetupMsg::DeleteCancel => "Batal".to_string(),

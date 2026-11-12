@@ -92,8 +92,8 @@ impl NotifiedStore {
     }
 
     /// Harness notices once consent is approved. The first approved call
-    /// records every harness that already has an `ok` target and stays
-    /// silent; later calls announce each newly `ok` harness once.
+    /// that has at least one `ok` target records every harness already `ok` and
+    /// stays silent; later calls announce each newly `ok` harness once.
     pub fn harness_notices(&mut self, setup: &SetupHealth) -> Vec<Notice> {
         if setup.consent_state != ConsentState::Approved {
             return Vec::new();
@@ -104,6 +104,11 @@ impl NotifiedStore {
             .filter(|t| t.state == TargetState::Ok)
             .map(|t| t.harness.as_str())
             .collect();
+        // Nothing installed yet: an apply is still running. Seeding now would
+        // announce the first install as news, so wait for one `ok` target.
+        if installed.is_empty() && !self.seeded {
+            return Vec::new();
+        }
         let announce = self.seeded;
         if !self.seeded {
             self.seeded = true;
@@ -249,6 +254,48 @@ mod tests {
         assert!(s.seeded);
         assert!(s.harnesses.contains("claude-code"));
         assert!(!s.harnesses.contains("codex"));
+    }
+
+    #[test]
+    fn approved_health_without_an_ok_target_does_not_seed() {
+        let mut s = NotifiedStore::default();
+        let empty = setup(ConsentState::Approved, Vec::new());
+        assert!(s.harness_notices(&empty).is_empty());
+        let unfinished = setup(
+            ConsentState::Approved,
+            vec![target("codex", TargetState::Missing)],
+        );
+        assert!(s.harness_notices(&unfinished).is_empty());
+        assert!(!s.seeded);
+        assert!(!s.take_dirty());
+
+        // The first health with an ok target seeds silently; a later one announces.
+        let first = setup(
+            ConsentState::Approved,
+            vec![target("claude-code", TargetState::Ok)],
+        );
+        assert!(s.harness_notices(&first).is_empty());
+        assert!(s.seeded);
+        let later = setup(
+            ConsentState::Approved,
+            vec![
+                target("claude-code", TargetState::Ok),
+                target("codex", TargetState::Ok),
+            ],
+        );
+        assert_eq!(s.harness_notices(&later).len(), 1);
+    }
+
+    #[test]
+    fn seeding_marks_the_store_dirty() {
+        let mut s = NotifiedStore::default();
+        assert!(!s.take_dirty());
+        s.harness_notices(&setup(
+            ConsentState::Approved,
+            vec![target("claude-code", TargetState::Ok)],
+        ));
+        assert!(s.take_dirty());
+        assert!(!s.take_dirty());
     }
 
     #[test]

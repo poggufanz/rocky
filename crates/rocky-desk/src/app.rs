@@ -26,7 +26,7 @@ use crate::client::Outbox;
 use crate::clock;
 use crate::conn::{Action, ConnState, ConnectOutcome};
 use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
-use crate::consent_view::{ConsentModel, show_install_row};
+use crate::consent_view::{ConsentModel, autostart_banner_hidden, show_install_row};
 use crate::desklog::LogOnce;
 use crate::i18n::{Msg, SetupMsg, UiLang, detect_ui_lang, resolve_lang, tr};
 use crate::icons::tray_icon;
@@ -285,10 +285,16 @@ impl DeskView {
         if !self.requests.start(kind.clone(), id, now_ms()) {
             return false;
         }
-        self.ctl
+        let sent = self
+            .ctl
             .outbox
             .as_ref()
-            .is_some_and(|outbox| outbox.send(client_msg(&kind, id)).is_ok())
+            .is_some_and(|outbox| outbox.send(client_msg(&kind, id)).is_ok());
+        if !sent {
+            // Nothing reached the daemon, so no reply will come: do not wait for the timeout.
+            self.requests.cancel(id);
+        }
+        sent
     }
 
     /// Route one request outcome to the screen that owns its kind.
@@ -298,6 +304,9 @@ impl DeskView {
         let step = self.consent.route(kind, outcome, &expired);
         if step.send_plan {
             self.request_plan();
+        }
+        if step.close && self.ctl.view == View::Consent {
+            self.ctl.view = View::Agents;
         }
         if let Some(error) = step.log {
             self.log.once("consent-later", &error);
@@ -324,7 +333,12 @@ impl DeskView {
     /// Agree: register sign-in start when checked, mark the question asked,
     /// then ask Node to approve. A failed sign-in write never blocks it.
     fn agree_consent(&mut self, cx: &mut Context<Self>) {
-        if !self.consent.can_agree() || self.ctl.outbox.is_none() {
+        if !self.consent.can_agree() {
+            return;
+        }
+        if self.ctl.outbox.is_none() {
+            self.consent.approve_not_sent();
+            cx.notify();
             return;
         }
         let error = self
@@ -335,7 +349,9 @@ impl DeskView {
         }
         let id = self.next_id();
         self.send_set(id, set_autostart_asked(id));
-        self.start_request(RequestKind::Approve);
+        if !self.start_request(RequestKind::Approve) {
+            self.consent.approve_not_sent();
+        }
         cx.notify();
     }
 
@@ -425,8 +441,7 @@ impl DeskView {
     /// The one-time sign-in question, shown while it is unanswered.
     fn banner(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         // The consent screen carries the sign-in question itself.
-        if self.ctl.view == View::Consent
-            || self.consent.answered()
+        if autostart_banner_hidden(self.ctl.view, self.consent.answered())
             || !show_autostart_banner(self.ctl.tray_start, self.ctl.model.settings())
         {
             return None;

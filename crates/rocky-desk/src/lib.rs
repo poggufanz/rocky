@@ -16,6 +16,7 @@ pub mod quit;
 pub mod relay;
 pub mod repo_banner;
 pub mod requests;
+pub mod root_match;
 pub mod settings_view;
 pub mod setup_lines;
 pub mod setup_settings;

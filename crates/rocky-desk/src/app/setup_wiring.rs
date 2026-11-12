@@ -50,12 +50,7 @@ impl DeskView {
                 self.start_control(Control::Harness(harness), kind);
             }
             SettingsAction::Shell { on } => {
-                let kind = if on {
-                    RequestKind::ShellOff
-                } else {
-                    RequestKind::ShellOn
-                };
-                self.start_control(Control::Shell, kind);
+                self.start_control(Control::Shell, SetupSettings::shell_request(on));
             }
             SettingsAction::Reinstall => self.start_control(Control::Reinstall, RequestKind::Apply),
             SettingsAction::RepoAllow(root) => {

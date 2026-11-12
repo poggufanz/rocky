@@ -168,7 +168,12 @@ fn repo_rows_merge_pending_and_capture() {
         },
     ];
     let capture = [CaptureHealth {
-        root: "C:\\work\\app".into(),
+        root: if cfg!(windows) {
+            "C:\\work\\app"
+        } else {
+            "C:/work/app"
+        }
+        .into(),
         state: CaptureState::Ok,
         last_reconcile_ms: None,
         error: None,
@@ -208,6 +213,8 @@ fn missing_worktree_offers_delete() {
     assert_eq!(wts[0].size, "2.0 MiB");
     assert!(wts[1].missing);
     assert_eq!(wts[1].size, "0.5 MiB");
+    assert!(!wts[0].offers_delete());
+    assert!(wts[1].offers_delete());
     // The delete step belongs to the worktree's own root.
     let mut model = SetupSettings::default();
     model.ask_purge("C:/work/gone");
@@ -316,4 +323,63 @@ fn removed_view_quits_on_close() {
     for view in [View::Agents, View::Settings, View::Consent] {
         assert_eq!(close_action(view), CloseAction::Hide);
     }
+}
+
+fn row_of(decision: RepoDecisionState) -> RepoRow {
+    let entry = repo("C:/work/app", decision, 0);
+    repo_rows(&[entry], &[], &[]).remove(0)
+}
+
+#[test]
+fn revoke_is_enabled_only_for_an_allowed_repo() {
+    let allowed = row_of(RepoDecisionState::Allowed).buttons();
+    assert!(!allowed.allow_enabled);
+    assert_eq!(allowed.second, SetupMsg::RepoRevoke);
+    assert!(allowed.second_enabled);
+
+    let declined = row_of(RepoDecisionState::Declined).buttons();
+    assert!(declined.allow_enabled);
+    assert_eq!(declined.second, SetupMsg::RepoRevoke);
+    assert!(!declined.second_enabled);
+
+    let not_asked = row_of(RepoDecisionState::Undecided).buttons();
+    assert!(not_asked.allow_enabled);
+    assert_eq!(not_asked.second, SetupMsg::RepoBannerNo);
+    assert!(not_asked.second_enabled);
+}
+
+#[test]
+fn delete_history_is_offered_only_for_a_decided_repo() {
+    assert!(row_of(RepoDecisionState::Allowed).offers_delete());
+    assert!(row_of(RepoDecisionState::Declined).offers_delete());
+    assert!(!row_of(RepoDecisionState::Undecided).offers_delete());
+}
+
+#[test]
+fn agent_tools_show_only_after_an_approved_plan() {
+    let mut model = SetupSettings::default();
+    assert!(!model.shows_agent_tools());
+    for (consent, shown) in [
+        (ConsentState::Later, false),
+        (ConsentState::Removed, false),
+        (ConsentState::Approved, true),
+    ] {
+        model.route(
+            RequestKind::Plan,
+            Outcome::Plan {
+                consent,
+                targets: Vec::new(),
+                harness_off: Vec::new(),
+                shell_hook: true,
+            },
+            "",
+        );
+        assert_eq!(model.shows_agent_tools(), shown, "{consent:?}");
+    }
+}
+
+#[test]
+fn shell_request_asks_for_the_opposite_state() {
+    assert_eq!(SetupSettings::shell_request(true), RequestKind::ShellOff);
+    assert_eq!(SetupSettings::shell_request(false), RequestKind::ShellOn);
 }

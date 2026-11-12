@@ -7,6 +7,7 @@ use rocky_proto::pipe::{ConsentState, SetupTarget, TargetHealth, TargetState};
 
 use crate::i18n::{Msg, SetupMsg};
 use crate::requests::{Outcome, RequestKind};
+use crate::settings_view::View;
 use crate::setup_lines::target_line;
 
 /// True when the consent screen should open by itself at window start.
@@ -16,6 +17,12 @@ pub fn should_open_consent(tray_start: bool, consent: ConsentState) -> bool {
             consent,
             ConsentState::None | ConsentState::Removed | ConsentState::Invalid
         )
+}
+
+/// The one-time sign-in question stays hidden on the consent screen, which
+/// carries it itself, and once the owner answered consent this run.
+pub fn autostart_banner_hidden(view: View, answered: bool) -> bool {
+    view == View::Consent || answered
 }
 
 /// The settings "Install" row shows until setup is approved.
@@ -49,6 +56,8 @@ pub enum Stage {
 pub struct Step {
     pub send_plan: bool,
     pub log: Option<String>,
+    /// The plan showed setup already approved: the screen has nothing to ask.
+    pub close: bool,
 }
 
 /// Why no plan is shown. Only a real answer means Node is missing; the other
@@ -153,6 +162,13 @@ impl ConsentModel {
         }
     }
 
+    /// Approve could not be sent. The screen shows the not-connected text and
+    /// Agree works again once the daemon is back.
+    pub fn approve_not_sent(&mut self) {
+        self.plan_failure = Some(PlanFailure::NotConnected);
+        self.stage = Stage::Ready;
+    }
+
     /// A health or snapshot arrived while the screen shows an unreachable
     /// failure: clear it and return true so the caller asks for the plan again.
     pub fn retry_plan_on_health(&mut self) -> bool {
@@ -251,7 +267,25 @@ impl ConsentModel {
         };
         let mut step = Step::default();
         match (kind, outcome) {
+            // Node's plan is authoritative: an approved owner is never asked again.
+            (
+                RequestKind::Plan,
+                Outcome::Plan {
+                    consent: ConsentState::Approved,
+                    ..
+                },
+            ) if matches!(self.stage, Stage::Loading | Stage::Ready) => {
+                self.consent = ConsentState::Approved;
+                step.close = true;
+            }
             (RequestKind::Plan, Outcome::Plan { targets, .. }) => self.on_plan(&targets),
+            // After a successful approve the CLI was found, so a failed plan is
+            // the daemon being slow or away, not a missing CLI.
+            (RequestKind::Plan, Outcome::Done { ok: false, .. })
+                if matches!(self.stage, Stage::Applying | Stage::Result) =>
+            {
+                self.on_plan_failed(PlanFailure::TimedOut);
+            }
             (RequestKind::Plan, Outcome::Done { ok: false, .. }) => {
                 self.on_plan_failed(PlanFailure::CliMissing);
             }
@@ -528,6 +562,81 @@ mod tests {
         assert_eq!(msgs[0], SetupMsg::CliMissing { path: None });
         assert_eq!(msgs[1], SetupMsg::RequestTimedOut);
         assert_eq!(msgs[2], SetupMsg::ConsentNotConnected);
+    }
+
+    #[test]
+    fn approved_plan_closes_a_loading_or_ready_screen_without_sending() {
+        let approved = |m: &mut ConsentModel| {
+            m.route(
+                RequestKind::Plan,
+                Outcome::Plan {
+                    consent: ConsentState::Approved,
+                    targets: vec![target("codex", TargetState::Ok)],
+                    harness_off: Vec::new(),
+                    shell_hook: true,
+                },
+                "late",
+            )
+        };
+        let mut loading = ConsentModel::default();
+        loading.open();
+        let step = approved(&mut loading);
+        assert!(step.close && !step.send_plan && step.log.is_none());
+        assert_eq!(loading.consent(), ConsentState::Approved);
+
+        let mut ready = ConsentModel::default();
+        ready.open();
+        ready.on_plan(&[target("codex", TargetState::Missing)]);
+        assert!(approved(&mut ready).close);
+
+        // After Agree the same answer is the Result, not a reason to close.
+        let mut after = applied_after_ok_approve();
+        assert!(!approved(&mut after).close);
+        assert_eq!(after.stage, Stage::Result);
+    }
+
+    #[test]
+    fn a_failed_plan_after_approve_is_not_a_missing_cli() {
+        let mut m = applied_after_ok_approve();
+        m.route(
+            RequestKind::Plan,
+            Outcome::Done {
+                ok: false,
+                error: Some("slow".into()),
+            },
+            "late",
+        );
+        assert_eq!(m.plan_failure, Some(PlanFailure::TimedOut));
+        assert_eq!(m.stage, Stage::Result);
+    }
+
+    #[test]
+    fn agree_without_a_connection_shows_not_connected_and_stays_retryable() {
+        let mut m = ConsentModel::default();
+        m.open();
+        m.on_plan(&[target("codex", TargetState::Missing)]);
+        assert!(m.can_agree());
+        m.approve_not_sent();
+        assert_eq!(m.plan_failure, Some(PlanFailure::NotConnected));
+        assert_eq!(m.stage, Stage::Ready);
+        assert!(!m.can_agree());
+        // The next health clears the failure and asks for the plan again.
+        assert!(m.retry_plan_on_health());
+        m.on_plan(&[target("codex", TargetState::Missing)]);
+        assert!(m.can_agree());
+
+        // A send that fails after Agree started leaves Applying too.
+        m.begin_agree(&mut ok_enable);
+        m.approve_not_sent();
+        assert_eq!(m.stage, Stage::Ready);
+    }
+
+    #[test]
+    fn autostart_banner_is_hidden_on_the_consent_screen_and_once_answered() {
+        assert!(autostart_banner_hidden(View::Consent, false));
+        assert!(autostart_banner_hidden(View::Agents, true));
+        assert!(!autostart_banner_hidden(View::Agents, false));
+        assert!(!autostart_banner_hidden(View::Settings, false));
     }
 
     #[test]

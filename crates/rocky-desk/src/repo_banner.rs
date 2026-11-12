@@ -3,6 +3,7 @@
 
 use rocky_proto::pipe::PendingRepo;
 
+use crate::root_match::same_root;
 use crate::view::RepoGroup;
 
 /// Where a pending repo's banner sits.
@@ -15,7 +16,7 @@ pub enum BannerPlace {
 }
 
 /// Places every pending repo once: on the first group whose roots contain its
-/// `main` or `key`, otherwise at the top. Windows paths compare without case.
+/// `main` or `key`, otherwise at the top. Windows paths compare without case and with either slash.
 pub fn banner_places(
     groups: &[RepoGroup],
     pending: &[PendingRepo],
@@ -23,18 +24,10 @@ pub fn banner_places(
     places_with_case(groups, pending, cfg!(windows))
 }
 
-fn same_root(a: &str, b: &str, ignore_case: bool) -> bool {
-    if ignore_case {
-        a.to_lowercase() == b.to_lowercase()
-    } else {
-        a == b
-    }
-}
-
 fn places_with_case(
     groups: &[RepoGroup],
     pending: &[PendingRepo],
-    ignore_case: bool,
+    windows: bool,
 ) -> Vec<(BannerPlace, PendingRepo)> {
     pending
         .iter()
@@ -43,8 +36,7 @@ fn places_with_case(
                 .iter()
                 .position(|g| {
                     g.roots.iter().any(|root| {
-                        same_root(root, &repo.main, ignore_case)
-                            || same_root(root, &repo.key, ignore_case)
+                        same_root(root, &repo.main, windows) || same_root(root, &repo.key, windows)
                     })
                 })
                 .map_or(BannerPlace::Top, BannerPlace::Group);
@@ -96,6 +88,20 @@ mod tests {
     fn case_match_follows_platform() {
         let groups = vec![group("a", &["C:\\Work\\A"])];
         let pending = [repo("c:\\work\\a", "c:\\work\\a")];
+        assert_eq!(
+            places_with_case(&groups, &pending, true)[0].0,
+            BannerPlace::Group(0)
+        );
+        assert_eq!(
+            places_with_case(&groups, &pending, false)[0].0,
+            BannerPlace::Top
+        );
+    }
+
+    #[test]
+    fn windows_match_also_ignores_separator_style() {
+        let groups = vec![group("a", &["C:\\Work\\A"])];
+        let pending = [repo("k", "c:/work/a")];
         assert_eq!(
             places_with_case(&groups, &pending, true)[0].0,
             BannerPlace::Group(0)

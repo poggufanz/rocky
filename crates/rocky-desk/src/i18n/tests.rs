@@ -115,3 +115,14 @@ fn hooks_restored_gap_ends_at_the_restore_time() {
         "Event sebelum 14:02 mungkin hilang: hook Rocky baru dipasang ulang saat itu."
     );
 }
+
+#[test]
+fn delete_history_ask_says_recording_stops_in_both_languages() {
+    let m = SetupMsg::DeleteHistoryAsk { name: "app".into() };
+    assert!(setup_en(&m).contains("stop recording"), "{}", setup_en(&m));
+    assert!(
+        setup_id(&m).contains("berhenti merekam"),
+        "{}",
+        setup_id(&m)
+    );
+}

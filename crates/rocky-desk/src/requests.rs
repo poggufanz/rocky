@@ -86,6 +86,11 @@ impl Requests {
         true
     }
 
+    /// Forgets a request that was recorded but never reached the wire.
+    pub fn cancel(&mut self, id: u64) {
+        self.pending.retain(|(pid, _, _)| *pid != id);
+    }
+
     pub fn pending(&self, kind: &RequestKind) -> bool {
         self.pending.iter().any(|(_, k, _)| k == kind)
     }
@@ -155,6 +160,19 @@ mod tests {
         assert!(r.start(RequestKind::HarnessOn("codex".into()), 4, 10));
         assert!(r.start(RequestKind::HarnessOn("gemini".into()), 5, 10));
         assert!(!r.start(RequestKind::HarnessOn("codex".into()), 6, 10));
+    }
+
+    #[test]
+    fn cancel_drops_only_the_unsent_request() {
+        let mut r = Requests::default();
+        r.start(RequestKind::Apply, 1, 0);
+        r.start(RequestKind::Plan, 2, 0);
+        r.cancel(1);
+        assert!(!r.pending(&RequestKind::Apply));
+        assert!(r.pending(&RequestKind::Plan));
+        // The same kind can start again at once instead of waiting for the timeout.
+        assert!(r.start(RequestKind::Apply, 3, 1));
+        assert!(r.expire(1).is_empty());
     }
 
     #[test]
