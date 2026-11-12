@@ -447,9 +447,10 @@ that owns the decision.
 
 `<ROCKY_HOME>/listening/repos/<hash>/collector.json` holds one lease per
 consented repo: `{proc, pid, token, expires}`. The holder is the only process
-that writes that repo's history. `proc` is `gui` (`rocky dash`), `mcp` (the MCP
-server), or `daemon` (the capture process the desktop app's background process
-runs). `expires` is epoch milliseconds. A lease lasts 30 s and its holder renews
+that writes that repo's history. `proc` is `gui` (`rocky dash`) or `daemon`
+(the capture process the desktop app's background process runs). Readers also
+accept the reserved value `mcp`, which no current process writes: the MCP server
+is read-only and never holds a lease. `expires` is epoch milliseconds. A lease lasts 30 s and its holder renews
 it every 10 s. Another process takes the repo only when the lease is missing,
 expired, or held by a process that no longer exists.
 
