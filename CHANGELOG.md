@@ -4,6 +4,10 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+While the desktop app's background process runs, it captures Listening history for consented repos, so `rocky dash` no longer has to stay open. `rocky dash` skips a repo the background process is capturing.
+
+A linked worktree of a consented repo is captured once a session starts in it.
+
 Windows x64 and Linux x64 installs now carry the desktop app through an optional platform package. Bare `rocky` copies it into `ROCKY_HOME/bin` and opens it, and falls back to the browser view when it cannot.
 
 The experimental desk daemon keeps 24 hours of desk history in `desk/history/` and restores agents and timelines from it after a restart. It places subagents under their main agent and shows the task description supplied when they start. Desk settings live in `desk/settings.json`.

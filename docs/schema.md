@@ -443,6 +443,62 @@ consent. A linked Git worktree has no decision of its own; it inherits its
 main repository's grant, and a revoke clears both that root and the root
 that owns the decision.
 
+### Collector lease
+
+`<ROCKY_HOME>/listening/repos/<hash>/collector.json` holds one lease per
+consented repo: `{proc, pid, token, expires}`. The holder is the only process
+that writes that repo's history. `proc` is `gui` (`rocky dash`), `mcp` (the MCP
+server), or `daemon` (the capture process the desktop app's background process
+runs). `expires` is epoch milliseconds. A lease lasts 30 s and its holder renews
+it every 10 s. Another process takes the repo only when the lease is missing,
+expired, or held by a process that no longer exists.
+
+`rocky dash` skips a repo whose `daemon` lease is live. After `rocky dash`
+releases a repo, the daemon's capture process takes it within one lease tick.
+Node is the only writer of the lease; the daemon never reads `collector.json`.
+
+## Capture process v1
+
+`rocky listen collect --stdio` is the hidden command the desktop app's
+background process runs to capture consented repos. It is not listed in help,
+runs the collector with no GUI, and opens no network connection. Both
+directions are UTF-8 JSON lines, one object per line, and every object carries
+`v: 1`. stderr carries human text and is discarded by the daemon.
+
+stdin takes one request per line:
+
+```json
+{"v":1,"root":"<absolute path>"}
+```
+
+A request asks for a reconcile of that repo now. When capture is allowed for
+the root, which includes a linked worktree of a consented repo, the process
+also starts tracking it. A line over 64 KiB, a line that is not JSON, a line
+with another `v`, a `root` that is not an absolute path, and a request for a
+root that capture is not allowed for are ignored. Nothing is answered to an
+ignored line.
+
+stdout carries only these two kinds:
+
+```json
+{"v":1,"kind":"roots","roots":[{"root":"<path>","owner":true}]}
+{"v":1,"kind":"result","root":"<path>","coverage":"complete","gaps":0,"reason":null,"at_ms":1767225600000}
+```
+
+- `roots` lists every repo the process tracks, sorted by path: the consented
+  repos plus requested roots that capture is allowed for. It is written again
+  only when the list or an `owner` value changes. `owner` is true when this
+  process holds the repo's lease, and false when another process does.
+- `result` reports one reconcile. `coverage` is `complete`, `partial`, or
+  `unknown`. `gaps` counts the gaps the pass recorded. `reason` is
+  `null`, or one of `root-unusable`, `repo-consent-required`, `git-unreadable`,
+  or `capture-failed`. `at_ms` is epoch milliseconds. `reason` is set only
+  with `coverage: "unknown"`.
+- The process reconciles each repo it owns every 60 s and on request.
+
+The process exits 0 when stdin ends, after it releases its leases. It exits 1
+when the collector fails and 2 on any other arguments.
+
 ## Pipe v3
 
 One JSON object per line over the daemon pipe. Every message carries `v`
@@ -463,7 +519,7 @@ disconnected, reconnects, and receives a fresh snapshot.
 | desk → daemon | `subscribe` | — |
 | daemon → desk | `snapshot` | `agents[]`, `aggregate`, `health`, `settings`, `repo_pending[]` |
 | daemon → desk | `status` | `op: "upsert" \| "remove"`, `agent` |
-| daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon`, `gaps[]`, `settings_unreadable`, `setup` |
+| daemon → desk | `health` | `spool_pending`, `spool_dropped`, `dropped_events`, `bad_files`, `late_events`, `hook_newer_than_daemon`, `gaps[]`, `settings_unreadable`, `setup`, `capture[]` |
 | daemon → desk | `settings` | full settings object, broadcast after every successful `set` |
 | desk → daemon | `set` | `id`, `name`, `value` |
 | desk → daemon | `timeline` | `id`, `key` |
@@ -524,6 +580,40 @@ broadcast as `show` to every desk, then the sender gets `ack` with `ok:
 true`. `cmd` with `name: "quit"` is broadcast as `quit` to every desk, the
 sender included, before the sender gets `ack` with `ok: true`; the daemon
 then exits.
+
+### Capture health
+
+`health.capture` is a list with one row per repo the daemon's capture process
+tracks: `{root, state, last_reconcile_ms, error}`. It is empty while no repo is
+consented and no allowed linked-worktree session exists, because the daemon
+then runs no capture process. `snapshot.health.capture` carries the same list.
+`root` is the repo path. `last_reconcile_ms` is when the last reconcile of that
+repo finished, epoch milliseconds, or `null` before the first one. `error` is a
+fixed sentence for a `failed` or `polling` row and `null` otherwise; it never
+quotes a Node note or a path.
+
+`state` is one of:
+
+| `state` | Meaning |
+|---|---|
+| `starting` | The process has not reported a reconcile for this repo yet. |
+| `ok` | The last reconcile covered the repo completely. |
+| `partial` | The last reconcile skipped something, such as an oversized, binary, or unreadable file, or it stopped at the path cap. |
+| `elsewhere` | Another process holds the repo's lease, as when `rocky dash` runs. The daemon does not capture it and does not count that as a fault. |
+| `polling` | The daemon could not watch the repo's files, so a change waits for the 60 s reconcile instead of a wake-up. The repo is still captured. |
+| `failed` | The reconcile reported `coverage: "unknown"`, or the capture process cannot run: the CLI record is missing, the process failed to start, or the start limit was reached. `error` says which. |
+
+The daemon starts the capture process when a repo is consented or an allowed
+linked worktree has a session, and stops it, with stdin closed first, when
+neither holds. It starts it at most 3 times in 5 minutes, counted as a sliding
+window; past that every row is `failed` until the window clears. It watches each
+repo it owns, ignoring `.git/` and access events, waits 300 ms after the first
+change before it asks for a reconcile (later changes do not move that wait), and
+sends at most one request per repo every 2 s. The daemon reads only `<ROCKY_HOME>/listening/repo-consents.json`
+from that directory.
+
+`capture` is additive within protocol 3. A `health` or `snapshot` frame without
+it decodes to an empty list, and `PROTOCOL_VERSION` stays 3.
 
 ### Setup guard messages
 
