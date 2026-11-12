@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
 use rocky_proto::pipe::{
-    ConsentState, PendingRepo, ServerMsg, SetupAction, SetupTarget, TargetState,
+    ConsentState, PendingRepo, RepoDecisionState, RepoEntry, ServerMsg, SetupAction, SetupTarget,
+    TargetState,
 };
 
-use super::super::node::{AutoResult, RepoDecisionState, RepoVerdict, RunError};
+use super::super::node::{AutoResult, RepoVerdict, RunError};
 use super::super::{Effect, Guard, GuardConsts, Job, Observation};
 use super::{CFG, OTHER, applied, approved, consent, target};
 
@@ -39,6 +40,9 @@ fn with_repo(verdict: RepoVerdict) -> Result<AutoResult, RunError> {
         targets: Vec::new(),
         notes: Vec::new(),
         repo: Some(verdict),
+        harness_off: Vec::new(),
+        shell_hook: true,
+        repos: Vec::new(),
     })
 }
 
@@ -49,6 +53,9 @@ fn result_with(targets: Vec<SetupTarget>, notes: &[&str]) -> Result<AutoResult, 
         targets,
         notes: notes.iter().map(|note| note.to_string()).collect(),
         repo: None,
+        harness_off: Vec::new(),
+        shell_hook: true,
+        repos: Vec::new(),
     })
 }
 
@@ -262,11 +269,69 @@ fn plan_request_replies_consent_plan_without_touching_health() {
         id: 5,
         consent: ConsentState::Approved,
         targets: planned,
+        harness_off: Vec::new(),
+        shell_hook: true,
     };
     assert_eq!(effects, vec![Effect::Reply { token: 3, msg }]);
     let health = guard.health(1).targets;
     assert_eq!(health.len(), 1);
     assert_eq!(health[0].path, OTHER);
+}
+
+#[test]
+fn plan_reply_carries_switches_and_repo_list_carries_repos() {
+    let mut guard = settled(approved(&[]));
+    assert!(guard.setup_request(3, 5, SetupAction::Plan).is_none());
+    let job = guard.next_job(0).expect("plan job");
+    let mut switched = applied(Vec::new());
+    if let Ok(result) = switched.as_mut() {
+        result.harness_off = vec!["codex".to_string()];
+        result.shell_hook = false;
+    }
+    let effects = guard.finish(&job, switched, 1);
+    let Effect::Reply { msg, .. } = &effects[0] else {
+        panic!("no reply: {effects:?}");
+    };
+    assert!(matches!(
+        msg,
+        ServerMsg::ConsentPlan { harness_off, shell_hook: false, .. } if harness_off == &["codex"]
+    ));
+
+    assert!(guard.setup_request(3, 6, SetupAction::RepoList).is_none());
+    let job = guard.next_job(2).expect("repo list job");
+    let entry = RepoEntry {
+        key: "k".to_string(),
+        main: "/code/a".to_string(),
+        name: "a".to_string(),
+        decision: RepoDecisionState::Allowed,
+        bytes: 1,
+        worktrees: Vec::new(),
+    };
+    let mut listed = applied(Vec::new());
+    if let Ok(result) = listed.as_mut() {
+        result.repos = vec![entry.clone()];
+    }
+    let effects = guard.finish(&job, listed, 3);
+    let msg = ServerMsg::RepoList {
+        id: 6,
+        repos: vec![entry],
+    };
+    assert_eq!(effects, vec![Effect::Reply { token: 3, msg }]);
+
+    assert!(guard.setup_request(3, 7, SetupAction::ShellOff).is_none());
+    let job = guard.next_job(4).expect("shell job");
+    let effects = guard.finish(&job, applied(Vec::new()), 5);
+    assert!(matches!(
+        &effects[0],
+        Effect::Reply {
+            msg: ServerMsg::Ack {
+                id: 7,
+                ok: true,
+                ..
+            },
+            ..
+        }
+    ));
 }
 
 #[test]

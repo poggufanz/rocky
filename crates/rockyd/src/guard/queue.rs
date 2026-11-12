@@ -6,9 +6,9 @@
 
 use std::collections::BTreeSet;
 
-use rocky_proto::pipe::{ConsentState, PendingRepo, ServerMsg, SetupAction};
+use rocky_proto::pipe::{ConsentState, PendingRepo, RepoDecisionState, ServerMsg, SetupAction};
 
-use super::node::{AutoResult, RepoDecisionState, RepoVerdict, RunError};
+use super::node::{AutoResult, RepoVerdict, RunError};
 use super::{Effect, Guard, Job};
 
 /// Harness ids the `setup` and discovery paths accept. Matches the Node MCP harness list.
@@ -115,18 +115,25 @@ impl Guard {
             Ok(result) => result,
             Err(err) => return vec![ack_error(token, id, &err)],
         };
-        let msg = if *action == SetupAction::Plan {
-            ServerMsg::ConsentPlan {
+        let msg = match action {
+            SetupAction::Plan => ServerMsg::ConsentPlan {
                 id,
                 consent: result.consent,
                 targets: result.targets,
-            }
-        } else {
-            self.targets = result.targets;
-            ServerMsg::Ack {
+                harness_off: result.harness_off,
+                shell_hook: result.shell_hook,
+            },
+            SetupAction::RepoList => ServerMsg::RepoList {
                 id,
-                ok: true,
-                error: None,
+                repos: result.repos,
+            },
+            _ => {
+                self.targets = result.targets;
+                ServerMsg::Ack {
+                    id,
+                    ok: true,
+                    error: None,
+                }
             }
         };
         vec![Effect::Reply { token, msg }]

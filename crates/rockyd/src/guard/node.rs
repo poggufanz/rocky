@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-use rocky_proto::pipe::{ConsentState, SetupTarget, TargetState};
+use rocky_proto::pipe::{ConsentState, RepoDecisionState, RepoEntry, SetupTarget, TargetState};
 use serde::Deserialize;
 
 use super::records::CliRecord;
@@ -41,15 +41,6 @@ const NO_RESULT: &str = "no result object on the last line";
 const OUTPUT_OVER_CAP: &str = "stdout passed the size cap";
 const STDOUT_NOT_CLOSED: &str = "stdout stayed open after the process exited";
 
-/// The repo capture decision Node reports for the repo it was asked about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RepoDecisionState {
-    Allowed,
-    Declined,
-    Undecided,
-}
-
 /// One repo's capture decision, as Node reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RepoVerdict {
@@ -65,6 +56,12 @@ pub struct AutoResult {
     pub targets: Vec<SetupTarget>,
     pub notes: Vec<String>,
     pub repo: Option<RepoVerdict>,
+    /// Harness ids the owner switched off. Empty without a consent record.
+    pub harness_off: Vec<String>,
+    /// Whether the shell hook is on. True without a consent record.
+    pub shell_hook: bool,
+    /// Repo decisions from `repo list`. Empty on every other result.
+    pub repos: Vec<RepoEntry>,
 }
 
 /// Why a setup run produced no usable result.
@@ -113,6 +110,16 @@ struct RawResult {
     targets: Vec<RawTarget>,
     notes: Vec<String>,
     repo: Option<RepoVerdict>,
+    #[serde(default)]
+    harness_off: Vec<String>,
+    #[serde(default = "default_true")]
+    shell_hook: bool,
+    #[serde(default)]
+    repos: Vec<RepoEntry>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One target as Node wrote it. `state` stays a string so an unknown value is
@@ -137,6 +144,9 @@ impl RawResult {
                 .collect(),
             notes: self.notes,
             repo: self.repo,
+            harness_off: self.harness_off,
+            shell_hook: self.shell_hook,
+            repos: self.repos,
         }
     }
 }
@@ -333,6 +343,30 @@ mod tests {
         assert_eq!(parse_output(VALID, None), Err(RunError::Exit(None)));
         assert!(matches!(
             parse_output("not json", Some(0)),
+            Err(RunError::BadOutput(_))
+        ));
+    }
+
+    #[test]
+    fn parse_output_reads_repos_and_switches() {
+        let text = r#"{"v":1,"action":"repo list","consent":"approved","targets":[],"notes":[],"harness_off":["codex"],"shell_hook":false,"repos":[{"key":"k","main":"/code/a","name":"a","decision":"allowed","bytes":10,"worktrees":[{"root":"/code/a","bytes":10,"exists":true}]}]}"#;
+
+        let result = parse_output(text, Some(0)).expect("repo list parses");
+
+        assert_eq!(result.harness_off, vec!["codex".to_string()]);
+        assert!(!result.shell_hook);
+        assert_eq!(result.repos.len(), 1);
+        assert_eq!(result.repos[0].decision, RepoDecisionState::Allowed);
+        assert_eq!(result.repos[0].worktrees[0].bytes, 10);
+
+        let plain = parse_output(VALID, Some(0)).expect("plain result parses");
+        assert!(plain.harness_off.is_empty());
+        assert!(plain.shell_hook);
+        assert!(plain.repos.is_empty());
+
+        let bad = VALID.replace("\"extra\":true", "\"repos\":[{\"key\":1}]");
+        assert!(matches!(
+            parse_output(&bad, Some(0)),
             Err(RunError::BadOutput(_))
         ));
     }
