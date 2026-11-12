@@ -144,6 +144,15 @@ function claudeSettingsTargets(ctx: AutoContext, locations: readonly string[]): 
   } else {
     push({ path: refusedSettingsPath(ctx.detect), refusal: resolved.reason });
   }
+  // `~/.claude` stays guarded when CLAUDE_CONFIG_DIR points elsewhere: some
+  // terminal hosts copy it over the profile on every new terminal, so entries
+  // written only to the profile are lost before the session reads them. It is
+  // added only when it validates as a Claude Code config directory.
+  const configured = ctx.detect.env.CLAUDE_CONFIG_DIR;
+  if (typeof configured === "string" && configured.length > 0) {
+    const homeDir = join(ctx.detect.home, ".claude");
+    if (settingsRefusal(ctx, homeDir) === undefined) push({ path: join(homeDir, "settings.json"), refusal: undefined });
+  }
   for (const location of locations) {
     push({ path: join(location, "settings.json"), refusal: settingsRefusal(ctx, location) });
   }

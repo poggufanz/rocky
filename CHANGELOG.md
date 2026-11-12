@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+With `CLAUDE_CONFIG_DIR` set, the desktop app's setup also keeps Rocky's hooks in `~/.claude/settings.json` when that folder holds Claude Code config. Some terminal hosts copy that file over the profile on every new terminal, so hooks written only to the profile were gone before the session read them.
+
 The desktop app asks once for setup consent, and its Settings switch harnesses and the shell hook, reinstall, manage repo capture, and remove Rocky.
 
 `rocky setup --auto` adds `shell on|off` and `repo list`.
