@@ -6,7 +6,9 @@
 
 use std::collections::BTreeSet;
 
-use rocky_proto::pipe::{ConsentState, PendingRepo, RepoDecisionState, ServerMsg, SetupAction};
+use rocky_proto::pipe::{
+    ConsentState, PendingRepo, RepoDecisionState, ServerMsg, SetupAction, SetupTarget, TargetState,
+};
 
 use super::node::{AutoResult, RepoVerdict, RunError};
 use super::{Effect, Guard, Job};
@@ -128,26 +130,38 @@ impl Guard {
                 repos: result.repos,
             },
             // Node reports only the shell entry, or nothing, for these; the cached
-            // targets stay as the last full apply left them.
-            SetupAction::RepoPurge { .. } | SetupAction::ShellOn | SetupAction::ShellOff => {
-                ServerMsg::Ack {
-                    id,
-                    ok: true,
-                    error: None,
+            // targets stay as the last full apply left them. A purge that failed
+            // still exits 0 and carries its reason as a note.
+            SetupAction::RepoPurge { .. } => match result.notes.first() {
+                Some(note) => ack(id, Err(note.clone())),
+                None => ack(id, Ok(())),
+            },
+            SetupAction::ShellOn | SetupAction::ShellOff => ack(id, Ok(())),
+            // A removal that left entries behind is a failure the desk can retry.
+            // A refused entry stays by design, so it does not count.
+            SetupAction::Remove => {
+                let failed = count_state(&result.targets, TargetState::Error);
+                self.targets = result.targets;
+                match failed {
+                    0 => ack(id, Ok(())),
+                    1 => ack(id, Err("1 entry was not removed.".to_string())),
+                    n => ack(id, Err(format!("{n} entries were not removed."))),
                 }
             }
-            SetupAction::Apply
-            | SetupAction::Remove
-            | SetupAction::ConsentApprove
-            | SetupAction::ConsentLater
-            | SetupAction::HarnessOn { .. }
-            | SetupAction::HarnessOff { .. } => {
+            SetupAction::Apply | SetupAction::ConsentApprove | SetupAction::ConsentLater => {
                 self.targets = result.targets;
-                ServerMsg::Ack {
-                    id,
-                    ok: true,
-                    error: None,
-                }
+                ack(id, Ok(()))
+            }
+            // The result covers one harness. Other harnesses keep their cached entries.
+            SetupAction::HarnessOn { harness } => {
+                self.targets.retain(|t| t.harness != *harness);
+                self.targets
+                    .extend(result.targets.into_iter().filter(|t| t.harness == *harness));
+                ack(id, Ok(()))
+            }
+            SetupAction::HarnessOff { harness } => {
+                self.targets.retain(|t| t.harness != *harness);
+                ack(id, Ok(()))
             }
         };
         vec![Effect::Reply { token, msg }]
@@ -269,6 +283,27 @@ fn unknown_harness(action: &SetupAction) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+/// An ack for `id`: `Ok` succeeds, `Err` carries the failure text.
+fn ack(id: u64, outcome: Result<(), String>) -> ServerMsg {
+    match outcome {
+        Ok(()) => ServerMsg::Ack {
+            id,
+            ok: true,
+            error: None,
+        },
+        Err(error) => ServerMsg::Ack {
+            id,
+            ok: false,
+            error: Some(error),
+        },
+    }
+}
+
+/// How many targets are in `state`.
+fn count_state(targets: &[SetupTarget], state: TargetState) -> usize {
+    targets.iter().filter(|t| t.state == state).count()
 }
 
 /// The reply for a request whose Node run failed.

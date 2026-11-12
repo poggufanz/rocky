@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use rocky_proto::paths::{binaries_record_path, cli_record_path, consent_path, expected_path};
-use rocky_proto::pipe::ConsentState;
+use rocky_proto::pipe::{ConsentState, SetupHealth};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -160,6 +160,25 @@ pub fn read_cli(home: &Path) -> Option<CliRecord> {
 pub fn read_bin_version(home: &Path) -> Option<String> {
     let raw: RawBinaries = read_record(&binaries_record_path(home))?;
     (raw.v == RECORD_VERSION).then_some(raw.version)
+}
+
+/// The setup status the files alone can answer: consent, the CLI record and the
+/// binaries version. Needs no Node run, so the daemon serves it from its first
+/// snapshot. Targets stay empty until the guard observes.
+pub fn startup_setup(home: &Path) -> SetupHealth {
+    let cli = read_cli(home);
+    let (cli_found, cli_missing) = cli_status(cli.as_ref());
+    let version_mismatch = match (&cli, read_bin_version(home)) {
+        (Some(record), Some(bin)) => record.version != bin,
+        _ => false,
+    };
+    SetupHealth {
+        consent_state: read_consent(home).state,
+        cli_found,
+        cli_missing,
+        version_mismatch,
+        targets: Vec::new(),
+    }
 }
 
 /// Checks the CLI record's node binary and entry script. Names the first path
@@ -364,6 +383,24 @@ mod tests {
         assert_eq!(
             cli_status(Some(&cli)),
             (false, Some(entry.display().to_string()))
+        );
+    }
+
+    #[test]
+    fn startup_setup_carries_the_on_disk_consent_state() {
+        let home = TempDir::new().unwrap();
+        assert_eq!(startup_setup(home.path()).consent_state, ConsentState::None);
+
+        write(&consent_path(home.path()), &consent_json("approved", "{}"));
+        let health = startup_setup(home.path());
+        assert_eq!(health.consent_state, ConsentState::Approved);
+        assert!(!health.cli_found);
+        assert!(health.targets.is_empty());
+
+        write(&consent_path(home.path()), &consent_json("later", "{}"));
+        assert_eq!(
+            startup_setup(home.path()).consent_state,
+            ConsentState::Later
         );
     }
 }
