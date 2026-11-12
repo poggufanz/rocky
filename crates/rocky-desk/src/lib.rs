@@ -1,5 +1,6 @@
 pub mod app;
 pub mod autostart;
+pub mod capture_lines;
 pub mod client;
 pub mod clock;
 pub mod conn;

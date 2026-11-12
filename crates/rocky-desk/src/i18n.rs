@@ -152,6 +152,19 @@ pub enum Msg {
     SetupMore {
         n: u64,
     },
+    /// `error` is data from the daemon and is shown as received. It may be empty.
+    CaptureFailed {
+        root: String,
+        error: String,
+    },
+    /// File watching failed, so the daemon checks the repo on a timer instead.
+    CapturePolling {
+        root: String,
+    },
+    /// Repo lines cut from the strip.
+    CaptureMore {
+        n: usize,
+    },
 }
 
 #[cfg(test)]
@@ -313,6 +326,19 @@ fn samples() -> Vec<Msg> {
         },
         Msg::SetupMore { n: 3 },
         Msg::SetupMore { n: 1 },
+        Msg::CaptureFailed {
+            root: "C:/work/app".into(),
+            error: "Node could not start.".into(),
+        },
+        Msg::CaptureFailed {
+            root: "C:/work/app".into(),
+            error: String::new(),
+        },
+        Msg::CapturePolling {
+            root: "C:/work/app".into(),
+        },
+        Msg::CaptureMore { n: 2 },
+        Msg::CaptureMore { n: 1 },
     ]
 }
 
@@ -428,6 +454,15 @@ pub fn en(m: &Msg) -> String {
             format!("{path} keeps losing Rocky entries ({n} times in 10 minutes).")
         }
         Msg::SetupMore { n } => format!("{n} more setup {}.", plural(*n, "problem", "problems")),
+        Msg::CaptureFailed { root, error } => {
+            format!("Capture for {root} failed{}.", error_suffix(error))
+        }
+        Msg::CapturePolling { root } => {
+            format!("Capture for {root} checks every 60 seconds; watching files failed.")
+        }
+        Msg::CaptureMore { n } => {
+            format!("And {n} more {}.", plural(*n as u64, "repo", "repos"))
+        }
     }
 }
 
@@ -548,6 +583,13 @@ pub fn id(m: &Msg) -> String {
             format!("{path} terus kehilangan entri Rocky ({n} kali dalam 10 menit).")
         }
         Msg::SetupMore { n } => format!("{n} masalah setup lain."),
+        Msg::CaptureFailed { root, error } => {
+            format!("Capture untuk {root} gagal{}.", error_suffix(error))
+        }
+        Msg::CapturePolling { root } => {
+            format!("Capture untuk {root} dicek setiap 60 detik; pemantauan file gagal.")
+        }
+        Msg::CaptureMore { n } => format!("Dan {n} repo lagi."),
     }
 }
 
