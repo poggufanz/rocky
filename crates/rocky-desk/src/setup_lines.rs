@@ -3,7 +3,7 @@
 
 use rocky_proto::pipe::{ConsentState, FIGHT_LIMIT, SetupHealth, TargetHealth, TargetState};
 
-use crate::i18n::Msg;
+use crate::i18n::{Msg, SetupMsg};
 
 /// Target lines the strip shows before the "more" summary.
 pub const SETUP_LINES: usize = 5;
@@ -14,21 +14,21 @@ pub const SETUP_LINES: usize = 5;
 pub fn setup_lines(setup: &SetupHealth) -> Vec<Msg> {
     let mut lines = Vec::new();
     if setup.version_mismatch {
-        lines.push(Msg::SetupNewVersion);
+        lines.push(Msg::Setup(SetupMsg::NewVersion));
     }
     if setup.consent_state != ConsentState::Approved {
         return lines;
     }
     if !setup.cli_found {
-        lines.push(Msg::SetupCliMissing {
+        lines.push(Msg::Setup(SetupMsg::CliMissing {
             path: setup.cli_missing.clone(),
-        });
+        }));
     }
     let mut targets = setup.targets.iter().filter_map(target_line);
     lines.extend(targets.by_ref().take(SETUP_LINES));
     let cut = targets.count();
     if cut > 0 {
-        lines.push(Msg::SetupMore { n: cut as u64 });
+        lines.push(Msg::Setup(SetupMsg::More { n: cut as u64 }));
     }
     lines
 }
@@ -41,26 +41,26 @@ fn target_line(t: &TargetHealth) -> Option<Msg> {
     let path = t.path.clone();
     let error = t.error.clone().unwrap_or_default();
     if t.fights_10m > FIGHT_LIMIT {
-        return Some(Msg::SetupFighting {
+        return Some(Msg::Setup(SetupMsg::Fighting {
             path,
             n: t.fights_10m,
-        });
+        }));
     }
     match t.state {
         TargetState::Missing | TargetState::Stale => Some(match &t.error {
-            Some(error) => Msg::SetupRepairFailed {
+            Some(error) => Msg::Setup(SetupMsg::RepairFailed {
                 path,
                 error: error.clone(),
-            },
-            None => Msg::SetupRepairing { path },
+            }),
+            None => Msg::Setup(SetupMsg::Repairing { path }),
         }),
-        TargetState::Changed => Some(Msg::SetupChanged { path }),
-        TargetState::Foreign => Some(Msg::SetupForeign {
+        TargetState::Changed => Some(Msg::Setup(SetupMsg::Changed { path })),
+        TargetState::Foreign => Some(Msg::Setup(SetupMsg::Foreign {
             harness: t.harness.clone(),
             path,
-        }),
-        TargetState::Refused => Some(Msg::SetupRefused { path, error }),
-        TargetState::Error => Some(Msg::SetupRepairFailed { path, error }),
+        })),
+        TargetState::Refused => Some(Msg::Setup(SetupMsg::Refused { path, error })),
+        TargetState::Error => Some(Msg::Setup(SetupMsg::RepairFailed { path, error })),
         TargetState::Ok | TargetState::Written | TargetState::NotConsented => None,
     }
 }
@@ -117,12 +117,12 @@ mod tests {
         let w = model.warnings(&crate::clock::utc_hhmm);
         assert_eq!(w.len(), 5, "{w:?}");
         assert_eq!(w[0], Msg::SettingsUnreadable);
-        assert_eq!(w[1], Msg::SetupNewVersion);
+        assert_eq!(w[1], Msg::Setup(SetupMsg::NewVersion));
         assert_eq!(
             w[2],
-            Msg::SetupChanged {
+            Msg::Setup(SetupMsg::Changed {
                 path: "/h/a.json".into()
-            }
+            })
         );
         assert!(matches!(w[3], Msg::Gap { .. }), "{w:?}");
         assert_eq!(w[4], Msg::ConnDisconnected);
@@ -148,20 +148,20 @@ mod tests {
         assert_eq!(
             setup_lines(&setup),
             vec![
-                Msg::SetupRepairing {
+                Msg::Setup(SetupMsg::Repairing {
                     path: "/h/missing.json".into()
-                },
-                Msg::SetupChanged {
+                }),
+                Msg::Setup(SetupMsg::Changed {
                     path: "/h/changed.json".into()
-                },
-                Msg::SetupForeign {
+                }),
+                Msg::Setup(SetupMsg::Foreign {
                     harness: "gemini-cli".into(),
                     path: "/h/foreign.json".into()
-                },
-                Msg::SetupRefused {
+                }),
+                Msg::Setup(SetupMsg::Refused {
                     path: "/h/refused.json".into(),
                     error: "path is outside the home folder".into()
-                },
+                }),
             ]
         );
     }
@@ -182,25 +182,25 @@ mod tests {
         assert_eq!(
             setup_lines(&setup),
             vec![
-                Msg::SetupRepairFailed {
+                Msg::Setup(SetupMsg::RepairFailed {
                     path: "/h/stale.json".into(),
                     error: "still missing after setup ran".into()
-                },
-                Msg::SetupRepairFailed {
+                }),
+                Msg::Setup(SetupMsg::RepairFailed {
                     path: "/h/gone.json".into(),
                     error: "Node did not finish within 120 seconds".into()
-                },
-                Msg::SetupRepairing {
+                }),
+                Msg::Setup(SetupMsg::Repairing {
                     path: "/h/stale2.json".into()
-                },
-                Msg::SetupRepairFailed {
+                }),
+                Msg::Setup(SetupMsg::RepairFailed {
                     path: "/h/error.json".into(),
                     error: String::new()
-                },
-                Msg::SetupRefused {
+                }),
+                Msg::Setup(SetupMsg::Refused {
                     path: "/h/refused.json".into(),
                     error: String::new()
-                },
+                }),
             ]
         );
     }
@@ -223,7 +223,7 @@ mod tests {
             setup.version_mismatch = true;
             assert_eq!(
                 setup_lines(&setup),
-                vec![Msg::SetupNewVersion],
+                vec![Msg::Setup(SetupMsg::NewVersion)],
                 "{consent:?}"
             );
         }
@@ -238,13 +238,13 @@ mod tests {
         assert_eq!(
             setup_lines(&setup),
             vec![
-                Msg::SetupNewVersion,
-                Msg::SetupCliMissing {
+                Msg::Setup(SetupMsg::NewVersion),
+                Msg::Setup(SetupMsg::CliMissing {
                     path: Some("/opt/rocky/dist/index.js".into())
-                },
-                Msg::SetupChanged {
+                }),
+                Msg::Setup(SetupMsg::Changed {
                     path: "/h/a.json".into()
-                },
+                }),
             ]
         );
     }
@@ -262,17 +262,17 @@ mod tests {
         assert_eq!(
             setup_lines(&setup),
             vec![
-                Msg::SetupFighting {
+                Msg::Setup(SetupMsg::Fighting {
                     path: "/h/fight.json".into(),
                     n: FIGHT_LIMIT + 1
-                },
-                Msg::SetupRepairing {
+                }),
+                Msg::Setup(SetupMsg::Repairing {
                     path: "/h/limit.json".into()
-                },
-                Msg::SetupFighting {
+                }),
+                Msg::Setup(SetupMsg::Fighting {
                     path: "/h/err.json".into(),
                     n: FIGHT_LIMIT + 4
-                },
+                }),
             ]
         );
     }
@@ -286,19 +286,19 @@ mod tests {
         assert_eq!(lines.len(), SETUP_LINES + 1);
         assert_eq!(
             lines[0],
-            Msg::SetupRepairFailed {
+            Msg::Setup(SetupMsg::RepairFailed {
                 path: "/h/0.json".into(),
                 error: String::new()
-            }
+            })
         );
         assert_eq!(
             lines[4],
-            Msg::SetupRepairFailed {
+            Msg::Setup(SetupMsg::RepairFailed {
                 path: "/h/4.json".into(),
                 error: String::new()
-            }
+            })
         );
-        assert_eq!(lines[5], Msg::SetupMore { n: 3 });
+        assert_eq!(lines[5], Msg::Setup(SetupMsg::More { n: 3 }));
     }
 
     #[test]
@@ -310,7 +310,11 @@ mod tests {
         targets.push(target(TargetState::Written, "codex", "/h/written.json"));
         let lines = setup_lines(&approved(targets));
         assert_eq!(lines.len(), 5);
-        assert!(lines.iter().all(|m| matches!(m, Msg::SetupChanged { .. })));
+        assert!(
+            lines
+                .iter()
+                .all(|m| matches!(m, Msg::Setup(SetupMsg::Changed { .. })))
+        );
     }
 
     #[test]
@@ -324,14 +328,18 @@ mod tests {
         setup.cli_found = false;
         let lines = setup_lines(&setup);
         assert_eq!(lines.len(), 7);
-        assert!(!lines.iter().any(|m| matches!(m, Msg::SetupMore { .. })));
+        assert!(
+            !lines
+                .iter()
+                .any(|m| matches!(m, Msg::Setup(SetupMsg::More { .. })))
+        );
     }
 
     #[test]
     fn cli_missing_names_the_path() {
-        let named = Msg::SetupCliMissing {
+        let named = Msg::Setup(SetupMsg::CliMissing {
             path: Some("C:/rocky/dist/index.js".into()),
-        };
+        });
         assert_eq!(
             en(&named),
             "C:/rocky/dist/index.js is gone. Run rocky once so Rocky can repair its entries."
@@ -340,7 +348,7 @@ mod tests {
             id(&named),
             "C:/rocky/dist/index.js sudah tidak ada. Jalankan rocky sekali supaya Rocky bisa memperbaiki entrinya."
         );
-        let unknown = Msg::SetupCliMissing { path: None };
+        let unknown = Msg::Setup(SetupMsg::CliMissing { path: None });
         assert_eq!(
             en(&unknown),
             "Rocky does not know where its command line is. Run rocky once."
@@ -357,56 +365,56 @@ mod tests {
         let error = || "Node did not finish within 120 seconds".to_string();
         let cases = [
             (
-                Msg::SetupNewVersion,
+                Msg::Setup(SetupMsg::NewVersion),
                 "New version installed. Run rocky once to use it.",
                 "Versi baru terpasang. Jalankan rocky sekali untuk memakainya.",
             ),
             (
-                Msg::SetupRepairing { path: path() },
+                Msg::Setup(SetupMsg::Repairing { path: path() }),
                 "Restoring Rocky entries in /h/c.json.",
                 "Memasang ulang entri Rocky di /h/c.json.",
             ),
             (
-                Msg::SetupRepairFailed {
+                Msg::Setup(SetupMsg::RepairFailed {
                     path: path(),
                     error: error(),
-                },
+                }),
                 "Cannot restore Rocky entries in /h/c.json: Node did not finish within 120 seconds.",
                 "Tidak bisa memasang ulang entri Rocky di /h/c.json: Node did not finish within 120 seconds.",
             ),
             (
-                Msg::SetupChanged { path: path() },
+                Msg::Setup(SetupMsg::Changed { path: path() }),
                 "/h/c.json changed while Rocky was writing it. Trying again.",
                 "/h/c.json berubah saat Rocky menulisnya. Mencoba lagi.",
             ),
             (
-                Msg::SetupForeign {
+                Msg::Setup(SetupMsg::Foreign {
                     harness: "gemini-cli".into(),
                     path: path(),
-                },
+                }),
                 "/h/c.json has a rocky server Rocky did not write, so Rocky leaves gemini-cli alone.",
                 "/h/c.json punya server rocky yang bukan tulisan Rocky, jadi Rocky tidak menyentuh gemini-cli.",
             ),
             (
-                Msg::SetupRefused {
+                Msg::Setup(SetupMsg::Refused {
                     path: path(),
                     error: "path is outside the home folder".into(),
-                },
+                }),
                 "Rocky will not write /h/c.json: path is outside the home folder.",
                 "Rocky tidak mau menulis /h/c.json: path is outside the home folder.",
             ),
             (
-                Msg::SetupFighting { path: path(), n: 6 },
+                Msg::Setup(SetupMsg::Fighting { path: path(), n: 6 }),
                 "/h/c.json keeps losing Rocky entries (6 times in 10 minutes).",
                 "/h/c.json terus kehilangan entri Rocky (6 kali dalam 10 menit).",
             ),
             (
-                Msg::SetupMore { n: 3 },
+                Msg::Setup(SetupMsg::More { n: 3 }),
                 "3 more setup problems.",
                 "3 masalah setup lain.",
             ),
             (
-                Msg::SetupMore { n: 1 },
+                Msg::Setup(SetupMsg::More { n: 1 }),
                 "1 more setup problem.",
                 "1 masalah setup lain.",
             ),
@@ -419,10 +427,10 @@ mod tests {
 
     #[test]
     fn error_text_is_shown_as_data_without_doubling_the_final_period() {
-        let msg = Msg::SetupRepairFailed {
+        let msg = Msg::Setup(SetupMsg::RepairFailed {
             path: "/h/c.json".into(),
             error: "Unexpected token.".into(),
-        };
+        });
         assert_eq!(
             en(&msg),
             "Cannot restore Rocky entries in /h/c.json: Unexpected token."
@@ -435,19 +443,19 @@ mod tests {
 
     #[test]
     fn empty_error_text_leaves_out_the_colon() {
-        let failed = Msg::SetupRepairFailed {
+        let failed = Msg::Setup(SetupMsg::RepairFailed {
             path: "/h/c.json".into(),
             error: String::new(),
-        };
+        });
         assert_eq!(en(&failed), "Cannot restore Rocky entries in /h/c.json.");
         assert_eq!(
             id(&failed),
             "Tidak bisa memasang ulang entri Rocky di /h/c.json."
         );
-        let refused = Msg::SetupRefused {
+        let refused = Msg::Setup(SetupMsg::Refused {
             path: "/h/c.json".into(),
             error: String::new(),
-        };
+        });
         assert_eq!(en(&refused), "Rocky will not write /h/c.json.");
         assert_eq!(id(&refused), "Rocky tidak mau menulis /h/c.json.");
     }

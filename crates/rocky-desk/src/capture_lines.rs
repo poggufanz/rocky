@@ -3,7 +3,7 @@
 
 use rocky_proto::pipe::{CaptureHealth, CaptureState};
 
-use crate::i18n::Msg;
+use crate::i18n::{Msg, SetupMsg};
 
 /// Repo lines the strip shows before the "more" summary.
 pub const CAPTURE_LINES: usize = 3;
@@ -18,7 +18,7 @@ pub fn capture_lines(rows: &[CaptureHealth]) -> Vec<Msg> {
     let mut lines: Vec<Msg> = reported.by_ref().take(CAPTURE_LINES).collect();
     let cut = reported.count();
     if cut > 0 {
-        lines.push(Msg::CaptureMore { n: cut });
+        lines.push(Msg::Setup(SetupMsg::CaptureMore { n: cut }));
     }
     lines
 }
@@ -26,16 +26,16 @@ pub fn capture_lines(rows: &[CaptureHealth]) -> Vec<Msg> {
 /// A failed repo with no error text still reports; the empty `error` leaves out
 /// the reason and the line reads "Capture for <root> failed."
 fn failed_line(row: &CaptureHealth) -> Msg {
-    Msg::CaptureFailed {
+    Msg::Setup(SetupMsg::Failed {
         root: row.root.clone(),
         error: row.error.clone().unwrap_or_default(),
-    }
+    })
 }
 
 fn polling_line(row: &CaptureHealth) -> Msg {
-    Msg::CapturePolling {
+    Msg::Setup(SetupMsg::Polling {
         root: row.root.clone(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -85,17 +85,17 @@ mod tests {
         assert_eq!(
             capture_lines(&rows),
             vec![
-                Msg::CaptureFailed {
+                Msg::Setup(SetupMsg::Failed {
                     root: "/r/fail-a".into(),
                     error: "Node could not start.".into()
-                },
-                Msg::CaptureFailed {
+                }),
+                Msg::Setup(SetupMsg::Failed {
                     root: "/r/fail-b".into(),
                     error: String::new()
-                },
-                Msg::CapturePolling {
+                }),
+                Msg::Setup(SetupMsg::Polling {
                     root: "/r/poll-a".into()
-                },
+                }),
             ]
         );
     }
@@ -112,9 +112,12 @@ mod tests {
         assert!(
             lines[..CAPTURE_LINES]
                 .iter()
-                .all(|m| matches!(m, Msg::CaptureFailed { .. }))
+                .all(|m| matches!(m, Msg::Setup(SetupMsg::Failed { .. })))
         );
-        assert_eq!(lines[CAPTURE_LINES], Msg::CaptureMore { n: 2 });
+        assert_eq!(
+            lines[CAPTURE_LINES],
+            Msg::Setup(SetupMsg::CaptureMore { n: 2 })
+        );
     }
 
     #[test]
@@ -128,16 +131,16 @@ mod tests {
         assert_eq!(
             capture_lines(&rows),
             vec![
-                Msg::CaptureFailed {
+                Msg::Setup(SetupMsg::Failed {
                     root: "/r/a".into(),
                     error: String::new()
-                },
-                Msg::CapturePolling {
+                }),
+                Msg::Setup(SetupMsg::Polling {
                     root: "/r/b".into()
-                },
-                Msg::CapturePolling {
+                }),
+                Msg::Setup(SetupMsg::Polling {
                     root: "/r/c".into()
-                },
+                }),
             ]
         );
     }
@@ -160,11 +163,11 @@ mod tests {
         assert_eq!(
             w,
             vec![
-                Msg::SetupNewVersion,
-                Msg::CaptureFailed {
+                Msg::Setup(SetupMsg::NewVersion),
+                Msg::Setup(SetupMsg::Failed {
                     root: "/r/a".into(),
                     error: String::new()
-                },
+                }),
                 Msg::ConnDisconnected,
             ]
         );
@@ -175,41 +178,41 @@ mod tests {
         let root = || "C:/work/app".to_string();
         let cases = [
             (
-                Msg::CaptureFailed {
+                Msg::Setup(SetupMsg::Failed {
                     root: root(),
                     error: "Node could not start.".into(),
-                },
+                }),
                 "Capture for C:/work/app failed: Node could not start.",
                 "Capture untuk C:/work/app gagal: Node could not start.",
             ),
             (
-                Msg::CaptureFailed {
+                Msg::Setup(SetupMsg::Failed {
                     root: root(),
                     error: "Capture stopped after 3 restarts in 5 minutes".into(),
-                },
+                }),
                 "Capture for C:/work/app failed: Capture stopped after 3 restarts in 5 minutes.",
                 "Capture untuk C:/work/app gagal: Capture stopped after 3 restarts in 5 minutes.",
             ),
             (
-                Msg::CaptureFailed {
+                Msg::Setup(SetupMsg::Failed {
                     root: root(),
                     error: String::new(),
-                },
+                }),
                 "Capture for C:/work/app failed.",
                 "Capture untuk C:/work/app gagal.",
             ),
             (
-                Msg::CapturePolling { root: root() },
+                Msg::Setup(SetupMsg::Polling { root: root() }),
                 "Capture for C:/work/app checks every 60 seconds; watching files failed.",
                 "Capture untuk C:/work/app dicek setiap 60 detik; pemantauan file gagal.",
             ),
             (
-                Msg::CaptureMore { n: 2 },
+                Msg::Setup(SetupMsg::CaptureMore { n: 2 }),
                 "And 2 more repos.",
                 "Dan 2 repo lagi.",
             ),
             (
-                Msg::CaptureMore { n: 1 },
+                Msg::Setup(SetupMsg::CaptureMore { n: 1 }),
                 "And 1 more repo.",
                 "Dan 1 repo lagi.",
             ),
