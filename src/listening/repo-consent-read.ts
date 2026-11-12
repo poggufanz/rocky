@@ -124,6 +124,11 @@ export function listConsentedRepos(home?: string): string[] {
   return Object.keys(readConsents(home));
 }
 
+/** Every stored answer, allowed or declined, in store key order. */
+export function listAllRepoDecisions(home?: string): Map<string, boolean> {
+  return new Map(Object.entries(readRawConsents(home)));
+}
+
 export function consentStoreExists(home?: string): boolean {
   try {
     return existsSync(consentsPath(home));

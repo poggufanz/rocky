@@ -5,17 +5,24 @@ pub mod client;
 pub mod clock;
 pub mod conn;
 pub mod connect;
+pub mod consent_view;
 pub mod desklog;
 pub mod i18n;
 pub mod icons;
+pub mod notified;
 pub mod notify;
 pub mod os_notice;
 pub mod quit;
 pub mod relay;
+pub mod repo_banner;
+pub mod requests;
+pub mod root_match;
 pub mod settings_view;
 pub mod setup_lines;
+pub mod setup_settings;
 pub mod spawn;
 pub mod toast;
+pub mod ui;
 pub mod view;
 
 #[cfg(windows)]

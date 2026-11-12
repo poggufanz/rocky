@@ -13,12 +13,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use rocky_proto::pipe::{
-    ConsentState, Gap, GapReason, PendingRepo, ServerMsg, SetupAction, SetupHealth, SetupTarget,
-    TargetHealth, TargetState,
+    ConsentState, Gap, GapReason, PendingRepo, RepoDecisionState, ServerMsg, SetupAction,
+    SetupHealth, SetupTarget, TargetHealth, TargetState,
 };
 
 use self::brake::{Brake, BrakeConsts};
-use self::node::{AutoResult, RepoDecisionState, RunError};
+use self::node::{AutoResult, RunError};
 use self::records::{CliRecord, ConsentView};
 
 /// The target kind that carries Rocky's desk hook entries.
@@ -117,8 +117,16 @@ impl Job {
             Self::RepoStatus { .. } => "repo status".to_string(),
             Self::RepoDecision { allow: true, .. } => "repo allow".to_string(),
             Self::RepoDecision { allow: false, .. } => "repo decline".to_string(),
-            Self::Setup { action, .. } => format!("setup {}", setup_args(action).join(" ")),
+            Self::Setup { action, .. } => setup_label(action),
         }
+    }
+}
+
+/// The log words for one `setup` action. A purge names no root.
+fn setup_label(action: &SetupAction) -> String {
+    match action {
+        SetupAction::RepoPurge { .. } => "setup repo purge".to_string(),
+        other => format!("setup {}", setup_args(other).join(" ")),
     }
 }
 
@@ -137,6 +145,10 @@ fn setup_args(action: &SetupAction) -> Vec<String> {
         SetupAction::ConsentLater => to_args(&["consent", "later"]),
         SetupAction::HarnessOn { harness } => to_args(&["harness", harness.as_str(), "on"]),
         SetupAction::HarnessOff { harness } => to_args(&["harness", harness.as_str(), "off"]),
+        SetupAction::ShellOn => to_args(&["shell", "on"]),
+        SetupAction::ShellOff => to_args(&["shell", "off"]),
+        SetupAction::RepoList => to_args(&["repo", "list"]),
+        SetupAction::RepoPurge { root } => to_args(&["repo", "purge", root.as_str()]),
     }
 }
 

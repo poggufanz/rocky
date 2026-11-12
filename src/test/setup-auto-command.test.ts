@@ -658,3 +658,80 @@ test("auto command: the built CLI prints exactly one JSON object on stdout", (t)
   assert.equal(parsed.v, 1);
   assert.equal(parsed.action, "plan");
 });
+
+test("auto command: every result carries harness_off and shell_hook", async (t) => {
+  const f = fixture(t);
+  const bare = await run(f, ["status", "--json"]) as RunResult & { json: AutoJson & { harness_off?: string[]; shell_hook?: boolean } };
+  assert.deepEqual(bare.json.harness_off, []);
+  assert.equal(bare.json.shell_hook, true);
+
+  writeConsentRecord(f.rh, {
+    v: 1,
+    scope: 1,
+    state: "approved",
+    at: 1,
+    harness_off: ["codex"],
+    shell_hook: false,
+    config_dirs: {},
+  });
+  const set = await run(f, ["status", "--json"]) as RunResult & { json: AutoJson & { harness_off?: string[]; shell_hook?: boolean } };
+  assert.deepEqual(set.json.harness_off, ["codex"]);
+  assert.equal(set.json.shell_hook, false);
+});
+
+test("auto command: shell off removes only the shell block in any consent state", async (t) => {
+  for (const state of [undefined, "later", "approved", "removed"] as const) {
+    const f = fixture(t);
+    mkdirSync(join(f.home, ".claude"));
+    const bashrc = join(f.home, ".bashrc");
+    writeFileSync(bashrc, addHookBlockBytes(Buffer.from("export KEEP=1\n")));
+    writeFileSync(claudeSettings(f), "{\"keep\":true}\n");
+    const mcp = claudeCodeMcpConfigPath(f.ctx.detect.env, f.home);
+    writeFileSync(mcp, "{\"mcpServers\":{}}\n");
+    if (state !== undefined) {
+      writeConsentRecord(f.rh, { v: 1, scope: 1, state, at: 1, harness_off: [], shell_hook: true, config_dirs: {} });
+    }
+    const settingsBefore = readFileSync(claudeSettings(f));
+    const mcpBefore = readFileSync(mcp);
+
+    const res = await run(f, ["shell", "off", "--json"]);
+    assert.equal(res.code, 0);
+    const text = readFileSync(bashrc, "utf8");
+    assert.ok(text.includes("export KEEP=1"), String(state));
+    assert.ok(!text.includes("ROCKY"), String(state));
+    assert.deepEqual(readFileSync(claudeSettings(f)), settingsBefore);
+    assert.deepEqual(readFileSync(mcp), mcpBefore);
+    assert.equal((res.json as { shell_hook?: boolean }).shell_hook, state === undefined ? true : false);
+    assert.ok((res.json.targets ?? []).every((target) => target.kind === "shell-hook" || target.kind === "shell"));
+  }
+});
+
+test("auto command: shell on writes nothing without approved consent", async (t) => {
+  for (const state of [undefined, "later", "removed"] as const) {
+    const f = fixture(t);
+    if (state !== undefined) {
+      writeConsentRecord(f.rh, { v: 1, scope: 1, state, at: 1, harness_off: [], shell_hook: false, config_dirs: {} });
+    }
+    const beforeHome = snapshotTree(f.home);
+    const beforeRocky = snapshotTree(f.rh);
+    const res = await run(f, ["shell", "on", "--json"]);
+    assert.equal(res.code, 0);
+    assert.ok(states(res.json).every((value) => value === "not_consented"), JSON.stringify(res.json.targets));
+    assert.deepEqual(snapshotTree(f.home), beforeHome);
+    assert.deepEqual(snapshotTree(f.rh), beforeRocky);
+  }
+});
+
+test("auto command: shell on under approved consent installs only the shell block", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  writeConsentRecord(f.rh, { v: 1, scope: 1, state: "approved", at: 1, harness_off: [], shell_hook: false, config_dirs: {} });
+  const res = await run(f, ["shell", "on", "--json"]);
+  assert.equal(res.code, 0);
+  assert.ok(readFileSync(join(f.home, ".bashrc"), "utf8").includes("ROCKY"));
+  assert.equal(existsSync(claudeSettings(f)), false);
+  const record = readConsentRecord(f.rh);
+  assert.ok(record.status === "valid");
+  assert.equal(record.record.shell_hook, true);
+  assert.equal((res.json as { shell_hook?: boolean }).shell_hook, true);
+});

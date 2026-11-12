@@ -13,14 +13,17 @@ import { resolveMcpRegistration } from "../registration.js";
 import { detectHarnesses, validateConfigLocation, type DetectEnv } from "./detect.js";
 import {
   applyAll,
+  applyShellOnly,
   AUTO_MCP_HARNESSES,
   inspectAll,
   refusalReports,
   removeAll,
   removeHarness,
+  removeShellOnly,
   type AutoContext,
   type AutoResult,
 } from "./engine.js";
+import { listRepos } from "./repo-list.js";
 import { createShellHookPort } from "./shell.js";
 import {
   hookBinPath,
@@ -39,6 +42,8 @@ type Parsed =
   | { kind: "plan" | "status" | "apply" | "remove"; label: string }
   | { kind: "consent"; decision: "approve" | "later"; label: string }
   | { kind: "harness"; harness: McpHarnessId; enabled: boolean; label: string }
+  | { kind: "shell"; enabled: boolean; label: string }
+  | { kind: "repo-list"; label: string }
   | { kind: "config-dir"; harness: McpHarnessId; location: string; label: string }
   | { kind: "repo"; action: RepoAction; root: string; label: string };
 
@@ -68,6 +73,12 @@ function parseAutoArgs(argv: readonly string[]): Parsed | undefined {
   }
   if (first === "harness" && args.length === 3 && isHarnessId(second) && (third === "on" || third === "off")) {
     return { kind: "harness", harness: second, enabled: third === "on", label };
+  }
+  if (first === "shell" && args.length === 2 && (second === "on" || second === "off")) {
+    return { kind: "shell", enabled: second === "on", label };
+  }
+  if (first === "repo" && args.length === 2 && second === "list") {
+    return { kind: "repo-list", label };
   }
   if (first === "config-dir" && args.length === 3 && isHarnessId(second)) {
     return { kind: "config-dir", harness: second, location: third, label };
@@ -113,14 +124,18 @@ export async function runAutoCommand(
     consent: read.status === "valid" ? read.record.state : read.status === "invalid" ? "invalid" : "none",
     targets: [],
     notes: [],
+    harness_off: record === undefined ? [] : [...record.harness_off],
+    shell_hook: record?.shell_hook ?? true,
   };
 
   try {
     executeAction(parsed, ctx, result, record);
+    syncScopeFields(ctx, result);
   } catch (error) {
     // A valid action owes the caller one result object even when a Rocky-home
     // write fails after a partial pass.
     result.notes.push(`internal error: ${error instanceof Error ? error.message : String(error)}`);
+    syncScopeFields(ctx, result);
     out(JSON.stringify(result));
     return 1;
   }
@@ -147,11 +162,20 @@ export async function runAutoSetup(
       action: parseAutoArgs(argv)?.label ?? argv.filter((arg) => arg !== JSON_FLAG).join(" "),
       consent: "none",
       targets: [],
+      harness_off: [],
+      shell_hook: true,
       notes: [`internal error: ${error instanceof Error ? error.message : String(error)}`],
     }));
     return 1;
   }
   return runAutoCommand(argv, ctx, out);
+}
+
+/** Report the scope fields as the record stands after the action ran. */
+function syncScopeFields(ctx: AutoContext, result: AutoResult): void {
+  const read = readConsentRecord(ctx.rockyHome);
+  result.harness_off = read.status === "valid" ? [...read.record.harness_off] : [];
+  result.shell_hook = read.status === "valid" ? read.record.shell_hook : true;
 }
 
 function executeAction(
@@ -210,6 +234,24 @@ function executeAction(
       }
       break;
     }
+    case "shell": {
+      if (!parsed.enabled) {
+        // Removal is safe in any consent state; the record only changes when one is valid.
+        if (record !== undefined) writeConsentRecord(ctx.rockyHome, { ...record, shell_hook: false });
+        result.targets = removeShellOnly(ctx);
+        break;
+      }
+      if (record?.state !== "approved") {
+        result.targets = refusalReports(inspectAll(ctx, record));
+        break;
+      }
+      writeConsentRecord(ctx.rockyHome, { ...record, shell_hook: true });
+      result.targets = applyShellOnly(ctx);
+      break;
+    }
+    case "repo-list":
+      result.repos = listRepos(ctx.rockyHome);
+      break;
     case "config-dir": {
       if (record?.state !== "approved") {
         result.targets = refusalReports(inspectAll(ctx, record));

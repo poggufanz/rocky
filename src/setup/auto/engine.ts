@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { defaultAgentHooksTarget, hasOwnedGateGroup } from "../agent-hooks.js";
 import type { McpRegistration } from "../clients.js";
+import type { RepoListEntry } from "./repo-list.js";
 import { DESK_MARKER } from "../desk-hooks.js";
 import { pruneSupersededTransactions } from "../file-transaction.js";
 import { readJsonObject } from "../json-config.js";
@@ -73,7 +74,10 @@ export interface AutoResult {
   consent: ConsentState | "none" | "invalid";
   targets: AutoTargetReport[];
   notes: string[];
+  harness_off: string[];
+  shell_hook: boolean;
   repo?: { key: string; main: string; decision: "allowed" | "declined" | "undecided" };
+  repos?: RepoListEntry[];
 }
 
 interface Scope {
@@ -318,19 +322,24 @@ export function removeAll(ctx: AutoContext, record: ConsentRecord | undefined): 
       reports.push(refusedSettingsReport(target));
       continue;
     }
-    reports.push(...removeClaudeSettings(target.path));
-    touched.add(target.path);
+    const removedReports = removeClaudeSettings(target.path);
+    reports.push(...removedReports);
+    if (!removedReports.some((entry) => entry.state === "refused")) touched.add(target.path);
   }
   for (const harness of AUTO_MCP_HARNESSES) {
     for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
-      reports.push(removeMcp(target, ctx.registration, expected.history[target.path] ?? []));
-      touched.add(target.path);
+      const report = removeMcp(target, ctx.registration, expected.history[target.path] ?? []);
+      reports.push(report);
+      if (report.state !== "refused") touched.add(target.path);
     }
   }
-  reports.push(removeShell(ctx.shell));
-  touched.add(ctx.shell.bashrcPath());
-  // The installer retains a recovery copy beside every profile it edits too.
-  for (const profile of ctx.shell.powerShellProfiles()) touched.add(profile);
+  const shellReport = removeShell(ctx.shell);
+  reports.push(shellReport);
+  if (shellReport.state !== "refused") {
+    touched.add(ctx.shell.bashrcPath());
+    // The installer retains a recovery copy beside every profile it edits too.
+    for (const profile of ctx.shell.powerShellProfiles()) touched.add(profile);
+  }
   for (const path of touched) pruneSupersededTransactions(path);
   writeExpected(ctx.rockyHome, { v: 1, files: [], history: expected.history });
   return reports;
@@ -352,13 +361,15 @@ export function removeHarness(
         reports.push(refusedSettingsReport(target));
         continue;
       }
-      reports.push(...removeClaudeSettings(target.path));
-      removed.add(target.path);
+      const removedReports = removeClaudeSettings(target.path);
+      reports.push(...removedReports);
+      if (!removedReports.some((entry) => entry.state === "refused")) removed.add(target.path);
     }
   }
   for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
-    reports.push(removeMcp(target, ctx.registration, expected.history[target.path] ?? []));
-    removed.add(target.path);
+    const report = removeMcp(target, ctx.registration, expected.history[target.path] ?? []);
+    reports.push(report);
+    if (report.state !== "refused") removed.add(target.path);
   }
   for (const path of removed) pruneSupersededTransactions(path);
   writeExpected(ctx.rockyHome, {
@@ -372,4 +383,34 @@ export function removeHarness(
 /** A copy for callers that report the same targets without writing them. */
 export function refusalReports(targets: readonly AutoTargetReport[]): AutoTargetReport[] {
   return targets.map(({ harness, kind, path }) => ({ harness, kind, path, state: "not_consented" }));
+}
+
+/** Install only the shell block, and expect exactly what it wrote. */
+export function applyShellOnly(ctx: AutoContext): AutoTargetReport[] {
+  const expected = readExpected(ctx.rockyHome);
+  const report = applyShell(ctx.shell);
+  const snippets = shellSnippets(ctx.shell);
+  const kept = expected.files.filter((file) => !snippets.some((entry) => entry.path === file.path));
+  writeExpected(ctx.rockyHome, {
+    v: 1,
+    files: report.state === "error" ? kept : [...kept, ...expectedFilesAfterWrite(snippets, [report])],
+    history: expected.history,
+  });
+  return [report];
+}
+
+/** Remove only the shell block, in any consent state, and drop its expectations. */
+export function removeShellOnly(ctx: AutoContext): AutoTargetReport[] {
+  const expected = readExpected(ctx.rockyHome);
+  const report = removeShell(ctx.shell);
+  const paths = new Set(shellSnippets(ctx.shell).map((entry) => entry.path));
+  const touched = new Set<string>([ctx.shell.bashrcPath(), ...ctx.shell.powerShellProfiles()]);
+  const pruned = (report.state === "refused" ? [] : [...touched]);
+  for (const path of pruned) pruneSupersededTransactions(path);
+  writeExpected(ctx.rockyHome, {
+    v: 1,
+    files: expected.files.filter((file) => !paths.has(file.path)),
+    history: expected.history,
+  });
+  return [report];
 }

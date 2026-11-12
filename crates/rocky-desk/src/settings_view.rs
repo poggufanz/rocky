@@ -101,12 +101,16 @@ pub fn set_autostart_asked(id: u64) -> ClientMsg {
     }
 }
 
-/// The two panels the header button switches between.
+/// The panels the window shows. The header button switches Agents and
+/// Settings; the consent screen replaces the whole window until answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum View {
     #[default]
     Agents,
     Settings,
+    Consent,
+    /// Shown after Remove Rocky finished; closing it quits the desk.
+    Removed,
 }
 
 /// The sign-in question shows on a window start until it has been answered.

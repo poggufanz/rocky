@@ -48,7 +48,41 @@ fn applied(targets: Vec<SetupTarget>) -> Result<AutoResult, RunError> {
         targets,
         notes: Vec::new(),
         repo: None,
+        harness_off: Vec::new(),
+        shell_hook: true,
+        repos: Vec::new(),
     })
+}
+
+#[test]
+fn setup_args_for_new_actions() {
+    let args = |action: SetupAction| setup_args(&action);
+    assert_eq!(args(SetupAction::ShellOn), ["shell", "on"]);
+    assert_eq!(args(SetupAction::ShellOff), ["shell", "off"]);
+    assert_eq!(args(SetupAction::RepoList), ["repo", "list"]);
+    assert_eq!(
+        args(SetupAction::RepoPurge {
+            root: "/code/a".to_string()
+        }),
+        ["repo", "purge", "/code/a"]
+    );
+}
+
+#[test]
+fn log_labels_carry_no_root() {
+    let setup = |action| Job::Setup {
+        token: 1,
+        id: 2,
+        action,
+    };
+    assert_eq!(setup(SetupAction::ShellOn).log_label(), "setup shell on");
+    assert_eq!(setup(SetupAction::ShellOff).log_label(), "setup shell off");
+    assert_eq!(setup(SetupAction::RepoList).log_label(), "setup repo list");
+    let purge = setup(SetupAction::RepoPurge {
+        root: "/secret/root".to_string(),
+    })
+    .log_label();
+    assert_eq!(purge, "setup repo purge");
 }
 
 #[test]

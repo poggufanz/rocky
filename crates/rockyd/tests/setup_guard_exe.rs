@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use rocky_proto::paths::log_path;
 use rocky_proto::pipe::{
-    ClientMsg, ConsentState, GapReason, Health, ServerMsg, SetupAction, SetupTarget, TargetState,
+    ClientMsg, ConsentState, GapReason, Health, RepoDecisionState, ServerMsg, SetupAction,
+    SetupTarget, TargetState,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -323,6 +324,49 @@ fn setup_plan_request_returns_consent_plan() {
             .map(String::as_str)
             .eq(["setup", "--auto", "plan", "--json"])),
         "no plan run in the fake CLI log: {runs:?}"
+    );
+}
+
+#[test]
+fn repo_list_request_gets_repo_list() {
+    let layout = layout();
+    seed(&layout, Some("9.0.0"), None);
+    let mut config = fake_config(&layout.settings);
+    config["result"]["repos"] = json!([{
+        "key": "k1",
+        "main": "/code/alpha",
+        "name": "alpha",
+        "decision": "declined",
+        "bytes": 2048,
+        "worktrees": [{ "root": "/code/alpha", "bytes": 2048, "exists": true }]
+    }]);
+    write_json(&layout.home.join("fake-cli.json"), &config);
+    let _daemon = spawn_daemon(&layout);
+
+    let mut client = subscribe(&layout.home);
+    client.send(&ClientMsg::Setup {
+        id: 11,
+        action: SetupAction::RepoList,
+    });
+    let list = read_until(&mut client, "the repo list for request 11", |msg| {
+        matches!(msg, ServerMsg::RepoList { id: 11, .. })
+    });
+
+    let ServerMsg::RepoList { repos, .. } = list else {
+        panic!("not a repo list: {list:?}");
+    };
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].name, "alpha");
+    assert_eq!(repos[0].decision, RepoDecisionState::Declined);
+    assert_eq!(repos[0].worktrees[0].bytes, 2048);
+    let runs = logged_runs(&layout.home);
+    assert!(
+        runs.iter().any(|argv| argv
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .eq(["setup", "--auto", "repo", "list", "--json"])),
+        "no repo list run in the fake CLI log: {runs:?}"
     );
 }
 

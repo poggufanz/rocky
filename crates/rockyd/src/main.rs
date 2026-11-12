@@ -21,6 +21,7 @@ use rocky_proto::pipe::{
 };
 use rocky_proto::settings::Settings;
 use rockyd::gaps::Gaps;
+use rockyd::guard::records::startup_setup;
 use rockyd::history::{HISTORY_CAP_BYTES, History, replay};
 use rockyd::log::RotatingLog;
 use rockyd::repo::resolve_repo;
@@ -131,16 +132,22 @@ fn main() {
     // Bind BEFORE touching the spool, settings, or history: a second daemon
     // must fail here (exit 3) without ingesting, pruning, or deleting anything.
     // The placeholder history is disabled and read-only until settings load.
+    // The setup status comes from local files only (no Node run), so the first
+    // snapshot a desk reads already carries the real consent state.
+    let setup = startup_setup(&home);
     let shared = Arc::new(Mutex::new(Shared {
         state: StatusState::new(),
         last_known: HashMap::new(),
         counters: Health::default(),
-        health: Health::default(),
+        health: Health {
+            setup: setup.clone(),
+            ..Health::default()
+        },
         settings: Settings::default(),
         settings_unreadable: false,
         gaps: Gaps::new(),
         history: History::open(&history_dir(&home), HISTORY_CAP_BYTES, false),
-        setup: SetupHealth::default(),
+        setup,
         repo_pending: Vec::new(),
         capture: Vec::new(),
     }));

@@ -229,6 +229,39 @@ pub struct PendingRepo {
     pub name: String,
 }
 
+/// The repo capture decision Node reports for a repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoDecisionState {
+    Allowed,
+    Declined,
+    Undecided,
+}
+
+/// One checkout of a repo that Listening knows about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeEntry {
+    pub root: String,
+    pub bytes: u64,
+    pub exists: bool,
+}
+
+/// One repo with a recorded capture decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoEntry {
+    pub key: String,
+    pub main: String,
+    pub name: String,
+    pub decision: RepoDecisionState,
+    pub bytes: u64,
+    #[serde(default)]
+    pub worktrees: Vec<WorktreeEntry>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// What a `setup` request asks the daemon to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "name", rename_all = "snake_case")]
@@ -240,6 +273,10 @@ pub enum SetupAction {
     ConsentLater,
     HarnessOn { harness: String },
     HarnessOff { harness: String },
+    ShellOn,
+    ShellOff,
+    RepoList,
+    RepoPurge { root: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -333,6 +370,14 @@ pub enum ServerMsg {
         id: u64,
         consent: ConsentState,
         targets: Vec<SetupTarget>,
+        #[serde(default)]
+        harness_off: Vec<String>,
+        #[serde(default = "default_true")]
+        shell_hook: bool,
+    },
+    RepoList {
+        id: u64,
+        repos: Vec<RepoEntry>,
     },
     RepoPending {
         repos: Vec<PendingRepo>,
@@ -387,9 +432,9 @@ mod tests {
 
     use crate::pipe::{
         AgentKey, AgentStatus, CaptureHealth, CaptureState, ClientMsg, CmdName, ConsentState,
-        GapReason, Health, LINE_CAP, Outcome, PendingRepo, RepoInfo, ServerMsg, SetupAction,
-        SetupHealth, SetupTarget, Status, StatusOp, TargetState, TimelineEntry, TimelineKind,
-        WireError, decode, encode,
+        GapReason, Health, LINE_CAP, Outcome, PendingRepo, RepoDecisionState, RepoEntry, RepoInfo,
+        ServerMsg, SetupAction, SetupHealth, SetupTarget, Status, StatusOp, TargetState,
+        TimelineEntry, TimelineKind, WireError, WorktreeEntry, decode, encode,
     };
     use crate::settings::Settings;
 
@@ -561,6 +606,8 @@ mod tests {
                 id: 14,
                 consent: ConsentState::Approved,
                 targets: vec![setup_target()],
+                harness_off: vec!["codex".into()],
+                shell_hook: false,
             },
             ServerMsg::RepoPending {
                 repos: vec![pending_repo()],
@@ -655,6 +702,8 @@ mod tests {
                 id: 4,
                 consent: ConsentState::Later,
                 targets: vec![setup_target()],
+                harness_off: Vec::new(),
+                shell_hook: true,
             },
             ServerMsg::RepoPending {
                 repos: vec![pending_repo()],
@@ -669,6 +718,56 @@ mod tests {
         ];
         for m in server {
             assert_eq!(decode::<ServerMsg>(encode(&m).trim_end()).unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn consent_plan_without_new_fields_decodes() {
+        let old = r#"{"v":3,"type":"consent_plan","id":1,"consent":"approved","targets":[]}"#;
+        let ServerMsg::ConsentPlan {
+            harness_off,
+            shell_hook,
+            ..
+        } = decode::<ServerMsg>(old).unwrap()
+        else {
+            panic!("expected a consent plan");
+        };
+        assert!(harness_off.is_empty());
+        assert!(shell_hook);
+    }
+
+    #[test]
+    fn repo_list_round_trip() {
+        let msg = ServerMsg::RepoList {
+            id: 21,
+            repos: vec![RepoEntry {
+                key: "k1".into(),
+                main: "C:/code/alpha".into(),
+                name: "alpha".into(),
+                decision: RepoDecisionState::Declined,
+                bytes: 4096,
+                worktrees: vec![WorktreeEntry {
+                    root: "C:/code/alpha-wt".into(),
+                    bytes: 512,
+                    exists: false,
+                }],
+            }],
+        };
+        assert_eq!(decode::<ServerMsg>(encode(&msg).trim_end()).unwrap(), msg);
+        let actions = [
+            SetupAction::ShellOn,
+            SetupAction::ShellOff,
+            SetupAction::RepoList,
+            SetupAction::RepoPurge {
+                root: "C:/code/alpha".into(),
+            },
+        ];
+        for (index, action) in actions.into_iter().enumerate() {
+            let m = ClientMsg::Setup {
+                id: index as u64,
+                action,
+            };
+            assert_eq!(decode::<ClientMsg>(encode(&m).trim_end()).unwrap(), m);
         }
     }
 

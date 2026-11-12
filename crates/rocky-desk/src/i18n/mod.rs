@@ -6,6 +6,12 @@
 use rocky_proto::pipe::{GapReason, Outcome, Status, TimelineKind};
 use rocky_proto::settings::Lang;
 
+mod setup;
+
+#[cfg(test)]
+use setup::setup_samples;
+pub use setup::{SetupMsg, setup_en, setup_id};
+
 /// Language the desk renders its own text in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiLang {
@@ -118,53 +124,8 @@ pub enum Msg {
         agent: String,
     },
     NoticeDone,
-    /// A newer Rocky was installed; the running command line must run once.
-    SetupNewVersion,
-    /// The command line is gone (`Some` names the path) or was never learned.
-    SetupCliMissing {
-        path: Option<String>,
-    },
-    SetupRepairing {
-        path: String,
-    },
-    /// `error` is data from the daemon or Node and is shown as received. It may be empty.
-    SetupRepairFailed {
-        path: String,
-        error: String,
-    },
-    SetupChanged {
-        path: String,
-    },
-    SetupForeign {
-        harness: String,
-        path: String,
-    },
-    /// `error` is data from the daemon or Node and is shown as received. It may be empty.
-    SetupRefused {
-        path: String,
-        error: String,
-    },
-    SetupFighting {
-        path: String,
-        n: u32,
-    },
-    /// Target lines cut from the strip.
-    SetupMore {
-        n: u64,
-    },
-    /// `error` is data from the daemon and is shown as received. It may be empty.
-    CaptureFailed {
-        root: String,
-        error: String,
-    },
-    /// File watching failed, so the daemon checks the repo on a timer instead.
-    CapturePolling {
-        root: String,
-    },
-    /// Repo lines cut from the strip.
-    CaptureMore {
-        n: usize,
-    },
+    /// Setup guard and capture health copy.
+    Setup(SetupMsg),
 }
 
 #[cfg(test)]
@@ -289,57 +250,10 @@ fn samples() -> Vec<Msg> {
             agent: "main".into(),
         },
         Msg::NoticeDone,
-        Msg::SetupNewVersion,
-        Msg::SetupCliMissing {
-            path: Some("C:/rocky/dist/index.js".into()),
-        },
-        Msg::SetupCliMissing { path: None },
-        Msg::SetupRepairing {
-            path: "C:/Users/me/.claude/settings.json".into(),
-        },
-        Msg::SetupRepairFailed {
-            path: "C:/Users/me/.claude/settings.json".into(),
-            error: "still missing after setup ran".into(),
-        },
-        Msg::SetupRepairFailed {
-            path: "C:/Users/me/.claude/settings.json".into(),
-            error: String::new(),
-        },
-        Msg::SetupChanged {
-            path: "C:/Users/me/.claude/settings.json".into(),
-        },
-        Msg::SetupForeign {
-            harness: "gemini-cli".into(),
-            path: "C:/Users/me/.gemini/settings.json".into(),
-        },
-        Msg::SetupRefused {
-            path: "C:/Users/me/.claude/settings.json".into(),
-            error: "path is outside the home folder".into(),
-        },
-        Msg::SetupRefused {
-            path: "C:/Users/me/.claude/settings.json".into(),
-            error: String::new(),
-        },
-        Msg::SetupFighting {
-            path: "C:/Users/me/.claude/settings.json".into(),
-            n: 6,
-        },
-        Msg::SetupMore { n: 3 },
-        Msg::SetupMore { n: 1 },
-        Msg::CaptureFailed {
-            root: "C:/work/app".into(),
-            error: "Node could not start.".into(),
-        },
-        Msg::CaptureFailed {
-            root: "C:/work/app".into(),
-            error: String::new(),
-        },
-        Msg::CapturePolling {
-            root: "C:/work/app".into(),
-        },
-        Msg::CaptureMore { n: 2 },
-        Msg::CaptureMore { n: 1 },
     ]
+    .into_iter()
+    .chain(setup_samples().into_iter().map(Msg::Setup))
+    .collect()
 }
 
 /// English copy.
@@ -430,39 +344,7 @@ pub fn en(m: &Msg) -> String {
         Msg::NoticeNeedsYou { agent, summary } => needs_you_en(agent, summary.as_deref()),
         Msg::NoticeFailed { agent } => format!("{agent} failed"),
         Msg::NoticeDone => "Finished".to_string(),
-        Msg::SetupNewVersion => "New version installed. Run rocky once to use it.".to_string(),
-        Msg::SetupCliMissing { path: Some(path) } => {
-            format!("{path} is gone. Run rocky once so Rocky can repair its entries.")
-        }
-        Msg::SetupCliMissing { path: None } => {
-            "Rocky does not know where its command line is. Run rocky once.".to_string()
-        }
-        Msg::SetupRepairing { path } => format!("Restoring Rocky entries in {path}."),
-        Msg::SetupRepairFailed { path, error } => {
-            format!("Cannot restore Rocky entries in {path}{}.", error_suffix(error))
-        }
-        Msg::SetupChanged { path } => {
-            format!("{path} changed while Rocky was writing it. Trying again.")
-        }
-        Msg::SetupForeign { harness, path } => format!(
-            "{path} has a rocky server Rocky did not write, so Rocky leaves {harness} alone."
-        ),
-        Msg::SetupRefused { path, error } => {
-            format!("Rocky will not write {path}{}.", error_suffix(error))
-        }
-        Msg::SetupFighting { path, n } => {
-            format!("{path} keeps losing Rocky entries ({n} times in 10 minutes).")
-        }
-        Msg::SetupMore { n } => format!("{n} more setup {}.", plural(*n, "problem", "problems")),
-        Msg::CaptureFailed { root, error } => {
-            format!("Capture for {root} failed{}.", error_suffix(error))
-        }
-        Msg::CapturePolling { root } => {
-            format!("Capture for {root} checks every 60 seconds; watching files failed.")
-        }
-        Msg::CaptureMore { n } => {
-            format!("And {n} more {}.", plural(*n as u64, "repo", "repos"))
-        }
+        Msg::Setup(m) => setup_en(m),
     }
 }
 
@@ -559,37 +441,7 @@ pub fn id(m: &Msg) -> String {
         Msg::NoticeNeedsYou { agent, summary } => needs_you_id(agent, summary.as_deref()),
         Msg::NoticeFailed { agent } => format!("{agent} gagal"),
         Msg::NoticeDone => "Selesai".to_string(),
-        Msg::SetupNewVersion => "Versi baru terpasang. Jalankan rocky sekali untuk memakainya.".to_string(),
-        Msg::SetupCliMissing { path: Some(path) } => {
-            format!("{path} sudah tidak ada. Jalankan rocky sekali supaya Rocky bisa memperbaiki entrinya.")
-        }
-        Msg::SetupCliMissing { path: None } => {
-            "Rocky tidak tahu letak command line-nya. Jalankan rocky sekali.".to_string()
-        }
-        Msg::SetupRepairing { path } => format!("Memasang ulang entri Rocky di {path}."),
-        Msg::SetupRepairFailed { path, error } => {
-            format!("Tidak bisa memasang ulang entri Rocky di {path}{}.", error_suffix(error))
-        }
-        Msg::SetupChanged { path } => {
-            format!("{path} berubah saat Rocky menulisnya. Mencoba lagi.")
-        }
-        Msg::SetupForeign { harness, path } => format!(
-            "{path} punya server rocky yang bukan tulisan Rocky, jadi Rocky tidak menyentuh {harness}."
-        ),
-        Msg::SetupRefused { path, error } => {
-            format!("Rocky tidak mau menulis {path}{}.", error_suffix(error))
-        }
-        Msg::SetupFighting { path, n } => {
-            format!("{path} terus kehilangan entri Rocky ({n} kali dalam 10 menit).")
-        }
-        Msg::SetupMore { n } => format!("{n} masalah setup lain."),
-        Msg::CaptureFailed { root, error } => {
-            format!("Capture untuk {root} gagal{}.", error_suffix(error))
-        }
-        Msg::CapturePolling { root } => {
-            format!("Capture untuk {root} dicek setiap 60 detik; pemantauan file gagal.")
-        }
-        Msg::CaptureMore { n } => format!("Dan {n} repo lagi."),
+        Msg::Setup(m) => setup_id(m),
     }
 }
 
@@ -851,114 +703,4 @@ fn gap_id(count: u64, from: &str, to: &str, reason: GapReason) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_variant_renders_in_both_languages() {
-        for m in samples() {
-            assert!(!en(&m).trim().is_empty(), "{m:?}");
-            assert!(!id(&m).trim().is_empty(), "{m:?}");
-        }
-    }
-
-    #[test]
-    fn setting_overrides_detection() {
-        assert_eq!(resolve_lang(Lang::En, UiLang::Id), UiLang::En);
-        assert_eq!(resolve_lang(Lang::Id, UiLang::En), UiLang::Id);
-        assert_eq!(resolve_lang(Lang::Auto, UiLang::Id), UiLang::Id);
-    }
-
-    #[test]
-    fn indonesian_is_detected_from_langid_and_env() {
-        assert!(primary_is_indonesian(0x0421));
-        assert!(!primary_is_indonesian(0x0409));
-        assert_eq!(
-            lang_from_env(None, Some("id_ID.UTF-8"), Some("en_US")),
-            UiLang::Id
-        );
-        assert_eq!(
-            lang_from_env(Some("en_US"), Some("id_ID"), None),
-            UiLang::En
-        );
-        assert_eq!(lang_from_env(Some(""), None, None), UiLang::En);
-    }
-
-    #[test]
-    fn m0_english_copy_is_unchanged() {
-        assert_eq!(
-            en(&Msg::Tooltip {
-                working: 2,
-                needs_you: 1,
-                failed: 0,
-                done: 0,
-                idle: 0
-            }),
-            "rocky: 2 working, 1 needs you"
-        );
-        assert_eq!(
-            en(&Msg::Tooltip {
-                working: 0,
-                needs_you: 0,
-                failed: 0,
-                done: 0,
-                idle: 0
-            }),
-            "rocky: idle"
-        );
-        assert_eq!(en(&Msg::Age { secs: 130 }), "2m");
-        assert_eq!(en(&Msg::NoAgents), "No agents recorded yet.");
-    }
-
-    #[test]
-    fn spool_pending_counts_files() {
-        assert_eq!(en(&Msg::SpoolPending { n: 3 }), "3 spool files pending.");
-        assert_eq!(id(&Msg::SpoolPending { n: 3 }), "3 berkas spool tertunda.");
-    }
-
-    #[test]
-    fn english_counts_of_one_are_singular() {
-        assert_eq!(
-            en(&Msg::SubagentsStillWorking { n: 1 }),
-            "1 subagent still working"
-        );
-        assert_eq!(
-            en(&Msg::SubagentsStillWorking { n: 2 }),
-            "2 subagents still working"
-        );
-        assert_eq!(
-            en(&Msg::SubagentsHidden { n: 1, working: 1 }),
-            "+1 subagent (1 working)"
-        );
-        assert_eq!(en(&Msg::EarlierGaps { n: 1 }), "1 earlier gap");
-        assert_eq!(en(&Msg::SpoolPending { n: 1 }), "1 spool file pending.");
-        assert_eq!(
-            id(&Msg::SubagentsStillWorking { n: 1 }),
-            "1 subagen masih bekerja"
-        );
-    }
-
-    #[test]
-    fn translations_follow_the_ui_language() {
-        assert_eq!(tr(UiLang::En, &Msg::MenuQuit), "Quit");
-        assert_eq!(tr(UiLang::Id, &Msg::MenuQuit), "Keluar");
-    }
-
-    #[test]
-    fn hooks_restored_gap_ends_at_the_restore_time() {
-        let gap = Msg::Gap {
-            count: 0,
-            from: "14:00".into(),
-            to: "14:02".into(),
-            reason: GapReason::HooksRestored,
-        };
-        assert_eq!(
-            en(&gap),
-            "Events before 14:02 may be missing: Rocky hooks were restored then."
-        );
-        assert_eq!(
-            id(&gap),
-            "Event sebelum 14:02 mungkin hilang: hook Rocky baru dipasang ulang saat itu."
-        );
-    }
-}
+mod tests;

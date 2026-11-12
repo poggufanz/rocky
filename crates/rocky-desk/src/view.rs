@@ -28,6 +28,8 @@ pub struct RepoGroup {
     /// Repo name as recorded; empty when the daemon reported none.
     pub name: String,
     pub branch: Option<String>,
+    /// Distinct repo roots the group's live agents reported, in first-seen order.
+    pub roots: Vec<String>,
     pub sessions: Vec<SessionRow>,
 }
 
@@ -217,6 +219,11 @@ impl Model {
         self.conn = c;
     }
 
+    /// The daemon's last health report.
+    pub fn health(&self) -> &Health {
+        &self.health
+    }
+
     pub fn settings(&self) -> Option<&Settings> {
         self.settings.as_ref()
     }
@@ -262,6 +269,7 @@ impl Model {
             .map(|((name, branch), sessions)| RepoGroup {
                 name,
                 branch,
+                roots: distinct_roots(&sessions),
                 sessions: sessions
                     .into_iter()
                     .map(|(session_id, mut agents)| {
@@ -432,6 +440,22 @@ fn priority(s: Status) -> u8 {
         Status::Idle => 1,
         Status::Ended => 0,
     }
+}
+
+/// Distinct non-empty repo roots across a group's agents, first-seen order.
+fn distinct_roots(sessions: &BTreeMap<String, Vec<&AgentStatus>>) -> Vec<String> {
+    let mut roots: Vec<String> = Vec::new();
+    for root in sessions
+        .values()
+        .flatten()
+        .filter_map(|a| a.repo.root.as_deref())
+        .filter(|r| !r.is_empty())
+    {
+        if !roots.iter().any(|seen| seen == root) {
+            roots.push(root.to_string());
+        }
+    }
+    roots
 }
 
 /// First 8 chars, char-safe.

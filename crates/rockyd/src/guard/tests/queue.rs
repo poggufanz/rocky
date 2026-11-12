@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
 use rocky_proto::pipe::{
-    ConsentState, PendingRepo, ServerMsg, SetupAction, SetupTarget, TargetState,
+    ConsentState, PendingRepo, RepoDecisionState, RepoEntry, ServerMsg, SetupAction, SetupTarget,
+    TargetState,
 };
 
-use super::super::node::{AutoResult, RepoDecisionState, RepoVerdict, RunError};
+use super::super::node::{AutoResult, RepoVerdict, RunError};
 use super::super::{Effect, Guard, GuardConsts, Job, Observation};
 use super::{CFG, OTHER, applied, approved, consent, target};
 
@@ -39,6 +40,9 @@ fn with_repo(verdict: RepoVerdict) -> Result<AutoResult, RunError> {
         targets: Vec::new(),
         notes: Vec::new(),
         repo: Some(verdict),
+        harness_off: Vec::new(),
+        shell_hook: true,
+        repos: Vec::new(),
     })
 }
 
@@ -49,6 +53,9 @@ fn result_with(targets: Vec<SetupTarget>, notes: &[&str]) -> Result<AutoResult, 
         targets,
         notes: notes.iter().map(|note| note.to_string()).collect(),
         repo: None,
+        harness_off: Vec::new(),
+        shell_hook: true,
+        repos: Vec::new(),
     })
 }
 
@@ -262,11 +269,101 @@ fn plan_request_replies_consent_plan_without_touching_health() {
         id: 5,
         consent: ConsentState::Approved,
         targets: planned,
+        harness_off: Vec::new(),
+        shell_hook: true,
     };
     assert_eq!(effects, vec![Effect::Reply { token: 3, msg }]);
     let health = guard.health(1).targets;
     assert_eq!(health.len(), 1);
     assert_eq!(health[0].path, OTHER);
+}
+
+#[test]
+fn plan_reply_carries_switches_and_repo_list_carries_repos() {
+    let mut guard = settled(approved(&[]));
+    assert!(guard.setup_request(3, 5, SetupAction::Plan).is_none());
+    let job = guard.next_job(0).expect("plan job");
+    let mut switched = applied(Vec::new());
+    if let Ok(result) = switched.as_mut() {
+        result.harness_off = vec!["codex".to_string()];
+        result.shell_hook = false;
+    }
+    let effects = guard.finish(&job, switched, 1);
+    let Effect::Reply { msg, .. } = &effects[0] else {
+        panic!("no reply: {effects:?}");
+    };
+    assert!(matches!(
+        msg,
+        ServerMsg::ConsentPlan { harness_off, shell_hook: false, .. } if harness_off == &["codex"]
+    ));
+
+    assert!(guard.setup_request(3, 6, SetupAction::RepoList).is_none());
+    let job = guard.next_job(2).expect("repo list job");
+    let entry = RepoEntry {
+        key: "k".to_string(),
+        main: "/code/a".to_string(),
+        name: "a".to_string(),
+        decision: RepoDecisionState::Allowed,
+        bytes: 1,
+        worktrees: Vec::new(),
+    };
+    let mut listed = applied(Vec::new());
+    if let Ok(result) = listed.as_mut() {
+        result.repos = vec![entry.clone()];
+    }
+    let effects = guard.finish(&job, listed, 3);
+    let msg = ServerMsg::RepoList {
+        id: 6,
+        repos: vec![entry],
+    };
+    assert_eq!(effects, vec![Effect::Reply { token: 3, msg }]);
+
+    assert!(guard.setup_request(3, 7, SetupAction::ShellOff).is_none());
+    let job = guard.next_job(4).expect("shell job");
+    let effects = guard.finish(&job, applied(Vec::new()), 5);
+    assert!(matches!(
+        &effects[0],
+        Effect::Reply {
+            msg: ServerMsg::Ack {
+                id: 7,
+                ok: true,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn purge_and_shell_acks_keep_cached_health_targets() {
+    let stored = vec![target("mcp", OTHER, TargetState::Ok, None)];
+    let mut guard = Guard::new(GuardConsts::default(), 0);
+    guard.observe(approved(&[]), 0);
+    assert_eq!(guard.next_job(0), Some(Job::Apply));
+    guard.finish(&Job::Apply, applied(stored), 0);
+    let purge = SetupAction::RepoPurge {
+        root: "/code/a".to_string(),
+    };
+    for (id, action) in [
+        (1, purge),
+        (2, SetupAction::ShellOn),
+        (3, SetupAction::ShellOff),
+    ] {
+        assert!(guard.setup_request(3, id, action).is_none());
+        let job = guard.next_job(1).expect("setup job");
+        let partial = vec![target("shell", CFG, TargetState::Written, None)];
+        let effects = guard.finish(&job, applied(partial), 2);
+        assert!(matches!(
+            &effects[0],
+            Effect::Reply {
+                msg: ServerMsg::Ack { ok: true, .. },
+                ..
+            }
+        ));
+        let health = guard.health(2).targets;
+        assert_eq!(health.len(), 1, "action {id} changed the cache");
+        assert_eq!(health[0].path, OTHER);
+    }
 }
 
 #[test]
@@ -500,4 +597,154 @@ fn allowed_roots_lists_allowed_verdicts() {
         guard.allowed_roots(),
         BTreeSet::from(["/w/a".to_string(), "/w/b".to_string()])
     );
+}
+
+/// A target of the given harness.
+fn harness_target(harness: &str, path: &str, state: TargetState) -> SetupTarget {
+    SetupTarget {
+        harness: harness.to_string(),
+        ..target("mcp", path, state, None)
+    }
+}
+
+/// A guard whose last apply stored `stored`.
+fn guard_with_targets(stored: Vec<SetupTarget>) -> Guard {
+    let mut guard = Guard::new(GuardConsts::default(), 0);
+    guard.observe(approved(&[]), 0);
+    assert_eq!(guard.next_job(0), Some(Job::Apply));
+    guard.finish(&Job::Apply, applied(stored), 0);
+    guard
+}
+
+/// Runs one setup action to its reply, finishing it with `result`.
+fn run_setup(
+    guard: &mut Guard,
+    action: SetupAction,
+    result: Result<AutoResult, RunError>,
+) -> ServerMsg {
+    assert!(guard.setup_request(7, 1, action).is_none());
+    let job = guard.next_job(1).expect("setup job");
+    let mut effects = guard.finish(&job, result, 2);
+    match effects.remove(0) {
+        Effect::Reply { msg, .. } => msg,
+        other => panic!("not a reply: {other:?}"),
+    }
+}
+
+fn ack(ok: bool, error: Option<&str>) -> ServerMsg {
+    ServerMsg::Ack {
+        id: 1,
+        ok,
+        error: error.map(str::to_string),
+    }
+}
+
+fn paths_of(guard: &Guard, harness: &str) -> Vec<String> {
+    let health = guard.health(3).targets;
+    health
+        .into_iter()
+        .filter(|t| t.harness == harness)
+        .map(|t| t.path)
+        .collect()
+}
+
+#[test]
+fn remove_with_an_error_target_acks_false_with_a_count() {
+    let mut guard = guard_with_targets(Vec::new());
+    let one = result_with(
+        vec![
+            harness_target("codex", "/a", TargetState::Error),
+            harness_target("codex", "/b", TargetState::Ok),
+        ],
+        &[],
+    );
+    assert_eq!(
+        run_setup(&mut guard, SetupAction::Remove, one),
+        ack(false, Some("1 entry was not removed."))
+    );
+
+    let mut guard = guard_with_targets(Vec::new());
+    let two = result_with(
+        vec![
+            harness_target("codex", "/a", TargetState::Error),
+            harness_target("gemini-cli", "/b", TargetState::Error),
+        ],
+        &[],
+    );
+    assert_eq!(
+        run_setup(&mut guard, SetupAction::Remove, two),
+        ack(false, Some("2 entries were not removed."))
+    );
+}
+
+#[test]
+fn remove_with_only_ok_and_refused_targets_acks_true() {
+    let mut guard = guard_with_targets(Vec::new());
+    let done = result_with(
+        vec![
+            harness_target("codex", "/a", TargetState::Ok),
+            harness_target("codex", "/b", TargetState::Refused),
+        ],
+        &[],
+    );
+    assert_eq!(
+        run_setup(&mut guard, SetupAction::Remove, done),
+        ack(true, None)
+    );
+}
+
+#[test]
+fn purge_with_notes_acks_false_with_the_first_note() {
+    let purge = || SetupAction::RepoPurge {
+        root: "/code/a".to_string(),
+    };
+    let mut guard = guard_with_targets(Vec::new());
+    let failed = result_with(Vec::new(), &["purge failed: busy", "second"]);
+    assert_eq!(
+        run_setup(&mut guard, purge(), failed),
+        ack(false, Some("purge failed: busy"))
+    );
+
+    let mut guard = guard_with_targets(Vec::new());
+    assert_eq!(
+        run_setup(&mut guard, purge(), result_with(Vec::new(), &[])),
+        ack(true, None)
+    );
+}
+
+#[test]
+fn harness_off_drops_only_that_harness_from_the_cache() {
+    let mut guard = guard_with_targets(vec![
+        harness_target("codex", "/c1", TargetState::Ok),
+        harness_target("gemini-cli", "/g1", TargetState::Error),
+    ]);
+    let action = SetupAction::HarnessOff {
+        harness: "codex".to_string(),
+    };
+    let result = result_with(vec![harness_target("codex", "/c1", TargetState::Ok)], &[]);
+    assert_eq!(run_setup(&mut guard, action, result), ack(true, None));
+    assert!(paths_of(&guard, "codex").is_empty());
+    assert_eq!(paths_of(&guard, "gemini-cli"), ["/g1"]);
+}
+
+#[test]
+fn harness_on_replaces_only_that_harness_in_the_cache() {
+    let mut guard = guard_with_targets(vec![
+        harness_target("codex", "/old", TargetState::Missing),
+        harness_target("gemini-cli", "/g1", TargetState::Error),
+    ]);
+    let action = SetupAction::HarnessOn {
+        harness: "codex".to_string(),
+    };
+    let result = result_with(
+        vec![
+            harness_target("codex", "/new", TargetState::Written),
+            harness_target("opencode", "/stray", TargetState::Ok),
+        ],
+        &[],
+    );
+    assert_eq!(run_setup(&mut guard, action, result), ack(true, None));
+    assert_eq!(paths_of(&guard, "codex"), ["/new"]);
+    assert_eq!(paths_of(&guard, "gemini-cli"), ["/g1"]);
+    assert!(paths_of(&guard, "opencode").is_empty());
 }
