@@ -1,10 +1,12 @@
 //! Capture decisions for the daemon: when the capture child starts and stops, which roots it
 //! is asked to reconcile, and how its answers read as per-repo health.
 //!
-//! This module is pure state. It does no I/O, spawns nothing, and never reads a clock: every
-//! time comes from the caller. The caller owns the child process and the file watcher, feeds
-//! what happens to them in through the methods below, and runs the actions that
-//! [`Capture::next_action`] returns.
+//! [`Capture`] is pure state. It does no I/O, spawns nothing, and never reads a clock: every
+//! time comes from the caller. The caller owns the child process (see [`child`]) and the file
+//! watcher, feeds what happens to them in through the methods below, and runs the actions
+//! that [`Capture::next_action`] returns.
+
+pub mod child;
 
 use rocky_proto::pipe::{CaptureHealth, CaptureState};
 use rocky_proto::respawn::RespawnPolicy;
