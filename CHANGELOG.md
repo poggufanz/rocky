@@ -4,6 +4,12 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+The desktop app asks once for setup consent, and its Settings switch harnesses and the shell hook, reinstall, manage repo capture, and remove Rocky.
+
+`rocky setup --auto` adds `shell on|off` and `repo list`.
+
+Removal keeps the recovery copy beside a refused path and finishes a pending transaction first.
+
 While the desktop app's background process runs, it captures Listening history for consented repos, so `rocky dash` no longer has to stay open. `rocky dash` skips a repo the background process is capturing.
 
 A linked worktree of a consented repo is captured once a session starts in it.

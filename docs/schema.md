@@ -372,6 +372,29 @@ must not be a symlink, must remain inside the user's home, and must still hold
 its harness file. A location that fails is reported as `refused` and nothing
 is written there.
 
+### Result fields
+
+Every `rocky setup --auto <action> --json` result carries `harness_off`
+(string array, the harness ids the consent record leaves out) and
+`shell_hook` (boolean, whether the shell hook is in scope). Without a valid
+consent record they are `[]` and `true`.
+
+The actions beyond `plan`, `apply`, `remove`, `consent`, and `harness`:
+
+| Action | Effect |
+|---|---|
+| `shell on` / `shell off` | Sets `shell_hook` in the consent record. `off` takes out the shell hook entries and stops their repair. |
+| `repo list` | Lists every repo with a recorded capture decision. Only this action adds `repos`. |
+
+`repos` is an array of `{key, main, name, decision, bytes, worktrees[]}`:
+`decision` is `allowed` or `declined`, `bytes` is the size of the repo's
+Listening store, and each worktree is `{root, bytes, exists}`.
+
+`remove` keeps the recovery copy that sits beside a path reported as
+`refused` (an MCP config, a Claude Code settings file, or a shell profile),
+and prunes every other retained recovery copy. It settles a pending MCP
+transaction before it checks the target.
+
 ### Expected record
 
 `<ROCKY_HOME>/setup/expected.json`:
@@ -458,6 +481,22 @@ expired, or held by a process that no longer exists.
 releases a repo, the daemon's capture process takes it within one lease tick.
 Node is the only writer of the lease; the daemon never reads `collector.json`.
 
+## Desk notified record v1
+
+`<ROCKY_HOME>/desk/notified.json` records which once-only setup notices the
+desk already showed, so a restart does not repeat them:
+
+```json
+{"v":1,"repos":["/home/u/work/app"],"harnesses":["claude-code"],"seeded":true}
+```
+
+`repos` holds the repo keys announced as waiting for a capture decision, and
+`harnesses` the harness ids announced after the first approval. `seeded` is
+true once the first approved plan has been recorded without announcing the
+harnesses it already held. The desk writes the file by a sibling temporary
+file renamed over the target. A missing file is a first run; an unparsable one
+reads as empty.
+
 ## Capture process v1
 
 `rocky listen collect --stdio` is the hidden command the desktop app's
@@ -531,7 +570,8 @@ disconnected, reconnects, and receives a fresh snapshot.
 | daemon → desk | `ack` | `id`, `ok`, `error?` |
 | desk → daemon | `setup` | `id`, `action` (an object tagged by `name`) |
 | desk → daemon | `repo_decision` | `id`, `root`, `allow` |
-| daemon → desk | `consent_plan` | `id`, `consent`, `targets[]` |
+| daemon → desk | `consent_plan` | `id`, `consent`, `targets[]`, `harness_off[]`, `shell_hook` |
+| daemon → desk | `repo_list` | `id`, `repos[]` |
 | daemon → desk | `repo_pending` | `repos[]` (broadcast when the pending list changes) |
 
 `agent` carries `key` (`session_id`, `agent_id`; empty `agent_id` means the
@@ -683,11 +723,19 @@ Client `setup` is `{"v":3,"type":"setup","id":7,"action":{"name":"plan"}}`.
 | `consent_later` | — | `consent later` |
 | `harness_on` | `harness` | `harness <id> on` |
 | `harness_off` | `harness` | `harness <id> off` |
+| `shell_on` | — | `shell on` |
+| `shell_off` | — | `shell off` |
+| `repo_list` | — | `repo list` |
+| `repo_purge` | `root` | `repo purge <root>` |
 
-`plan` is answered with `consent_plan`, `{id, consent, targets[]}`: `consent`
-is a consent state, and each target is `{harness, kind, path, state,
-detail?}` with a `state` from the table above; `detail` is absent when Node
-gave none. Every other action is answered with `ack`. A failed run of any
+`plan` is answered with `consent_plan`, `{id, consent, targets[], harness_off[],
+shell_hook}`: `consent` is a consent state, and each target is `{harness,
+kind, path, state, detail?}` with a `state` from the table above; `detail` is
+absent when Node gave none. `harness_off` and `shell_hook` mirror the consent
+record; a frame without them decodes to `[]` and `true`. `repo_list` is
+answered with `repo_list`, `{id, repos[]}`, where each repo is `{key, main,
+name, decision, bytes, worktrees[]}` as in the setup result. Every other
+action is answered with `ack`. A failed run of any
 action, `plan` included, is answered with `ack` and `ok: false`, and an
 `error` that names the cause, such as a missing CLI record, a Node run that
 timed out, or `daemon stopping`. A `setup` request for an unknown harness id
