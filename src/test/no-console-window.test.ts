@@ -5,7 +5,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const FIXED_SOURCES = ["src/core/exec.ts", "src/commands/hook.ts", "src/listening/consent.ts"];
+const FIXED_SOURCES = ["src/core/exec.ts", "src/commands/hook.ts", "src/commands/listen.ts"];
 const SPAWN_CALL = /\b(?:spawnSync|execFileSync|spawn|execFile)\(/g;
 const HIDDEN_WINDOW = /windowsHide: true/g;
 const CONSOLE_KEPT = "// console kept: runs the user's own command";
@@ -18,11 +18,13 @@ function typeScriptFiles(dir: string): string[] {
   });
 }
 
-test("no console window from setup paths", () => {
+test("no console window from setup and capture paths", () => {
   // ponytail: count match, not a parser; a miss here means a console window when the daemon runs Node.
   const setupSources = typeScriptFiles(join(packageRoot, "src", "setup"));
   assert.ok(setupSources.length > 0, "no setup sources found");
-  const sources = [...FIXED_SOURCES.map((file) => join(packageRoot, file)), ...setupSources];
+  const capture = typeScriptFiles(join(packageRoot, "src", "listening"));
+  assert.ok(capture.length > 0, "no listening sources found");
+  const sources = [...FIXED_SOURCES.map((file) => join(packageRoot, file)), ...setupSources, ...capture];
   for (const source of sources) {
     const text = readFileSync(source, "utf8");
     const spawnCalls = text.match(SPAWN_CALL)?.length ?? 0;

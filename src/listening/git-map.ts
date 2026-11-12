@@ -24,6 +24,7 @@ function runGit(
   try {
     const result = spawnSync("git", [...args], {
       shell: false,
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "buffer",
       maxBuffer: GIT_MAX_BYTES,
