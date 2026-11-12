@@ -35,7 +35,7 @@ import {
   removeRockyMcpServer,
   writeMergedJsonConfig,
 } from "../harness-mcp-shared.js";
-import { readJsonObject, recoverJsonTransaction, type JsonReadResult } from "../json-config.js";
+import { readJsoncObject, recoverJsonTransaction, type JsonReadResult } from "../json-config.js";
 import {
   isOwnedRockyRegistration,
   registrationKey,
@@ -240,7 +240,7 @@ function readJsonTarget(t: McpTarget): JsonTarget {
       : { status: "error", detail: refusal.detail };
   }
   const cfg = jsonHarnessFor(t.harness);
-  const prior = readJsonObject(t.path);
+  const prior = readJsoncObject(t.path);
   if (prior.status === "invalid") return { status: "error", detail: `MCP config is unreadable: ${t.path}` };
   if (prior.status === "missing") return { status: "missing", prior };
   const raw = prior.value[cfg.containerKey];

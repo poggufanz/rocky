@@ -19,6 +19,7 @@ import { claudeCodeMcpConfigPath, toClaudeEntry } from "../setup/harness-claude-
 import { codexRockyBlock } from "../setup/harness-codex.js";
 import { toCopilotEntry } from "../setup/harness-copilot-cli.js";
 import { toGeminiEntry } from "../setup/harness-gemini-cli.js";
+import { stripJsonComments } from "../setup/json-config.js";
 import { toOpencodeEntry } from "../setup/harness-opencode.js";
 import { registrationKey } from "../setup/registration.js";
 import type { DetectEnv } from "../setup/auto/detect.js";
@@ -388,4 +389,26 @@ test("auto mcp: snippets carry the command and first argument", (t) => {
   assert.deepEqual(mcpSnippets(targetOf(f, "codex"), f.reg), [
     `command = ${JSON.stringify(f.reg.command)}`,
   ]);
+});
+
+test("json comments are stripped outside strings only", () => {
+  const text = '// head\n{ "a": "x//y", /* note */ "b": "q\\"//r", "c": 1 // tail\n}\n';
+  assert.deepEqual(JSON.parse(stripJsonComments(text)), { a: "x//y", b: "q\"//r", c: 1 });
+  assert.equal(stripJsonComments('{ "a": 1 /* open'), '{ "a": 1 /* open');
+});
+
+test("auto mcp: a JSON config with comments is rewritten as plain JSON with the rocky entry", (t) => {
+  const f = fixture(t);
+  const copilot = targetOf(f, "copilot-cli");
+  mkdirSync(dirname(copilot.path), { recursive: true });
+  writeFileSync(copilot.path, '// User settings\n{\n  "theme": "dark", // kept\n  "url": "http://x//y"\n}\n');
+
+  assert.equal(inspectMcp(copilot, f.reg, []).state, "missing");
+  const out = applyMcp(copilot, f.reg, []);
+
+  assert.equal(out.report.state, "written");
+  const written = readJson(copilot.path);
+  assert.equal(written.theme, "dark");
+  assert.equal(written.url, "http://x//y");
+  assert.deepEqual(container(written, "mcpServers"), { rocky: toCopilotEntry(f.reg) });
 });

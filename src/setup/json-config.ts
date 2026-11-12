@@ -54,7 +54,64 @@ function errorCode(error: unknown): string | undefined {
   return isObject(error) && typeof error.code === "string" ? error.code : undefined;
 }
 
+/**
+ * Drops `//` and `/* *\/` comments outside JSON strings. An unterminated block
+ * comment returns the text unchanged so the parser still rejects it.
+ * ponytail: comments only; a trailing comma still makes the file invalid.
+ */
+export function stripJsonComments(text: string): string {
+  let out = "";
+  let i = 0;
+  let inString = false;
+  while (i < text.length) {
+    const c = text[i];
+    if (inString) {
+      out += c;
+      if (c === "\\") {
+        out += text[i + 1] ?? "";
+        i += 2;
+        continue;
+      }
+      if (c === "\"") inString = false;
+      i += 1;
+      continue;
+    }
+    if (c === "\"") {
+      inString = true;
+      out += c;
+      i += 1;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i += 1;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end < 0) return text;
+      i = end + 2;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/** Strict JSON read: comments make the file invalid. */
 export function readJsonObject(path: string): JsonReadResult {
+  return readObject(path, "reject");
+}
+
+/**
+ * JSONC read for configs a harness lets users comment. The comments are gone
+ * once the file is written back, which the owner accepted for setup writes.
+ */
+export function readJsoncObject(path: string): JsonReadResult {
+  return readObject(path, "strip");
+}
+
+function readObject(path: string, comments: "reject" | "strip"): JsonReadResult {
   let bytes: Buffer;
   let metadata: ReturnType<typeof lstatSync>;
   try {
@@ -78,7 +135,8 @@ export function readJsonObject(path: string): JsonReadResult {
 
   let value: unknown;
   try {
-    value = JSON.parse(bytes.toString("utf8"));
+    const text = bytes.toString("utf8");
+    value = JSON.parse(comments === "strip" ? stripJsonComments(text) : text);
   } catch {
     return { status: "invalid", error: "JSON config is invalid" };
   }
