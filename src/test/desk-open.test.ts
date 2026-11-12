@@ -202,7 +202,7 @@ test("desk open: a desk that will not close still gets the swap and a note", asy
   assert.equal(await openDesk(source.deps), "opened");
   assert.deepEqual(source.calls, ["quit", "sync", "launch", "apply"]);
   assert.equal(source.said.length, 1);
-  assert.ok(source.said[0].includes("Quit it from its tray menu"));
+  assert.ok(source.said[0].includes("Quit Rocky from its tray menu"));
   assert.ok(source.said[0].includes(VERSION));
 });
 

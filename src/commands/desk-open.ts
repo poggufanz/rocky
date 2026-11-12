@@ -104,7 +104,7 @@ export async function openDesk(deps: DeskOpenDeps): Promise<"opened" | "unavaila
     }
     if (quitCode !== 0) {
       deps.say(
-        `rocky: the running desktop app did not close. Quit it from its tray menu, then run rocky again to use version ${pkg.version}.`,
+        `rocky: the running desktop app or its background process did not close. Quit Rocky from its tray menu, or end the rockyd process if no tray icon shows, then run rocky again to use version ${pkg.version}.`,
       );
     }
     swapped = result.state === "installed";
