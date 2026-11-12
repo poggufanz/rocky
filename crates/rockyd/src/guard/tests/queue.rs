@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use rocky_proto::pipe::{
     ConsentState, PendingRepo, ServerMsg, SetupAction, SetupTarget, TargetState,
 };
@@ -471,4 +473,31 @@ fn decided_status_clears_pending_for_its_main() {
     let fourth = guard.next_job(3).expect("fourth root");
     let declined = verdict("k3", "/code/clean", RepoDecisionState::Declined);
     assert!(guard.finish(&fourth, with_repo(declined), 4).is_empty());
+}
+
+#[test]
+fn allowed_roots_lists_allowed_verdicts() {
+    let mut guard = settled(approved(&[]));
+    assert!(guard.allowed_roots().is_empty());
+    let cases = [
+        ("/w/a", "/code/alpha", RepoDecisionState::Allowed),
+        ("/w/b", "/code/beta", RepoDecisionState::Undecided),
+        ("/w/c", "/code/gamma", RepoDecisionState::Declined),
+    ];
+    for (index, (root, main, decision)) in cases.into_iter().enumerate() {
+        guard.session_root(root);
+        let job = guard.next_job(index as u64).expect("status job");
+        guard.finish(&job, with_repo(verdict("k", main, decision)), 1);
+    }
+    assert_eq!(guard.allowed_roots(), BTreeSet::from(["/w/a".to_string()]));
+
+    // An allow decision for a main repo reaches every root cached under it.
+    guard.repo_request(1, 1, "/w/b".to_string(), true);
+    let decide = guard.next_job(9).expect("decision job");
+    let allowed = verdict("k", "/code/beta", RepoDecisionState::Allowed);
+    guard.finish(&decide, with_repo(allowed), 10);
+    assert_eq!(
+        guard.allowed_roots(),
+        BTreeSet::from(["/w/a".to_string(), "/w/b".to_string()])
+    );
 }

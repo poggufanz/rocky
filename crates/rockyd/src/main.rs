@@ -2,6 +2,7 @@
 
 //! `rockyd`: drain spool into the status machine, serve desk over a named pipe.
 
+mod capture_loop;
 mod guard_loop;
 
 use std::collections::{HashMap, HashSet};
@@ -10,12 +11,13 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use capture_loop::CaptureLoop;
 use guard_loop::GuardLoop;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, settings_path, spool_dir};
 use rocky_proto::pipe::{
-    AgentKey, AgentStatus, Health, PendingRepo, ServerMsg, SetupHealth, StatusOp,
+    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, ServerMsg, SetupHealth, StatusOp,
 };
 use rocky_proto::settings::Settings;
 use rockyd::gaps::Gaps;
@@ -55,6 +57,8 @@ struct Shared {
     setup: SetupHealth,
     /// Repos waiting for a capture decision, as the last broadcast listed them.
     repo_pending: Vec<PendingRepo>,
+    /// Per-repo capture state. `take_health` carries it into the broadcast health.
+    capture: Vec<CaptureHealth>,
 }
 
 impl Shared {
@@ -65,6 +69,7 @@ impl Shared {
         next.gaps = self.gaps.to_vec();
         next.settings_unreadable = self.settings_unreadable;
         next.setup = self.setup.clone();
+        next.capture = self.capture.clone();
         let changed = next != self.health;
         if changed {
             self.health = next.clone();
@@ -137,6 +142,7 @@ fn main() {
         history: History::open(&history_dir(&home), HISTORY_CAP_BYTES, false),
         setup: SetupHealth::default(),
         repo_pending: Vec::new(),
+        capture: Vec::new(),
     }));
 
     let hub = Arc::new(Hub::new());
@@ -241,6 +247,8 @@ fn main() {
     guards.check(&shared, &hub, &log);
     rescan(&spool, &shared, &hub, &log, &mut ingest, &mut guards);
     guards.check(&shared, &hub, &log);
+    let mut captures = CaptureLoop::new(home.clone(), &log);
+    captures.check(&guards.allowed_roots());
 
     // 6. Settle what replay and ingest produced, and drop day-old history and
     // gaps. Runs after ingest so pending spool events are never idled away.
@@ -307,6 +315,8 @@ fn main() {
                     } else {
                         "stop requested, exiting"
                     });
+                    // `process::exit` runs no destructors, so the capture child is stopped here.
+                    captures.shutdown(&log);
                     std::process::exit(0);
                 }
                 Ok(Control::Set {
@@ -356,9 +366,12 @@ fn main() {
             last_tick = now;
             tick_once(&shared, &hub, &log);
             guards.check(&shared, &hub, &log);
+            captures.check(&guards.allowed_roots());
         }
 
         guards.service(&shared, &hub, &log);
+        // ponytail: rebuilt every 25 ms; cache it on the guard if the set grows large.
+        captures.service(&guards.allowed_roots(), &shared, &hub, &log);
         thread::sleep(Duration::from_millis(25));
     }
 }

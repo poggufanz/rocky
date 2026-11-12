@@ -4,6 +4,8 @@
 //! outcome into replies, log lines, and pending-repo changes. It starts no
 //! process itself.
 
+use std::collections::BTreeSet;
+
 use rocky_proto::pipe::{ConsentState, PendingRepo, ServerMsg, SetupAction};
 
 use super::node::{AutoResult, RepoDecisionState, RepoVerdict, RunError};
@@ -88,6 +90,16 @@ impl Guard {
     /// Repos that still need a Listening decision, ordered by main path.
     pub fn pending(&self) -> Vec<PendingRepo> {
         self.pending_repos.values().cloned().collect()
+    }
+
+    /// Session roots whose cached repo verdict is `allowed`. A repo decision updates the cache,
+    /// so a desk "allow" shows here as soon as its job finishes.
+    pub fn allowed_roots(&self) -> BTreeSet<String> {
+        self.root_verdicts
+            .iter()
+            .filter(|(_, (_, decision))| *decision == RepoDecisionState::Allowed)
+            .map(|(root, _)| root.clone())
+            .collect()
     }
 
     /// The outcome of a `setup` job. A plan replies with the plan and leaves the
