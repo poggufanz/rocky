@@ -4,11 +4,15 @@
 //! arguments and no shell, hides the console window on Windows, asks it to reconcile roots
 //! over stdin, and reads its answers from stdout. Stderr goes nowhere, so Node text never
 //! reaches a daemon log.
+//!
+//! Neither pipe is ever touched on the caller's thread. A reader thread owns stdout and a
+//! writer thread owns stdin, so a Node that stalls cannot block the daemon thread that serves
+//! the desk pipe and the guard.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,14 +31,19 @@ pub const CHILD_STOP_GRACE: Duration = Duration::from_secs(5);
 /// How often [`CaptureChild::stop`] checks whether the child has exited.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// Requests that may wait for the writer thread. Past this, [`CaptureChild::send`] fails
+/// instead of waiting.
+const SEND_QUEUE: usize = 64;
+
 /// A running capture child.
 ///
 /// Dropping it kills and reaps the process, so no path leaves a zombie behind.
 #[derive(Debug)]
 pub struct CaptureChild {
     child: Child,
-    /// Taken by [`CaptureChild::stop`], which closes it to tell Node to leave.
-    stdin: Option<ChildStdin>,
+    /// Feeds the writer thread, which owns stdin. Taken by [`CaptureChild::stop`]: with the
+    /// sender gone the writer ends and drops stdin, which tells Node to leave.
+    requests: Option<SyncSender<String>>,
     lines: Receiver<CaptureLine>,
 }
 
@@ -58,17 +67,20 @@ impl CaptureChild {
             return Err(io::Error::other("capture pipes were not set up"));
         };
         let (sender, lines) = mpsc::channel();
-        // Not joined. The reader ends when stdout closes, which is when the child exits.
-        let reader = thread::Builder::new()
-            .name("capture-reader".to_string())
-            .spawn(move || read_lines(stdout, &sender));
-        if let Err(error) = reader {
+        let (requests, queued) = mpsc::sync_channel(SEND_QUEUE);
+        // Neither thread is joined. A grandchild can inherit a pipe and keep it open after
+        // Node is killed, and a join would then hang `stop`. Both end on their own when
+        // their pipe closes: the reader at end of stdout, the writer on a failed write or
+        // once `requests` is dropped.
+        if let Err(error) = spawn_thread("capture-reader", move || read_lines(stdout, &sender))
+            .and_then(|()| spawn_thread("capture-writer", move || write_requests(stdin, &queued)))
+        {
             kill_and_reap(&mut child);
             return Err(error);
         }
         Ok(Self {
             child,
-            stdin: Some(stdin),
+            requests: Some(requests),
             lines,
         })
     }
@@ -76,16 +88,20 @@ impl CaptureChild {
     /// Asks the child to reconcile `root`. The request is one JSON line, so a root with
     /// spaces, quotes, or shell characters arrives as written.
     ///
-    /// Fails when the child is gone.
+    /// Never blocks: the line is queued for the writer thread. `Err` means the child is gone
+    /// (`BrokenPipe`, which can show a moment after it exits) or is not reading and the queue
+    /// is full (`WouldBlock`). The caller should stop the child.
     pub fn send(&mut self, root: &str) -> io::Result<()> {
-        let stdin = self
-            .stdin
-            .as_mut()
+        let requests = self
+            .requests
+            .as_ref()
             .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?;
         let mut line = json!({ "v": 1, "root": root }).to_string();
         line.push('\n');
-        stdin.write_all(line.as_bytes())?;
-        stdin.flush()
+        requests.try_send(line).map_err(|error| match error {
+            TrySendError::Full(_) => io::Error::from(io::ErrorKind::WouldBlock),
+            TrySendError::Disconnected(_) => io::Error::from(io::ErrorKind::BrokenPipe),
+        })
     }
 
     /// The lines the child wrote that the daemon accepts. The channel closes when the child's
@@ -101,9 +117,10 @@ impl CaptureChild {
     }
 
     /// Closes stdin, gives the child `grace` to exit by itself, then kills it. The process is
-    /// reaped either way.
+    /// reaped either way. Requests still queued are written before stdin closes, unless the
+    /// child is not reading; the kill then ends the write.
     pub fn stop(mut self, grace: Duration) {
-        drop(self.stdin.take());
+        drop(self.requests.take());
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
             match self.child.try_wait() {
@@ -126,6 +143,28 @@ impl Drop for CaptureChild {
 fn kill_and_reap(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn spawn_thread(name: &str, work: impl FnOnce() + Send + 'static) -> io::Result<()> {
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(work)
+        .map(drop)
+}
+
+/// Writes each queued request to `stdin` and flushes it. Returns on a failed write, which is
+/// a closed pipe or, after a kill, the end of a write that was stuck on a full one, and when
+/// the sender is dropped. Either way `stdin` drops, so the child sees end of input.
+fn write_requests(mut stdin: ChildStdin, requests: &Receiver<String>) {
+    for line in requests {
+        if stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush())
+            .is_err()
+        {
+            return;
+        }
+    }
 }
 
 /// Splits `stdout` on `\n` and sends each accepted line. Returns at end of input, on a read

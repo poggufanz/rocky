@@ -3,6 +3,7 @@
 //! temp Rocky home and needs `node` on PATH.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -244,4 +245,72 @@ fn child_try_exit_reports_a_child_that_exited() {
     // Assert
     assert_eq!(status.and_then(|status| status.code()), Some(1));
     child.stop(GUARD);
+}
+
+#[test]
+fn child_send_fails_once_the_child_exited() {
+    // Arrange
+    let home = TempDir::new().expect("temp home");
+    configure(home.path(), &json!({ "mode": "exit" }));
+    let mut child = spawn(home.path());
+    wait_until("the child to exit", || child.try_exit().is_some());
+
+    // Act: the writer notices the closed pipe on its own time, so poll for the failure.
+    let mut kind = None;
+    wait_until("a send to fail", || match child.send(AWKWARD_ROOT) {
+        Ok(()) => false,
+        Err(error) => {
+            kind = Some(error.kind());
+            true
+        }
+    });
+
+    // Assert
+    assert_eq!(kind, Some(io::ErrorKind::BrokenPipe));
+    child.stop(GUARD);
+}
+
+#[test]
+fn child_send_to_a_child_that_never_reads_does_not_block() {
+    // Arrange
+    let home = TempDir::new().expect("temp home");
+    configure(home.path(), &json!({ "mode": "deaf" }));
+    let mut child = spawn(home.path());
+    wait_until("the fake CLI to start", || {
+        home.path().join("fake-cli.log").is_file()
+    });
+
+    // Act: far more bytes than the pipe and the send queue hold together.
+    let (failures_sender, failures_receiver) = mpsc::channel();
+    let (stopped_sender, stopped_receiver) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let root = "x".repeat(16 * 1024);
+        let mut failures = Vec::new();
+        for _ in 0..256 {
+            if let Err(error) = child.send(&root) {
+                failures.push(error.kind());
+            }
+        }
+        let _ = failures_sender.send(failures);
+        child.stop(Duration::from_millis(500));
+        let _ = stopped_sender.send(());
+    });
+
+    // Assert: no send blocked, a full queue is reported, and stop still gets the child out.
+    let failures = failures_receiver
+        .recv_timeout(GUARD)
+        .expect("a send blocked past the guard");
+    assert!(!failures.is_empty(), "a full queue must be reported");
+    assert!(
+        failures
+            .iter()
+            .all(|kind| *kind == io::ErrorKind::WouldBlock),
+        "a live child that is not reading only fills the queue: {failures:?}"
+    );
+    assert_eq!(
+        stopped_receiver.recv_timeout(GUARD),
+        Ok(()),
+        "stop did not return inside the guard"
+    );
+    worker.join().expect("worker thread");
 }
