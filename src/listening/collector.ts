@@ -1,22 +1,26 @@
 /**
- * Single-owner collector lease. GUI-foreground and MCP-stdio
- * race for one owner per repo; the loser reads durable state only.
- * Ownership hands off after stop/crash without a daemon: the next
- * process checks the durable lease, steals when expired or owner-dead,
- * then reconciles. Ambiguity yields partial coverage, never dual writers.
+ * Single-owner collector lease. The GUI (`rocky dash`) and the desktop
+ * daemon's capture process race for one owner per repo; the loser reads
+ * durable state only. The MCP server is read-only and never holds a lease. Ownership hands off after stop/crash
+ * with no supervisor: the next process checks the durable lease, steals
+ * when expired or owner-dead, then reconciles. Ambiguity yields partial
+ * coverage, never dual writers.
  */
 import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { collectorPath, repoDir } from "./store-paths.js";
 
+/** Every process kind a lease may name. Only `gui` and `daemon` write one; `mcp` is accepted on read only. */
+const OWNER_PROCS = ["gui", "mcp", "daemon"] as const;
+
 export interface CollectorOwner {
-  proc: "gui" | "mcp";
+  proc: (typeof OWNER_PROCS)[number];
   pid: number;
   token: string;
 }
 
 interface Lease {
-  proc: "gui" | "mcp";
+  proc: CollectorOwner["proc"];
   pid: number;
   token: string;
   expires: number;
@@ -25,13 +29,17 @@ interface Lease {
 /** PROPOSAL-adjacent lease length; fixed for recovery liveness. */
 export const COLLECTOR_LEASE_MS = 30_000;
 
+function isOwnerProc(value: unknown): value is CollectorOwner["proc"] {
+  return OWNER_PROCS.some((proc) => proc === value);
+}
+
 function readLease(repoRoot: string, home?: string): Lease | undefined {
   try {
     const raw = readFileSync(collectorPath(repoRoot, home), "utf8");
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return undefined;
     const candidate = parsed as Record<string, unknown>;
-    if ((candidate["proc"] !== "gui" && candidate["proc"] !== "mcp")
+    if (!isOwnerProc(candidate["proc"])
       || typeof candidate["pid"] !== "number"
       || typeof candidate["token"] !== "string"
       || typeof candidate["expires"] !== "number") {
@@ -77,7 +85,7 @@ function pidAlive(pid: number): boolean {
 }
 
 function validOwner(owner: CollectorOwner): boolean {
-  return (owner.proc === "gui" || owner.proc === "mcp")
+  return isOwnerProc(owner.proc)
     && Number.isSafeInteger(owner.pid)
     && owner.pid > 0
     && typeof owner.token === "string"

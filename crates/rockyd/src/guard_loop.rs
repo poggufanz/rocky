@@ -308,6 +308,11 @@ impl GuardLoop {
         self.last_token
     }
 
+    /// Session roots whose repo the owner has allowed capture for.
+    pub(crate) fn allowed_roots(&self) -> BTreeSet<String> {
+        self.guard.allowed_roots()
+    }
+
     /// Queues the config dirs and session repos one rescan found.
     pub(crate) fn rescanned(&mut self, locations: &[(String, String)], roots: &[String]) {
         for (harness, location) in locations {
@@ -345,7 +350,7 @@ fn is_ok(state: TargetState) -> bool {
 /// Whether a watcher event can change a guarded file or record. Access events are
 /// opens, reads, and closes. The check itself opens these files, so counting them
 /// would re-run the check forever on inotify.
-fn is_change(kind: &EventKind) -> bool {
+pub(crate) fn is_change(kind: &EventKind) -> bool {
     !matches!(kind, EventKind::Access(_))
 }
 

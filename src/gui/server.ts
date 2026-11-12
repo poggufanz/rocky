@@ -64,7 +64,7 @@ import { LISTENING_DISK_BUDGET_BYTES_PER_REPO } from "../listening/types.js";
 import { projectGraph } from "../listening/graph-store.js";
 import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import { repoSlug } from "../listening/store-paths.js";
-import { startCollectorLoop, type CollectorLoop } from "../listening/collector-loop.js";
+import { COLLECTOR_TICK_MS, startCollectorLoop, type CollectorLoop } from "../listening/collector-loop.js";
 
 export const DEFAULT_GUI_PORT = 7777;
 const READ_CAP_BYTES = 2 * 1024 * 1024;
@@ -955,7 +955,7 @@ export function startGui(options: { port?: number; root?: string; collect?: bool
       server.listen(port, "127.0.0.1", () => {
         const addr = server.address();
         boundPort = typeof addr === "object" && addr !== null ? addr.port : port;
-        if (options.collect === true) collectors = startCollectorLoop({ proc: "gui" });
+        if (options.collect === true) collectors = startCollectorLoop({ proc: "gui", fullEveryMs: COLLECTOR_TICK_MS });
         done({
           port: boundPort,
           token,

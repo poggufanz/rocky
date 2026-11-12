@@ -6,6 +6,7 @@ use rocky_proto::pipe::{
 use rocky_proto::settings::Settings;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::capture_lines::capture_lines;
 use crate::i18n::{Msg, UiLang, tr};
 use crate::setup_lines::setup_lines;
 
@@ -390,6 +391,7 @@ impl Model {
             w.push(Msg::SettingsUnreadable);
         }
         w.extend(setup_lines(&h.setup));
+        w.extend(capture_lines(&h.capture));
         let mut gaps: Vec<_> = h.gaps.iter().collect();
         gaps.sort_by_key(|g| std::cmp::Reverse(g.to_ms));
         for gap in gaps.iter().take(GAP_LINES) {

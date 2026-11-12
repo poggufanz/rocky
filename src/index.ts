@@ -593,6 +593,9 @@ async function main(): Promise<number> {
         return (await import("./agent/annotate.js")).annotateCommand(rest[0] ?? "");
       case "_ambiguity":
         return (await import("./agent/ambiguity.js")).ambiguityCommand(rest[0] ?? "");
+      case "listen":
+        // Hidden: the desktop daemon's capture process, not listed in help.
+        return (await import("./commands/listen.js")).listenCommand(rest);
       case "--version":
         if (rest.length !== 0) throw new CliUsageError(`unexpected argument: ${rest[0]}`, "rocky --version");
         console.log(PACKAGE_VERSION);

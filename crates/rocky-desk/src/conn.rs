@@ -4,6 +4,8 @@
 //! connection event: what should happen next? All transition logic lives here
 //! so it is unit-testable; `app.rs` only executes the returned [`Action`].
 
+use rocky_proto::respawn::RespawnPolicy;
+
 use super::view::Conn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +39,7 @@ pub enum Action {
 
 #[derive(Debug)]
 pub struct ConnState {
-    policy: super::respawn::RespawnPolicy,
+    policy: RespawnPolicy,
     /// Id of the stop cmd awaiting its ack, if any.
     stop_ack_id: Option<u64>,
     /// A stop was acked (or the daemon died while one was pending).
@@ -51,7 +53,7 @@ pub struct ConnState {
 impl ConnState {
     pub fn new(max_respawns: usize, window_ms: u64) -> Self {
         Self {
-            policy: super::respawn::RespawnPolicy::new(max_respawns, window_ms),
+            policy: RespawnPolicy::new(max_respawns, window_ms),
             stop_ack_id: None,
             stopped: false,
             connecting: false,

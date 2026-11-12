@@ -209,7 +209,7 @@ Rocky starts an HTTP server on `127.0.0.1`, prints the URL on stderr, and tries 
 
 The default port is `7777`. If that port is busy, Rocky takes any free port rather than failing.
 
-In a pipe or a script there is no human to look at a browser, so bare `rocky` prints usage help and `rocky dash` prints the `rocky stats` summary instead. With `--no-open`, both `rocky` and `rocky dash` serve the page and print the URL without needing a terminal; the process stays in the foreground (and runs the Listening collector for consented repos) until stopped.
+In a pipe or a script there is no human to look at a browser, so bare `rocky` prints usage help and `rocky dash` prints the `rocky stats` summary instead. With `--no-open`, both `rocky` and `rocky dash` serve the page and print the URL without needing a terminal; the process stays in the foreground (and runs the Listening collector for consented repos) until stopped. The collector also runs in the desktop app's background process, and `dash` skips a repo that process holds.
 
 ### Segments
 
