@@ -37,11 +37,15 @@ use crate::requests::{Outcome as RequestOutcome, RequestKind, Requests, client_m
 use crate::settings_view::{
     self, SettingId, View, set_autostart_asked, set_bool, set_lang, show_autostart_banner,
 };
+use crate::setup_settings::SetupSettings;
 use crate::spawn::daemon_exe_name;
 #[cfg(windows)]
 use crate::toast::set_process_aumid;
 use crate::ui::consent::{consent_screen, install_row};
+use crate::ui::setup_settings::removed_screen;
 use crate::view::{Conn, Model};
+
+mod setup_wiring;
 
 gpui::actions!(rocky, [OpenRocky, StopRecording, QuitDesk]);
 
@@ -175,6 +179,10 @@ struct DeskView {
     requests: Requests,
     /// First-use consent screen state.
     consent: ConsentModel,
+    /// Settings setup sections: switches, repos and Remove Rocky.
+    setup: SetupSettings,
+    /// When the final screen gives up waiting for the daemon's quit broadcast.
+    removed_quit_at: Option<u64>,
     /// The tray menu must be rebuilt for the new language. Done by the pump
     /// outside the view lease, since the builder reads this entity.
     menu_stale: bool,
@@ -258,9 +266,11 @@ impl DeskView {
         self.ctl.view = match self.ctl.view {
             View::Agents => View::Settings,
             View::Settings | View::Consent => View::Agents,
+            View::Removed => View::Removed,
         };
         if self.ctl.view == View::Settings {
             self.read_autostart();
+            self.refresh_setup();
         }
         cx.notify();
     }
@@ -284,6 +294,7 @@ impl DeskView {
     /// Route one request outcome to the screen that owns its kind.
     fn on_outcome(&mut self, kind: RequestKind, outcome: RequestOutcome) {
         let expired = tr(self.ctl.ui_lang, &Msg::Setup(SetupMsg::RequestTimedOut));
+        self.route_setup(kind.clone(), outcome.clone(), &expired);
         let step = self.consent.route(kind, outcome, &expired);
         if step.send_plan {
             self.request_plan();
@@ -678,6 +689,7 @@ impl DeskView {
                             // Ack state changed (stop acked or id cleared).
                         }
                         let for_notify = msg.clone();
+                        self.setup.on_server_msg(&for_notify);
                         requests.extend(self.ctl.model.apply(msg));
                         if settings_msg {
                             self.register_notices();
@@ -715,7 +727,7 @@ impl DeskView {
                 changed = true;
             }
         }
-        if quit {
+        if quit || self.removed_quit_due() {
             // Nothing left to render or relay: close the tray and end the
             // process. The daemon is already exiting on the same command.
             self.quit(cx);
@@ -768,6 +780,10 @@ impl Render for DeskView {
             )
             .into_any_element();
         }
+        if self.ctl.view == View::Removed {
+            let home = self.ctl.rocky_home.display().to_string();
+            return removed_screen(lang, &home, Self::finish_removed, cx).into_any_element();
+        }
         // Opaque background: without one, gpui on Windows shows the desktop through.
         let mut root = div()
             .flex()
@@ -781,7 +797,7 @@ impl Render for DeskView {
             root = root.child(banner);
         }
         let other = match self.ctl.view {
-            View::Agents | View::Consent => Msg::ViewSettings,
+            View::Agents | View::Consent | View::Removed => Msg::ViewSettings,
             View::Settings => Msg::ViewAgents,
         };
         root = root.child(
@@ -803,7 +819,10 @@ impl Render for DeskView {
             // Outside the panel, which returns early while settings are
             // unknown: Quit must stay reachable when the daemon is down.
             return root
+                .id(SharedString::from("settings"))
+                .overflow_y_scroll()
                 .child(self.settings_panel(cx))
+                .child(self.setup_panel(cx))
                 .child(
                     div()
                         .id(SharedString::from("quit"))
@@ -1108,6 +1127,8 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             notified_path,
             requests: Requests::default(),
             consent: ConsentModel::default(),
+            setup: SetupSettings::default(),
+            removed_quit_at: None,
             menu_stale: false,
             #[cfg(not(windows))]
             user_shown: false,
@@ -1150,9 +1171,14 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             }
         }
         // Closing the window hides it: veto the close and minimize instead.
+        // On the final screen it quits instead.
         if let Err(e) = window.update(cx, |_, window, cx| {
-            window.on_window_should_close(&*cx, |window, _| {
-                set_visible(window, false);
+            let view = view.clone();
+            window.on_window_should_close(&*cx, move |window, cx| {
+                let quitting = view.update(cx, |v, cx| v.on_close_request(cx));
+                if !quitting {
+                    set_visible(window, false);
+                }
                 false
             });
         }) {

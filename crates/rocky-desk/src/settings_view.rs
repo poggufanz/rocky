@@ -109,6 +109,8 @@ pub enum View {
     Agents,
     Settings,
     Consent,
+    /// Shown after Remove Rocky finished; closing it quits the desk.
+    Removed,
 }
 
 /// The sign-in question shows on a window start until it has been answered.

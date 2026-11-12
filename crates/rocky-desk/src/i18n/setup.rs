@@ -84,6 +84,60 @@ pub enum SetupMsg {
     ConsentNotConnected,
     /// Settings row that opens the consent screen.
     ConsentInstall,
+    /// A Settings request could not be sent because the daemon is unreachable.
+    NotConnected,
+    SettingsAgentTools,
+    HarnessOk,
+    /// `time` is a local `HH:MM`.
+    HarnessRestored {
+        time: String,
+    },
+    HarnessForeign,
+    /// `error` is data from the daemon or Node and may be empty.
+    HarnessFailed {
+        error: String,
+    },
+    HarnessOff,
+    HarnessNotInstalled,
+    /// A switch or button waits for the daemon's answer.
+    SwitchWorking,
+    SettingsShell,
+    ReinstallAll,
+    SettingsRepos,
+    RepoAllowed,
+    RepoDeclined,
+    RepoNotAsked,
+    RepoAllow,
+    RepoRevoke,
+    CaptureOk,
+    CaptureStarting,
+    CapturePartial,
+    CaptureElsewhere,
+    DeleteHistory,
+    /// `name` is a repo name and never translated.
+    DeleteHistoryAsk {
+        name: String,
+    },
+    DeleteConfirm,
+    DeleteCancel,
+    WorktreeMissing,
+    RemoveRocky,
+    RemoveAsk,
+    RemoveConfirm,
+    RemoveCancel,
+    RemoveRetry,
+    RemoveWorking,
+    /// `error` is data from the daemon or Node and may be empty.
+    RemoveFailed {
+        error: String,
+    },
+    RemovedHeading,
+    /// `path` is the Rocky home folder and never translated.
+    RemovedKeptData {
+        path: String,
+    },
+    RemovedUninstall,
+    RemovedClose,
 }
 
 #[cfg(test)]
@@ -162,6 +216,57 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         SetupMsg::RequestTimedOut,
         SetupMsg::ConsentNotConnected,
         SetupMsg::ConsentInstall,
+        SetupMsg::NotConnected,
+        SetupMsg::SettingsAgentTools,
+        SetupMsg::HarnessOk,
+        SetupMsg::HarnessRestored {
+            time: "09:41".into(),
+        },
+        SetupMsg::HarnessForeign,
+        SetupMsg::HarnessFailed {
+            error: "path is outside the home folder".into(),
+        },
+        SetupMsg::HarnessFailed {
+            error: String::new(),
+        },
+        SetupMsg::HarnessOff,
+        SetupMsg::HarnessNotInstalled,
+        SetupMsg::SwitchWorking,
+        SetupMsg::SettingsShell,
+        SetupMsg::ReinstallAll,
+        SetupMsg::SettingsRepos,
+        SetupMsg::RepoAllowed,
+        SetupMsg::RepoDeclined,
+        SetupMsg::RepoNotAsked,
+        SetupMsg::RepoAllow,
+        SetupMsg::RepoRevoke,
+        SetupMsg::CaptureOk,
+        SetupMsg::CaptureStarting,
+        SetupMsg::CapturePartial,
+        SetupMsg::CaptureElsewhere,
+        SetupMsg::DeleteHistory,
+        SetupMsg::DeleteHistoryAsk { name: "app".into() },
+        SetupMsg::DeleteConfirm,
+        SetupMsg::DeleteCancel,
+        SetupMsg::WorktreeMissing,
+        SetupMsg::RemoveRocky,
+        SetupMsg::RemoveAsk,
+        SetupMsg::RemoveConfirm,
+        SetupMsg::RemoveCancel,
+        SetupMsg::RemoveRetry,
+        SetupMsg::RemoveWorking,
+        SetupMsg::RemoveFailed {
+            error: "Node could not start.".into(),
+        },
+        SetupMsg::RemoveFailed {
+            error: String::new(),
+        },
+        SetupMsg::RemovedHeading,
+        SetupMsg::RemovedKeptData {
+            path: "C:/Users/me/.rocky".into(),
+        },
+        SetupMsg::RemovedUninstall,
+        SetupMsg::RemovedClose,
     ]
 }
 
@@ -230,6 +335,50 @@ pub fn setup_en(m: &SetupMsg) -> String {
             "Rocky is not connected yet. The plan loads when it is.".to_string()
         }
         SetupMsg::ConsentInstall => "Install".to_string(),
+        SetupMsg::NotConnected => "Rocky is not connected yet.".to_string(),
+        SetupMsg::SettingsAgentTools => "Agent tools".to_string(),
+        SetupMsg::HarnessOk => "ok".to_string(),
+        SetupMsg::HarnessRestored { time } => format!("restored at {time}"),
+        SetupMsg::HarnessForeign => "foreign".to_string(),
+        SetupMsg::HarnessFailed { error } => format!("failed{}", error_suffix(error)),
+        SetupMsg::HarnessOff => "off".to_string(),
+        SetupMsg::HarnessNotInstalled => "not installed".to_string(),
+        SetupMsg::SwitchWorking => "working".to_string(),
+        SetupMsg::SettingsShell => "Shell hook (Bash and PowerShell)".to_string(),
+        SetupMsg::ReinstallAll => "Reinstall all".to_string(),
+        SetupMsg::SettingsRepos => "Repos".to_string(),
+        SetupMsg::RepoAllowed => "recording allowed".to_string(),
+        SetupMsg::RepoDeclined => "not recorded".to_string(),
+        SetupMsg::RepoNotAsked => "not asked yet".to_string(),
+        SetupMsg::RepoAllow => "Allow".to_string(),
+        SetupMsg::RepoRevoke => "Revoke".to_string(),
+        SetupMsg::CaptureOk => "capturing".to_string(),
+        SetupMsg::CaptureStarting => "capture starting".to_string(),
+        SetupMsg::CapturePartial => "capture is partial".to_string(),
+        SetupMsg::CaptureElsewhere => "another process captures this repo".to_string(),
+        SetupMsg::DeleteHistory => "Delete history".to_string(),
+        SetupMsg::DeleteHistoryAsk { name } => {
+            format!("Delete the recorded history for {name}? This cannot be undone.")
+        }
+        SetupMsg::DeleteConfirm => "Delete".to_string(),
+        SetupMsg::DeleteCancel => "Cancel".to_string(),
+        SetupMsg::WorktreeMissing => "folder is gone".to_string(),
+        SetupMsg::RemoveRocky => "Remove Rocky".to_string(),
+        SetupMsg::RemoveAsk => {
+            "Remove Rocky from your agent tools and shell, and stop it? Your memory, journal and file history stay on disk."
+                .to_string()
+        }
+        SetupMsg::RemoveConfirm => "Remove".to_string(),
+        SetupMsg::RemoveCancel => "Cancel".to_string(),
+        SetupMsg::RemoveRetry => "Retry".to_string(),
+        SetupMsg::RemoveWorking => "Removing Rocky.".to_string(),
+        SetupMsg::RemoveFailed { error } => {
+            format!("Rocky was not removed{}. Try again.", error_suffix(error))
+        }
+        SetupMsg::RemovedHeading => "Rocky is removed from your tools.".to_string(),
+        SetupMsg::RemovedKeptData { path } => format!("Your data stays in {path}."),
+        SetupMsg::RemovedUninstall => "To remove the command line, run:".to_string(),
+        SetupMsg::RemovedClose => "Close".to_string(),
     }
 }
 
@@ -301,5 +450,49 @@ pub fn setup_id(m: &SetupMsg) -> String {
             "Rocky belum terhubung. Rencana dimuat setelah terhubung.".to_string()
         }
         SetupMsg::ConsentInstall => "Pasang".to_string(),
+        SetupMsg::NotConnected => "Rocky belum terhubung.".to_string(),
+        SetupMsg::SettingsAgentTools => "Alat agen".to_string(),
+        SetupMsg::HarnessOk => "baik".to_string(),
+        SetupMsg::HarnessRestored { time } => format!("dipulihkan pukul {time}"),
+        SetupMsg::HarnessForeign => "asing".to_string(),
+        SetupMsg::HarnessFailed { error } => format!("gagal{}", error_suffix(error)),
+        SetupMsg::HarnessOff => "mati".to_string(),
+        SetupMsg::HarnessNotInstalled => "belum terpasang".to_string(),
+        SetupMsg::SwitchWorking => "memproses".to_string(),
+        SetupMsg::SettingsShell => "Shell hook (Bash dan PowerShell)".to_string(),
+        SetupMsg::ReinstallAll => "Pasang ulang semua".to_string(),
+        SetupMsg::SettingsRepos => "Repo".to_string(),
+        SetupMsg::RepoAllowed => "perekaman diizinkan".to_string(),
+        SetupMsg::RepoDeclined => "tidak direkam".to_string(),
+        SetupMsg::RepoNotAsked => "belum ditanya".to_string(),
+        SetupMsg::RepoAllow => "Izinkan".to_string(),
+        SetupMsg::RepoRevoke => "Cabut".to_string(),
+        SetupMsg::CaptureOk => "merekam".to_string(),
+        SetupMsg::CaptureStarting => "capture sedang mulai".to_string(),
+        SetupMsg::CapturePartial => "capture sebagian".to_string(),
+        SetupMsg::CaptureElsewhere => "proses lain merekam repo ini".to_string(),
+        SetupMsg::DeleteHistory => "Hapus riwayat".to_string(),
+        SetupMsg::DeleteHistoryAsk { name } => {
+            format!("Hapus riwayat yang terekam untuk {name}? Ini tidak bisa dibatalkan.")
+        }
+        SetupMsg::DeleteConfirm => "Hapus".to_string(),
+        SetupMsg::DeleteCancel => "Batal".to_string(),
+        SetupMsg::WorktreeMissing => "foldernya sudah hilang".to_string(),
+        SetupMsg::RemoveRocky => "Hapus Rocky".to_string(),
+        SetupMsg::RemoveAsk => {
+            "Hapus Rocky dari alat agen dan shell, lalu hentikan? Memory, journal, dan riwayat file tetap ada di disk."
+                .to_string()
+        }
+        SetupMsg::RemoveConfirm => "Hapus".to_string(),
+        SetupMsg::RemoveCancel => "Batal".to_string(),
+        SetupMsg::RemoveRetry => "Coba lagi".to_string(),
+        SetupMsg::RemoveWorking => "Menghapus Rocky.".to_string(),
+        SetupMsg::RemoveFailed { error } => {
+            format!("Rocky belum terhapus{}. Coba lagi.", error_suffix(error))
+        }
+        SetupMsg::RemovedHeading => "Rocky sudah dihapus dari alat Anda.".to_string(),
+        SetupMsg::RemovedKeptData { path } => format!("Data Anda tetap ada di {path}."),
+        SetupMsg::RemovedUninstall => "Untuk menghapus command line, jalankan:".to_string(),
+        SetupMsg::RemovedClose => "Tutup".to_string(),
     }
 }

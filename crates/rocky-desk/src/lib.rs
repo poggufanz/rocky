@@ -17,6 +17,7 @@ pub mod relay;
 pub mod requests;
 pub mod settings_view;
 pub mod setup_lines;
+pub mod setup_settings;
 pub mod spawn;
 pub mod toast;
 pub mod ui;

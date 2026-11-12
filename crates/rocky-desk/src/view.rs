@@ -217,6 +217,11 @@ impl Model {
         self.conn = c;
     }
 
+    /// The daemon's last health report.
+    pub fn health(&self) -> &Health {
+        &self.health
+    }
+
     pub fn settings(&self) -> Option<&Settings> {
         self.settings.as_ref()
     }
