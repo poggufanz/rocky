@@ -127,7 +127,21 @@ impl Guard {
                 id,
                 repos: result.repos,
             },
-            _ => {
+            // Node reports only the shell entry, or nothing, for these; the cached
+            // targets stay as the last full apply left them.
+            SetupAction::RepoPurge { .. } | SetupAction::ShellOn | SetupAction::ShellOff => {
+                ServerMsg::Ack {
+                    id,
+                    ok: true,
+                    error: None,
+                }
+            }
+            SetupAction::Apply
+            | SetupAction::Remove
+            | SetupAction::ConsentApprove
+            | SetupAction::ConsentLater
+            | SetupAction::HarnessOn { .. }
+            | SetupAction::HarnessOff { .. } => {
                 self.targets = result.targets;
                 ServerMsg::Ack {
                     id,

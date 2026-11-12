@@ -335,6 +335,38 @@ fn plan_reply_carries_switches_and_repo_list_carries_repos() {
 }
 
 #[test]
+fn purge_and_shell_acks_keep_cached_health_targets() {
+    let stored = vec![target("mcp", OTHER, TargetState::Ok, None)];
+    let mut guard = Guard::new(GuardConsts::default(), 0);
+    guard.observe(approved(&[]), 0);
+    assert_eq!(guard.next_job(0), Some(Job::Apply));
+    guard.finish(&Job::Apply, applied(stored), 0);
+    let purge = SetupAction::RepoPurge {
+        root: "/code/a".to_string(),
+    };
+    for (id, action) in [
+        (1, purge),
+        (2, SetupAction::ShellOn),
+        (3, SetupAction::ShellOff),
+    ] {
+        assert!(guard.setup_request(3, id, action).is_none());
+        let job = guard.next_job(1).expect("setup job");
+        let partial = vec![target("shell", CFG, TargetState::Written, None)];
+        let effects = guard.finish(&job, applied(partial), 2);
+        assert!(matches!(
+            &effects[0],
+            Effect::Reply {
+                msg: ServerMsg::Ack { ok: true, .. },
+                ..
+            }
+        ));
+        let health = guard.health(2).targets;
+        assert_eq!(health.len(), 1, "action {id} changed the cache");
+        assert_eq!(health[0].path, OTHER);
+    }
+}
+
+#[test]
 fn unknown_harness_is_refused_without_node() {
     let mut guard = settled(approved(&[]));
     let cursor = SetupAction::HarnessOn {
