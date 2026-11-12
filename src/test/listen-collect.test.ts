@@ -1,11 +1,12 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { PassThrough } from "node:stream";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createLineReader, MAX_LINE_BYTES, parseRequestLine } from "../commands/listen.js";
+import { createLineReader, listenCommand, MAX_LINE_BYTES, parseRequestLine } from "../commands/listen.js";
 import { setRepoCapture } from "../listening/consent.js";
 import {
   COLLECTOR_TICK_MS,
@@ -50,6 +51,8 @@ interface Listen {
   stderr(): string;
   send(value: unknown): void;
   endInput(): void;
+  /** Close our end of the child's stdout pipe, as a daemon that went away would. */
+  dropOutput(): void;
   exited: Promise<number | null>;
   kill(): void;
 }
@@ -84,6 +87,7 @@ function spawnListen(home: string, userHome: string, args: string[]): Listen {
       child.stdin.write(typeof value === "string" ? value : `${JSON.stringify(value)}\n`);
     },
     endInput: () => child.stdin.end(),
+    dropOutput: () => child.stdout.destroy(),
     exited,
     kill: () => {
       if (child.exitCode === null && child.signalCode === null) child.kill();
@@ -217,22 +221,27 @@ test("collect rejects other arguments", (t) => {
   }));
 });
 
+/** Resolves true once `proc` has printed `count` result lines for `root`. */
+function untilResults(proc: Listen, root: string, count: number): Promise<boolean> {
+  return until(() => proc.results().filter((line) => line.root === root).length >= count);
+}
+
+// The tick reconciles a root once and the next full pass is a minute away
+// (CAPTURE_FULL_EVERY_MS), so a second result for the same root inside the wait
+// can only come from a request line.
 test("collect ignores a root without consent", { skip: noGit }, async (t) => {
   const s = new Scratch(t);
   const home = s.dir("rocky-listen-home-");
-  const early = s.repo();
-  const late = s.repo();
+  const target = s.repo();
   const stranger = s.repo();
-  assert.equal(setRepoCapture(early, true, CONSENT, home).ok, true);
+  const key = normalizeRepoRoot(target);
+  assert.equal(setRepoCapture(target, true, CONSENT, home).ok, true);
   const proc = s.listen(home);
-  assert.ok(await until(() => proc.lines.some((raw) => (JSON.parse(raw) as Line).kind === "roots")), "first tick done");
-  // Consent arrives after the first tick, so only the request line can get this
-  // root reconciled soon. Lines are handled in order: once the late root has a
-  // result, the stranger line before it was already handled.
-  assert.equal(setRepoCapture(late, true, CONSENT, home).ok, true);
+  assert.ok(await untilResults(proc, key, 1), "the first pass reconciles the consented root");
+  // Lines are handled in order: once the second result shows up, the stranger line before it was already handled.
   proc.send({ v: 1, root: stranger });
-  proc.send({ v: 1, root: late });
-  assert.ok(await until(() => proc.results().some((line) => line.root === normalizeRepoRoot(late))), "late root result");
+  proc.send({ v: 1, root: target });
+  assert.ok(await untilResults(proc, key, 2), "a request line reconciles the consented root again");
   const strangerKey = normalizeRepoRoot(stranger);
   assert.ok(!proc.results().some((line) => line.root === strangerKey), "no result for the unconsented root");
   assert.ok(!proc.lines.some((raw) => raw.includes(JSON.stringify(strangerKey).slice(1, -1))), "the root is never named");
@@ -242,19 +251,71 @@ test("collect ignores a root without consent", { skip: noGit }, async (t) => {
 test("collect keeps serving after malformed input lines", { skip: noGit }, async (t) => {
   const s = new Scratch(t);
   const home = s.dir("rocky-listen-home-");
-  const early = s.repo();
-  const late = s.repo();
-  assert.equal(setRepoCapture(early, true, CONSENT, home).ok, true);
+  const target = s.repo();
+  const key = normalizeRepoRoot(target);
+  assert.equal(setRepoCapture(target, true, CONSENT, home).ok, true);
   const proc = s.listen(home);
-  assert.ok(await until(() => proc.lines.some((raw) => (JSON.parse(raw) as Line).kind === "roots")), "first tick done");
-  assert.equal(setRepoCapture(late, true, CONSENT, home).ok, true);
+  assert.ok(await untilResults(proc, key, 1), "the first pass reconciles the consented root");
   proc.send("not json at all\n");
-  proc.send(`{"v":2,"root":${JSON.stringify(late)}}\n`);
+  proc.send(`{"v":2,"root":${JSON.stringify(target)}}\n`);
   proc.send(`{"v":1,"root":${JSON.stringify(`/${"a".repeat(MAX_LINE_BYTES + 10)}`)}}\n`);
   proc.send("\n");
-  proc.send({ v: 1, root: late });
-  assert.ok(await until(() => proc.results().some((line) => line.root === normalizeRepoRoot(late))), "late root result");
+  proc.send({ v: 1, root: target });
+  assert.ok(await untilResults(proc, key, 2), "the valid line after the malformed ones is still served");
   for (const raw of proc.lines) assert.equal((JSON.parse(raw) as Line).v, 1, raw);
+});
+
+test("collect exits when its output pipe closes even if stdin stays open", { skip: noGit }, async (t) => {
+  const s = new Scratch(t);
+  const home = s.dir("rocky-listen-home-");
+  const repo = s.repo();
+  assert.equal(setRepoCapture(repo, true, CONSENT, home).ok, true);
+  // Closed before the child starts, so its first roots line has nowhere to go.
+  const proc = s.listen(home);
+  proc.dropOutput();
+  const outcome = await Promise.race([proc.exited, new Promise<string>((done) => setTimeout(() => done("hung"), WAIT_MS))]);
+  assert.equal(outcome, 0, "the process must exit on its own while stdin is still open");
+  assert.equal(leaseExpires(repo, home), 0, "its leases are released");
+});
+
+/** A loop that records requests. It ends as `failed` at once when asked, else `stopped` on `stop()`. */
+function fakeLoop(opts: { failed?: boolean; requests?: string[] } = {}): CollectorLoop {
+  let finish: (result: "stopped" | "failed") => void = () => {};
+  const done = new Promise<"stopped" | "failed">((resolve) => {
+    finish = resolve;
+  });
+  if (opts.failed === true) finish("failed");
+  return {
+    kick: () => {},
+    request: (root) => {
+      opts.requests?.push(root);
+    },
+    stop: async () => finish("stopped"),
+    done,
+  };
+}
+
+test("a failed loop ends the command while the input stream is still open", async () => {
+  const input = new PassThrough();
+  const code = await listenCommand(["collect", "--stdio"], { startLoop: () => fakeLoop({ failed: true }), input });
+  assert.equal(code, 1);
+  assert.equal(input.destroyed, true, "stdin is released so the process can exit");
+});
+
+test("only valid request lines reach the loop, in order", async () => {
+  const root = process.platform === "win32" ? "C:\\work\\repo" : "/work/repo";
+  const other = process.platform === "win32" ? "D:\\other" : "/other";
+  const requests: string[] = [];
+  const input = new PassThrough();
+  const command = listenCommand(["collect", "--stdio"], { startLoop: () => fakeLoop({ requests }), input });
+  input.write("not json\n");
+  input.write(`{"v":2,"root":${JSON.stringify(root)}}\n`);
+  input.write(`{"v":1,"root":${JSON.stringify(`${other}${"a".repeat(MAX_LINE_BYTES)}`)}}\n`);
+  input.write(`{"v":1,"root":${JSON.stringify(root)}}\n`);
+  input.write(`{"v":1,"root":${JSON.stringify(other)}}`);
+  input.end();
+  assert.equal(await command, 0);
+  assert.deepEqual(requests, [root, other], "the last line counts even without a trailing newline");
 });
 
 test("request lines parse only a v1 object with an absolute root", () => {

@@ -4,6 +4,7 @@
  * carries `{"v":1,"root":"<absolute path>"}` requests; stdout carries `roots`
  * and `result` lines and nothing else. All human text goes to stderr.
  */
+import type { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { isAbsolute } from "node:path";
 import { resolveRockyPaths } from "../core/state-paths.js";
@@ -99,12 +100,19 @@ export function createLineReader(
   };
 }
 
-export async function listenCommand(args: string[]): Promise<number> {
+/** Internal test seam. The command line passes neither. */
+export interface ListenDeps {
+  startLoop?: typeof startCollectorLoop;
+  input?: Readable;
+}
+
+export async function listenCommand(args: string[], deps: ListenDeps = {}): Promise<number> {
   if (args.length !== 2 || args[0] !== "collect" || args[1] !== "--stdio") {
     say(USAGE);
     return 2;
   }
-  const loop = startCollectorLoop({
+  const input = deps.input ?? process.stdin;
+  const loop = (deps.startLoop ?? startCollectorLoop)({
     proc: "daemon",
     home: resolveRockyPaths().home,
     fullEveryMs: CAPTURE_FULL_EVERY_MS,
@@ -127,13 +135,19 @@ export async function listenCommand(args: string[]): Promise<number> {
       reader.end();
       resolve();
     };
-    process.stdin.on("data", (chunk: Buffer) => reader.push(chunk));
-    process.stdin.on("end", finish);
-    process.stdin.on("error", finish);
+    input.on("data", (chunk: Buffer) => reader.push(chunk));
+    input.on("end", finish);
+    input.on("error", finish);
     // The reader is gone: nobody is left to hear results, so stop capturing.
     process.stdout.on("error", finish);
   });
-  await Promise.race([loop.done, inputEnded]);
-  await loop.stop();
+  try {
+    await Promise.race([loop.done, inputEnded]);
+    await loop.stop();
+  } finally {
+    // The daemon may still hold its end of the pipe (worker failure, output gone).
+    // A live stdin listener would keep this process running after the exit code is set.
+    input.destroy();
+  }
   return (await loop.done) === "failed" ? 1 : 0;
 }
