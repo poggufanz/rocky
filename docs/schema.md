@@ -383,7 +383,7 @@ The actions beyond `plan`, `apply`, `remove`, `consent`, and `harness`:
 
 | Action | Effect |
 |---|---|
-| `shell on` / `shell off` | Sets `shell_hook` in the consent record. `off` takes out the shell hook entries and stops their repair. |
+| `shell on` / `shell off` | Sets `shell_hook` in the consent record, but only a valid record takes the flag. `off` removes the shell block in any consent state and stops its repair. `on` installs the shell block only under `approved` consent. |
 | `repo list` | Lists every repo with a recorded capture decision. Only this action adds `repos`. |
 
 `repos` is an array of `{key, main, name, decision, bytes, worktrees[]}`:
