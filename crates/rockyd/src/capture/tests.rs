@@ -386,7 +386,7 @@ fn result_maps_coverage_and_reason() {
     // A path-like reason never reaches the row.
     assert_eq!(
         row(&health, "C:/c").error.as_deref(),
-        Some("Capture failed.")
+        Some("The capture process reported an error.")
     );
 
     // The newest Result wins.
@@ -408,9 +408,15 @@ fn reason_text_names_known_reasons_only() {
         reason_text(Some("root-unusable")),
         "The repo folder cannot be read."
     );
-    assert_eq!(reason_text(Some("C:/secret/repo")), "Capture failed.");
-    assert_eq!(reason_text(Some("")), "Capture failed.");
-    assert_eq!(reason_text(None), "Capture failed.");
+    assert_eq!(
+        reason_text(Some("C:/secret/repo")),
+        "The capture process reported an error."
+    );
+    assert_eq!(
+        reason_text(Some("")),
+        "The capture process reported an error."
+    );
+    assert_eq!(reason_text(None), "The capture process reported an error.");
 }
 
 #[test]
