@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod gaps;
 pub mod guard;
 pub mod history;
