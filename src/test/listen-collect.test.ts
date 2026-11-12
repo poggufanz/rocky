@@ -2,7 +2,7 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { PassThrough } from "node:stream";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,12 +129,6 @@ class Scratch {
       ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"],
       { cwd: dir, stdio: "ignore" },
     );
-    return dir;
-  }
-
-  copyOf(source: string): string {
-    const dir = this.dir("rocky-listen-copy-");
-    cpSync(source, dir, { recursive: true });
     return dir;
   }
 
@@ -383,9 +377,10 @@ test("daemon capture writes the same store as the dash collector", { skip: noGit
   const s = new Scratch(t);
   const homeA = s.dir("rocky-listen-home-");
   const homeB = s.dir("rocky-listen-home-");
-  const original = s.repo();
-  const guiRepo = s.copyOf(original);
-  const daemonRepo = s.copyOf(original);
+  // Two repos built the same way instead of one copied twice: copying a fresh
+  // `.git` with cpSync failed intermittently on macOS (ENOENT under objects).
+  const guiRepo = s.repo();
+  const daemonRepo = s.repo();
   assert.equal(setRepoCapture(guiRepo, true, CONSENT, homeA).ok, true);
   assert.equal(setRepoCapture(daemonRepo, true, CONSENT, homeB).ok, true);
 
