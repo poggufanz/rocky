@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { defaultAgentHooksTarget, hasOwnedGateGroup } from "../agent-hooks.js";
 import type { McpRegistration } from "../clients.js";
+import type { RepoListEntry } from "./repo-list.js";
 import { DESK_MARKER } from "../desk-hooks.js";
 import { pruneSupersededTransactions } from "../file-transaction.js";
 import { readJsonObject } from "../json-config.js";
@@ -73,7 +74,10 @@ export interface AutoResult {
   consent: ConsentState | "none" | "invalid";
   targets: AutoTargetReport[];
   notes: string[];
+  harness_off: string[];
+  shell_hook: boolean;
   repo?: { key: string; main: string; decision: "allowed" | "declined" | "undecided" };
+  repos?: RepoListEntry[];
 }
 
 interface Scope {
@@ -372,4 +376,33 @@ export function removeHarness(
 /** A copy for callers that report the same targets without writing them. */
 export function refusalReports(targets: readonly AutoTargetReport[]): AutoTargetReport[] {
   return targets.map(({ harness, kind, path }) => ({ harness, kind, path, state: "not_consented" }));
+}
+
+/** Install only the shell block, and expect exactly what it wrote. */
+export function applyShellOnly(ctx: AutoContext): AutoTargetReport[] {
+  const expected = readExpected(ctx.rockyHome);
+  const report = applyShell(ctx.shell);
+  const snippets = shellSnippets(ctx.shell);
+  const kept = expected.files.filter((file) => !snippets.some((entry) => entry.path === file.path));
+  writeExpected(ctx.rockyHome, {
+    v: 1,
+    files: report.state === "error" ? kept : [...kept, ...expectedFilesAfterWrite(snippets, [report])],
+    history: expected.history,
+  });
+  return [report];
+}
+
+/** Remove only the shell block, in any consent state, and drop its expectations. */
+export function removeShellOnly(ctx: AutoContext): AutoTargetReport[] {
+  const expected = readExpected(ctx.rockyHome);
+  const report = removeShell(ctx.shell);
+  const paths = new Set(shellSnippets(ctx.shell).map((entry) => entry.path));
+  const touched = new Set<string>([ctx.shell.bashrcPath(), ...ctx.shell.powerShellProfiles()]);
+  for (const path of touched) pruneSupersededTransactions(path);
+  writeExpected(ctx.rockyHome, {
+    v: 1,
+    files: expected.files.filter((file) => !paths.has(file.path)),
+    history: expected.history,
+  });
+  return [report];
 }
