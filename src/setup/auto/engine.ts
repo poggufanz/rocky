@@ -322,8 +322,9 @@ export function removeAll(ctx: AutoContext, record: ConsentRecord | undefined): 
       reports.push(refusedSettingsReport(target));
       continue;
     }
-    reports.push(...removeClaudeSettings(target.path));
-    touched.add(target.path);
+    const removedReports = removeClaudeSettings(target.path);
+    reports.push(...removedReports);
+    if (!removedReports.some((entry) => entry.state === "refused")) touched.add(target.path);
   }
   for (const harness of AUTO_MCP_HARNESSES) {
     for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {
@@ -360,8 +361,9 @@ export function removeHarness(
         reports.push(refusedSettingsReport(target));
         continue;
       }
-      reports.push(...removeClaudeSettings(target.path));
-      removed.add(target.path);
+      const removedReports = removeClaudeSettings(target.path);
+      reports.push(...removedReports);
+      if (!removedReports.some((entry) => entry.state === "refused")) removed.add(target.path);
     }
   }
   for (const target of mcpTargets(harness, ctx.detect, locationsOf(record, harness))) {

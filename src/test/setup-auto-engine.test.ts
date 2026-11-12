@@ -127,3 +127,17 @@ test("remove reports a missing MCP target with no pending transaction as ok", (t
   const reports = removeAll(f.ctx, undefined);
   assert.equal(reports.find((report) => report.path === target)?.state, "ok");
 });
+
+test("remove keeps the recovery copy beside settings the engine refuses to rewrite", (t) => {
+  const f = fixture(t);
+  const claudeDir = join(f.home, ".claude");
+  mkdirSync(claudeDir);
+  const settings = join(claudeDir, "settings.json");
+  writeFileSync(settings, "{ not json");
+  const retained = transactionFixture(claudeDir, settings, "1234-abcd", "committed", "{}\n");
+
+  const reports = removeAll(f.ctx, undefined);
+
+  assert.equal(reports.some((report) => report.path === settings && report.state === "refused"), true);
+  assert.equal(existsSync(retained), true);
+});
