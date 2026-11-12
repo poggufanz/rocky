@@ -109,6 +109,12 @@ pub enum SetupMsg {
     RepoNotAsked,
     RepoAllow,
     RepoRevoke,
+    /// Banner question for a repo waiting for an answer; `name` is never translated.
+    RepoBannerAsk {
+        name: String,
+    },
+    /// Banner button that keeps the repo unrecorded.
+    RepoBannerNo,
     CaptureOk,
     CaptureStarting,
     CapturePartial,
@@ -240,6 +246,10 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         SetupMsg::RepoNotAsked,
         SetupMsg::RepoAllow,
         SetupMsg::RepoRevoke,
+        SetupMsg::RepoBannerAsk {
+            name: "demo".to_string(),
+        },
+        SetupMsg::RepoBannerNo,
         SetupMsg::CaptureOk,
         SetupMsg::CaptureStarting,
         SetupMsg::CapturePartial,
@@ -352,6 +362,10 @@ pub fn setup_en(m: &SetupMsg) -> String {
         SetupMsg::RepoNotAsked => "not asked yet".to_string(),
         SetupMsg::RepoAllow => "Allow".to_string(),
         SetupMsg::RepoRevoke => "Revoke".to_string(),
+        SetupMsg::RepoBannerAsk { name } => {
+            format!("Allow Rocky to record file history for {name}?")
+        }
+        SetupMsg::RepoBannerNo => "No".to_string(),
         SetupMsg::CaptureOk => "capturing".to_string(),
         SetupMsg::CaptureStarting => "capture starting".to_string(),
         SetupMsg::CapturePartial => "capture is partial".to_string(),
@@ -467,6 +481,10 @@ pub fn setup_id(m: &SetupMsg) -> String {
         SetupMsg::RepoNotAsked => "belum ditanya".to_string(),
         SetupMsg::RepoAllow => "Izinkan".to_string(),
         SetupMsg::RepoRevoke => "Cabut".to_string(),
+        SetupMsg::RepoBannerAsk { name } => {
+            format!("Izinkan Rocky merekam riwayat file {name}?")
+        }
+        SetupMsg::RepoBannerNo => "Tidak".to_string(),
         SetupMsg::CaptureOk => "merekam".to_string(),
         SetupMsg::CaptureStarting => "capture sedang mulai".to_string(),
         SetupMsg::CapturePartial => "capture sebagian".to_string(),

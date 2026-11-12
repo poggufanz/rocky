@@ -8,10 +8,13 @@ use rocky_proto::pipe::{ClientMsg, CmdName};
 use super::{DeskView, now_ms};
 use crate::autostart;
 use crate::i18n::{Msg, SetupMsg, tr};
+use crate::repo_banner::{BannerPlace, banner_places};
 use crate::requests::{Outcome as RequestOutcome, RequestKind};
 use crate::settings_view::View;
 use crate::setup_settings::{CloseAction, Control, SetupSettings, close_action};
+use crate::ui::repo_banner::repo_banner;
 use crate::ui::setup_settings::{SettingsAction, setup_sections};
+use crate::view::RepoGroup;
 
 /// How long the final screen waits for the daemon's quit broadcast before the
 /// desk exits on its own.
@@ -144,6 +147,32 @@ impl DeskView {
             return true;
         }
         false
+    }
+
+    /// The Agents banners, each pending repo once: those above all groups,
+    /// then one list per group in `groups` order.
+    pub(super) fn repo_banners(
+        &mut self,
+        groups: &[RepoGroup],
+        cx: &mut Context<Self>,
+    ) -> (Vec<Div>, Vec<Vec<Div>>) {
+        let mut top = Vec::new();
+        let mut per_group: Vec<Vec<Div>> = groups.iter().map(|_| Vec::new()).collect();
+        for (place, repo) in banner_places(groups, self.setup.pending()) {
+            let banner = repo_banner(
+                self.ctl.ui_lang,
+                &self.requests,
+                &self.setup,
+                &repo,
+                cx,
+                Self::handle_setup_action,
+            );
+            match place {
+                BannerPlace::Top => top.push(banner),
+                BannerPlace::Group(i) => per_group[i].push(banner),
+            }
+        }
+        (top, per_group)
     }
 
     /// The setup part of the Settings panel.

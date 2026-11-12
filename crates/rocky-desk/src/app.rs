@@ -834,12 +834,19 @@ impl Render for DeskView {
                 .into_any_element();
         }
         let groups = self.ctl.model.groups(now_ms());
+        let (top_banners, group_banners) = self.repo_banners(&groups, cx);
+        for banner in top_banners {
+            root = root.child(banner);
+        }
         if groups.is_empty() {
             root = root.child(div().text_sm().child(tr(lang, &Msg::NoAgents)));
         }
-        for g in &groups {
+        for (g, banners) in groups.iter().zip(group_banners) {
             let mut gdiv = div().flex_col().gap_1();
             gdiv = gdiv.child(div().text_sm().child(g.label(lang)));
+            for banner in banners {
+                gdiv = gdiv.child(banner);
+            }
             for s in &g.sessions {
                 let mut sdiv = div().flex_col().pl_2();
                 sdiv = sdiv.child(div().text_xs().child(tr(

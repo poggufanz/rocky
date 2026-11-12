@@ -47,7 +47,7 @@ fn text(lang: UiLang, m: SetupMsg) -> String {
     tr(lang, &Msg::Setup(m))
 }
 
-fn error_line(lang: UiLang, error: &str) -> Div {
+pub(crate) fn error_line(lang: UiLang, error: &str) -> Div {
     div().text_xs().text_color(rgb(ERROR_COLOR)).child(text(
         lang,
         SetupMsg::ConsentFailed {
@@ -56,7 +56,7 @@ fn error_line(lang: UiLang, error: &str) -> Div {
     ))
 }
 
-fn action_button<T: 'static>(
+pub(crate) fn action_button<T: 'static>(
     id: String,
     label: String,
     enabled: bool,
