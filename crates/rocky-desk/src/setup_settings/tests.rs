@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::i18n::SetupMsg;
 use rocky_proto::pipe::{TargetHealth, WorktreeEntry};
