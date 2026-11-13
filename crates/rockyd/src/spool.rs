@@ -399,6 +399,7 @@ mod tests {
             &mut state,
             &mut |_: &str| RepoInfo {
                 root: None,
+                main_root: None,
                 name: "repo".into(),
                 branch: None,
             },
@@ -435,6 +436,7 @@ mod tests {
             &mut state,
             &mut |_: &str| RepoInfo {
                 root: None,
+                main_root: None,
                 name: "repo".into(),
                 branch: None,
             },
@@ -493,6 +495,7 @@ mod tests {
             &mut state,
             &mut |_: &str| RepoInfo {
                 root: None,
+                main_root: None,
                 name: "repo".into(),
                 branch: None,
             },

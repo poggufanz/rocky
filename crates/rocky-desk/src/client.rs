@@ -458,6 +458,7 @@ mod tests {
             quiet_10m: false,
             repo: RepoInfo {
                 root: None,
+                main_root: None,
                 name: "n".repeat(name_len),
                 branch: None,
             },

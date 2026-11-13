@@ -40,6 +40,8 @@ pub struct Action {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoInfo {
     pub root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_root: Option<String>,
     pub name: String,
     pub branch: Option<String>,
 }
@@ -575,6 +577,7 @@ mod tests {
             quiet_10m: false,
             repo: RepoInfo {
                 root: None,
+                main_root: None,
                 name: "rocky".into(),
                 branch: None,
             },
@@ -837,6 +840,38 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&GapReason::HooksRestored).unwrap(),
             "\"hooks_restored\""
+        );
+    }
+
+    #[test]
+    fn repo_info_main_root_omits_when_none_and_defaults_on_old_wire() {
+        let without_main = RepoInfo {
+            root: Some("C:/r".into()),
+            main_root: None,
+            name: "r".into(),
+            branch: Some("main".into()),
+        };
+        let encoded = serde_json::to_string(&without_main).unwrap();
+        assert!(
+            !encoded.contains("main_root"),
+            "unexpected field: {encoded}"
+        );
+
+        let legacy = r#"{"root":"C:/r","name":"r","branch":"main"}"#;
+        let decoded: RepoInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded, without_main);
+
+        let with_main = RepoInfo {
+            root: Some("C:/wt".into()),
+            main_root: Some("C:/r".into()),
+            name: "wt".into(),
+            branch: Some("feat".into()),
+        };
+        let encoded_with = serde_json::to_string(&with_main).unwrap();
+        assert!(encoded_with.contains("\"main_root\":\"C:/r\""));
+        assert_eq!(
+            serde_json::from_str::<RepoInfo>(&encoded_with).unwrap(),
+            with_main
         );
     }
 }

@@ -582,6 +582,7 @@ fn relative_to(target: &str, root: &str) -> Option<String> {
 fn placeholder() -> RepoInfo {
     RepoInfo {
         root: None,
+        main_root: None,
         name: String::new(),
         branch: None,
     }
