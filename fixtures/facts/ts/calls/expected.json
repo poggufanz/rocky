@@ -10,19 +10,19 @@
       },
       "labels": [
         {
-          "id": "call_removed",
-          "args": {
-            "name": "log"
-          }
-        },
-        {
           "id": "call_added",
           "args": {
             "name": "notify"
           }
+        },
+        {
+          "id": "call_removed",
+          "args": {
+            "name": "log"
+          }
         }
       ],
-      "importance": "medium"
+      "importance": "low"
     }
   ]
 }

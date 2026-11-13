@@ -670,13 +670,53 @@ function editedLast() { const x = 2; }
         assert_eq!(
             facts.changes[0].labels,
             vec![
-                Label::CallRemoved {
-                    name: "save".to_string()
-                },
                 Label::CallAdded {
                     name: "notify".to_string()
                 },
+                Label::CallRemoved {
+                    name: "save".to_string()
+                },
             ]
         );
+    }
+
+    #[test]
+    fn else_if_return_is_not_a_guard() {
+        let before = "\
+function pick(a: boolean, c: boolean, x: number) {
+  let y = 0;
+  if (a) {
+    y = 2;
+  }
+  return y;
+}
+";
+        let after = "\
+function pick(a: boolean, c: boolean, x: number) {
+  let y = 0;
+  if (a) {
+    y = 2;
+  } else if (c) return x;
+  return y;
+}
+";
+        let facts = analyze(&FileInput {
+            path: "src/pick.ts",
+            before: Side::Text(before),
+            after: Side::Text(after),
+        });
+        assert_eq!(facts.changes.len(), 1);
+        assert_eq!(facts.changes[0].labels, vec![Label::BranchAdded {}]);
+    }
+
+    #[test]
+    fn guard_condition_change_emits_condition_changed() {
+        let facts = analyze(&FileInput {
+            path: "src/guard.ts",
+            before: Side::Text("function f(a: number) {\n  if (a < 0) return 0;\n  return a;\n}\n"),
+            after: Side::Text("function f(a: number) {\n  if (a <= 0) return 0;\n  return a;\n}\n"),
+        });
+        assert_eq!(facts.changes.len(), 1);
+        assert_eq!(facts.changes[0].labels, vec![Label::ConditionChanged {}]);
     }
 }

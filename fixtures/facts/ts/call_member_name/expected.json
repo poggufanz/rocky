@@ -10,19 +10,19 @@
       },
       "labels": [
         {
-          "id": "call_removed",
-          "args": {
-            "name": "repo.save"
-          }
-        },
-        {
           "id": "call_added",
           "args": {
             "name": "repo.insert"
           }
+        },
+        {
+          "id": "call_removed",
+          "args": {
+            "name": "repo.save"
+          }
         }
       ],
-      "importance": "medium"
+      "importance": "low"
     }
   ]
 }

@@ -195,6 +195,7 @@ impl Label {
             | Label::TestSkipped { .. }
             | Label::TestOnly { .. } => Importance::High,
             Label::CallAdded { .. }
+            | Label::CallRemoved { .. }
             | Label::AwaitChanged { .. }
             | Label::BodyChanged {}
             | Label::ImportAdded { .. }
@@ -216,7 +217,6 @@ impl Label {
             | Label::LoopAdded {}
             | Label::LoopRemoved {}
             | Label::ReturnChanged {}
-            | Label::CallRemoved { .. }
             | Label::ValueChanged { .. }
             | Label::ConfigChanged { .. }
             | Label::FileNew {}
@@ -387,8 +387,8 @@ mod tests {
                 Label::CallRemoved {
                     name: "f".to_string(),
                 },
-                Importance::Medium,
-                Importance::Medium,
+                Importance::Low,
+                Importance::Low,
             ),
             (
                 Label::AwaitChanged {

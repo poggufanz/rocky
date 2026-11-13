@@ -65,6 +65,7 @@ impl SkelKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SkelNode {
     pub kind: SkelKind,
+    /// Alignment key (`"if:guard"` for guard `If`, `"call:<name>"` for `Call`, `"err:<op>"` for `ErrorOp`, else kind name).
     pub key: String,
     pub text: String,
     pub guard: bool,
@@ -631,7 +632,7 @@ export default function () {}
         assert_eq!(
             summary,
             vec![
-                (SkelKind::If, "if", "! a", true, 2),
+                (SkelKind::If, "if:guard", "! a", true, 2),
                 (SkelKind::Call, "call:log", "", false, 3),
                 (SkelKind::Return, "return", "", false, 4),
                 (SkelKind::If, "if", "a > 10", false, 6),
@@ -770,11 +771,11 @@ function helper() {
         assert_eq!(
             facts.changes[0].labels,
             vec![
-                Label::CallRemoved {
-                    name: "a".to_string()
-                },
                 Label::CallAdded {
                     name: "b".to_string()
+                },
+                Label::CallRemoved {
+                    name: "a".to_string()
                 },
             ]
         );

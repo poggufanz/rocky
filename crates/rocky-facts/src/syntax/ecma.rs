@@ -285,8 +285,8 @@ fn is_exit_statement(kind: &str) -> bool {
     )
 }
 
-fn is_if_guard(if_node: Node<'_>) -> bool {
-    if if_node.child_by_field_name("alternative").is_some() {
+fn is_if_guard(if_node: Node<'_>, parent_is_else: bool) -> bool {
+    if parent_is_else || if_node.child_by_field_name("alternative").is_some() {
         return false;
     }
     let Some(consequence) = if_node.child_by_field_name("consequence") else {
@@ -432,7 +432,7 @@ fn is_nested_test_boundary(node: Node<'_>, src: &str) -> bool {
     extract_test_statement(node, src).is_some() || extract_test_call(node, src).is_some()
 }
 
-fn skel_node_for(node: Node<'_>, src: &str) -> Option<SkelNode> {
+fn skel_node_for(node: Node<'_>, src: &str, parent_is_else: bool) -> Option<SkelNode> {
     let line = node.start_position().row as u32 + 1;
     let simple = |kind: SkelKind| SkelNode {
         kind,
@@ -444,15 +444,21 @@ fn skel_node_for(node: Node<'_>, src: &str) -> Option<SkelNode> {
 
     match node.kind() {
         "if_statement" => {
+            let guard = is_if_guard(node, parent_is_else);
+            let key = if guard {
+                "if:guard".to_string()
+            } else {
+                SkelKind::If.kind_name().to_string()
+            };
             let text = node
                 .child_by_field_name("condition")
                 .map(|c| normalized_code_text(strip_outer_parens(c), src))
                 .unwrap_or_default();
             Some(SkelNode {
                 kind: SkelKind::If,
-                key: SkelKind::If.kind_name().to_string(),
+                key,
                 text,
-                guard: is_if_guard(node),
+                guard,
                 line,
             })
         }
@@ -520,19 +526,20 @@ fn skel_node_for(node: Node<'_>, src: &str) -> Option<SkelNode> {
 
 fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
     let mut out = Vec::new();
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
+    let mut stack = vec![(root, false)];
+    while let Some((node, parent_is_else)) = stack.pop() {
         let kind = node.kind();
         if is_comment_kind(kind) || is_nested_test_boundary(node, src) {
             continue;
         }
-        if let Some(skel) = skel_node_for(node, src) {
+        if let Some(skel) = skel_node_for(node, src, parent_is_else) {
             out.push(skel);
         }
+        let child_parent_is_else = kind == "else_clause";
         let start = stack.len();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            stack.push(child);
+            stack.push((child, child_parent_is_else));
         }
         stack[start..].reverse();
     }
