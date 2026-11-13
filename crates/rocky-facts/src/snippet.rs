@@ -180,6 +180,12 @@ pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLin
         collect_after_heads,
     );
 
+    if before_region.len() > MAX_DIFF_ITEMS || after_region.len() > MAX_DIFF_ITEMS {
+        return vec![SnippetLine::More {
+            lines: saturating_u32(after_region.len()),
+        }];
+    }
+
     if matches!(input.after, Side::Absent) {
         return single_side_entries(before_region, |text| SnippetLine::Removed { text });
     }
@@ -200,12 +206,6 @@ pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLin
             &head_lines,
         );
         return cap_entries(entries);
-    }
-
-    if before_region.len() > MAX_DIFF_ITEMS || after_region.len() > MAX_DIFF_ITEMS {
-        return vec![SnippetLine::More {
-            lines: saturating_u32(after_region.len()),
-        }];
     }
 
     let ops = capture_diff_slices(Algorithm::Myers, before_region, after_region);
@@ -560,15 +560,18 @@ async function flow(a: number, xs: number[]) {
         assert_eq!(lines[11], SnippetLine::More { lines: 18 });
     }
 
+    fn numbered_lines(prefix: &str, count: usize) -> String {
+        let mut out = String::new();
+        for i in 0..count {
+            let _ = writeln!(out, "{prefix}{i}");
+        }
+        out
+    }
+
     #[test]
     fn above_max_diff_items_returns_single_more() {
-        let mut before = String::new();
-        let mut after = String::new();
-        for i in 0..=MAX_DIFF_ITEMS {
-            let _ = writeln!(before, "b{i}");
-            let _ = writeln!(after, "a{i}");
-        }
-        let _ = writeln!(after, "extra");
+        let before = numbered_lines("b", MAX_DIFF_ITEMS + 1);
+        let after = numbered_lines("a", MAX_DIFF_ITEMS + 2);
 
         let lines = snippet(
             &FileInput {
@@ -583,6 +586,149 @@ async function flow(a: number, xs: number[]) {
             vec![SnippetLine::More {
                 lines: (MAX_DIFF_ITEMS + 2) as u32
             }]
+        );
+    }
+
+    #[test]
+    fn before_absent_above_max_diff_items_returns_single_more() {
+        let after = numbered_lines("a", MAX_DIFF_ITEMS + 1);
+        let lines = snippet(
+            &FileInput {
+                path: "notes/huge.txt",
+                before: Side::Absent,
+                after: Side::Text(&after),
+            },
+            None,
+        );
+        assert_eq!(
+            lines,
+            vec![SnippetLine::More {
+                lines: (MAX_DIFF_ITEMS + 1) as u32
+            }]
+        );
+    }
+
+    #[test]
+    fn before_unknown_above_max_diff_items_returns_single_more() {
+        let after = numbered_lines("a", MAX_DIFF_ITEMS + 1);
+        let lines = snippet(
+            &FileInput {
+                path: "notes/huge.txt",
+                before: Side::Unknown,
+                after: Side::Text(&after),
+            },
+            None,
+        );
+        assert_eq!(
+            lines,
+            vec![SnippetLine::More {
+                lines: (MAX_DIFF_ITEMS + 1) as u32
+            }]
+        );
+    }
+
+    #[test]
+    fn after_absent_above_max_diff_items_returns_more_zero() {
+        let before = numbered_lines("b", MAX_DIFF_ITEMS + 1);
+        let lines = snippet(
+            &FileInput {
+                path: "notes/huge.txt",
+                before: Side::Text(&before),
+                after: Side::Absent,
+            },
+            None,
+        );
+        assert_eq!(lines, vec![SnippetLine::More { lines: 0 }]);
+    }
+
+    #[test]
+    fn exactly_max_diff_items_renders_normally() {
+        let lines_exact = numbered_lines("line_", MAX_DIFF_ITEMS);
+
+        let added = snippet(
+            &FileInput {
+                path: "notes/exact.txt",
+                before: Side::Absent,
+                after: Side::Text(&lines_exact),
+            },
+            None,
+        );
+        assert_eq!(added.len(), MAX_SNIPPET_ENTRIES);
+        assert_eq!(
+            added[0],
+            SnippetLine::Added {
+                text: "line_0".to_string()
+            }
+        );
+        assert_eq!(
+            added[MAX_SNIPPET_ENTRIES - 1],
+            SnippetLine::More {
+                lines: (MAX_DIFF_ITEMS - (MAX_SNIPPET_ENTRIES - 1)) as u32
+            }
+        );
+
+        let unknown = snippet(
+            &FileInput {
+                path: "notes/exact.txt",
+                before: Side::Unknown,
+                after: Side::Text(&lines_exact),
+            },
+            None,
+        );
+        assert_eq!(
+            unknown,
+            vec![SnippetLine::Fold {
+                lines: MAX_DIFF_ITEMS as u32
+            }]
+        );
+
+        let removed = snippet(
+            &FileInput {
+                path: "notes/exact.txt",
+                before: Side::Text(&lines_exact),
+                after: Side::Absent,
+            },
+            None,
+        );
+        assert_eq!(removed.len(), MAX_SNIPPET_ENTRIES);
+        assert_eq!(
+            removed[0],
+            SnippetLine::Removed {
+                text: "line_0".to_string()
+            }
+        );
+        assert_eq!(
+            removed[MAX_SNIPPET_ENTRIES - 1],
+            SnippetLine::More {
+                lines: (MAX_DIFF_ITEMS - (MAX_SNIPPET_ENTRIES - 1)) as u32
+            }
+        );
+
+        let mut after_edited = String::from("edited_0\n");
+        for i in 1..MAX_DIFF_ITEMS {
+            let _ = writeln!(after_edited, "line_{i}");
+        }
+        let diffed = snippet(
+            &FileInput {
+                path: "notes/exact.txt",
+                before: Side::Text(&lines_exact),
+                after: Side::Text(&after_edited),
+            },
+            None,
+        );
+        assert_eq!(
+            diffed,
+            vec![
+                SnippetLine::Removed {
+                    text: "line_0".to_string()
+                },
+                SnippetLine::Added {
+                    text: "edited_0".to_string()
+                },
+                SnippetLine::Fold {
+                    lines: (MAX_DIFF_ITEMS - 1) as u32
+                },
+            ]
         );
     }
 

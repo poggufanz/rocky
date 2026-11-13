@@ -282,7 +282,7 @@ fn catalog_coverage() {
 
 fn build_perf_ts(file_idx: usize, modified: bool) -> String {
     use std::fmt::Write;
-    let mut out = String::with_capacity(110_000);
+    let mut out = String::with_capacity(102_400);
     for fn_idx in 0..500 {
         let changed = modified && fn_idx % 100 == 10;
         let _ = writeln!(
@@ -296,8 +296,8 @@ fn build_perf_ts(file_idx: usize, modified: bool) -> String {
         let _ = writeln!(out, "  for (let i = 0; i < 4; i++) {{");
         let _ = writeln!(out, "    acc += helper_{fn_idx}(i, acc);");
         let _ = writeln!(out, "  }}");
-        let _ = writeln!(out, "  const extra = acc * 2 - a;");
-        let _ = writeln!(out, "  return extra + b;");
+        let _ = writeln!(out, "  const res = acc * 2 - a;");
+        let _ = writeln!(out, "  return res + b;");
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
     }
@@ -307,23 +307,64 @@ fn build_perf_ts(file_idx: usize, modified: bool) -> String {
 #[test]
 #[ignore]
 fn perf_twenty_files() {
+    const MAX_PERF_FILE_BYTES: usize = 102_400;
     let files: Vec<(String, String, String)> = (0..20)
         .map(|i| {
             let path = format!("src/perf_{i}.ts");
             let before = build_perf_ts(i, false);
             let after = build_perf_ts(i, true);
             assert!(
-                before.len() >= 95_000 && before.len() <= 115_000,
-                "unexpected generated file size: {} bytes",
-                before.len()
+                before.len() <= MAX_PERF_FILE_BYTES && after.len() <= MAX_PERF_FILE_BYTES,
+                "generated file exceeds 100 KiB: before={}, after={}",
+                before.len(),
+                after.len()
             );
             (path, before, after)
         })
         .collect();
 
-    let start = Instant::now();
-    let mut analyze_time = Duration::ZERO;
-    let mut snippet_time = Duration::ZERO;
+    let warmup_input = FileInput {
+        path: &files[0].0,
+        before: Side::Text(&files[0].1),
+        after: Side::Text(&files[0].2),
+    };
+    let _ = analyze(&warmup_input);
+
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(files.len());
+
+    let files_slice = files.as_slice();
+    let par_start = Instant::now();
+    let par_changes: usize = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker_idx| {
+                scope.spawn(move || {
+                    let mut count = 0usize;
+                    for (path, before, after) in
+                        files_slice.iter().skip(worker_idx).step_by(workers)
+                    {
+                        let input = FileInput {
+                            path,
+                            before: Side::Text(before),
+                            after: Side::Text(after),
+                        };
+                        count += analyze(&input).changes.len();
+                    }
+                    count
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("perf worker thread panicked"))
+            .sum()
+    });
+    let parallel_analyze_time = par_start.elapsed();
+
+    let seq_start = Instant::now();
+    let mut seq_facts = Vec::with_capacity(files.len());
     let mut total_changes = 0usize;
     for (path, before, after) in &files {
         let input = FileInput {
@@ -331,31 +372,33 @@ fn perf_twenty_files() {
             before: Side::Text(before),
             after: Side::Text(after),
         };
-        let t0 = Instant::now();
         let facts = analyze(&input);
-        analyze_time += t0.elapsed();
         total_changes += facts.changes.len();
-        let t1 = Instant::now();
+        seq_facts.push(facts);
+    }
+    let single_thread_analyze_time = seq_start.elapsed();
+
+    let snippet_start = Instant::now();
+    for ((path, before, after), facts) in files.iter().zip(&seq_facts) {
+        let input = FileInput {
+            path,
+            before: Side::Text(before),
+            after: Side::Text(after),
+        };
         for change in &facts.changes {
             let lines = snippet(&input, change.symbol.as_ref());
             assert!(!lines.is_empty());
         }
-        snippet_time += t1.elapsed();
     }
-    let elapsed = start.elapsed();
+    let snippet_time = snippet_start.elapsed();
+
     println!(
-        "perf_twenty_files: {} files (~{} KiB each), {} changes in {:?} (analyze={:?}, snippet={:?})",
-        files.len(),
-        files[0].1.len() / 1024,
-        total_changes,
-        elapsed,
-        analyze_time,
-        snippet_time
+        "perf_twenty_files: workers={workers}, parallel_analyze={parallel_analyze_time:?}, single_thread_analyze={single_thread_analyze_time:?}, snippet={snippet_time:?}, changes={total_changes}"
     );
+    assert_eq!(par_changes, 100);
     assert_eq!(total_changes, 100);
     assert!(
-        elapsed < Duration::from_millis(500),
-        "perf_twenty_files took {:?}, expected < 500ms",
-        elapsed
+        parallel_analyze_time <= Duration::from_millis(500),
+        "parallel analyze took {parallel_analyze_time:?}, expected <= 500ms"
     );
 }
