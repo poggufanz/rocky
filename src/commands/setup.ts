@@ -454,7 +454,11 @@ async function runPurgeCapture(
   }
   const purged = purgeRepoCapture(repo, { yes: true, actor: "cli", onRevoke: "delete" }, home);
   if (!purged.ok) {
-    detail(purged.reason ?? "Purge failed.");
+    detail(
+      purged.reason === "cards-delete-failed"
+        ? "Rocky could not delete this repo's change cards. Try the purge again."
+        : purged.reason ?? "Purge failed.",
+    );
     return 1;
   }
   if (probe.allowed) detail(`capture revoked: ${purged.root ?? probe.root}`);
