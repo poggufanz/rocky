@@ -181,8 +181,13 @@ pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLin
     );
 
     if before_region.len() > MAX_DIFF_ITEMS || after_region.len() > MAX_DIFF_ITEMS {
+        let omitted = if after_region.is_empty() {
+            before_region.len()
+        } else {
+            after_region.len()
+        };
         return vec![SnippetLine::More {
-            lines: saturating_u32(after_region.len()),
+            lines: saturating_u32(omitted),
         }];
     }
 
@@ -628,7 +633,7 @@ async function flow(a: number, xs: number[]) {
     }
 
     #[test]
-    fn after_absent_above_max_diff_items_returns_more_zero() {
+    fn after_absent_above_max_diff_items_returns_before_count() {
         let before = numbered_lines("b", MAX_DIFF_ITEMS + 1);
         let lines = snippet(
             &FileInput {
@@ -638,7 +643,42 @@ async function flow(a: number, xs: number[]) {
             },
             None,
         );
-        assert_eq!(lines, vec![SnippetLine::More { lines: 0 }]);
+        assert_eq!(
+            lines,
+            vec![SnippetLine::More {
+                lines: (MAX_DIFF_ITEMS + 1) as u32
+            }]
+        );
+    }
+
+    #[test]
+    fn removed_symbol_above_max_diff_items_returns_before_count() {
+        let mut before = String::from("function gone() {\n");
+        for i in 0..MAX_DIFF_ITEMS {
+            let _ = writeln!(before, "  const x_{i} = {i};");
+        }
+        before.push_str("}\n");
+        let sym = Symbol {
+            kind: SymbolKind::Function,
+            name: "gone".to_string(),
+            container: None,
+            exported: false,
+            nth: 0,
+        };
+        let lines = snippet(
+            &FileInput {
+                path: "src/huge.ts",
+                before: Side::Text(&before),
+                after: Side::Text("function kept() {}\n"),
+            },
+            Some(&sym),
+        );
+        assert_eq!(
+            lines,
+            vec![SnippetLine::More {
+                lines: (MAX_DIFF_ITEMS + 2) as u32
+            }]
+        );
     }
 
     #[test]

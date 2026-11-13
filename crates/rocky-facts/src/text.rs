@@ -153,6 +153,7 @@ mod tests {
             }
         }
         after_lines.push("new".to_string());
+        after_lines.reverse();
 
         let before = before_lines.join("\n");
         let after = after_lines.join("\n");
