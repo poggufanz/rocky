@@ -4,14 +4,11 @@ use tree_sitter::Node;
 
 use crate::model::SymbolKind;
 use crate::syntax::{
-    Extracted, ExtractedSymbol, Param, SkelKind, SkelNode, TestMode, extract_return_type,
-    first_non_comment_named_child, is_comment_kind, new_symbol, node_lines, node_text,
-    normalized_code_text, single_non_comment_named_child, strip_outer_parens, walk_leaves,
+    Extracted, ExtractedSymbol, MAX_FALLBACK_CALLEE_CHARS, Param, SkelKind, SkelNode, TestMode,
+    TokenIndex, extract_return_type, first_non_comment_named_child, is_comment_kind, new_symbol,
+    node_lines, node_text, normalized_code_text, single_non_comment_named_child,
+    strip_outer_parens, walk_leaves,
 };
-use crate::text::cut;
-
-const MAX_MODULE_CHARS: usize = 80;
-const MAX_NAME_CHARS: usize = 80;
 
 #[derive(Clone, Copy)]
 enum BodyContext {
@@ -151,7 +148,7 @@ fn extract_use_module(use_node: Node<'_>, src: &str) -> Option<String> {
             compact.push_str(text);
         }
     });
-    (!compact.is_empty()).then(|| cut(&compact, MAX_MODULE_CHARS))
+    (!compact.is_empty()).then_some(compact)
 }
 
 fn extract_impl_type_name(mut ty: Node<'_>, src: &str) -> String {
@@ -241,7 +238,7 @@ fn method_error_op(callee: Node<'_>, src: &str) -> Option<&'static str> {
     }
 }
 
-fn extract_callee_name(callee: Node<'_>, src: &str) -> String {
+fn extract_callee_name(callee: Node<'_>, src: &str, tokens: &TokenIndex<'_>) -> String {
     let mut segments: Vec<(&str, &str)> = Vec::new();
     let mut cur = unwrap_callee(callee);
     loop {
@@ -271,7 +268,7 @@ fn extract_callee_name(callee: Node<'_>, src: &str) -> String {
             }
             _ => {
                 if segments.is_empty() {
-                    return cut(&normalized_code_text(cur, src), MAX_NAME_CHARS);
+                    return tokens.bounded_text(cur, MAX_FALLBACK_CALLEE_CHARS);
                 }
                 break;
             }
@@ -295,7 +292,7 @@ fn extract_callee_name(callee: Node<'_>, src: &str) -> String {
         out.push_str(sep);
         out.push_str(seg);
     }
-    cut(&out, MAX_NAME_CHARS)
+    out
 }
 
 fn is_exit_expr(node: Node<'_>) -> bool {
@@ -339,12 +336,19 @@ fn is_if_guard(if_node: Node<'_>, parent_is_else: bool) -> bool {
     last.is_some_and(is_exit_expr)
 }
 
-fn push_skel_nodes(node: Node<'_>, src: &str, parent_is_else: bool, out: &mut Vec<SkelNode>) {
+fn push_skel_nodes(
+    node: Node<'_>,
+    src: &str,
+    parent_is_else: bool,
+    tokens: &TokenIndex<'_>,
+    out: &mut Vec<SkelNode>,
+) {
     let line = node.start_position().row as u32 + 1;
     let simple = |kind: SkelKind, key: &str| SkelNode {
         kind,
         key: key.to_string(),
         text: String::new(),
+        text_hash: 0,
         guard: false,
         line,
     };
@@ -357,28 +361,30 @@ fn push_skel_nodes(node: Node<'_>, src: &str, parent_is_else: bool, out: &mut Ve
             } else {
                 SkelKind::If.kind_name().to_string()
             };
-            let text = node
+            let (text, text_hash) = node
                 .child_by_field_name("condition")
-                .map(|c| normalized_code_text(strip_outer_parens(c), src))
+                .map(|c| tokens.skel_text_and_hash(strip_outer_parens(c)))
                 .unwrap_or_default();
             out.push(SkelNode {
                 kind: SkelKind::If,
                 key,
                 text,
+                text_hash,
                 guard,
                 line,
             });
         }
         "else_clause" => out.push(simple(SkelKind::Else, SkelKind::Else.kind_name())),
         "match_expression" => {
-            let text = node
+            let (text, text_hash) = node
                 .child_by_field_name("value")
-                .map(|v| normalized_code_text(strip_outer_parens(v), src))
+                .map(|v| tokens.skel_text_and_hash(strip_outer_parens(v)))
                 .unwrap_or_default();
             out.push(SkelNode {
                 kind: SkelKind::Match,
                 key: SkelKind::Match.kind_name().to_string(),
                 text,
+                text_hash,
                 guard: false,
                 line,
             });
@@ -388,27 +394,29 @@ fn push_skel_nodes(node: Node<'_>, src: &str, parent_is_else: bool, out: &mut Ve
             out.push(simple(SkelKind::Loop, SkelKind::Loop.kind_name()))
         }
         "while_expression" => {
-            let text = node
+            let (text, text_hash) = node
                 .child_by_field_name("condition")
-                .map(|c| normalized_code_text(strip_outer_parens(c), src))
+                .map(|c| tokens.skel_text_and_hash(strip_outer_parens(c)))
                 .unwrap_or_default();
             out.push(SkelNode {
                 kind: SkelKind::While,
                 key: SkelKind::While.kind_name().to_string(),
                 text,
+                text_hash,
                 guard: false,
                 line,
             });
         }
         "return_expression" => {
             let arg = first_non_comment_named_child(node);
-            let text = arg
-                .map(|expr| normalized_code_text(expr, src))
+            let (text, text_hash) = arg
+                .map(|expr| tokens.skel_text_and_hash(expr))
                 .unwrap_or_default();
             out.push(SkelNode {
                 kind: SkelKind::Return,
                 key: SkelKind::Return.kind_name().to_string(),
                 text,
+                text_hash,
                 guard: false,
                 line,
             });
@@ -442,11 +450,12 @@ fn push_skel_nodes(node: Node<'_>, src: &str, parent_is_else: bool, out: &mut Ve
             } else if matches!(path_last_segment(callee, src), Some("Ok" | "Err" | "Some")) {
                 // Variant constructors are not calls.
             } else {
-                let name = extract_callee_name(callee, src);
+                let name = extract_callee_name(callee, src, tokens);
                 out.push(SkelNode {
                     kind: SkelKind::Call,
                     key: format!("call:{name}"),
                     text: String::new(),
+                    text_hash: 0,
                     guard: false,
                     line,
                 });
@@ -457,6 +466,7 @@ fn push_skel_nodes(node: Node<'_>, src: &str, parent_is_else: bool, out: &mut Ve
 }
 
 pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
+    let tokens = TokenIndex::new(root, src);
     let mut out = Vec::new();
     let mut cursor = root.walk();
     let mut stack = vec![(root, false)];
@@ -465,7 +475,7 @@ pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
         if is_comment_kind(kind) {
             continue;
         }
-        push_skel_nodes(node, src, parent_is_else, &mut out);
+        push_skel_nodes(node, src, parent_is_else, &tokens, &mut out);
         let child_parent_is_else = kind == "else_clause";
         let start = stack.len();
         cursor.reset(node);

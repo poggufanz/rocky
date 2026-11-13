@@ -4,14 +4,11 @@ use tree_sitter::Node;
 
 use crate::model::{Symbol, SymbolKind};
 use crate::syntax::{
-    Extracted, ExtractedSymbol, Param, SkelKind, SkelNode, TestMode, extract_return_type,
-    first_non_comment_named_child, is_comment_kind, new_symbol, node_lines, node_text,
-    normalized_code_text, single_non_comment_named_child, strip_outer_parens,
+    Extracted, ExtractedSymbol, MAX_FALLBACK_CALLEE_CHARS, Param, SkelKind, SkelNode, TestMode,
+    TokenIndex, extract_return_type, first_non_comment_named_child, is_comment_kind, new_symbol,
+    node_lines, node_text, normalized_code_text, single_non_comment_named_child,
+    strip_outer_parens,
 };
-use crate::text::cut;
-
-const MAX_MODULE_CHARS: usize = 80;
-const MAX_NAME_CHARS: usize = 80;
 
 enum Visit<'a> {
     Node {
@@ -170,8 +167,7 @@ fn extract_literal(value: Node<'_>, src: &str) -> Option<String> {
 
 fn extract_import_module(import_node: Node<'_>, src: &str) -> Option<String> {
     let source = import_node.child_by_field_name("source")?;
-    let inner = unquote_string_literal(node_text(source, src));
-    Some(cut(inner, MAX_MODULE_CHARS))
+    Some(unquote_string_literal(node_text(source, src)).to_string())
 }
 
 fn symbol_name_or_default(node: Node<'_>, src: &str) -> (String, Option<(usize, usize)>) {
@@ -196,7 +192,7 @@ fn unwrap_callee(mut node: Node<'_>) -> Node<'_> {
     node
 }
 
-fn extract_callee_name(callee: Node<'_>, src: &str) -> String {
+fn extract_callee_name(callee: Node<'_>, src: &str, tokens: &TokenIndex<'_>) -> String {
     let mut segments: Vec<&str> = Vec::new();
     let mut cur = unwrap_callee(callee);
     loop {
@@ -216,7 +212,7 @@ fn extract_callee_name(callee: Node<'_>, src: &str) -> String {
             }
             _ => {
                 if segments.is_empty() {
-                    return cut(&normalized_code_text(cur, src), MAX_NAME_CHARS);
+                    return tokens.bounded_text(cur, MAX_FALLBACK_CALLEE_CHARS);
                 }
                 break;
             }
@@ -230,7 +226,7 @@ fn extract_callee_name(callee: Node<'_>, src: &str) -> String {
         let start = segments.len() - 2;
         segments.drain(..start);
     }
-    cut(&segments.join("."), MAX_NAME_CHARS)
+    segments.join(".")
 }
 
 fn is_exit_statement(kind: &str) -> bool {
@@ -387,12 +383,18 @@ fn is_nested_test_boundary(node: Node<'_>, src: &str) -> bool {
     extract_test_statement(node, src).is_some() || extract_test_call(node, src).is_some()
 }
 
-fn skel_node_for(node: Node<'_>, src: &str, parent_is_else: bool) -> Option<SkelNode> {
+fn skel_node_for(
+    node: Node<'_>,
+    src: &str,
+    parent_is_else: bool,
+    tokens: &TokenIndex<'_>,
+) -> Option<SkelNode> {
     let line = node.start_position().row as u32 + 1;
     let simple = |kind: SkelKind| SkelNode {
         kind,
         key: kind.kind_name().to_string(),
         text: String::new(),
+        text_hash: 0,
         guard: false,
         line,
     };
@@ -405,28 +407,30 @@ fn skel_node_for(node: Node<'_>, src: &str, parent_is_else: bool) -> Option<Skel
             } else {
                 SkelKind::If.kind_name().to_string()
             };
-            let text = node
+            let (text, text_hash) = node
                 .child_by_field_name("condition")
-                .map(|c| normalized_code_text(strip_outer_parens(c), src))
+                .map(|c| tokens.skel_text_and_hash(strip_outer_parens(c)))
                 .unwrap_or_default();
             Some(SkelNode {
                 kind: SkelKind::If,
                 key,
                 text,
+                text_hash,
                 guard,
                 line,
             })
         }
         "else_clause" => Some(simple(SkelKind::Else)),
         "switch_statement" => {
-            let text = node
+            let (text, text_hash) = node
                 .child_by_field_name("value")
-                .map(|v| normalized_code_text(strip_outer_parens(v), src))
+                .map(|v| tokens.skel_text_and_hash(strip_outer_parens(v)))
                 .unwrap_or_default();
             Some(SkelNode {
                 kind: SkelKind::Match,
                 key: SkelKind::Match.kind_name().to_string(),
                 text,
+                text_hash,
                 guard: false,
                 line,
             })
@@ -434,26 +438,28 @@ fn skel_node_for(node: Node<'_>, src: &str, parent_is_else: bool) -> Option<Skel
         "switch_case" | "switch_default" => Some(simple(SkelKind::Arm)),
         "for_statement" | "for_in_statement" | "do_statement" => Some(simple(SkelKind::Loop)),
         "while_statement" => {
-            let text = node
+            let (text, text_hash) = node
                 .child_by_field_name("condition")
-                .map(|c| normalized_code_text(strip_outer_parens(c), src))
+                .map(|c| tokens.skel_text_and_hash(strip_outer_parens(c)))
                 .unwrap_or_default();
             Some(SkelNode {
                 kind: SkelKind::While,
                 key: SkelKind::While.kind_name().to_string(),
                 text,
+                text_hash,
                 guard: false,
                 line,
             })
         }
         "return_statement" => {
-            let text = first_non_comment_named_child(node)
-                .map(|arg| normalized_code_text(arg, src))
+            let (text, text_hash) = first_non_comment_named_child(node)
+                .map(|arg| tokens.skel_text_and_hash(arg))
                 .unwrap_or_default();
             Some(SkelNode {
                 kind: SkelKind::Return,
                 key: SkelKind::Return.kind_name().to_string(),
                 text,
+                text_hash,
                 guard: false,
                 line,
             })
@@ -465,12 +471,13 @@ fn skel_node_for(node: Node<'_>, src: &str, parent_is_else: bool) -> Option<Skel
         "call_expression" => {
             let name = node
                 .child_by_field_name("function")
-                .map(|callee| extract_callee_name(callee, src))
+                .map(|callee| extract_callee_name(callee, src, tokens))
                 .unwrap_or_default();
             Some(SkelNode {
                 kind: SkelKind::Call,
                 key: format!("call:{name}"),
                 text: String::new(),
+                text_hash: 0,
                 guard: false,
                 line,
             })
@@ -480,6 +487,7 @@ fn skel_node_for(node: Node<'_>, src: &str, parent_is_else: bool) -> Option<Skel
 }
 
 pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
+    let tokens = TokenIndex::new(root, src);
     let mut out = Vec::new();
     let mut cursor = root.walk();
     let mut stack = vec![(root, false)];
@@ -488,7 +496,7 @@ pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
         if is_comment_kind(kind) || is_nested_test_boundary(node, src) {
             continue;
         }
-        if let Some(skel) = skel_node_for(node, src, parent_is_else) {
+        if let Some(skel) = skel_node_for(node, src, parent_is_else, &tokens) {
             out.push(skel);
         }
         let child_parent_is_else = kind == "else_clause";
@@ -662,18 +670,19 @@ impl<'a> Extractor<'a> {
             .filter(|child| child.kind() == "variable_declarator")
             .collect();
         let single = declarators.len() == 1;
-        if declarators.len() > 1 {
-            self.excluded_outside_spans
-                .push((outer.start_byte(), outer.end_byte()));
-        }
+        let mut skipped_spans: Vec<(usize, usize)> = Vec::new();
+        let mut has_represented = false;
         let stack_start = self.stack.len();
         for declarator in declarators {
             let Some(name_node) = declarator.child_by_field_name("name") else {
+                skipped_spans.push((declarator.start_byte(), declarator.end_byte()));
                 continue;
             };
             if name_node.kind() != "identifier" {
+                skipped_spans.push((declarator.start_byte(), declarator.end_byte()));
                 continue;
             }
+            has_represented = true;
             let sym_node = if single { outer } else { declarator };
             let name = node_text(name_node, self.src).to_string();
             let name_span = Some((name_node.start_byte(), name_node.end_byte()));
@@ -725,6 +734,20 @@ impl<'a> Extractor<'a> {
             }
         }
         self.stack[stack_start..].reverse();
+
+        if !single && has_represented {
+            let mut cursor_byte = outer.start_byte();
+            for (skip_start, skip_end) in skipped_spans {
+                if cursor_byte < skip_start {
+                    self.excluded_outside_spans.push((cursor_byte, skip_start));
+                }
+                cursor_byte = cursor_byte.max(skip_end);
+            }
+            if cursor_byte < outer.end_byte() {
+                self.excluded_outside_spans
+                    .push((cursor_byte, outer.end_byte()));
+            }
+        }
     }
 
     fn handle_declaration(
@@ -761,6 +784,9 @@ impl<'a> Extractor<'a> {
             }
             "lexical_declaration" => {
                 self.push_children_rev(decl, false, true);
+            }
+            "internal_module" | "module" | "ambient_declaration" => {
+                self.push_children_rev(decl, false, false);
             }
             _ => {}
         }

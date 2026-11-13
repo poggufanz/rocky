@@ -68,6 +68,7 @@ pub(crate) struct SkelNode {
     /// Alignment key (`"if:guard"` for guard `If`, `"call:<name>"` for `Call`, `"err:<op>"` for `ErrorOp`, else kind name).
     pub key: String,
     pub text: String,
+    pub text_hash: u128,
     pub guard: bool,
     pub line: u32,
 }
@@ -194,6 +195,115 @@ pub(crate) fn normalized_code_text(node: Node<'_>, src: &str) -> String {
         }
     });
     out
+}
+
+const MAX_SKEL_TEXT_CHARS: usize = 256;
+pub(crate) const MAX_FALLBACK_CALLEE_CHARS: usize = 128;
+
+const HASH_BASE_1: u64 = 0x9e37_79b9_7f4a_7c15;
+const HASH_BASE_2: u64 = 0xbf58_476d_1ce4_e5b9;
+
+fn mix_token(text: &str, seed: u64) -> u64 {
+    let mut h = seed ^ (text.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for &b in text.as_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
+    (h ^ (h >> 31)) | 1
+}
+
+/// Single-pass token index enabling bounded text and exact slice hashes without re-walking subtrees.
+pub(crate) struct TokenIndex<'a> {
+    starts: Vec<usize>,
+    texts: Vec<&'a str>,
+    prefix_h1: Vec<u64>,
+    prefix_h2: Vec<u64>,
+}
+
+impl<'a> TokenIndex<'a> {
+    pub(crate) fn new(root: Node<'_>, src: &'a str) -> Self {
+        let mut starts = Vec::new();
+        let mut texts = Vec::new();
+        let mut prefix_h1 = vec![0u64];
+        let mut prefix_h2 = vec![0u64];
+        walk_leaves(root, src, |start, _, text, is_comment| {
+            if !is_comment {
+                starts.push(start);
+                texts.push(text);
+                let prev1 = *prefix_h1.last().expect("prefix_h1 non-empty");
+                let prev2 = *prefix_h2.last().expect("prefix_h2 non-empty");
+                let t1 = mix_token(text, 0xcbf2_9ce4_8422_2325);
+                let t2 = mix_token(text, 0x517c_c1b7_2722_0a95);
+                prefix_h1.push(prev1.wrapping_mul(HASH_BASE_1).wrapping_add(t1));
+                prefix_h2.push(prev2.wrapping_mul(HASH_BASE_2).wrapping_add(t2));
+            }
+        });
+        Self {
+            starts,
+            texts,
+            prefix_h1,
+            prefix_h2,
+        }
+    }
+
+    fn token_range(&self, node: Node<'_>) -> (usize, usize) {
+        let lo = self.starts.partition_point(|&s| s < node.start_byte());
+        let hi = self.starts.partition_point(|&s| s < node.end_byte());
+        (lo, hi)
+    }
+
+    fn slice_hash(&self, lo: usize, hi: usize) -> u128 {
+        if lo >= hi {
+            return 0;
+        }
+        let len = (hi - lo) as u32;
+        let h1 = self.prefix_h1[hi]
+            .wrapping_sub(self.prefix_h1[lo].wrapping_mul(HASH_BASE_1.wrapping_pow(len)));
+        let h2 = self.prefix_h2[hi]
+            .wrapping_sub(self.prefix_h2[lo].wrapping_mul(HASH_BASE_2.wrapping_pow(len)));
+        (u128::from(h1) << 64) | u128::from(h2)
+    }
+
+    fn bounded_text_range(&self, lo: usize, hi: usize, max_chars: usize) -> String {
+        let mut out = String::new();
+        let mut char_len = 0usize;
+        for &tok in &self.texts[lo..hi] {
+            if char_len >= max_chars {
+                break;
+            }
+            if !out.is_empty() {
+                if char_len + 1 >= max_chars {
+                    break;
+                }
+                out.push(' ');
+                char_len += 1;
+            }
+            for ch in tok.chars() {
+                if char_len >= max_chars {
+                    return out;
+                }
+                out.push(ch);
+                char_len += 1;
+            }
+        }
+        out
+    }
+
+    pub(crate) fn bounded_text(&self, node: Node<'_>, max_chars: usize) -> String {
+        let (lo, hi) = self.token_range(node);
+        self.bounded_text_range(lo, hi, max_chars)
+    }
+
+    pub(crate) fn skel_text_and_hash(&self, node: Node<'_>) -> (String, u128) {
+        let (lo, hi) = self.token_range(node);
+        let text = self.bounded_text_range(lo, hi, MAX_SKEL_TEXT_CHARS);
+        let hash = self.slice_hash(lo, hi);
+        (text, hash)
+    }
 }
 
 pub(crate) fn new_symbol(
@@ -755,7 +865,7 @@ export default function () {}
             .map(|n| (n.kind, n.key.as_str(), n.text.as_str(), n.guard, n.line))
             .collect();
 
-        let cut_long = format!("call:{}…", "f".repeat(79));
+        let full_long = format!("call:{long_name}");
         assert_eq!(
             summary,
             vec![
@@ -784,7 +894,7 @@ export default function () {}
                 (SkelKind::Call, "call:c.d", "", false, 23),
                 (SkelKind::Call, "call:map", "", false, 24),
                 (SkelKind::Call, "call:items.filter", "", false, 24),
-                (SkelKind::Call, cut_long.as_str(), "", false, 26),
+                (SkelKind::Call, full_long.as_str(), "", false, 26),
                 (SkelKind::Catch, "catch", "", false, 27),
                 (SkelKind::Throw, "throw", "", false, 28),
                 (SkelKind::Return, "return", "a", false, 30),
@@ -1211,7 +1321,7 @@ async fn demo(&self, ok: bool, a: i32, opt: Option<i32>, xs: Vec<i32>) -> Result
             .map(|n| (n.kind, n.key.as_str(), n.text.as_str(), n.guard, n.line))
             .collect();
 
-        let cut_long = format!("call:{}…", "f".repeat(79));
+        let full_long = format!("call:{long_fn}");
         assert_eq!(
             summary,
             vec![
@@ -1248,7 +1358,7 @@ async fn demo(&self, ok: bool, a: i32, opt: Option<i32>, xs: Vec<i32>) -> Result
                 (SkelKind::Call, "call:opt.map", "", false, 42),
                 (SkelKind::Await, "await", "", false, 43),
                 (SkelKind::Call, "call:fetch", "", false, 43),
-                (SkelKind::Call, cut_long.as_str(), "", false, 44),
+                (SkelKind::Call, full_long.as_str(), "", false, 44),
             ]
         );
     }
@@ -1347,5 +1457,242 @@ async fn demo(&self, ok: bool, a: i32, opt: Option<i32>, xs: Vec<i32>) -> Result
                 (SymbolKind::Method, "work".to_string(), Some(class_x)),
             ]
         );
+    }
+
+    #[test]
+    fn exported_and_non_exported_namespaces_have_symbol_parity() {
+        use crate::model::{Lang, SymbolKind};
+
+        let body = "\
+  export function f(x: number): number { return x; }
+  function g() {}
+  export class C {
+    m() {}
+  }
+  export interface I { id: string; }
+  type T = number;
+  export enum E { A }
+";
+        let exported_src = format!("export namespace N {{\n{body}}}\n");
+        let plain_src = format!("namespace N {{\n{body}}}\n");
+        let module_src = format!("export module M {{\n{body}}}\n");
+
+        let exported_parsed = super::parse(Lang::Typescript, &exported_src);
+        let plain_parsed = super::parse(Lang::Typescript, &plain_src);
+        let module_parsed = super::parse(Lang::Typescript, &module_src);
+        assert!(!exported_parsed.has_error);
+        assert!(!plain_parsed.has_error);
+        assert!(!module_parsed.has_error);
+
+        let project =
+            |parsed: &super::FileSyntax| -> Vec<(SymbolKind, String, Option<String>, bool)> {
+                parsed
+                    .symbols
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.symbol.kind,
+                            s.symbol.name.clone(),
+                            s.symbol.container.clone(),
+                            s.symbol.exported,
+                        )
+                    })
+                    .collect()
+            };
+
+        let expected = vec![
+            (SymbolKind::Function, "f".to_string(), None, true),
+            (SymbolKind::Function, "g".to_string(), None, false),
+            (SymbolKind::Class, "C".to_string(), None, true),
+            (
+                SymbolKind::Method,
+                "m".to_string(),
+                Some("C".to_string()),
+                true,
+            ),
+            (SymbolKind::Interface, "I".to_string(), None, true),
+            (SymbolKind::Type, "T".to_string(), None, false),
+            (SymbolKind::Enum, "E".to_string(), None, true),
+        ];
+        assert_eq!(project(&plain_parsed), expected);
+        assert_eq!(project(&exported_parsed), expected);
+        assert_eq!(project(&module_parsed), expected);
+
+        let facts = analyze(&FileInput {
+            path: "src/ns.ts",
+            before: Side::Text(""),
+            after: Side::Text(
+                "export namespace N { export function f(x: number): number { return x; } }\n",
+            ),
+        });
+        assert_eq!(facts.changes.len(), 2);
+        assert_eq!(facts.changes[0].symbol, None);
+        let sym = facts.changes[1].symbol.as_ref().expect("exported fn f");
+        assert_eq!(sym.name, "f");
+        assert!(sym.exported);
+        assert_eq!(facts.changes[1].labels, vec![Label::SymbolAdded {}]);
+
+        let nested_in_fn = super::parse(
+            Lang::Typescript,
+            "function outer() { export namespace Inner { export function hidden() {} } }\n",
+        );
+        assert_eq!(
+            project(&nested_in_fn),
+            vec![(SymbolKind::Function, "outer".to_string(), None, false)]
+        );
+    }
+
+    #[test]
+    fn mixed_const_declaration_keeps_skipped_declarators_in_outside() {
+        let added_destructured = analyze(&FileInput {
+            path: "src/cfg.ts",
+            before: Side::Text("export const SESSION_TTL = 60;\n"),
+            after: Side::Text("export const SESSION_TTL = 3600, {x} = source;\n"),
+        });
+        assert_eq!(added_destructured.changes.len(), 2);
+        assert_eq!(added_destructured.changes[0].symbol, None);
+        assert_eq!(
+            added_destructured.changes[1]
+                .symbol
+                .as_ref()
+                .map(|s| s.name.as_str()),
+            Some("SESSION_TTL")
+        );
+        assert_eq!(
+            added_destructured.changes[1].labels,
+            vec![Label::ValueChanged {
+                name: "SESSION_TTL".to_string(),
+                before: "60".to_string(),
+                after: "3600".to_string(),
+            }]
+        );
+
+        let edited_both = analyze(&FileInput {
+            path: "src/cfg.ts",
+            before: Side::Text("export const A = 1, {x} = source;\n"),
+            after: Side::Text("export const A = 2, {y} = source;\n"),
+        });
+        assert_eq!(edited_both.changes.len(), 2);
+        assert_eq!(edited_both.changes[0].symbol, None);
+        assert_eq!(edited_both.changes[0].labels, vec![Label::BodyChanged {}]);
+        assert_eq!(
+            edited_both.changes[1]
+                .symbol
+                .as_ref()
+                .map(|s| s.name.as_str()),
+            Some("A")
+        );
+
+        let edited_only_represented = analyze(&FileInput {
+            path: "src/cfg.ts",
+            before: Side::Text("export const A = 1, {x} = source;\n"),
+            after: Side::Text("export const A = 2, {x} = source;\n"),
+        });
+        assert_eq!(edited_only_represented.changes.len(), 1);
+        assert_eq!(
+            edited_only_represented.changes[0]
+                .symbol
+                .as_ref()
+                .map(|s| s.name.as_str()),
+            Some("A")
+        );
+
+        let all_destructured = analyze(&FileInput {
+            path: "src/cfg.ts",
+            before: Side::Text("const {x} = a, {y} = b;\n"),
+            after: Side::Text("const {x} = a, {z} = b;\n"),
+        });
+        assert_eq!(all_destructured.changes.len(), 1);
+        assert_eq!(all_destructured.changes[0].symbol, None);
+    }
+
+    #[test]
+    fn ecma_nested_callees_and_control_expressions() {
+        let deep_4000 = format!("const deep = f{};\n", "()".repeat(4000));
+        let deep_4001 = format!("const deep = f{};\n", "()".repeat(4001));
+
+        let added = analyze(&FileInput {
+            path: "src/deep_calls.ts",
+            before: Side::Text(""),
+            after: Side::Text(&deep_4000),
+        });
+        assert_eq!(added.changes.len(), 1);
+        assert_eq!(
+            added.changes[0].symbol.as_ref().map(|s| s.name.as_str()),
+            Some("deep")
+        );
+        assert_eq!(added.changes[0].labels, vec![Label::SymbolAdded {}]);
+
+        let call_added = analyze(&FileInput {
+            path: "src/deep_calls.ts",
+            before: Side::Text(&deep_4000),
+            after: Side::Text(&deep_4001),
+        });
+        assert_eq!(call_added.changes.len(), 1);
+        assert!(matches!(
+            call_added.changes[0].labels.first(),
+            Some(Label::CallAdded { name }) if name.chars().count() == 80 && name.ends_with('…')
+        ));
+
+        let ret_before = format!(
+            "function deepRet() {{\n  return {prefix}1{suffix};\n}}\n",
+            prefix = "[".repeat(600),
+            suffix = "]".repeat(600),
+        );
+        let ret_after = ret_before.replacen("1", "2", 1);
+        let ret_facts = analyze(&FileInput {
+            path: "src/deep_ret.ts",
+            before: Side::Text(&ret_before),
+            after: Side::Text(&ret_after),
+        });
+        assert_eq!(ret_facts.changes.len(), 1);
+        assert_eq!(ret_facts.changes[0].labels, vec![Label::ReturnChanged {}]);
+    }
+
+    #[test]
+    fn rust_nested_callees_and_control_expressions() {
+        let deep_4000 = format!("fn deep() {{ let _ = f{}; }}\n", "()".repeat(4000));
+        let deep_4001 = format!("fn deep() {{ let _ = f{}; }}\n", "()".repeat(4001));
+
+        let added = analyze(&FileInput {
+            path: "src/deep_calls.rs",
+            before: Side::Text(""),
+            after: Side::Text(&deep_4000),
+        });
+        assert_eq!(added.changes.len(), 1);
+        assert_eq!(
+            added.changes[0].symbol.as_ref().map(|s| s.name.as_str()),
+            Some("deep")
+        );
+        assert_eq!(added.changes[0].labels, vec![Label::SymbolAdded {}]);
+
+        let call_added = analyze(&FileInput {
+            path: "src/deep_calls.rs",
+            before: Side::Text(&deep_4000),
+            after: Side::Text(&deep_4001),
+        });
+        assert_eq!(call_added.changes.len(), 1);
+        assert!(matches!(
+            call_added.changes[0].labels.first(),
+            Some(Label::CallAdded { name }) if name.chars().count() == 80 && name.ends_with('…')
+        ));
+
+        let mut ret_before = String::from("fn deep_ret() -> i32 {\n");
+        for _ in 0..600 {
+            ret_before.push_str("return { ");
+        }
+        ret_before.push_str("return 1;");
+        for _ in 0..600 {
+            ret_before.push_str(" };");
+        }
+        ret_before.push_str("\n}\n");
+        let ret_after = ret_before.replacen("return 1;", "return 2;", 1);
+        let ret_facts = analyze(&FileInput {
+            path: "src/deep_ret.rs",
+            before: Side::Text(&ret_before),
+            after: Side::Text(&ret_after),
+        });
+        assert_eq!(ret_facts.changes.len(), 1);
+        assert_eq!(ret_facts.changes[0].labels, vec![Label::ReturnChanged {}]);
     }
 }

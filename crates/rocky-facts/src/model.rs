@@ -50,7 +50,7 @@ pub enum Importance {
 }
 
 /// Kind of symbol associated with a change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
     Function,

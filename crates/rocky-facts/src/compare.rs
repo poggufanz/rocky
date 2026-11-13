@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use similar::{Algorithm, DiffOp, capture_diff_slices};
 
@@ -102,6 +102,10 @@ fn saturating_u32(value: usize) -> u32 {
 }
 
 fn diff_skeleton(before: &[SkelNode], after: &[SkelNode], labels: &mut Vec<Label>) {
+    // Above MAX_DIFF_ITEMS, skip Myers alignment to avoid quadratic diffing on huge skeletons.
+    // Summary counts below still emit branch, loop, await, error, and call labels, while
+    // alignment-dependent guard_added, condition_changed, and return_changed are omitted until a
+    // bounded alignment pass is needed.
     if before.len() <= MAX_DIFF_ITEMS && after.len() <= MAX_DIFF_ITEMS {
         let before_keys: Vec<&str> = before.iter().map(|n| n.key.as_str()).collect();
         let after_keys: Vec<&str> = after.iter().map(|n| n.key.as_str()).collect();
@@ -125,8 +129,12 @@ fn diff_skeleton(before: &[SkelNode], after: &[SkelNode], labels: &mut Vec<Label
                             (
                                 SkelKind::If | SkelKind::While | SkelKind::Match,
                                 SkelKind::If | SkelKind::While | SkelKind::Match,
-                            ) if b.text != a.text => condition_changed = true,
-                            (SkelKind::Return, SkelKind::Return) if b.text != a.text => {
+                            ) if b.text != a.text || b.text_hash != a.text_hash => {
+                                condition_changed = true
+                            }
+                            (SkelKind::Return, SkelKind::Return)
+                                if b.text != a.text || b.text_hash != a.text_hash =>
+                            {
                                 return_changed = true;
                             }
                             _ => {}
@@ -248,14 +256,16 @@ fn diff_paired_symbol(before: &SymbolInfo<'_>, after: &SymbolInfo<'_>) -> Change
         });
     }
 
-    match (before.test_mode, after.test_mode) {
-        (TestMode::Normal, TestMode::Skip) => labels.push(Label::TestSkipped {
-            name: cut(&after.symbol.name, MAX_NAME_CHARS),
-        }),
-        (TestMode::Normal, TestMode::Only) => labels.push(Label::TestOnly {
-            name: cut(&after.symbol.name, MAX_NAME_CHARS),
-        }),
-        _ => {}
+    if before.test_mode != after.test_mode {
+        match after.test_mode {
+            TestMode::Skip => labels.push(Label::TestSkipped {
+                name: cut(&after.symbol.name, MAX_NAME_CHARS),
+            }),
+            TestMode::Only => labels.push(Label::TestOnly {
+                name: cut(&after.symbol.name, MAX_NAME_CHARS),
+            }),
+            TestMode::Normal => {}
+        }
     }
 
     diff_skeleton(&before.skeleton, &after.skeleton, &mut labels);
@@ -322,17 +332,29 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
         }
     }
 
+    // Index unpaired after-symbols in source order; never iterate the HashMap itself so output
+    // order stays completely deterministic.
+    let mut unpaired_after: HashMap<(SymbolKind, &[&str]), VecDeque<usize>> = HashMap::new();
+    for (a_idx, a_sym) in after.symbols.iter().enumerate() {
+        if !after_paired[a_idx] {
+            unpaired_after
+                .entry((a_sym.symbol.kind, a_sym.code_without_name.as_slice()))
+                .or_default()
+                .push_back(a_idx);
+        }
+    }
+
     for (b_idx, b_sym) in before.symbols.iter().enumerate() {
         if before_paired[b_idx] {
             continue;
         }
-        if let Some((a_idx, a_sym)) = after.symbols.iter().enumerate().find(|(idx, cand)| {
-            !after_paired[*idx]
-                && cand.symbol.kind == b_sym.symbol.kind
-                && cand.code_without_name == b_sym.code_without_name
-        }) {
+        let key = (b_sym.symbol.kind, b_sym.code_without_name.as_slice());
+        if let Some(candidates) = unpaired_after.get_mut(&key)
+            && let Some(a_idx) = candidates.pop_front()
+        {
             before_paired[b_idx] = true;
             after_paired[a_idx] = true;
+            let a_sym = &after.symbols[a_idx];
             after_changes.push((
                 a_idx,
                 Change::new(
@@ -374,12 +396,12 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
     let mut file_labels = Vec::new();
     for module in after.imports.difference(&before.imports) {
         file_labels.push(Label::ImportAdded {
-            module: module.clone(),
+            module: cut(module, MAX_NAME_CHARS),
         });
     }
     for module in before.imports.difference(&after.imports) {
         file_labels.push(Label::ImportRemoved {
-            module: module.clone(),
+            module: cut(module, MAX_NAME_CHARS),
         });
     }
     if before.outside != after.outside {
@@ -880,6 +902,202 @@ function pick(a: boolean, c: boolean, x: number) {
         assert_eq!(
             fallback_facts.changes[0].labels,
             vec![Label::BodyChanged {}]
+        );
+    }
+
+    #[test]
+    fn shared_prefix_calls_and_imports_remain_distinct() {
+        let prefix_mod = "m".repeat(80);
+        let prefix_fn = "f".repeat(80);
+        let prefix_method = "g".repeat(80);
+
+        let ts_before = format!(
+            "import a from \"{prefix_mod}A\";\n\
+             function run() {{\n  {prefix_fn}A();\n  obj.{prefix_method}A();\n}}\n"
+        );
+        let ts_after = format!(
+            "import a from \"{prefix_mod}B\";\n\
+             function run() {{\n  {prefix_fn}B();\n  obj.{prefix_method}B();\n}}\n"
+        );
+        let ts_facts = analyze(&FileInput {
+            path: "src/long_ids.ts",
+            before: Side::Text(&ts_before),
+            after: Side::Text(&ts_after),
+        });
+        assert_eq!(ts_facts.changes.len(), 2);
+        let expected_mod_cut = format!("{}…", "m".repeat(79));
+        assert_eq!(
+            ts_facts.changes[0].labels,
+            vec![
+                Label::ImportAdded {
+                    module: expected_mod_cut.clone()
+                },
+                Label::ImportRemoved {
+                    module: expected_mod_cut
+                },
+            ]
+        );
+        assert_eq!(ts_facts.changes[1].labels.len(), 4);
+        assert!(ts_facts.changes[1].labels.iter().all(|l| matches!(
+            l,
+            Label::CallAdded { name } | Label::CallRemoved { name }
+                if name.chars().count() == 80 && name.ends_with('…')
+        )));
+
+        let rs_before = format!(
+            "use crate::{prefix_mod}A;\n\
+             fn run() {{\n    {prefix_fn}A();\n}}\n"
+        );
+        let rs_after = format!(
+            "use crate::{prefix_mod}B;\n\
+             fn run() {{\n    {prefix_fn}B();\n}}\n"
+        );
+        let rs_facts = analyze(&FileInput {
+            path: "src/long_ids.rs",
+            before: Side::Text(&rs_before),
+            after: Side::Text(&rs_after),
+        });
+        assert_eq!(rs_facts.changes.len(), 2);
+        let expected_rs_mod_cut = format!("crate::{}…", "m".repeat(72));
+        assert_eq!(
+            rs_facts.changes[0].labels,
+            vec![
+                Label::ImportAdded {
+                    module: expected_rs_mod_cut.clone()
+                },
+                Label::ImportRemoved {
+                    module: expected_rs_mod_cut
+                },
+            ]
+        );
+        let expected_fn_cut = format!("{}…", "f".repeat(79));
+        assert_eq!(
+            rs_facts.changes[1].labels,
+            vec![
+                Label::CallAdded {
+                    name: expected_fn_cut.clone()
+                },
+                Label::CallRemoved {
+                    name: expected_fn_cut
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_mode_transitions_between_skip_and_only() {
+        let skip_to_only = analyze(&FileInput {
+            path: "src/mode.test.ts",
+            before: Side::Text("it.skip(\"runs\", () => {\n  check(1);\n});\n"),
+            after: Side::Text("it.only(\"runs\", () => {\n  check(1);\n});\n"),
+        });
+        assert_eq!(skip_to_only.changes.len(), 1);
+        assert_eq!(skip_to_only.changes[0].importance, Importance::High);
+        assert_eq!(
+            skip_to_only.changes[0].labels,
+            vec![Label::TestOnly {
+                name: "runs".to_string()
+            }]
+        );
+
+        let only_to_skip = analyze(&FileInput {
+            path: "src/mode.test.ts",
+            before: Side::Text("it.only(\"runs\", () => {\n  check(1);\n});\n"),
+            after: Side::Text("it.skip(\"runs\", () => {\n  check(1);\n});\n"),
+        });
+        assert_eq!(only_to_skip.changes.len(), 1);
+        assert_eq!(only_to_skip.changes[0].importance, Importance::High);
+        assert_eq!(
+            only_to_skip.changes[0].labels,
+            vec![Label::TestSkipped {
+                name: "runs".to_string()
+            }]
+        );
+
+        let xit_to_fit = analyze(&FileInput {
+            path: "src/mode.test.js",
+            before: Side::Text("xit(\"runs\", () => {\n  check(1);\n});\n"),
+            after: Side::Text("fit(\"runs\", () => {\n  check(1);\n});\n"),
+        });
+        assert_eq!(xit_to_fit.changes[0].importance, Importance::High);
+        assert_eq!(
+            xit_to_fit.changes[0].labels,
+            vec![Label::TestOnly {
+                name: "runs".to_string()
+            }]
+        );
+
+        let skip_to_normal = analyze(&FileInput {
+            path: "src/mode.test.ts",
+            before: Side::Text("it.skip(\"runs\", () => {\n  check(1);\n});\n"),
+            after: Side::Text("it(\"runs\", () => {\n  check(1);\n});\n"),
+        });
+        assert_eq!(skip_to_normal.changes[0].importance, Importance::Low);
+        assert_eq!(
+            skip_to_normal.changes[0].labels,
+            vec![Label::BodyChanged {}]
+        );
+
+        let only_to_normal = analyze(&FileInput {
+            path: "src/mode.test.ts",
+            before: Side::Text("it.only(\"runs\", () => {\n  check(1);\n});\n"),
+            after: Side::Text("it(\"runs\", () => {\n  check(1);\n});\n"),
+        });
+        assert_eq!(only_to_normal.changes[0].importance, Importance::Low);
+        assert_eq!(
+            only_to_normal.changes[0].labels,
+            vec![Label::BodyChanged {}]
+        );
+    }
+
+    #[test]
+    fn wide_unpaired_renamed_symbols() {
+        use std::fmt::Write;
+
+        let count = 20_000usize;
+        let mut before = String::with_capacity(count * 32);
+        let mut after = String::with_capacity(count * 36);
+        let _ = writeln!(before, "function dup_a() {{ return -1; }}");
+        let _ = writeln!(before, "function dup_b() {{ return -1; }}");
+        let _ = writeln!(after, "function new_a() {{ return -1; }}");
+        let _ = writeln!(after, "function new_b() {{ return -1; }}");
+
+        for i in 0..count {
+            let _ = writeln!(before, "function fn_{i}() {{ return {i}; }}");
+            let _ = writeln!(after, "function renamed_{i}() {{ return {i}; }}");
+        }
+
+        let facts = analyze(&FileInput {
+            path: "src/wide_renames.ts",
+            before: Side::Text(&before),
+            after: Side::Text(&after),
+        });
+        assert_eq!(facts.changes.len(), count + 2);
+        assert_eq!(
+            facts.changes[0].symbol.as_ref().map(|s| s.name.as_str()),
+            Some("new_a")
+        );
+        assert_eq!(
+            facts.changes[0].labels,
+            vec![Label::SymbolRenamed {
+                from: "dup_a".to_string()
+            }]
+        );
+        assert_eq!(
+            facts.changes[1].symbol.as_ref().map(|s| s.name.as_str()),
+            Some("new_b")
+        );
+        assert_eq!(
+            facts.changes[1].labels,
+            vec![Label::SymbolRenamed {
+                from: "dup_b".to_string()
+            }]
+        );
+        assert_eq!(
+            facts.changes.last().unwrap().labels,
+            vec![Label::SymbolRenamed {
+                from: format!("fn_{}", count - 1)
+            }]
         );
     }
 }
