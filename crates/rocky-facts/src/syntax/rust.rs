@@ -165,7 +165,7 @@ fn extract_impl_type_name(mut ty: Node<'_>, src: &str) -> String {
         ty.kind(),
         "type_identifier" | "scoped_type_identifier" | "primitive_type"
     ) {
-        return cut(node_text(ty, src), MAX_NAME_CHARS);
+        return node_text(ty, src).to_string();
     }
 
     let mut tokens = Vec::new();
@@ -189,7 +189,7 @@ fn extract_impl_type_name(mut ty: Node<'_>, src: &str) -> String {
             stack[start..].reverse();
         }
     }
-    cut(&tokens.join(" "), MAX_NAME_CHARS)
+    tokens.join(" ")
 }
 
 fn unwrap_callee(mut node: Node<'_>) -> Node<'_> {

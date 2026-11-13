@@ -771,4 +771,115 @@ function pick(a: boolean, c: boolean, x: number) {
             }]
         );
     }
+
+    #[test]
+    fn rust_long_impl_container_names_preserve_identity_and_pairing() {
+        use crate::model::{Change, SymbolKind};
+
+        let prefix = "A".repeat(80);
+        let type_x = format!("{prefix}X");
+        let type_y = format!("{prefix}Y");
+
+        let before = format!(
+            "impl {type_x} {{\n    fn work(&self) -> i32 {{ 1 }}\n}}\nimpl {type_y} {{\n    fn work(&self) -> i32 {{ 2 }}\n}}\n"
+        );
+        let after = format!(
+            "impl {type_x} {{\n    fn work(&self) -> i32 {{ 1 }}\n}}\nimpl {type_y} {{\n    fn work(&self) -> i32 {{ 3 }}\n}}\n"
+        );
+        let facts = analyze(&FileInput {
+            path: "src/lib.rs",
+            before: Side::Text(&before),
+            after: Side::Text(&after),
+        });
+        assert_eq!(facts.changes.len(), 1);
+        let sym = facts.changes[0].symbol.as_ref().expect("method symbol");
+        assert_eq!(sym.kind, SymbolKind::Method);
+        assert_eq!(sym.name, "work");
+        assert_eq!(sym.container.as_deref(), Some(type_y.as_str()));
+        assert_eq!(sym.nth, 0);
+        assert_eq!(facts.changes[0].labels, vec![Label::BodyChanged {}]);
+
+        let before_inserted = format!(
+            "impl {type_y} {{\n    fn work(&self) -> i32 {{\n        keep();\n        2\n    }}\n}}\n"
+        );
+        let after_inserted = format!(
+            "impl {type_x} {{\n    fn work(&self) -> i32 {{\n        added();\n        1\n    }}\n}}\nimpl {type_y} {{\n    fn work(&self) -> i32 {{\n        keep();\n        2\n    }}\n}}\n"
+        );
+        let inserted_facts = analyze(&FileInput {
+            path: "src/lib.rs",
+            before: Side::Text(&before_inserted),
+            after: Side::Text(&after_inserted),
+        });
+        let symbol_changes: Vec<&Change> = inserted_facts
+            .changes
+            .iter()
+            .filter(|c| c.symbol.is_some())
+            .collect();
+        assert_eq!(symbol_changes.len(), 1);
+        let added_sym = symbol_changes[0]
+            .symbol
+            .as_ref()
+            .expect("added method symbol");
+        assert_eq!(added_sym.kind, SymbolKind::Method);
+        assert_eq!(added_sym.name, "work");
+        assert_eq!(added_sym.container.as_deref(), Some(type_x.as_str()));
+        assert_eq!(added_sym.nth, 0);
+        assert_eq!(symbol_changes[0].labels, vec![Label::SymbolAdded {}]);
+
+        let after_inserted_and_edited = format!(
+            "impl {type_x} {{\n    fn work(&self) -> i32 {{\n        added();\n        1\n    }}\n}}\nimpl {type_y} {{\n    fn work(&self) -> i32 {{\n        keep();\n        3\n    }}\n}}\n"
+        );
+        let edited_facts = analyze(&FileInput {
+            path: "src/lib.rs",
+            before: Side::Text(&before_inserted),
+            after: Side::Text(&after_inserted_and_edited),
+        });
+        let edited_symbols: Vec<(&str, u32, &[Label])> = edited_facts
+            .changes
+            .iter()
+            .filter_map(|c| {
+                c.symbol.as_ref().map(|s| {
+                    (
+                        s.container.as_deref().unwrap_or(""),
+                        s.nth,
+                        c.labels.as_slice(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            edited_symbols,
+            vec![
+                (type_x.as_str(), 0, [Label::SymbolAdded {}].as_slice()),
+                (type_y.as_str(), 0, [Label::BodyChanged {}].as_slice()),
+            ]
+        );
+
+        let before_fallback = format!(
+            "impl<T> Show for &{type_x}<T> {{\n    fn work(&self) -> i32 {{ 1 }}\n}}\nimpl<T> Show for &{type_y}<T> {{\n    fn work(&self) -> i32 {{ 2 }}\n}}\n"
+        );
+        let after_fallback = format!(
+            "impl<T> Show for &{type_x}<T> {{\n    fn work(&self) -> i32 {{ 1 }}\n}}\nimpl<T> Show for &{type_y}<T> {{\n    fn work(&self) -> i32 {{ 3 }}\n}}\n"
+        );
+        let fallback_facts = analyze(&FileInput {
+            path: "src/lib.rs",
+            before: Side::Text(&before_fallback),
+            after: Side::Text(&after_fallback),
+        });
+        assert_eq!(fallback_facts.changes.len(), 1);
+        let fallback_sym = fallback_facts.changes[0]
+            .symbol
+            .as_ref()
+            .expect("fallback method symbol");
+        let expected_fallback_container = format!("& {type_y}");
+        assert_eq!(
+            fallback_sym.container.as_deref(),
+            Some(expected_fallback_container.as_str())
+        );
+        assert_eq!(fallback_sym.nth, 0);
+        assert_eq!(
+            fallback_facts.changes[0].labels,
+            vec![Label::BodyChanged {}]
+        );
+    }
 }

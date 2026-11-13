@@ -1213,4 +1213,61 @@ async fn demo(&self, ok: bool, a: i32, opt: Option<i32>, xs: Vec<i32>) -> Result
             ]
         );
     }
+
+    #[test]
+    fn rust_and_ecma_preserve_full_long_container_names() {
+        use crate::model::{Lang, SymbolKind};
+
+        let summarize = |parsed: &super::FileSyntax| -> Vec<(SymbolKind, String, Option<String>)> {
+            parsed
+                .symbols
+                .iter()
+                .map(|s| {
+                    (
+                        s.symbol.kind,
+                        s.symbol.name.clone(),
+                        s.symbol.container.clone(),
+                    )
+                })
+                .collect()
+        };
+
+        let prefix = "A".repeat(80);
+        let type_x = format!("{prefix}X");
+        let trait_x = format!("{prefix}Trait");
+        let mod_a = format!("{prefix}ModA");
+        let mod_b = format!("{prefix}ModB");
+        let rust_src = format!(
+            "impl<T> {type_x}<T> {{ fn m(&self) {{}} }}\n\
+             impl<T> Show for &{type_x}<T> {{ fn r(&self) {{}} }}\n\
+             trait {trait_x} {{ fn t(&self); }}\n\
+             mod {mod_a} {{ mod {mod_b} {{ fn f() {{}} }} }}\n"
+        );
+        let rust_parsed = super::parse(Lang::Rust, &rust_src);
+        assert!(!rust_parsed.has_error);
+        let ref_container = format!("& {type_x}");
+        let mod_container = format!("{mod_a}::{mod_b}");
+        assert_eq!(
+            summarize(&rust_parsed),
+            vec![
+                (SymbolKind::Method, "m".to_string(), Some(type_x)),
+                (SymbolKind::Method, "r".to_string(), Some(ref_container)),
+                (SymbolKind::Trait, trait_x.clone(), None),
+                (SymbolKind::Method, "t".to_string(), Some(trait_x)),
+                (SymbolKind::Function, "f".to_string(), Some(mod_container)),
+            ]
+        );
+
+        let class_x = format!("{prefix}ClassX");
+        let ecma_src = format!("export class {class_x} {{\n  work() {{}}\n}}\n");
+        let ecma_parsed = super::parse(Lang::Typescript, &ecma_src);
+        assert!(!ecma_parsed.has_error);
+        assert_eq!(
+            summarize(&ecma_parsed),
+            vec![
+                (SymbolKind::Class, class_x.clone(), None),
+                (SymbolKind::Method, "work".to_string(), Some(class_x)),
+            ]
+        );
+    }
 }
