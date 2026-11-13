@@ -22,6 +22,10 @@ enum ConfigValue {
     Bool(bool),
     Number(String),
     String(String),
+    /// TOML datetime, kept apart from strings so a type change is not read as format-only.
+    Datetime(String),
+    /// TOML `nan`/`inf`, which JSON cannot hold; kept apart from strings for the same reason.
+    NonFinite(String),
     Array(Vec<ConfigValue>),
     Object(BTreeMap<String, ConfigValue>),
 }
@@ -35,6 +39,8 @@ impl PartialEq for ConfigValue {
                 (Self::Bool(x), Self::Bool(y)) if x == y => {}
                 (Self::Number(x), Self::Number(y)) if x == y => {}
                 (Self::String(x), Self::String(y)) if x == y => {}
+                (Self::Datetime(x), Self::Datetime(y)) if x == y => {}
+                (Self::NonFinite(x), Self::NonFinite(y)) if x == y => {}
                 (Self::Array(xs), Self::Array(ys)) if xs.len() == ys.len() => {
                     stack.extend(xs.iter().zip(ys.iter()));
                 }
@@ -105,7 +111,11 @@ impl ConfigValue {
                 RenderTask::Value(val) => match val {
                     ConfigValue::Null => out.push_str("null"),
                     ConfigValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-                    ConfigValue::Number(n) => out.push_str(n),
+                    ConfigValue::Number(n)
+                    | ConfigValue::Datetime(n)
+                    | ConfigValue::NonFinite(n) => {
+                        out.push_str(n);
+                    }
                     ConfigValue::String(s) => {
                         out.push_str(&serde_json::to_string(s).expect("string JSON serialization"));
                     }
@@ -210,6 +220,17 @@ fn from_json(value: serde_json::Value) -> ConfigValue {
     values.pop().unwrap_or(ConfigValue::Null)
 }
 
+/// TOML spelling of a non-finite float (`nan`, `inf`, `-inf`).
+fn non_finite_text(f: f64) -> &'static str {
+    if f.is_nan() {
+        "nan"
+    } else if f.is_sign_negative() {
+        "-inf"
+    } else {
+        "inf"
+    }
+}
+
 fn from_toml_value(value: toml::Value) -> ConfigValue {
     enum Step {
         Value(toml::Value),
@@ -227,10 +248,10 @@ fn from_toml_value(value: toml::Value) -> ConfigValue {
                 toml::Value::Integer(i) => values.push(ConfigValue::Number(i.to_string())),
                 toml::Value::Float(f) => match serde_json::Number::from_f64(f) {
                     Some(n) => values.push(ConfigValue::Number(n.to_string())),
-                    None => values.push(ConfigValue::String(f.to_string())),
+                    None => values.push(ConfigValue::NonFinite(non_finite_text(f).to_string())),
                 },
                 toml::Value::Boolean(b) => values.push(ConfigValue::Bool(b)),
-                toml::Value::Datetime(dt) => values.push(ConfigValue::String(dt.to_string())),
+                toml::Value::Datetime(dt) => values.push(ConfigValue::Datetime(dt.to_string())),
                 toml::Value::Array(items) => {
                     let start = values.len();
                     work.push(Step::Finish(PendingContainer::Array { start }));
@@ -604,6 +625,48 @@ mod tests {
                 key: "ratio".to_string(),
                 before: Some("1.5".to_string()),
                 after: Some("2.0".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn toml_datetime_to_string_is_a_change() {
+        let changes = config_changes(
+            Lang::Toml,
+            "stamp = 2024-01-01T00:00:00Z
+",
+            "stamp = \"2024-01-01T00:00:00Z\"
+",
+        )
+        .expect("valid TOML");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].labels,
+            vec![Label::ConfigChanged {
+                key: "stamp".to_string(),
+                before: Some("2024-01-01T00:00:00Z".to_string()),
+                after: Some("\"2024-01-01T00:00:00Z\"".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn toml_non_finite_float_to_string_is_a_change() {
+        let changes = config_changes(
+            Lang::Toml,
+            "x = nan
+",
+            "x = \"nan\"
+",
+        )
+        .expect("valid TOML");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].labels,
+            vec![Label::ConfigChanged {
+                key: "x".to_string(),
+                before: Some("nan".to_string()),
+                after: Some("\"nan\"".to_string()),
             }]
         );
     }
