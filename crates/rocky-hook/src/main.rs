@@ -12,8 +12,8 @@ use std::io::Read as _;
 use std::panic::{self, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rocky_proto::hook::{DropReason, ID_CAP, STDIN_CAP, parse_hook_payload};
-use rocky_proto::paths::{rocky_home, spool_dir, tool_text_off_marker};
+use rocky_proto::hook::{Capture, DropReason, ID_CAP, STDIN_CAP, parse_hook_payload};
+use rocky_proto::paths::{cards_off_marker, rocky_home, spool_dir, tool_text_off_marker};
 use rocky_proto::spool::{ENV_VALUE_CAP, SHELL_ENV_VARS, SPOOL_VERSION, SpoolBody, SpoolRecord};
 
 /// What one invocation was asked to do.
@@ -42,7 +42,10 @@ fn run() {
 fn desk_hook(harness: String) {
     let (data, oversize) = read_stdin();
     let home = rocky_home();
-    let capture = !tool_text_off_marker(&home).exists();
+    let capture = Capture {
+        tool_text: !tool_text_off_marker(&home).exists(),
+        prompt: !cards_off_marker(&home).exists(),
+    };
     let body = match oversize {
         Some(total) => SpoolBody::Dropped {
             reason: DropReason::Oversize,

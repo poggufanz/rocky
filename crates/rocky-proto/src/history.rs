@@ -69,6 +69,7 @@ mod tests {
             target_path: None,
             command: None,
             description: None,
+            prompt: None,
             truncated: false,
         };
         let l = HistoryLine {

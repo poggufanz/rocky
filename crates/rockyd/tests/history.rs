@@ -39,6 +39,7 @@ fn event(name: &str, sid: &str) -> HookEvent {
         target_path: None,
         command: None,
         description: None,
+        prompt: None,
         truncated: false,
     }
 }

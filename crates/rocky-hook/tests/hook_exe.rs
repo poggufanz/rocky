@@ -426,3 +426,43 @@ fn desk_hook_config_dir_follows_the_value_cap() {
         );
     }
 }
+
+fn user_prompt_submit_payload(prompt: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "session_id": "s1",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn user_prompt_submit_prompt_reaches_spool() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = user_prompt_submit_payload("fix the cart");
+    let (code, out, err) = run(&["desk-hook", "claude-code"], &payload, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let event = event(read_record(&files[0]));
+    assert_eq!(event.prompt.as_deref(), Some("fix the cart"));
+}
+
+#[test]
+fn cards_off_marker_keeps_prompt_out_of_spool() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join("desk")).unwrap();
+    fs::write(home.path().join("desk").join("cards-off"), b"").unwrap();
+    let payload = user_prompt_submit_payload("fix the cart");
+    let (code, out, err) = run(&["desk-hook", "claude-code"], &payload, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let event = event(read_record(&files[0]));
+    assert_eq!(event.prompt, None);
+    let text = String::from_utf8(fs::read(&files[0]).unwrap()).unwrap();
+    assert!(
+        !text.contains("\"prompt\"") && !text.contains("fix the cart"),
+        "{text}"
+    );
+}
