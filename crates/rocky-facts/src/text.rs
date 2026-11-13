@@ -89,7 +89,7 @@ pub(crate) fn line_counts(before: &str, after: &str) -> (u32, u32) {
 }
 
 /// Computes `100 - round(100 * matched / max(len_a, len_b))` over token slices.
-pub(crate) fn token_change_pct(a: &[String], b: &[String]) -> u32 {
+pub(crate) fn token_change_pct<T: Eq + Hash>(a: &[T], b: &[T]) -> u32 {
     let max_len = a.len().max(b.len());
     if max_len == 0 {
         return 0;
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(token_change_pct(&abcd, &abcd), 0);
         assert_eq!(token_change_pct(&abcd, &wxyz), 100);
         assert_eq!(token_change_pct(&abcd, &abxy), 50);
-        assert_eq!(token_change_pct(&[], &[]), 0);
+        assert_eq!(token_change_pct::<&str>(&[], &[]), 0);
     }
 
     #[test]

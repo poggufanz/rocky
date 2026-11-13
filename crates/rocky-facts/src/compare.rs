@@ -12,7 +12,7 @@ const REWRITE_PCT_THRESHOLD: u32 = 70;
 
 type MatchKey<'a> = (SymbolKind, Option<&'a str>, &'a str, u32);
 
-fn match_key(info: &SymbolInfo) -> MatchKey<'_> {
+fn match_key<'a>(info: &'a SymbolInfo<'_>) -> MatchKey<'a> {
     (
         info.symbol.kind,
         info.symbol.container.as_deref(),
@@ -227,7 +227,7 @@ fn diff_skeleton(before: &[SkelNode], after: &[SkelNode], labels: &mut Vec<Label
     }
 }
 
-fn diff_paired_symbol(before: &SymbolInfo, after: &SymbolInfo) -> Change {
+fn diff_paired_symbol(before: &SymbolInfo<'_>, after: &SymbolInfo<'_>) -> Change {
     let mut labels = Vec::new();
 
     if let Some(label) = diff_params(&before.params, &after.params) {
@@ -284,7 +284,7 @@ fn diff_paired_symbol(before: &SymbolInfo, after: &SymbolInfo) -> Change {
 }
 
 /// Compares two parsed `FileSyntax` representations into ordered `Change` facts.
-pub(crate) fn compare(before: &FileSyntax, after: &FileSyntax) -> Vec<Change> {
+pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Change> {
     if before.has_error || after.has_error {
         return vec![Change::new(
             None,

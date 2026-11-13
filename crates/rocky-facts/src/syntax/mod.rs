@@ -69,18 +69,23 @@ pub(crate) struct SkelNode {
     pub key: String,
     pub text: String,
     pub guard: bool,
-    #[allow(dead_code)] // Read by snippet extraction.
     pub line: u32,
+}
+
+/// Line span and skeleton head lines of a matched symbol for snippet extraction.
+pub(crate) struct SymbolRegion {
+    pub lines: (u32, u32),
+    pub head_lines: BTreeSet<u32>,
 }
 
 /// Extracted symbol metadata and token streams for a single syntax item.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolInfo {
+pub(crate) struct SymbolInfo<'a> {
     pub symbol: Symbol,
     pub lines: (u32, u32),
-    pub code: Vec<String>,
-    pub all: Vec<String>,
-    pub code_without_name: Vec<String>,
+    pub code: Vec<&'a str>,
+    pub all: Vec<&'a str>,
+    pub code_without_name: Vec<&'a str>,
     pub params: Vec<Param>,
     pub return_type: Option<String>,
     pub literal: Option<String>,
@@ -90,15 +95,15 @@ pub(crate) struct SymbolInfo {
 
 /// Language-neutral syntax representation used to compare two versions of a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FileSyntax {
+pub(crate) struct FileSyntax<'a> {
     pub has_error: bool,
-    pub all: Vec<String>,
-    pub symbols: Vec<SymbolInfo>,
+    pub all: Vec<&'a str>,
+    pub symbols: Vec<SymbolInfo<'a>>,
     pub imports: BTreeSet<String>,
-    pub outside: Vec<String>,
+    pub outside: Vec<&'a str>,
 }
 
-pub(crate) struct ExtractedSymbol {
+pub(crate) struct ExtractedSymbol<'a> {
     pub symbol: Symbol,
     pub lines: (u32, u32),
     pub span: (usize, usize),
@@ -108,10 +113,11 @@ pub(crate) struct ExtractedSymbol {
     pub literal: Option<String>,
     pub test_mode: TestMode,
     pub skeleton: Vec<SkelNode>,
+    pub body: Option<Node<'a>>,
 }
 
-pub(crate) struct Extracted {
-    pub symbols: Vec<ExtractedSymbol>,
+pub(crate) struct Extracted<'a> {
+    pub symbols: Vec<ExtractedSymbol<'a>>,
     pub imports: BTreeSet<String>,
     pub excluded_outside_spans: Vec<(usize, usize)>,
 }
@@ -120,8 +126,8 @@ pub(crate) fn is_comment_kind(kind: &str) -> bool {
     matches!(kind, "comment" | "line_comment" | "block_comment")
 }
 
-pub(crate) fn node_text<'a>(node: Node<'a>, src: &'a str) -> &'a str {
-    node.utf8_text(src.as_bytes()).unwrap_or("")
+pub(crate) fn node_text<'a>(_node: Node<'_>, _src: &'a str) -> &'a str {
+    _node.utf8_text(_src.as_bytes()).unwrap_or("")
 }
 
 pub(crate) fn node_lines(node: Node<'_>) -> (u32, u32) {
@@ -137,10 +143,10 @@ pub(crate) fn node_lines(node: Node<'_>) -> (u32, u32) {
 }
 
 /// Walks leaf tokens under `root` in source order using an iterative `TreeCursor`.
-pub(crate) fn walk_leaves(
+pub(crate) fn walk_leaves<'a>(
     root: Node<'_>,
-    src: &str,
-    mut on_leaf: impl FnMut(usize, usize, &str, bool),
+    src: &'a str,
+    mut on_leaf: impl FnMut(usize, usize, &'a str, bool),
 ) {
     let mut cursor = root.walk();
     let mut comment_depth = 0usize;
@@ -178,13 +184,16 @@ pub(crate) fn walk_leaves(
 
 /// Joins non-comment leaf tokens under `node` with single spaces.
 pub(crate) fn normalized_code_text(node: Node<'_>, src: &str) -> String {
-    let mut tokens = Vec::new();
+    let mut out = String::new();
     walk_leaves(node, src, |_, _, text, is_comment| {
         if !is_comment {
-            tokens.push(text.to_string());
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(text);
         }
     });
-    tokens.join(" ")
+    out
 }
 
 pub(crate) fn new_symbol(
@@ -238,7 +247,7 @@ pub(crate) fn extract_return_type(fn_node: Node<'_>, src: &str) -> Option<String
         .filter(|s| !s.is_empty())
 }
 
-fn empty_error_syntax() -> FileSyntax {
+fn empty_error_syntax<'a>() -> FileSyntax<'a> {
     FileSyntax {
         has_error: true,
         all: Vec::new(),
@@ -258,27 +267,97 @@ fn language_for(lang: Lang) -> Option<tree_sitter::Language> {
     }
 }
 
-/// Parses `src` with the grammar for `lang` into a language-neutral `FileSyntax`.
-pub(crate) fn parse(lang: Lang, src: &str) -> FileSyntax {
-    let Some(ts_lang) = language_for(lang) else {
-        return empty_error_syntax();
-    };
+fn is_head_skel_kind(kind: SkelKind) -> bool {
+    matches!(
+        kind,
+        SkelKind::If
+            | SkelKind::Else
+            | SkelKind::Match
+            | SkelKind::Arm
+            | SkelKind::Loop
+            | SkelKind::While
+            | SkelKind::Return
+            | SkelKind::Throw
+            | SkelKind::Try
+            | SkelKind::Catch
+    )
+}
 
+fn parse_tree(lang: Lang, src: &str) -> Option<tree_sitter::Tree> {
+    let ts_lang = language_for(lang)?;
     let mut parser = Parser::new();
-    if parser.set_language(&ts_lang).is_err() {
-        return empty_error_syntax();
-    }
+    parser.set_language(&ts_lang).ok()?;
+    parser.parse(src, None)
+}
 
-    let Some(tree) = parser.parse(src, None) else {
+fn extract_from_root<'a>(
+    lang: Lang,
+    root: Node<'a>,
+    src: &'a str,
+    details: bool,
+) -> Option<Extracted<'a>> {
+    match lang {
+        Lang::Typescript | Lang::Tsx | Lang::Javascript => Some(ecma::extract(root, src, details)),
+        Lang::Rust => Some(rust::extract(root, src, details)),
+        _ => None,
+    }
+}
+
+/// Extracts just the line span and optional head lines for one symbol without collecting file tokens.
+pub(crate) fn parse_symbol_region(
+    lang: Lang,
+    src: &str,
+    target: &Symbol,
+    collect_heads: bool,
+) -> Option<SymbolRegion> {
+    let tree = parse_tree(lang, src)?;
+    let extracted = extract_from_root(lang, tree.root_node(), src, false)?;
+    let mut matching: Vec<ExtractedSymbol<'_>> = extracted
+        .symbols
+        .into_iter()
+        .filter(|raw| {
+            raw.symbol.kind == target.kind
+                && raw.symbol.container.as_deref() == target.container.as_deref()
+                && raw.symbol.name == target.name
+        })
+        .collect();
+    if matching.is_empty() {
+        return None;
+    }
+    matching.sort_by_key(|sym| (sym.span.0, Reverse(sym.span.1)));
+    let matched = matching.into_iter().nth(target.nth as usize)?;
+    let mut head_lines = BTreeSet::new();
+    if collect_heads {
+        head_lines.insert(matched.lines.0);
+        head_lines.insert(matched.lines.1);
+        if let Some(body) = matched.body {
+            let skeleton = match lang {
+                Lang::Typescript | Lang::Tsx | Lang::Javascript => ecma::build_skeleton(body, src),
+                Lang::Rust => rust::build_skeleton(body, src),
+                _ => Vec::new(),
+            };
+            for node in skeleton {
+                if is_head_skel_kind(node.kind) {
+                    head_lines.insert(node.line);
+                }
+            }
+        }
+    }
+    Some(SymbolRegion {
+        lines: matched.lines,
+        head_lines,
+    })
+}
+
+/// Parses `src` with the grammar for `lang` into a language-neutral `FileSyntax`.
+pub(crate) fn parse<'a>(lang: Lang, src: &'a str) -> FileSyntax<'a> {
+    let Some(tree) = parse_tree(lang, src) else {
         return empty_error_syntax();
     };
-
     let root = tree.root_node();
     let has_error = root.has_error();
-    let mut extracted = match lang {
-        Lang::Typescript | Lang::Tsx | Lang::Javascript => ecma::extract(root, src),
-        Lang::Rust => rust::extract(root, src),
-        _ => return empty_error_syntax(),
+    let Some(mut extracted) = extract_from_root(lang, root, src, true) else {
+        return empty_error_syntax();
     };
 
     // Order outer before inner when spans share a start byte so nested exclusions remain exact.
@@ -300,9 +379,9 @@ pub(crate) fn parse(lang: Lang, src: &str) -> FileSyntax {
     }
 
     let sym_count = extracted.symbols.len();
-    let mut sym_code: Vec<Vec<String>> = vec![Vec::new(); sym_count];
-    let mut sym_all: Vec<Vec<String>> = vec![Vec::new(); sym_count];
-    let mut sym_code_without_name: Vec<Vec<String>> = vec![Vec::new(); sym_count];
+    let mut sym_code: Vec<Vec<&'a str>> = vec![Vec::new(); sym_count];
+    let mut sym_all: Vec<Vec<&'a str>> = vec![Vec::new(); sym_count];
+    let mut sym_code_without_name: Vec<Vec<&'a str>> = vec![Vec::new(); sym_count];
 
     let mut file_all = Vec::new();
     let mut outside = Vec::new();
@@ -313,8 +392,7 @@ pub(crate) fn parse(lang: Lang, src: &str) -> FileSyntax {
     let mut excl_end = 0usize;
 
     walk_leaves(root, src, |start, end, text, is_comment| {
-        let token = text.to_string();
-        file_all.push(token.clone());
+        file_all.push(text);
 
         while let Some(&top) = sym_stack.last() {
             if extracted.symbols[top].span.1 <= start {
@@ -337,18 +415,18 @@ pub(crate) fn parse(lang: Lang, src: &str) -> FileSyntax {
         }
 
         if let Some(&owner_idx) = sym_stack.last() {
-            sym_all[owner_idx].push(token.clone());
+            sym_all[owner_idx].push(text);
             if !is_comment {
                 let in_name = extracted.symbols[owner_idx]
                     .name_span
                     .is_some_and(|(ns, ne)| start >= ns && end <= ne);
                 if !in_name {
-                    sym_code_without_name[owner_idx].push(token.clone());
+                    sym_code_without_name[owner_idx].push(text);
                 }
-                sym_code[owner_idx].push(token);
+                sym_code[owner_idx].push(text);
             }
         } else if !is_comment && start >= excl_end {
-            outside.push(token);
+            outside.push(text);
         }
     });
 
@@ -587,14 +665,14 @@ export default function () {}
         assert_eq!(by_name("arrowSingle").params.len(), 1);
         assert_eq!(by_name("arrowSingle").params[0].name, "x");
         assert!(
-            parsed.outside.contains(&"mutableVar".to_string()),
+            parsed.outside.contains(&"mutableVar"),
             "let declaration should stay in outside"
         );
         assert!(
             !by_name("Service")
                 .all
                 .iter()
-                .any(|t| t == "run" || t == "secret"),
+                .any(|&t| t == "run" || t == "secret"),
             "class own tokens must exclude nested methods"
         );
     }
@@ -1063,7 +1141,7 @@ mod tests {
         assert_eq!(by_name("discounted").params[0].name, "self");
         assert_eq!(by_name("discounted").params[0].text, "& mut self");
         assert!(
-            !by_name("Priced").all.iter().any(|t| t == "total"),
+            !by_name("Priced").all.contains(&"total"),
             "trait own tokens must exclude trait methods"
         );
     }

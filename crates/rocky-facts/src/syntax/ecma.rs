@@ -479,8 +479,9 @@ fn skel_node_for(node: Node<'_>, src: &str, parent_is_else: bool) -> Option<Skel
     }
 }
 
-fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
+pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
     let mut out = Vec::new();
+    let mut cursor = root.walk();
     let mut stack = vec![(root, false)];
     while let Some((node, parent_is_else)) = stack.pop() {
         let kind = node.kind();
@@ -492,7 +493,7 @@ fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
         }
         let child_parent_is_else = kind == "else_clause";
         let start = stack.len();
-        let mut cursor = node.walk();
+        cursor.reset(node);
         for child in node.named_children(&mut cursor) {
             stack.push((child, child_parent_is_else));
         }
@@ -503,7 +504,9 @@ fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
 
 struct Extractor<'a> {
     src: &'a str,
-    symbols: Vec<ExtractedSymbol>,
+    details: bool,
+    cursor: tree_sitter::TreeCursor<'a>,
+    symbols: Vec<ExtractedSymbol<'a>>,
     imports: BTreeSet<String>,
     excluded_outside_spans: Vec<(usize, usize)>,
     containers: Vec<String>,
@@ -513,8 +516,8 @@ struct Extractor<'a> {
 impl<'a> Extractor<'a> {
     fn push_children_rev(&mut self, node: Node<'a>, program_level: bool, in_fn: bool) {
         let start = self.stack.len();
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
+        self.cursor.reset(node);
+        for child in node.named_children(&mut self.cursor) {
             self.stack.push(Visit::Node {
                 node: child,
                 program_level,
@@ -536,19 +539,28 @@ impl<'a> Extractor<'a> {
         name_span: Option<(usize, usize)>,
     ) {
         let body = fn_node.child_by_field_name("body");
-        let skeleton = body
-            .map(|b| build_skeleton(b, self.src))
-            .unwrap_or_default();
+        let (params, return_type, skeleton, deferred_body) = if self.details {
+            (
+                extract_params(fn_node, self.src),
+                extract_return_type(fn_node, self.src),
+                body.map(|b| build_skeleton(b, self.src))
+                    .unwrap_or_default(),
+                None,
+            )
+        } else {
+            (Vec::new(), None, Vec::new(), body)
+        };
         self.symbols.push(ExtractedSymbol {
             symbol,
             lines: node_lines(outer),
             span: (outer.start_byte(), outer.end_byte()),
             name_span,
-            params: extract_params(fn_node, self.src),
-            return_type: extract_return_type(fn_node, self.src),
+            params,
+            return_type,
             literal: None,
             test_mode: TestMode::Normal,
             skeleton,
+            body: deferred_body,
         });
         if let Some(b) = body {
             self.stack.push(Visit::Node {
@@ -560,10 +572,16 @@ impl<'a> Extractor<'a> {
     }
 
     fn push_test(&mut self, outer: Node<'a>, test: TestCall<'a>) {
-        let skeleton = test
-            .callback_body
-            .map(|b| build_skeleton(b, self.src))
-            .unwrap_or_default();
+        let (skeleton, deferred_body) = if self.details {
+            (
+                test.callback_body
+                    .map(|b| build_skeleton(b, self.src))
+                    .unwrap_or_default(),
+                None,
+            )
+        } else {
+            (Vec::new(), test.callback_body)
+        };
         self.symbols.push(ExtractedSymbol {
             symbol: new_symbol(SymbolKind::Test, test.name, self.current_container(), false),
             lines: node_lines(outer),
@@ -574,6 +592,7 @@ impl<'a> Extractor<'a> {
             literal: None,
             test_mode: test.mode,
             skeleton,
+            body: deferred_body,
         });
         if let Some(b) = test.callback_body {
             self.stack.push(Visit::Node {
@@ -596,6 +615,7 @@ impl<'a> Extractor<'a> {
             literal: None,
             test_mode: TestMode::Normal,
             skeleton: Vec::new(),
+            body: None,
         });
         if let Some(body) = class_node.child_by_field_name("body") {
             self.stack.push(Visit::ClassBody {
@@ -631,6 +651,7 @@ impl<'a> Extractor<'a> {
             literal: None,
             test_mode: TestMode::Normal,
             skeleton: Vec::new(),
+            body: None,
         });
     }
 
@@ -671,9 +692,17 @@ impl<'a> Extractor<'a> {
                     name_span,
                 );
             } else {
-                let skeleton = value
-                    .map(|v| build_skeleton(v, self.src))
-                    .unwrap_or_default();
+                let (literal, skeleton, deferred_body) = if self.details {
+                    (
+                        value.and_then(|v| extract_literal(v, self.src)),
+                        value
+                            .map(|v| build_skeleton(v, self.src))
+                            .unwrap_or_default(),
+                        None,
+                    )
+                } else {
+                    (None, Vec::new(), value)
+                };
                 self.symbols.push(ExtractedSymbol {
                     symbol: new_symbol(SymbolKind::Const, name, None, exported),
                     lines: node_lines(sym_node),
@@ -681,9 +710,10 @@ impl<'a> Extractor<'a> {
                     name_span,
                     params: Vec::new(),
                     return_type: None,
-                    literal: value.and_then(|v| extract_literal(v, self.src)),
+                    literal,
                     test_mode: TestMode::Normal,
                     skeleton,
+                    body: deferred_body,
                 });
                 if let Some(val) = value {
                     self.stack.push(Visit::Node {
@@ -793,9 +823,11 @@ impl<'a> Extractor<'a> {
 }
 
 /// Extracts TypeScript, TSX, and JavaScript symbols, control skeletons, tests, and imports iteratively without recursion.
-pub(crate) fn extract(root: Node<'_>, src: &str) -> Extracted {
+pub(crate) fn extract<'a>(root: Node<'a>, src: &'a str, details: bool) -> Extracted<'a> {
     let mut extractor = Extractor {
         src,
+        details,
+        cursor: root.walk(),
         symbols: Vec::new(),
         imports: BTreeSet::new(),
         excluded_outside_spans: Vec::new(),
