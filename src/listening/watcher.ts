@@ -101,7 +101,7 @@ function versionEvent(
   root: string,
   rel: string,
   versionId: string,
-  opts: { baseline?: boolean; deleted?: boolean },
+  opts: { baseline?: boolean; deleted?: boolean; version?: string; prev?: string; created?: boolean },
 ): EventEnvelope {
   return {
     v: 1,
@@ -116,10 +116,12 @@ function versionEvent(
     redaction: { applied: true, truncated: false },
     coverage: "complete",
     refs: {
-      version: versionId,
+      version: opts.version ?? versionId,
       fileRel: rel,
       ...(opts.baseline === true ? { baseline: true } : {}),
       ...(opts.deleted === true ? { deleted: true } : {}),
+      ...(opts.prev !== undefined ? { prev: opts.prev } : {}),
+      ...(opts.created === true ? { created: true } : {}),
     },
   };
 }
@@ -127,19 +129,33 @@ function versionEvent(
 interface KnownVersion {
   versionId: string;
   sha: string;
+  deleted: boolean;
+}
+
+/** Previous sha256 only when the latest recorded event for the path is live. */
+function livePrevSha(prior: KnownVersion | undefined): string | undefined {
+  if (prior === undefined || prior.deleted || prior.sha.length === 0) return undefined;
+  return prior.sha;
 }
 
 /** Latest recorded version per rel, rebuilt from the durable log. */
-function knownVersions(root: string, home?: string): Map<string, KnownVersion> {
+function knownVersions(
+  root: string,
+  home?: string,
+): { known: Map<string, KnownVersion>; complete: boolean } {
   const known = new Map<string, KnownVersion>();
-  const { events } = loadEventsForProjection(root, home);
+  const { events, truncated, malformed } = loadEventsForProjection(root, home);
   for (const e of events) {
     if (e.node !== "file_version" || e.nodeId === undefined) continue;
     const rel = e.refs.fileRel;
     if (rel === undefined) continue;
-    known.set(rel, { versionId: e.nodeId, sha: e.refs.version ?? "" });
+    known.set(rel, {
+      versionId: e.nodeId,
+      sha: e.refs.version ?? "",
+      deleted: e.refs.deleted === true,
+    });
   }
-  return known;
+  return { known, complete: !truncated && malformed === 0 };
 }
 
 /**
@@ -230,7 +246,7 @@ export function ensureBaseline(
   const root = canonicalRootOf(repoRoot);
   if (root === undefined) return { ok: false, reason: "root-unusable" };
   if (!isRepoCaptureAllowed(root, home)) return { ok: false, reason: "repo-consent-required" };
-  const known = knownVersions(root, home);
+  const { known } = knownVersions(root, home);
   if (known.size > 0) return { ok: true };
   const out = reconcileRepo(repoRoot, { baseline: true } as { pathCap?: number }, home);
   return out.coverage === "unknown" ? { ok: false, reason: out.gaps[0] ?? "baseline-failed" } : { ok: true };
@@ -266,7 +282,7 @@ export function reconcileRepo(
     return { versions: [], hunks: 0, gaps: [reason], coverage: "unknown" };
   }
   const { rels, truncated, gaps } = walked;
-  const known = knownVersions(root, home);
+  const { known, complete } = knownVersions(root, home);
   const versions: string[] = [];
   let hunks = 0;
   const live = new Set<string>();
@@ -296,27 +312,32 @@ export function reconcileRepo(
     const redacted = redactSecretsAtBoundary(text);
     const sha = sha256hex(Buffer.from(redacted, "utf8"));
     const prior = known.get(rel);
-    if (prior !== undefined && prior.sha === sha) continue;
+    if (prior !== undefined && !prior.deleted && prior.sha === sha) continue;
     const versionId = randomUUID();
     const stored = storeListeningObject(root, Buffer.from(redacted, "utf8"), home);
     if (!stored.ok) {
       gaps.push(`${rel}: ${stored.reason}`);
       continue;
     }
-    const appended = appendListeningEvent(root, {
-      ...versionEvent(root, rel, versionId, { baseline: baseline || prior === undefined }),
-      refs: {
+    const prev = livePrevSha(prior);
+    const created = (prior === undefined || prior.deleted) && !baseline && complete;
+    const appended = appendListeningEvent(
+      root,
+      versionEvent(root, rel, versionId, {
+        baseline: baseline || prior === undefined,
         version: sha,
-        fileRel: rel,
-        ...(baseline || prior === undefined ? { baseline: true } : {}),
-      },
-    }, undefined, home);
+        prev,
+        created,
+      }),
+      undefined,
+      home,
+    );
     if (!appended.ok) {
       gaps.push(`${rel}: ${appended.reason}`);
       continue;
     }
     versions.push(versionId);
-    known.set(rel, { versionId, sha });
+    known.set(rel, { versionId, sha, deleted: false });
     if (prior !== undefined) {
       const before = prior.sha.length > 0 ? undefined : undefined;
       void before;
@@ -350,9 +371,14 @@ export function reconcileRepo(
       }
     }
     const versionId = randomUUID();
-    const appended = appendListeningEvent(root, versionEvent(root, rel, versionId, { deleted: true }), undefined, home);
+    const prev = livePrevSha(prior);
+    const appended = appendListeningEvent(
+      root,
+      versionEvent(root, rel, versionId, { deleted: true, prev }),
+      undefined,
+      home,
+    );
     if (appended.ok) versions.push(versionId);
-    void prior;
   }
   if (truncated) gaps.push(`path-cap-reached:${rels.length}`);
   const coverage = gaps.length > 0 || truncated ? "partial" : "complete";

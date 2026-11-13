@@ -107,6 +107,10 @@ export interface EventEnvelope {
     baseline?: boolean;
     /** True when this version records a deletion. */
     deleted?: boolean;
+    /** sha256 of the previous live version of this path. */
+    prev?: string;
+    /** True when this path had no live version after the baseline: a new or re-created file. */
+    created?: boolean;
     /** 1-based start line of the hunk this event describes. */
     startLine?: number;
     /** Number of lines the hunk spans. */

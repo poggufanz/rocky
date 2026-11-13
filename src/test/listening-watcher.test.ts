@@ -1,12 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setRepoCapture } from "../listening/consent.js";
+import { appendListeningEvent } from "../listening/event-log.js";
 import { loadEventsForProjection } from "../listening/event-log-read.js";
-import { consentsPath } from "../listening/store-paths.js";
+import { projectGraph } from "../listening/graph-store.js";
+import { consentsPath, eventsPath } from "../listening/store-paths.js";
+import type { EventEnvelope } from "../listening/types.js";
 import { ensureBaseline, reconcileRepo } from "../listening/watcher.js";
 
 function freshHome(): string {
@@ -116,4 +120,216 @@ test("path cap truncates with partial coverage", () => {
   const out = reconcileRepo(root, { pathCap: 2 }, home);
   assert.equal(out.coverage, "partial");
   assert.ok(out.gaps.some((g) => g.startsWith("path-cap-reached")));
+});
+
+function fileVersionEvents(root: string, home: string, rel?: string): EventEnvelope[] {
+  return loadEventsForProjection(root, home).events.filter(
+    (e) => e.node === "file_version" && (rel === undefined || e.refs.fileRel === rel),
+  );
+}
+
+test("a changed file's version carries refs.prev with the previous sha", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  writeFileSync(join(root, "a.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+  writeFileSync(join(root, "a.txt"), "three\n");
+  reconcileRepo(root, {}, home);
+
+  const events = fileVersionEvents(root, home, "a.txt");
+  assert.equal(events.length, 3);
+  assert.equal(events[1].refs.prev, events[0].refs.version);
+  assert.equal(events[2].refs.prev, events[1].refs.version);
+  assert.equal(events[1].refs.created, undefined);
+  assert.equal(events[2].refs.created, undefined);
+});
+
+test("the baseline version has neither refs.prev nor refs.created", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+
+  const events = fileVersionEvents(root, home, "a.txt");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].refs.baseline, true);
+  assert.equal(events[0].refs.prev, undefined);
+  assert.equal(events[0].refs.created, undefined);
+  assert.equal("prev" in events[0].refs, false);
+  assert.equal("created" in events[0].refs, false);
+});
+
+test("a file created after the baseline has refs.created and no refs.prev", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  writeFileSync(join(root, "b.txt"), "two\n");
+  const out = reconcileRepo(root, {}, home);
+  assert.equal(out.coverage, "complete");
+
+  const events = fileVersionEvents(root, home, "b.txt");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].refs.created, true);
+  assert.equal(events[0].refs.prev, undefined);
+  assert.equal("prev" in events[0].refs, false);
+  assert.equal(events[0].refs.baseline, true);
+});
+
+test("a re-created file after a deletion has refs.created and no refs.prev", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  rmSync(join(root, "a.txt"));
+  reconcileRepo(root, {}, home);
+  writeFileSync(join(root, "a.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+
+  const events = fileVersionEvents(root, home, "a.txt");
+  assert.equal(events.length, 3);
+  assert.equal(events[1].refs.deleted, true);
+  assert.equal(events[2].refs.created, true);
+  assert.equal(events[2].refs.prev, undefined);
+  assert.equal("prev" in events[2].refs, false);
+  assert.equal(events[2].refs.deleted, undefined);
+
+  rmSync(join(root, "a.txt"));
+  reconcileRepo(root, {}, home);
+  writeFileSync(join(root, "a.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+  const recreatedSame = fileVersionEvents(root, home, "a.txt");
+  assert.equal(recreatedSame.length, 5);
+  assert.equal(recreatedSame[4].refs.created, true);
+  assert.equal(recreatedSame[4].refs.prev, undefined);
+});
+
+test("a deletion event carries refs.prev of the last live version", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  writeFileSync(join(root, "a.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+  rmSync(join(root, "a.txt"));
+  reconcileRepo(root, {}, home);
+
+  const events = fileVersionEvents(root, home, "a.txt");
+  assert.equal(events.length, 3);
+  const del = events[2];
+  assert.equal(del.refs.deleted, true);
+  assert.equal(del.refs.prev, events[1].refs.version);
+  assert.equal(del.refs.created, undefined);
+  assert.equal(del.refs.version, del.nodeId);
+  assert.notEqual(del.refs.version, events[1].refs.version);
+});
+
+test("an eviction gap blocks refs.created", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  const gapResult = appendListeningEvent(root, {
+    v: 1,
+    eventId: "gap-1",
+    source: "watcher",
+    repoRoot: root,
+    ts: Date.now(),
+    adapterVersion: "listening-store/1",
+    consent: { host: false, repo: true, rawTrace: false },
+    redaction: { applied: false, truncated: false },
+    coverage: "partial",
+    refs: {},
+    gapEvicted: 3,
+  }, undefined, home);
+  assert.equal(gapResult.ok, true);
+
+  writeFileSync(join(root, "b.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+
+  const events = fileVersionEvents(root, home, "b.txt");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].refs.created, undefined);
+  assert.equal(events[0].refs.prev, undefined);
+  assert.equal("created" in events[0].refs, false);
+  assert.equal("prev" in events[0].refs, false);
+});
+
+test("malformed log lines block refs.created", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  appendFileSync(eventsPath(root, home), "{not-valid-json\n");
+
+  writeFileSync(join(root, "b.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+
+  const events = fileVersionEvents(root, home, "b.txt");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].refs.created, undefined);
+  assert.equal(events[0].refs.prev, undefined);
+});
+
+test("events without the new refs still load", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  const oneSha = createHash("sha256").update("one\n", "utf8").digest("hex");
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(appendListeningEvent(root, {
+    v: 1,
+    eventId: "old-1",
+    source: "watcher",
+    repoRoot: root,
+    ts: Date.now() - 2000,
+    adapterVersion: "listening-watcher/1",
+    node: "file_version",
+    nodeId: "old-ver-1",
+    consent: { host: false, repo: true, rawTrace: false },
+    redaction: { applied: true, truncated: false },
+    coverage: "complete",
+    refs: { version: oneSha, fileRel: "a.txt", baseline: true },
+  }, undefined, home).ok, true);
+  assert.equal(appendListeningEvent(root, {
+    v: 1,
+    eventId: "old-2",
+    source: "watcher",
+    repoRoot: root,
+    ts: Date.now() - 1000,
+    adapterVersion: "listening-watcher/1",
+    node: "file_version",
+    nodeId: "old-del-1",
+    consent: { host: false, repo: true, rawTrace: false },
+    redaction: { applied: true, truncated: false },
+    coverage: "complete",
+    refs: { version: "old-del-1", fileRel: "b.txt", deleted: true },
+  }, undefined, home).ok, true);
+
+  const loaded = loadEventsForProjection(root, home);
+  assert.equal(loaded.malformed, 0);
+  assert.equal(loaded.truncated, false);
+  assert.equal(loaded.events.length, 2);
+
+  const graph = projectGraph(root, { limit: 50 }, home);
+  assert.equal(graph.coverage.status, "complete");
+  assert.equal(graph.nodes.length, 2);
+
+  writeFileSync(join(root, "b.txt"), "reborn\n");
+  const unchangedA = reconcileRepo(root, {}, home);
+  assert.equal(unchangedA.coverage, "complete");
+  assert.equal(fileVersionEvents(root, home, "a.txt").length, 1);
+
+  const bEvents = fileVersionEvents(root, home, "b.txt");
+  assert.equal(bEvents.length, 2);
+  assert.equal(bEvents[1].refs.created, true);
+  assert.equal(bEvents[1].refs.prev, undefined);
+
+  writeFileSync(join(root, "a.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+  const aEvents = fileVersionEvents(root, home, "a.txt");
+  assert.equal(aEvents.length, 2);
+  assert.equal(aEvents[1].refs.prev, oneSha);
+  assert.equal(aEvents[1].refs.created, undefined);
 });
