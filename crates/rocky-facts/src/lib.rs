@@ -10,4 +10,4 @@ mod text;
 pub use analyze::analyze;
 pub use lang::lang_for_path;
 pub use model::*;
-pub use snippet::{SnippetLine, debug, snippet};
+pub use snippet::{SnippetLine, debug, snippet, snippets};
