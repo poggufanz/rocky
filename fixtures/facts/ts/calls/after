@@ -1,0 +1,4 @@
+function sync(x: string) {
+  save(x);
+  notify(x);
+}

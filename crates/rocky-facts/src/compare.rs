@@ -1,7 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::{Change, Label, SymbolKind};
-use crate::syntax::{FileSyntax, Param, SymbolInfo};
+use similar::{Algorithm, DiffOp, capture_diff_slices};
+
+use crate::model::{Change, Label, MAX_DIFF_ITEMS, SymbolKind};
+use crate::syntax::{FileSyntax, Param, SkelKind, SkelNode, SymbolInfo, TestMode};
 use crate::text::{cut, token_change_pct};
 
 const MAX_NAME_CHARS: usize = 80;
@@ -64,6 +66,167 @@ fn diff_params(before: &[Param], after: &[Param]) -> Option<Label> {
     }
 }
 
+#[derive(Default)]
+struct SkelSummary<'a> {
+    branches: usize,
+    loops: usize,
+    awaits: usize,
+    errors: BTreeMap<&'a str, usize>,
+    calls: BTreeMap<&'a str, usize>,
+}
+
+impl<'a> SkelSummary<'a> {
+    fn from_nodes(nodes: &'a [SkelNode]) -> Self {
+        let mut summary = Self::default();
+        for node in nodes {
+            match node.kind {
+                SkelKind::Else | SkelKind::Arm => summary.branches += 1,
+                SkelKind::Loop | SkelKind::While => summary.loops += 1,
+                SkelKind::Await => summary.awaits += 1,
+                SkelKind::Try | SkelKind::Throw | SkelKind::ErrorOp => {
+                    *summary.errors.entry(node.key.as_str()).or_insert(0) += 1;
+                }
+                SkelKind::Call => {
+                    let name = node.key.strip_prefix("call:").unwrap_or(&node.key);
+                    *summary.calls.entry(name).or_insert(0) += 1;
+                }
+                SkelKind::If | SkelKind::Match | SkelKind::Return | SkelKind::Catch => {}
+            }
+        }
+        summary
+    }
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn diff_skeleton(before: &[SkelNode], after: &[SkelNode], labels: &mut Vec<Label>) {
+    if before.len() <= MAX_DIFF_ITEMS && after.len() <= MAX_DIFF_ITEMS {
+        let before_keys: Vec<&str> = before.iter().map(|n| n.key.as_str()).collect();
+        let after_keys: Vec<&str> = after.iter().map(|n| n.key.as_str()).collect();
+        let ops = capture_diff_slices(Algorithm::Myers, &before_keys, &after_keys);
+
+        let mut guard_added = false;
+        let mut condition_changed = false;
+        let mut return_changed = false;
+
+        for op in ops {
+            match op {
+                DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } => {
+                    for offset in 0..len {
+                        let b = &before[old_index + offset];
+                        let a = &after[new_index + offset];
+                        match (b.kind, a.kind) {
+                            (
+                                SkelKind::If | SkelKind::While | SkelKind::Match,
+                                SkelKind::If | SkelKind::While | SkelKind::Match,
+                            ) if b.text != a.text => condition_changed = true,
+                            (SkelKind::Return, SkelKind::Return) if b.text != a.text => {
+                                return_changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                DiffOp::Insert {
+                    new_index, new_len, ..
+                }
+                | DiffOp::Replace {
+                    new_index, new_len, ..
+                } => {
+                    for a in &after[new_index..new_index + new_len] {
+                        if a.kind == SkelKind::If && a.guard {
+                            guard_added = true;
+                        }
+                    }
+                }
+                DiffOp::Delete { .. } => {}
+            }
+        }
+
+        if guard_added {
+            labels.push(Label::GuardAdded {});
+        }
+        if condition_changed {
+            labels.push(Label::ConditionChanged {});
+        }
+        if return_changed {
+            labels.push(Label::ReturnChanged {});
+        }
+    }
+
+    let before_sum = SkelSummary::from_nodes(before);
+    let after_sum = SkelSummary::from_nodes(after);
+
+    if after_sum.branches > before_sum.branches {
+        labels.push(Label::BranchAdded {});
+    } else if after_sum.branches < before_sum.branches {
+        labels.push(Label::BranchRemoved {});
+    }
+
+    if after_sum.loops > before_sum.loops {
+        labels.push(Label::LoopAdded {});
+    } else if after_sum.loops < before_sum.loops {
+        labels.push(Label::LoopRemoved {});
+    }
+
+    if after_sum.awaits != before_sum.awaits {
+        labels.push(Label::AwaitChanged {
+            added: saturating_u32(after_sum.awaits.saturating_sub(before_sum.awaits)),
+            removed: saturating_u32(before_sum.awaits.saturating_sub(after_sum.awaits)),
+        });
+    }
+
+    let err_keys: BTreeSet<&str> = before_sum
+        .errors
+        .keys()
+        .chain(after_sum.errors.keys())
+        .copied()
+        .collect();
+    let mut err_added = false;
+    let mut err_removed = false;
+    for key in err_keys {
+        let b_cnt = before_sum.errors.get(key).copied().unwrap_or(0);
+        let a_cnt = after_sum.errors.get(key).copied().unwrap_or(0);
+        if a_cnt > b_cnt {
+            err_added = true;
+        } else if b_cnt > a_cnt {
+            err_removed = true;
+        }
+    }
+    if err_added {
+        labels.push(Label::ErrorHandlingAdded {});
+    }
+    if err_removed {
+        labels.push(Label::ErrorHandlingRemoved {});
+    }
+
+    let call_names: BTreeSet<&str> = before_sum
+        .calls
+        .keys()
+        .chain(after_sum.calls.keys())
+        .copied()
+        .collect();
+    for name in call_names {
+        let b_cnt = before_sum.calls.get(name).copied().unwrap_or(0);
+        let a_cnt = after_sum.calls.get(name).copied().unwrap_or(0);
+        if a_cnt > b_cnt {
+            labels.push(Label::CallAdded {
+                name: cut(name, MAX_NAME_CHARS),
+            });
+        } else if b_cnt > a_cnt {
+            labels.push(Label::CallRemoved {
+                name: cut(name, MAX_NAME_CHARS),
+            });
+        }
+    }
+}
+
 fn diff_paired_symbol(before: &SymbolInfo, after: &SymbolInfo) -> Change {
     let mut labels = Vec::new();
 
@@ -84,6 +247,18 @@ fn diff_paired_symbol(before: &SymbolInfo, after: &SymbolInfo) -> Change {
             after: cut(a_lit, MAX_VALUE_CHARS),
         });
     }
+
+    match (before.test_mode, after.test_mode) {
+        (TestMode::Normal, TestMode::Skip) => labels.push(Label::TestSkipped {
+            name: cut(&after.symbol.name, MAX_NAME_CHARS),
+        }),
+        (TestMode::Normal, TestMode::Only) => labels.push(Label::TestOnly {
+            name: cut(&after.symbol.name, MAX_NAME_CHARS),
+        }),
+        _ => {}
+    }
+
+    diff_skeleton(&before.skeleton, &after.skeleton, &mut labels);
 
     let pct = token_change_pct(&before.code, &after.code);
     if pct > REWRITE_PCT_THRESHOLD {
@@ -172,19 +347,27 @@ pub(crate) fn compare(before: &FileSyntax, after: &FileSyntax) -> Vec<Change> {
 
     for (a_idx, a_sym) in after.symbols.iter().enumerate() {
         if !after_paired[a_idx] {
-            after_changes.push((
-                a_idx,
-                Change::new(Some(a_sym.symbol.clone()), vec![Label::SymbolAdded {}]),
-            ));
+            let label = if a_sym.symbol.kind == SymbolKind::Test {
+                Label::TestAdded {
+                    name: cut(&a_sym.symbol.name, MAX_NAME_CHARS),
+                }
+            } else {
+                Label::SymbolAdded {}
+            };
+            after_changes.push((a_idx, Change::new(Some(a_sym.symbol.clone()), vec![label])));
         }
     }
 
     for (b_idx, b_sym) in before.symbols.iter().enumerate() {
         if !before_paired[b_idx] {
-            removed_changes.push((
-                b_idx,
-                Change::new(Some(b_sym.symbol.clone()), vec![Label::SymbolRemoved {}]),
-            ));
+            let label = if b_sym.symbol.kind == SymbolKind::Test {
+                Label::TestRemoved {
+                    name: cut(&b_sym.symbol.name, MAX_NAME_CHARS),
+                }
+            } else {
+                Label::SymbolRemoved {}
+            };
+            removed_changes.push((b_idx, Change::new(Some(b_sym.symbol.clone()), vec![label])));
         }
     }
 
@@ -354,6 +537,145 @@ function editedLast() { const x = 2; }
             vec![
                 ("C", &Label::SymbolAdded {}),
                 ("B", &Label::SymbolRemoved {})
+            ]
+        );
+    }
+
+    #[test]
+    fn skeleton_while_switch_replace_guard_and_both_error_labels() {
+        let while_facts = analyze(&FileInput {
+            path: "src/w.ts",
+            before: Side::Text("function f(a: number) { while (a > 1) { a--; } }\n"),
+            after: Side::Text("function f(a: number) { while (a >= 1) { a--; } }\n"),
+        });
+        assert_eq!(
+            while_facts.changes[0].labels,
+            vec![Label::ConditionChanged {}]
+        );
+
+        let switch_facts = analyze(&FileInput {
+            path: "src/s.ts",
+            before: Side::Text(
+                "function f(x: number, y: number) { switch (x) { default: return 1; } }\n",
+            ),
+            after: Side::Text(
+                "function f(x: number, y: number) { switch (y) { default: return 1; } }\n",
+            ),
+        });
+        assert_eq!(
+            switch_facts.changes[0].labels,
+            vec![Label::ConditionChanged {}]
+        );
+
+        let err_both = analyze(&FileInput {
+            path: "src/e.ts",
+            before: Side::Text(
+                "function f(x: string) {\n  if (!x) throw new Error(\"bad\");\n  return work(x);\n}\n",
+            ),
+            after: Side::Text(
+                "function f(x: string) {\n  try {\n    return work(x);\n  } catch (e) {\n    return fallback(e);\n  }\n}\n",
+            ),
+        });
+        assert!(
+            err_both.changes[0]
+                .labels
+                .contains(&Label::ErrorHandlingRemoved {})
+        );
+        assert!(
+            err_both.changes[0]
+                .labels
+                .contains(&Label::ErrorHandlingAdded {})
+        );
+
+        let replace_guard = analyze(&FileInput {
+            path: "src/g.ts",
+            before: Side::Text(
+                "function f(x: number) {\n  const a = 1;\n  const b = 2;\n  save(x);\n  return a + b + x;\n}\n",
+            ),
+            after: Side::Text(
+                "function f(x: number) {\n  const a = 1;\n  const b = 2;\n  if (x <= 0) return 0;\n  return a + b + x;\n}\n",
+            ),
+        });
+        assert_eq!(
+            replace_guard.changes[0].labels,
+            vec![
+                Label::GuardAdded {},
+                Label::CallRemoved {
+                    name: "save".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_mode_and_body_change_plus_rename_stays_removed_and_added() {
+        let skipped_with_body = analyze(&FileInput {
+            path: "src/a.test.ts",
+            before: Side::Text("it(\"runs\", () => {\n  save(1);\n  check(1);\n});\n"),
+            after: Side::Text(
+                "it.skip(\"runs\", () => {\n  save(1);\n  check(1);\n  notify(1);\n});\n",
+            ),
+        });
+        assert_eq!(skipped_with_body.changes.len(), 1);
+        assert_eq!(skipped_with_body.changes[0].importance, Importance::High);
+        assert_eq!(
+            skipped_with_body.changes[0].labels,
+            vec![
+                Label::TestSkipped {
+                    name: "runs".to_string()
+                },
+                Label::CallAdded {
+                    name: "notify".to_string()
+                },
+            ]
+        );
+
+        let renamed_test = analyze(&FileInput {
+            path: "src/b.test.ts",
+            before: Side::Text("it(\"old\", () => { save(1); });\n"),
+            after: Side::Text("it(\"new\", () => { save(1); });\n"),
+        });
+        assert_eq!(renamed_test.changes.len(), 2);
+        assert_eq!(
+            renamed_test.changes[0].labels,
+            vec![Label::TestAdded {
+                name: "new".to_string()
+            }]
+        );
+        assert_eq!(
+            renamed_test.changes[1].labels,
+            vec![Label::TestRemoved {
+                name: "old".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn large_skeleton_uses_multiset_and_counts() {
+        use std::fmt::Write;
+
+        let mut before = String::from("function many() {\n");
+        for i in 0..10_500 {
+            let _ = writeln!(before, "  save({i});");
+        }
+        before.push_str("}\n");
+        let after = before.replacen("save(5000);", "notify(5000);", 1);
+
+        let facts = analyze(&FileInput {
+            path: "src/many.ts",
+            before: Side::Text(&before),
+            after: Side::Text(&after),
+        });
+        assert_eq!(facts.changes.len(), 1);
+        assert_eq!(
+            facts.changes[0].labels,
+            vec![
+                Label::CallRemoved {
+                    name: "save".to_string()
+                },
+                Label::CallAdded {
+                    name: "notify".to_string()
+                },
             ]
         );
     }

@@ -1,0 +1,4 @@
+function sum(xs: number[]) {
+  let total = 0;
+  return total;
+}

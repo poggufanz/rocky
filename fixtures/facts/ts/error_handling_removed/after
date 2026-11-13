@@ -1,0 +1,4 @@
+function validate(x: string) {
+  const trimmed = x.trim();
+  return trimmed;
+}

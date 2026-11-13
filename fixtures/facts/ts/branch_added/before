@@ -1,0 +1,7 @@
+function pick(a: boolean, x: boolean) {
+  let y = 0;
+  if (a) {
+    y = 2;
+  }
+  return y;
+}

@@ -1,0 +1,22 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "test",
+        "name": "x",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "test_only",
+          "args": {
+            "name": "x"
+          }
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

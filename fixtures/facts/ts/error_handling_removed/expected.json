@@ -1,0 +1,20 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "validate",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "error_handling_removed",
+          "args": {}
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

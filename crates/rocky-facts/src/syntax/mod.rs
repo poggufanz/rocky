@@ -18,10 +18,58 @@ pub(crate) struct Param {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TestMode {
     Normal,
-    #[allow(dead_code)] // Constructed by the upcoming test extractor.
     Skip,
-    #[allow(dead_code)] // Constructed by the upcoming test extractor.
     Only,
+}
+
+/// Control-flow and call classification within a symbol's skeleton.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SkelKind {
+    If,
+    Else,
+    Match,
+    Arm,
+    Loop,
+    While,
+    Return,
+    Throw,
+    Try,
+    Catch,
+    #[allow(dead_code)] // Constructed by the Rust syntax extractor.
+    ErrorOp,
+    Await,
+    Call,
+}
+
+impl SkelKind {
+    pub(crate) fn kind_name(self) -> &'static str {
+        match self {
+            Self::If => "if",
+            Self::Else => "else",
+            Self::Match => "match",
+            Self::Arm => "arm",
+            Self::Loop => "loop",
+            Self::While => "while",
+            Self::Return => "return",
+            Self::Throw => "throw",
+            Self::Try => "try",
+            Self::Catch => "catch",
+            Self::ErrorOp => "error_op",
+            Self::Await => "await",
+            Self::Call => "call",
+        }
+    }
+}
+
+/// Single entry in a symbol's pre-order control-flow and call skeleton.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkelNode {
+    pub kind: SkelKind,
+    pub key: String,
+    pub text: String,
+    pub guard: bool,
+    #[allow(dead_code)] // Read by snippet extraction.
+    pub line: u32,
 }
 
 /// Extracted symbol metadata and token streams for a single syntax item.
@@ -35,8 +83,8 @@ pub(crate) struct SymbolInfo {
     pub params: Vec<Param>,
     pub return_type: Option<String>,
     pub literal: Option<String>,
-    #[allow(dead_code)] // Read by the upcoming test comparator.
     pub test_mode: TestMode,
+    pub skeleton: Vec<SkelNode>,
 }
 
 /// Language-neutral syntax representation used to compare two versions of a source file.
@@ -58,6 +106,7 @@ pub(crate) struct ExtractedSymbol {
     pub return_type: Option<String>,
     pub literal: Option<String>,
     pub test_mode: TestMode,
+    pub skeleton: Vec<SkelNode>,
 }
 
 pub(crate) struct Extracted {
@@ -270,6 +319,7 @@ pub(crate) fn parse(lang: Lang, src: &str) -> FileSyntax {
             return_type: raw.return_type,
             literal: raw.literal,
             test_mode: raw.test_mode,
+            skeleton: raw.skeleton,
         })
         .collect();
 
@@ -524,6 +574,208 @@ export default function () {}
                 (SymbolKind::Class, "default", None, true),
                 (SymbolKind::Method, "ping", Some("default"), true),
                 (SymbolKind::Method, "#priv", Some("default"), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn ecma_skeleton_nodes_guards_and_callees() {
+        use super::SkelKind;
+        use crate::model::Lang;
+
+        let long_name = "f".repeat(100);
+        let src = format!(
+            r#"async function demo(a: number, xs: number[]) {{
+  if (!a) {{
+    log(a);
+    return;
+  }}
+  if (a > 10) {{
+    s1();
+    s2();
+    s3();
+    return;
+  }}
+  if (a === 1) return 1; else return 2;
+  while (a > 0) {{ a--; }}
+  do {{ a++; }} while (a < 2);
+  for (const x of xs) {{}}
+  switch (a) {{
+    case 1: break;
+    default: break;
+  }}
+  try {{
+    await this.repo.save(a);
+    this?.client?.fetch(a);
+    a.b.c.d(a);
+    items.filter(x => x.ok).map(y => y);
+    new Error("x");
+    {long_name}();
+  }} catch (e) {{
+    throw e;
+  }}
+  return a;
+}}"#
+        );
+
+        let parsed = super::parse(Lang::Typescript, &src);
+        assert!(!parsed.has_error);
+        let skel = &parsed.symbols[0].skeleton;
+
+        let summary: Vec<(SkelKind, &str, &str, bool, u32)> = skel
+            .iter()
+            .map(|n| (n.kind, n.key.as_str(), n.text.as_str(), n.guard, n.line))
+            .collect();
+
+        let cut_long = format!("call:{}…", "f".repeat(79));
+        assert_eq!(
+            summary,
+            vec![
+                (SkelKind::If, "if", "! a", true, 2),
+                (SkelKind::Call, "call:log", "", false, 3),
+                (SkelKind::Return, "return", "", false, 4),
+                (SkelKind::If, "if", "a > 10", false, 6),
+                (SkelKind::Call, "call:s1", "", false, 7),
+                (SkelKind::Call, "call:s2", "", false, 8),
+                (SkelKind::Call, "call:s3", "", false, 9),
+                (SkelKind::Return, "return", "", false, 10),
+                (SkelKind::If, "if", "a === 1", false, 12),
+                (SkelKind::Return, "return", "1", false, 12),
+                (SkelKind::Else, "else", "", false, 12),
+                (SkelKind::Return, "return", "2", false, 12),
+                (SkelKind::While, "while", "a > 0", false, 13),
+                (SkelKind::Loop, "loop", "", false, 14),
+                (SkelKind::Loop, "loop", "", false, 15),
+                (SkelKind::Match, "match", "a", false, 16),
+                (SkelKind::Arm, "arm", "", false, 17),
+                (SkelKind::Arm, "arm", "", false, 18),
+                (SkelKind::Try, "try", "", false, 20),
+                (SkelKind::Await, "await", "", false, 21),
+                (SkelKind::Call, "call:repo.save", "", false, 21),
+                (SkelKind::Call, "call:client.fetch", "", false, 22),
+                (SkelKind::Call, "call:c.d", "", false, 23),
+                (SkelKind::Call, "call:map", "", false, 24),
+                (SkelKind::Call, "call:items.filter", "", false, 24),
+                (SkelKind::Call, cut_long.as_str(), "", false, 26),
+                (SkelKind::Catch, "catch", "", false, 27),
+                (SkelKind::Throw, "throw", "", false, 28),
+                (SkelKind::Return, "return", "a", false, 30),
+            ]
+        );
+    }
+
+    #[test]
+    fn ecma_extracts_tests_containers_and_modes() {
+        use super::{SkelKind, TestMode};
+        use crate::model::{Lang, SymbolKind};
+
+        let src = r#"
+describe("outer", () => {
+  context.skip("mid", () => {
+    suite.only("inner", () => {
+      it("normal", () => { save(); });
+      it.skip("skipped", () => {});
+      test.only("only", () => {});
+      xtest("xskipped", () => {});
+      fit("fonly", () => {});
+      ftest("ftonly", () => {});
+      it(`plain template`, () => {});
+      it(`dynamic ${1}`, () => {});
+    });
+  });
+});
+function helper() {
+  it("nested in fn", () => { ping(); });
+}
+"#;
+        let parsed = super::parse(Lang::Typescript, src);
+        assert!(!parsed.has_error);
+
+        let tests: Vec<(&str, Option<&str>, TestMode)> = parsed
+            .symbols
+            .iter()
+            .filter(|s| s.symbol.kind == SymbolKind::Test)
+            .map(|s| {
+                (
+                    s.symbol.name.as_str(),
+                    s.symbol.container.as_deref(),
+                    s.test_mode,
+                )
+            })
+            .collect();
+        assert_eq!(
+            tests,
+            vec![
+                ("normal", Some("outer > mid > inner"), TestMode::Normal),
+                ("skipped", Some("outer > mid > inner"), TestMode::Skip),
+                ("only", Some("outer > mid > inner"), TestMode::Only),
+                ("xskipped", Some("outer > mid > inner"), TestMode::Skip),
+                ("fonly", Some("outer > mid > inner"), TestMode::Only),
+                ("ftonly", Some("outer > mid > inner"), TestMode::Only),
+                (
+                    "plain template",
+                    Some("outer > mid > inner"),
+                    TestMode::Normal
+                ),
+                ("nested in fn", None, TestMode::Normal),
+            ]
+        );
+
+        let normal_test = parsed
+            .symbols
+            .iter()
+            .find(|s| s.symbol.name == "normal")
+            .unwrap();
+        assert_eq!(normal_test.skeleton.len(), 1);
+        assert_eq!(normal_test.skeleton[0].kind, SkelKind::Call);
+        assert_eq!(normal_test.skeleton[0].key, "call:save");
+
+        let helper = parsed
+            .symbols
+            .iter()
+            .find(|s| s.symbol.name == "helper")
+            .unwrap();
+        assert!(
+            helper.skeleton.is_empty(),
+            "nested test call should not leak into enclosing function skeleton"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_control_flow_does_not_overflow() {
+        let mut before = String::from("function deep(x: boolean) {\n");
+        for _ in 0..10_000 {
+            before.push_str("if (x) { ");
+        }
+        before.push_str("a();");
+        for _ in 0..10_000 {
+            before.push_str(" }");
+        }
+        before.push_str("\n}\n");
+        let after = before.replacen("a();", "b();", 1);
+
+        let handle = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                analyze(&FileInput {
+                    path: "src/deep_cf.ts",
+                    before: Side::Text(&before),
+                    after: Side::Text(&after),
+                })
+            })
+            .expect("spawn 1 MiB stack thread");
+
+        let facts = handle.join().expect("should not overflow stack");
+        assert_eq!(facts.changes.len(), 1);
+        assert_eq!(
+            facts.changes[0].labels,
+            vec![
+                Label::CallRemoved {
+                    name: "a".to_string()
+                },
+                Label::CallAdded {
+                    name: "b".to_string()
+                },
             ]
         );
     }

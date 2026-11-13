@@ -1,0 +1,5 @@
+function validate(x: string) {
+  if (!x) throw new Error("x");
+  const trimmed = x.trim();
+  return trimmed;
+}

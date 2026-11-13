@@ -1,0 +1,4 @@
+function apply(cart, m) {
+  if (!m.active) return cart.total;
+  return cart.total * m.rate
+}
