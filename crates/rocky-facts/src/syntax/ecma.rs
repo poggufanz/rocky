@@ -49,15 +49,10 @@ fn is_declaration_kind(kind: &str) -> bool {
     )
 }
 
-fn count_u32(count: usize) -> u32 {
-    u32::try_from(count).unwrap_or(u32::MAX)
-}
-
 fn is_const_lexical(node: Node<'_>) -> bool {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i)
-            && !is_comment_kind(child.kind())
-        {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if !is_comment_kind(child.kind()) {
             return child.kind() == "const";
         }
     }
@@ -65,15 +60,10 @@ fn is_const_lexical(node: Node<'_>) -> bool {
 }
 
 fn has_private_modifier(method: Node<'_>, src: &str) -> bool {
-    for i in 0..count_u32(method.named_child_count()) {
-        if let Some(child) = method.named_child(i)
-            && child.kind() == "accessibility_modifier"
-            && node_text(child, src) == "private"
-        {
-            return true;
-        }
-    }
-    false
+    let mut cursor = method.walk();
+    method
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "accessibility_modifier" && node_text(child, src) == "private")
 }
 
 fn param_pattern_node(param: Node<'_>) -> Node<'_> {
@@ -91,10 +81,8 @@ fn param_pattern_node(param: Node<'_>) -> Node<'_> {
 fn extract_params(fn_node: Node<'_>, src: &str) -> Vec<Param> {
     if let Some(params_node) = fn_node.child_by_field_name("parameters") {
         let mut params = Vec::new();
-        for i in 0..count_u32(params_node.named_child_count()) {
-            let Some(child) = params_node.named_child(i) else {
-                continue;
-            };
+        let mut cursor = params_node.walk();
+        for child in params_node.named_children(&mut cursor) {
             if is_comment_kind(child.kind()) {
                 continue;
             }
@@ -130,19 +118,20 @@ fn extract_literal(value: Node<'_>, src: &str) -> Option<String> {
     match value.kind() {
         "string" | "number" | "true" | "false" | "null" => Some(node_text(value, src).to_string()),
         "template_string" => {
-            for i in 0..count_u32(value.named_child_count()) {
-                if let Some(child) = value.named_child(i)
-                    && child.kind() == "template_substitution"
-                {
-                    return None;
-                }
+            let mut cursor = value.walk();
+            if value
+                .named_children(&mut cursor)
+                .any(|child| child.kind() == "template_substitution")
+            {
+                return None;
             }
             Some(node_text(value, src).to_string())
         }
         "unary_expression" => {
-            let op = value
-                .child_by_field_name("operator")
-                .or_else(|| value.child(0))?;
+            let op = value.child_by_field_name("operator").or_else(|| {
+                let mut cursor = value.walk();
+                cursor.goto_first_child().then(|| cursor.node())
+            })?;
             let arg = value.child_by_field_name("argument")?;
             if node_text(op, src) == "-" && arg.kind() == "number" {
                 Some(node_text(value, src).to_string())
@@ -194,14 +183,15 @@ struct Extractor<'a> {
 
 impl<'a> Extractor<'a> {
     fn push_children_rev(&mut self, node: Node<'a>, program_level: bool) {
-        for i in (0..count_u32(node.named_child_count())).rev() {
-            if let Some(child) = node.named_child(i) {
-                self.stack.push(Visit::Stmt {
-                    node: child,
-                    program_level,
-                });
-            }
+        let start = self.stack.len();
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.stack.push(Visit::Stmt {
+                node: child,
+                program_level,
+            });
         }
+        self.stack[start..].reverse();
     }
 
     fn push_callable(
@@ -272,14 +262,11 @@ impl<'a> Extractor<'a> {
     }
 
     fn handle_const_decl(&mut self, decl: Node<'a>, outer: Node<'a>, exported: bool) {
-        let mut declarators = Vec::new();
-        for i in 0..count_u32(decl.named_child_count()) {
-            if let Some(child) = decl.named_child(i)
-                && child.kind() == "variable_declarator"
-            {
-                declarators.push(child);
-            }
-        }
+        let mut cursor = decl.walk();
+        let declarators: Vec<Node<'a>> = decl
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "variable_declarator")
+            .collect();
         let single = declarators.len() == 1;
         if declarators.len() > 1 {
             self.excluded_outside_spans
@@ -388,10 +375,8 @@ impl<'a> Extractor<'a> {
     }
 
     fn handle_class_body(&mut self, node: Node<'a>, container: &str, class_exported: bool) {
-        for i in 0..count_u32(node.named_child_count()) {
-            let Some(child) = node.named_child(i) else {
-                continue;
-            };
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
             if child.kind() != "method_definition" {
                 continue;
             }

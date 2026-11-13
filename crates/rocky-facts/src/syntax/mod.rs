@@ -329,6 +329,56 @@ mod tests {
     }
 
     #[test]
+    fn wide_inputs_do_not_go_quadratic() {
+        use std::fmt::Write;
+
+        use crate::model::{MAX_BYTES, SymbolKind};
+
+        let mut stmts_before = String::with_capacity(1_000_000);
+        for i in 0..100_000 {
+            let _ = writeln!(stmts_before, "x{i}=0;");
+        }
+        assert!(stmts_before.len() <= MAX_BYTES);
+        let stmts_after = stmts_before.replacen("x50000=0;", "x50000=1;", 1);
+
+        let stmts_facts = analyze(&FileInput {
+            path: "src/wide_stmts.ts",
+            before: Side::Text(&stmts_before),
+            after: Side::Text(&stmts_after),
+        });
+        assert_eq!(stmts_facts.changes.len(), 1);
+        assert_eq!(stmts_facts.changes[0].symbol, None);
+        assert_eq!(stmts_facts.changes[0].labels, vec![Label::BodyChanged {}]);
+
+        let mut array_before = String::with_capacity(700_000);
+        array_before.push_str("export const big = [");
+        for i in 0..100_000 {
+            if i > 0 {
+                array_before.push_str(", ");
+            }
+            let _ = write!(array_before, "{i}");
+        }
+        array_before.push_str("];\n");
+        assert!(array_before.len() <= MAX_BYTES);
+        let array_after = array_before.replacen(", 50000,", ", 100000,", 1);
+
+        let array_facts = analyze(&FileInput {
+            path: "src/wide_array.ts",
+            before: Side::Text(&array_before),
+            after: Side::Text(&array_after),
+        });
+        assert_eq!(array_facts.changes.len(), 1);
+        assert_eq!(
+            array_facts.changes[0]
+                .symbol
+                .as_ref()
+                .map(|s| (s.kind, s.name.as_str(), s.exported)),
+            Some((SymbolKind::Const, "big", true))
+        );
+        assert_eq!(array_facts.changes[0].labels, vec![Label::BodyChanged {}]);
+    }
+
+    #[test]
     fn large_symbol_uses_multiset_pct() {
         let before_body: String = (0..30_000)
             .map(|i| format!("a{i}"))
