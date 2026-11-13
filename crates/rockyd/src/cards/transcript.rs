@@ -346,6 +346,19 @@ struct WindowScan {
     turn_user_text: Option<String>,
 }
 
+struct InRangePrompt {
+    ts_ms: u64,
+    dist_ms: u64,
+    assistant_lines_rev: Vec<CollectedAssistant>,
+    user_text: Option<String>,
+}
+
+impl InRangePrompt {
+    fn is_closer_or_earlier(&self, other: &Self) -> bool {
+        self.dist_ms < other.dist_ms || (self.dist_ms == other.dist_ms && self.ts_ms <= other.ts_ms)
+    }
+}
+
 fn parse_ascii_digits(bytes: &[u8]) -> Option<u32> {
     let mut acc: u32 = 0;
     for &b in bytes {
@@ -471,6 +484,18 @@ fn incomplete_scan(
     }
 }
 
+fn finish_scan(
+    best_in_range: Option<InRangePrompt>,
+    current_rev: Vec<CollectedAssistant>,
+    current_has_target: bool,
+    min_ts: u64,
+) -> WindowScan {
+    match best_in_range {
+        Some(best) => found_scan(best.assistant_lines_rev, best.user_text),
+        None => incomplete_scan(current_rev, current_has_target, min_ts),
+    }
+}
+
 fn scan_window_backwards(
     window: &[u8],
     targets: &HashSet<&str>,
@@ -480,6 +505,7 @@ fn scan_window_backwards(
     let max_ts = turn_started_ms.saturating_add(TURN_START_SLACK_MS);
     let mut current_rev: Vec<CollectedAssistant> = Vec::new();
     let mut current_has_target = false;
+    let mut best_in_range: Option<InRangePrompt> = None;
 
     for raw_line in window.rsplit(|&b| b == b'\n') {
         let trimmed = raw_line.trim_ascii();
@@ -532,16 +558,30 @@ fn scan_window_backwards(
                         current_has_target = false;
                     }
                     Some(ts) if ts >= min_ts => {
-                        return found_scan(current_rev, user_text);
+                        let segment = std::mem::take(&mut current_rev);
+                        current_has_target = false;
+                        let candidate = InRangePrompt {
+                            ts_ms: ts,
+                            dist_ms: ts.abs_diff(turn_started_ms),
+                            assistant_lines_rev: segment,
+                            user_text,
+                        };
+                        if best_in_range
+                            .as_ref()
+                            .is_none_or(|best| candidate.is_closer_or_earlier(best))
+                        {
+                            best_in_range = Some(candidate);
+                        }
                     }
                     Some(_) => {
-                        return incomplete_scan(current_rev, current_has_target, min_ts);
+                        return finish_scan(best_in_range, current_rev, current_has_target, min_ts);
                     }
                     None => {
-                        if current_has_target || targets.is_empty() {
+                        if best_in_range.is_none() && (current_has_target || targets.is_empty()) {
                             return found_scan(current_rev, user_text);
                         }
                         current_rev.clear();
+                        current_has_target = false;
                     }
                 }
             }
@@ -549,7 +589,7 @@ fn scan_window_backwards(
         }
     }
 
-    incomplete_scan(current_rev, current_has_target, min_ts)
+    finish_scan(best_in_range, current_rev, current_has_target, min_ts)
 }
 
 fn parse_assistant_line(message: Option<RawMessage>) -> Option<AssistantLine> {
@@ -1331,6 +1371,227 @@ mod tests {
             );
             assert!(out_trunc.quotes.is_empty());
         }
+    }
+
+    #[test]
+    fn close_spaced_turns_pick_nearest_prompt_and_isolate_quotes() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("close_spaced_two_turns.jsonl");
+        let two_turns = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{"role":"user","content":"Turn A prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:02.000Z","message":{"id":"msg_a","role":"assistant","content":[{"type":"text","text":"A quote"},{"type":"tool_use","id":"toolu_a","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:04.000Z","message":{"role":"user","content":"Turn B prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:05.000Z","message":{"id":"msg_b","role":"assistant","content":[{"type":"text","text":"B quote"},{"type":"tool_use","id":"toolu_b","name":"Edit"}]}}"#,
+        ];
+        fs::write(&path, format!("{}\n", two_turns.join("\n"))).expect("write two_turns");
+
+        let turn_a_start = nov_13_utc_ms(9, 15, 1, 0);
+        let out_a_match = read_quotes(&path, &["toolu_a".to_string()], turn_a_start)
+            .expect("read turn A with toolu_a");
+        assert!(out_a_match.complete);
+        assert_eq!(
+            out_a_match.first_user_text,
+            Some(("Turn A prompt".to_string(), false))
+        );
+        assert_eq!(out_a_match.quotes.len(), 1);
+        assert_eq!(
+            out_a_match.quotes.get("toolu_a").map(|q| q.text.as_str()),
+            Some("A quote")
+        );
+
+        for ids in [
+            Vec::new(),
+            vec!["toolu_absent".to_string()],
+            vec!["toolu_b".to_string()],
+        ] {
+            let out_a = read_quotes(&path, &ids, turn_a_start).expect("read turn A other ids");
+            assert!(out_a.complete);
+            assert_eq!(
+                out_a.first_user_text,
+                Some(("Turn A prompt".to_string(), false))
+            );
+            assert!(out_a.quotes.is_empty());
+        }
+
+        let turn_b_start = nov_13_utc_ms(9, 15, 4, 250);
+        let out_b_match = read_quotes(&path, &["toolu_b".to_string()], turn_b_start)
+            .expect("read turn B with toolu_b");
+        assert!(out_b_match.complete);
+        assert_eq!(
+            out_b_match.first_user_text,
+            Some(("Turn B prompt".to_string(), false))
+        );
+        assert_eq!(out_b_match.quotes.len(), 1);
+        assert_eq!(
+            out_b_match.quotes.get("toolu_b").map(|q| q.text.as_str()),
+            Some("B quote")
+        );
+
+        for ids in [
+            Vec::new(),
+            vec!["toolu_absent".to_string()],
+            vec!["toolu_a".to_string()],
+        ] {
+            let out_b = read_quotes(&path, &ids, turn_b_start).expect("read turn B other ids");
+            assert!(out_b.complete);
+            assert_eq!(
+                out_b.first_user_text,
+                Some(("Turn B prompt".to_string(), false))
+            );
+            assert!(out_b.quotes.is_empty());
+        }
+
+        let bounded_path = temp.path().join("close_spaced_bounded.jsonl");
+        let bounded_lines = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:14:00.000Z","message":{"role":"user","content":"Earlier turn prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:14:02.000Z","message":{"id":"msg_0","role":"assistant","content":[{"type":"text","text":"Earlier quote"},{"type":"tool_use","id":"toolu_0","name":"Edit"}]}}"#,
+            two_turns[0],
+            two_turns[1],
+            two_turns[2],
+            two_turns[3],
+            r#"{"type":"user","timestamp":"2026-11-13T09:16:00.000Z","message":{"role":"user","content":"Later turn prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:16:02.000Z","message":{"id":"msg_c","role":"assistant","content":[{"type":"text","text":"Later quote"},{"type":"tool_use","id":"toolu_c","name":"Edit"}]}}"#,
+        ];
+        fs::write(&bounded_path, format!("{}\n", bounded_lines.join("\n")))
+            .expect("write close_spaced_bounded");
+
+        let out_bounded_a = read_quotes(&bounded_path, &["toolu_a".to_string()], turn_a_start)
+            .expect("read bounded turn A");
+        assert!(out_bounded_a.complete);
+        assert_eq!(
+            out_bounded_a.first_user_text,
+            Some(("Turn A prompt".to_string(), false))
+        );
+        assert_eq!(
+            out_bounded_a.quotes.get("toolu_a").map(|q| q.text.as_str()),
+            Some("A quote")
+        );
+
+        let out_bounded_b = read_quotes(&bounded_path, &["toolu_b".to_string()], turn_b_start)
+            .expect("read bounded turn B");
+        assert!(out_bounded_b.complete);
+        assert_eq!(
+            out_bounded_b.first_user_text,
+            Some(("Turn B prompt".to_string(), false))
+        );
+        assert_eq!(
+            out_bounded_b.quotes.get("toolu_b").map(|q| q.text.as_str()),
+            Some("B quote")
+        );
+
+        let truncated_path = temp.path().join("close_spaced_truncated.jsonl");
+        {
+            let mut f = File::create(&truncated_path).expect("create close_spaced_truncated");
+            writeln!(
+                f,
+                r#"{{"type":"user","timestamp":"2026-11-13T09:14:00.000Z","message":{{"role":"user","content":"Old turn outside 8 MiB"}}}}"#
+            )
+            .expect("write old user");
+            let pad = "h".repeat(2048);
+            let filler = format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:01.000Z","message":{{"id":"msg_fill4","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
+            );
+            for _ in 0..4200 {
+                writeln!(f, "{filler}").expect("write filler");
+            }
+            for line in two_turns {
+                writeln!(f, "{line}").expect("write tail turns");
+            }
+        }
+        let out_trunc_a = read_quotes(&truncated_path, &["toolu_a".to_string()], turn_a_start)
+            .expect("read truncated turn A");
+        assert!(out_trunc_a.complete);
+        assert_eq!(
+            out_trunc_a.first_user_text,
+            Some(("Turn A prompt".to_string(), false))
+        );
+        assert_eq!(
+            out_trunc_a.quotes.get("toolu_a").map(|q| q.text.as_str()),
+            Some("A quote")
+        );
+
+        let out_trunc_b = read_quotes(&truncated_path, &["toolu_b".to_string()], turn_b_start)
+            .expect("read truncated turn B");
+        assert!(out_trunc_b.complete);
+        assert_eq!(
+            out_trunc_b.first_user_text,
+            Some(("Turn B prompt".to_string(), false))
+        );
+        assert_eq!(
+            out_trunc_b.quotes.get("toolu_b").map(|q| q.text.as_str()),
+            Some("B quote")
+        );
+    }
+
+    #[test]
+    fn equidistant_in_range_prompts_break_ties_to_earlier_prompt() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("equidistant_turns.jsonl");
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{"role":"user","content":"Turn A prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:01.000Z","message":{"id":"msg_a","role":"assistant","content":[{"type":"text","text":"A quote"},{"type":"tool_use","id":"toolu_a","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:04.000Z","message":{"role":"user","content":"Turn B prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:05.000Z","message":{"id":"msg_b","role":"assistant","content":[{"type":"text","text":"B quote"},{"type":"tool_use","id":"toolu_b","name":"Edit"}]}}"#,
+        ];
+        fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write equidistant_turns");
+
+        let midpoint_ms = nov_13_utc_ms(9, 15, 2, 0);
+        let out_match = read_quotes(
+            &path,
+            &["toolu_a".to_string(), "toolu_b".to_string()],
+            midpoint_ms,
+        )
+        .expect("read midpoint");
+        assert!(out_match.complete);
+        assert_eq!(
+            out_match.first_user_text,
+            Some(("Turn A prompt".to_string(), false))
+        );
+        assert_eq!(out_match.quotes.len(), 1);
+        assert_eq!(
+            out_match.quotes.get("toolu_a").map(|q| q.text.as_str()),
+            Some("A quote")
+        );
+
+        for ids in [Vec::new(), vec!["toolu_absent".to_string()]] {
+            let out = read_quotes(&path, &ids, midpoint_ms).expect("read midpoint no tool");
+            assert!(out.complete);
+            assert_eq!(
+                out.first_user_text,
+                Some(("Turn A prompt".to_string(), false))
+            );
+            assert!(out.quotes.is_empty());
+        }
+
+        let same_ts_path = temp.path().join("same_ts_turns.jsonl");
+        let same_ts_lines = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:02.000Z","message":{"role":"user","content":"First same-ts prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:02.100Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"First quote"},{"type":"tool_use","id":"toolu_first","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:02.000Z","message":{"role":"user","content":"Second same-ts prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:02.200Z","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"Second quote"},{"type":"tool_use","id":"toolu_second","name":"Edit"}]}}"#,
+        ];
+        fs::write(&same_ts_path, format!("{}\n", same_ts_lines.join("\n")))
+            .expect("write same_ts_turns");
+
+        let out_same_ts = read_quotes(
+            &same_ts_path,
+            &["toolu_first".to_string(), "toolu_second".to_string()],
+            midpoint_ms,
+        )
+        .expect("read same_ts");
+        assert!(out_same_ts.complete);
+        assert_eq!(
+            out_same_ts.first_user_text,
+            Some(("First same-ts prompt".to_string(), false))
+        );
+        assert_eq!(out_same_ts.quotes.len(), 1);
+        assert_eq!(
+            out_same_ts
+                .quotes
+                .get("toolu_first")
+                .map(|q| q.text.as_str()),
+            Some("First quote")
+        );
     }
 
     #[test]
