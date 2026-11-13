@@ -129,7 +129,8 @@ usage:
   rocky setup --check       verify owned host registrations and the rocky MCP tools.
   rocky setup --remove      remove owned rocky registrations from detected hosts,
                             and move a managed voice skill that an older release
-                            installed into a backup folder.
+                            installed into a backup folder. Refuses while desk
+                            consent is approved.
   rocky setup --replace     replace conflicting registrations after confirmation.
   rocky setup --harness     open a checkbox picker (Up/Down, Space, Enter) for hosts.
   rocky setup --harness <id> [--harness <id>] [--yes]
@@ -144,6 +145,7 @@ usage:
                             Codex has no deny hook; it uses the notify lane only.
   rocky setup --uninstall-agent-hooks
                             remove rocky's Claude Code hooks; Codex config stays untouched.
+                            Refuses while desk consent is approved.
   rocky setup --status      report host/MCP registration via rocky setup --check and
                             agent-hook state/capability; spool and Ollama/model health
                             are not checked.

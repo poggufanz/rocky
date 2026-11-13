@@ -203,6 +203,7 @@ interface Fixture {
   claudeDir: string;
   settingsPath: string;
   codexConfigPath: string;
+  hookBin: string;
   mutationCalls: string[];
   readCalls: string[];
   deps: SetupDependencies;
@@ -291,6 +292,7 @@ function makeFixture(t: test.TestContext): Fixture {
     claudeDir,
     settingsPath,
     codexConfigPath,
+    hookBin,
     mutationCalls,
     readCalls,
     deps,
@@ -341,7 +343,7 @@ for (const state of ["later", "removed", "invalid", "absent"] as const) {
   });
 }
 
-test("setup --status, --check and --agent-hooks are not refused under approved consent", async (t) => {
+test("setup --status, --check, --agent-hooks and --desk-hooks are not refused under approved consent", async (t) => {
   await t.test("--status", async (st) => {
     const f = makeFixture(st);
     seedConsent(f.rh, "approved");
@@ -379,6 +381,20 @@ test("setup --status, --check and --agent-hooks are not refused under approved c
     assert.match(output.stderr, /claude-code agent hooks: written/);
     assert.ok(f.mutationCalls.includes("confirm"));
     assert.equal(hasOwnedAgentHooks(JSON.parse(readFileSync(f.settingsPath, "utf8")) as Record<string, unknown>), true);
+  });
+
+  await t.test("--desk-hooks", async (st) => {
+    const f = makeFixture(st);
+    seedConsent(f.rh, "approved");
+    writeFileSync(f.settingsPath, "{}\n", "utf8");
+
+    const output = await captureStderr(() => setup(["--desk-hooks", f.hookBin], f.deps));
+
+    assert.equal(output.code, 0, output.stderr);
+    assert.doesNotMatch(output.stderr, /Rocky manages these entries/);
+    assert.match(output.stderr, /claude-code desk hooks: written/);
+    assert.ok(f.mutationCalls.includes("confirm"));
+    assert.equal(hasOwnedDeskHooks(JSON.parse(readFileSync(f.settingsPath, "utf8")) as Record<string, unknown>), true);
   });
 });
 

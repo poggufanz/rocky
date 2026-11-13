@@ -227,6 +227,8 @@ test("approved consent: a failed shell removal returns 1 and still records shell
   const read = readConsentRecord(f.rh);
   assert.equal(read.status === "valid" && read.record.shell_hook, false);
   assert.equal(output.stdout, "");
+  assert.match(output.stderr, /rocky: Shell hook uninstall failed\./);
+  assert.deepEqual(validateOutputLine("Shell hook uninstall failed."), []);
   assert.doesNotMatch(output.stderr, /Shell hook off\. The desk switch is off too\./);
 });
 
@@ -246,6 +248,8 @@ test("approved consent: a context-build failure returns 1 without claiming shell
 
   assert.equal(output.code, 1);
   assert.equal(output.stdout, "");
+  assert.match(output.stderr, /rocky: Shell hook uninstall failed: internal error: boom\./);
+  assert.deepEqual(validateOutputLine("Shell hook uninstall failed: internal error: boom."), []);
   assert.doesNotMatch(output.stderr, /Shell hook off\. The desk switch is off too\./);
 });
 

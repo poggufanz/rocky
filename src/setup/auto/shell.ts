@@ -103,15 +103,33 @@ export function shellSnippets(port: ShellHookPort): ExpectedFile[] {
   return files;
 }
 
-export function createShellHookPort(): ShellHookPort {
+export interface ShellHookPortDeps {
+  platform?: NodeJS.Platform;
+  install?: () => number;
+  uninstall?: () => number;
+  bashrcPath?: () => string;
+  rockyHome?: () => string;
+  detectPowerShellHosts?: () => ReadonlyArray<{ profile: string }>;
+}
+
+export function createShellHookPort(deps: ShellHookPortDeps = {}): ShellHookPort {
+  const platform = deps.platform ?? process.platform;
+  const detectHosts = deps.detectPowerShellHosts ?? detectPowerShellHosts;
+  let cachedProfiles: readonly string[] | undefined;
   return {
-    install: () => hookInstall(),
-    uninstall: () => hookUninstall(),
-    bashrcPath: () => join(homedir(), ".bashrc"),
+    install: deps.install ?? (() => hookInstall()),
+    uninstall: deps.uninstall ?? (() => hookUninstall()),
+    bashrcPath: deps.bashrcPath ?? (() => join(homedir(), ".bashrc")),
     // Empty off win32 without calling the detector: every call starts a PowerShell.
-    powerShellProfiles: () => process.platform === "win32"
-      ? detectPowerShellHosts().map((host) => host.profile)
-      : [],
-    rockyHome: () => resolveRockyPaths().home,
+    // Cached per port instance so one command probes PowerShell at most once.
+    powerShellProfiles: () => {
+      if (cachedProfiles === undefined) {
+        cachedProfiles = platform === "win32"
+          ? detectHosts().map((host) => host.profile)
+          : [];
+      }
+      return [...cachedProfiles];
+    },
+    rockyHome: deps.rockyHome ?? (() => resolveRockyPaths().home),
   };
 }
