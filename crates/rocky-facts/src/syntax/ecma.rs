@@ -486,8 +486,14 @@ fn skel_node_for(
     }
 }
 
+/// Builds a skeleton for one region, indexing only that region's tokens.
 pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
     let tokens = TokenIndex::new(root, src);
+    build_skeleton_with(root, src, &tokens)
+}
+
+/// Builds a skeleton for a region using a token index that covers the whole file.
+fn build_skeleton_with(root: Node<'_>, src: &str, tokens: &TokenIndex<'_>) -> Vec<SkelNode> {
     let mut out = Vec::new();
     let mut cursor = root.walk();
     let mut stack = vec![(root, false)];
@@ -496,7 +502,7 @@ pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
         if is_comment_kind(kind) || is_nested_test_boundary(node, src) {
             continue;
         }
-        if let Some(skel) = skel_node_for(node, src, parent_is_else, &tokens) {
+        if let Some(skel) = skel_node_for(node, src, parent_is_else, tokens) {
             out.push(skel);
         }
         let child_parent_is_else = kind == "else_clause";
@@ -513,6 +519,7 @@ pub(crate) fn build_skeleton(root: Node<'_>, src: &str) -> Vec<SkelNode> {
 struct Extractor<'a> {
     src: &'a str,
     details: bool,
+    tokens: TokenIndex<'a>,
     cursor: tree_sitter::TreeCursor<'a>,
     symbols: Vec<ExtractedSymbol<'a>>,
     imports: BTreeSet<String>,
@@ -551,7 +558,7 @@ impl<'a> Extractor<'a> {
             (
                 extract_params(fn_node, self.src),
                 extract_return_type(fn_node, self.src),
-                body.map(|b| build_skeleton(b, self.src))
+                body.map(|b| build_skeleton_with(b, self.src, &self.tokens))
                     .unwrap_or_default(),
                 None,
             )
@@ -583,7 +590,7 @@ impl<'a> Extractor<'a> {
         let (skeleton, deferred_body) = if self.details {
             (
                 test.callback_body
-                    .map(|b| build_skeleton(b, self.src))
+                    .map(|b| build_skeleton_with(b, self.src, &self.tokens))
                     .unwrap_or_default(),
                 None,
             )
@@ -705,7 +712,7 @@ impl<'a> Extractor<'a> {
                     (
                         value.and_then(|v| extract_literal(v, self.src)),
                         value
-                            .map(|v| build_skeleton(v, self.src))
+                            .map(|v| build_skeleton_with(v, self.src, &self.tokens))
                             .unwrap_or_default(),
                         None,
                     )
@@ -853,6 +860,11 @@ pub(crate) fn extract<'a>(root: Node<'a>, src: &'a str, details: bool) -> Extrac
     let mut extractor = Extractor {
         src,
         details,
+        tokens: if details {
+            TokenIndex::new(root, src)
+        } else {
+            TokenIndex::empty()
+        },
         cursor: root.walk(),
         symbols: Vec::new(),
         imports: BTreeSet::new(),

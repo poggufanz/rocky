@@ -225,6 +225,16 @@ pub(crate) struct TokenIndex<'a> {
 }
 
 impl<'a> TokenIndex<'a> {
+    /// An index with no tokens, for callers that never query it.
+    pub(crate) fn empty() -> Self {
+        Self {
+            starts: Vec::new(),
+            texts: Vec::new(),
+            prefix_h1: vec![0],
+            prefix_h2: vec![0],
+        }
+    }
+
     pub(crate) fn new(root: Node<'_>, src: &'a str) -> Self {
         let mut starts = Vec::new();
         let mut texts = Vec::new();
@@ -1359,6 +1369,98 @@ async fn demo(&self, ok: bool, a: i32, opt: Option<i32>, xs: Vec<i32>) -> Result
                 (SkelKind::Await, "await", "", false, 43),
                 (SkelKind::Call, "call:fetch", "", false, 43),
                 (SkelKind::Call, full_long.as_str(), "", false, 44),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_ts_tests_keep_labels_per_test() {
+        const DEPTH: usize = 2_000;
+        let mut before = String::new();
+        for i in 0..DEPTH {
+            before.push_str(&format!(
+                "describe('d{i}', () => {{ it('t{i}', () => {{ f{i}(); }});
+"
+            ));
+        }
+        for _ in 0..DEPTH {
+            before.push_str(
+                "});
+",
+            );
+        }
+        let after = before.replacen(&format!("f{}();", DEPTH - 1), "g();", 1);
+
+        let handle = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                analyze(&FileInput {
+                    path: "src/nested.test.ts",
+                    before: Side::Text(&before),
+                    after: Side::Text(&after),
+                })
+            })
+            .expect("spawn 1 MiB stack thread");
+
+        let facts = handle.join().expect("should not overflow stack");
+        assert_eq!(facts.changes.len(), 1);
+        let symbol = facts.changes[0].symbol.as_ref().expect("test symbol");
+        assert_eq!(symbol.name, format!("t{}", DEPTH - 1));
+        assert_eq!(
+            facts.changes[0].labels,
+            vec![
+                Label::CallAdded {
+                    name: "g".to_string()
+                },
+                Label::CallRemoved {
+                    name: format!("f{}", DEPTH - 1)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_rust_test_modules_keep_labels_per_test() {
+        const DEPTH: usize = 500;
+        let mut before = String::new();
+        for i in 0..DEPTH {
+            before.push_str(&format!(
+                "mod m{i} {{ #[test] fn t{i}() {{ f{i}(); }}
+"
+            ));
+        }
+        for _ in 0..DEPTH {
+            before.push_str(
+                "}
+",
+            );
+        }
+        let after = before.replacen(&format!("f{}();", DEPTH - 1), "g();", 1);
+
+        let handle = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                analyze(&FileInput {
+                    path: "src/nested.rs",
+                    before: Side::Text(&before),
+                    after: Side::Text(&after),
+                })
+            })
+            .expect("spawn 1 MiB stack thread");
+
+        let facts = handle.join().expect("should not overflow stack");
+        assert_eq!(facts.changes.len(), 1);
+        let symbol = facts.changes[0].symbol.as_ref().expect("test symbol");
+        assert_eq!(symbol.name, format!("t{}", DEPTH - 1));
+        assert_eq!(
+            facts.changes[0].labels,
+            vec![
+                Label::CallAdded {
+                    name: "g".to_string()
+                },
+                Label::CallRemoved {
+                    name: format!("f{}", DEPTH - 1)
+                },
             ]
         );
     }
