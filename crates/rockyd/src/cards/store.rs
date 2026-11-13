@@ -136,32 +136,47 @@ impl StoreReader {
         let mut buf = Vec::with_capacity(to_read as usize);
         file.by_ref().take(to_read).read_to_end(&mut buf)?;
         if buf.is_empty() {
-            self.offset = file.metadata().map_or(0, |m| m.len().min(start));
+            self.offset = file
+                .metadata()
+                .ok()
+                .filter(|m| m.len() >= base)
+                .map_or(0, |_| base);
             return Ok((Vec::new(), false));
         }
-        let end_offset = start + buf.len() as u64;
 
-        let window = if mid_line {
+        let parse_start = if mid_line {
             match buf.iter().position(|&b| b == b'\n') {
-                Some(pos) => &buf[pos + 1..],
+                Some(pos) => pos + 1,
                 None => {
-                    self.offset = end_offset;
-                    return Ok((Vec::new(), true));
+                    self.offset = base;
+                    return Ok((Vec::new(), tail_cut));
                 }
             }
         } else {
-            &buf[..]
+            0
         };
 
+        // Advance only through complete newline-delimited records so an unfinished
+        // trailing write is re-read once completed.
+        let Some(last_nl) = buf[parse_start..].iter().rposition(|&b| b == b'\n') else {
+            self.offset = if mid_line {
+                start + parse_start as u64
+            } else {
+                base
+            };
+            return Ok((Vec::new(), tail_cut));
+        };
+        let parse_end = parse_start + last_nl;
+
         let mut versions = Vec::new();
-        for line in window.split(|&b| b == b'\n') {
+        for line in buf[parse_start..parse_end].split(|&b| b == b'\n') {
             if let Some(version) = parse_version_line(line)
                 && version.ts >= from_ms
             {
                 versions.push(version);
             }
         }
-        self.offset = end_offset;
+        self.offset = start + parse_end as u64 + 1;
         Ok((versions, tail_cut))
     }
 }
@@ -1006,5 +1021,244 @@ mod tests {
         assert_eq!(versions.len(), 2);
         assert_eq!(versions[0].file_rel, "first.ts");
         assert_eq!(versions[1].file_rel, "second.ts");
+    }
+
+    #[test]
+    fn unfinished_trailing_event_is_retained_until_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        let sha1 = sha_char('1');
+        let sha2 = sha_char('2');
+        let sha3 = sha_char('3');
+
+        // Split a single event across two reads (simulating a partial writeSync).
+        append_bytes(
+            &events,
+            br#"{"v":1,"node":"file_version","ts":100,"refs":{"#,
+        );
+        let mut reader = StoreReader::new(dir.path().to_path_buf());
+        let (first, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert!(first.is_empty());
+
+        append_bytes(&events, br#""fileRel":"a.ts"}}"#);
+        append_bytes(&events, b"\n");
+
+        let (second, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert_eq!(
+            second,
+            vec![Version {
+                file_rel: "a.ts".into(),
+                ts: 100,
+                sha: None,
+                prev: None,
+                created: false,
+                deleted: false,
+                baseline: false,
+            }]
+        );
+
+        let (repeat, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert!(repeat.is_empty());
+
+        // Complete event followed by an unfinished trailing event in the same read.
+        let complete = format!(
+            "{}\n",
+            file_version_json(Some("b.ts"), 200, Some(&sha1), None, None, None, None)
+        );
+        let split_event = file_version_json(
+            Some("c.ts"),
+            300,
+            Some(&sha2),
+            Some(&sha3),
+            None,
+            None,
+            None,
+        );
+        let split_at = split_event.len() / 2;
+        let (head, tail) = split_event.split_at(split_at);
+
+        let mut chunk = complete.into_bytes();
+        chunk.extend_from_slice(head.as_bytes());
+        append_bytes(&events, &chunk);
+
+        let (third, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].file_rel, "b.ts");
+
+        // Appending the remaining bytes without '\n' still waits for line completion.
+        append_bytes(&events, tail.as_bytes());
+        let (still_pending, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert!(still_pending.is_empty());
+
+        append_bytes(&events, b"\n");
+        let (fourth, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert_eq!(
+            fourth,
+            vec![Version {
+                file_rel: "c.ts".into(),
+                ts: 300,
+                sha: Some(sha2),
+                prev: Some(sha3),
+                created: false,
+                deleted: false,
+                baseline: false,
+            }]
+        );
+
+        let (after, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert!(after.is_empty());
+
+        // Shrinking to an unfinished partial line resets the offset to 0 even before '\n' arrives.
+        let shrunk_event = file_version_json(
+            Some("shrunk_partial.ts"),
+            400,
+            Some(&sha1),
+            None,
+            None,
+            None,
+            None,
+        );
+        let (shrunk_head, shrunk_tail) = shrunk_event.split_at(shrunk_event.len() / 2);
+        fs::write(&events, shrunk_head.as_bytes()).unwrap();
+        let (shrunk_pending, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert!(shrunk_pending.is_empty());
+
+        let mut finish_shrunk = shrunk_tail.as_bytes().to_vec();
+        finish_shrunk.push(b'\n');
+        finish_shrunk.extend_from_slice(
+            format!("{{\"v\":1,\"pad\":\"{}\"}}\n", "p".repeat(1200)).as_bytes(),
+        );
+        append_bytes(&events, &finish_shrunk);
+        let (shrunk_done, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert_eq!(shrunk_done.len(), 1);
+        assert_eq!(shrunk_done[0].file_rel, "shrunk_partial.ts");
+    }
+
+    #[test]
+    fn tail_cut_preserves_unfinished_trailing_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        let sha1 = sha_char('1');
+        let sha2 = sha_char('2');
+
+        let pad_line = format!("{{\"v\":1,\"pad\":\"{}\"}}\n", "x".repeat(1000));
+        let mut data = Vec::new();
+        while data.len() <= MAX_TAIL_BYTES as usize + 4096 {
+            data.extend_from_slice(pad_line.as_bytes());
+        }
+        data.extend_from_slice(
+            file_version_json(
+                Some("before_partial.ts"),
+                500,
+                Some(&sha1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .as_bytes(),
+        );
+        data.push(b'\n');
+
+        let trailing = file_version_json(
+            Some("split_after_tail.ts"),
+            600,
+            Some(&sha2),
+            Some(&sha1),
+            None,
+            None,
+            None,
+        );
+        let split_at = trailing.len() / 2;
+        let (head, tail) = trailing.split_at(split_at);
+        data.extend_from_slice(head.as_bytes());
+        fs::write(&events, &data).unwrap();
+
+        let mut reader = StoreReader::new(dir.path().to_path_buf());
+        let (first, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(tail_cut);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].file_rel, "before_partial.ts");
+
+        // Complete the trailing event and confirm it is read cleanly without tail_cut.
+        let mut rest = tail.as_bytes().to_vec();
+        rest.push(b'\n');
+        append_bytes(&events, &rest);
+
+        let (second, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].file_rel, "split_after_tail.ts");
+        assert_eq!(second[0].ts, 600);
+
+        let (third, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert!(third.is_empty());
+
+        // An oversized (> 2 MiB) unterminated line remains bounded by MAX_TAIL_BYTES
+        // and recovers once terminated by a newline before subsequent events.
+        let oversized = vec![b'x'; MAX_TAIL_BYTES as usize + 2048];
+        append_bytes(&events, &oversized);
+        let (oversized_read, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(tail_cut);
+        assert!(oversized_read.is_empty());
+
+        let mut finish_and_next = b"\n".to_vec();
+        finish_and_next.extend_from_slice(
+            file_version_json(
+                Some("after_oversized.ts"),
+                700,
+                Some(&sha1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .as_bytes(),
+        );
+        finish_and_next.push(b'\n');
+        append_bytes(&events, &finish_and_next);
+
+        let (recovered, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(tail_cut);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].file_rel, "after_oversized.ts");
+
+        // A tail cut whose only newline terminates the cut line still preserves a trailing partial event.
+        let pending_after_cut = file_version_json(
+            Some("after_cut_partial.ts"),
+            800,
+            Some(&sha2),
+            Some(&sha1),
+            None,
+            None,
+            None,
+        );
+        let (pending_head, pending_tail) = pending_after_cut.split_at(pending_after_cut.len() / 2);
+        let mut cut_then_partial = vec![b'y'; MAX_TAIL_BYTES as usize + 128];
+        cut_then_partial.push(b'\n');
+        cut_then_partial.extend_from_slice(pending_head.as_bytes());
+        append_bytes(&events, &cut_then_partial);
+
+        let (mid_cut_read, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(tail_cut);
+        assert!(mid_cut_read.is_empty());
+
+        let mut finish_cut_partial = pending_tail.as_bytes().to_vec();
+        finish_cut_partial.push(b'\n');
+        append_bytes(&events, &finish_cut_partial);
+        let (cut_partial_done, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert_eq!(cut_partial_done.len(), 1);
+        assert_eq!(cut_partial_done[0].file_rel, "after_cut_partial.ts");
     }
 }
