@@ -12,6 +12,7 @@ use serde::de::IgnoredAny;
 
 const MAX_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const QUOTE_MAX_CHARS: usize = 500;
+const TURN_START_SLACK_MS: u64 = 5_000;
 const CLAUDE_CODE_HARNESS: &str = "claude-code";
 
 /// One agent prose quote attached to an edit tool use.
@@ -106,12 +107,11 @@ pub fn read_quotes(
     tool_use_ids: &[String],
     turn_started_ms: u64,
 ) -> io::Result<TranscriptRead> {
-    let _ = turn_started_ms;
-    let (buf, tail_cut) = read_tail(path)?;
+    let tail = read_tail(path)?;
 
-    let window = if tail_cut {
-        match buf.iter().position(|&b| b == b'\n') {
-            Some(pos) => &buf[pos + 1..],
+    let window = if tail.tail_truncated && !tail.starts_on_line_boundary {
+        match tail.buf.iter().position(|&b| b == b'\n') {
+            Some(pos) => &tail.buf[pos + 1..],
             None => {
                 return Ok(TranscriptRead {
                     quotes: BTreeMap::new(),
@@ -121,16 +121,16 @@ pub fn read_quotes(
             }
         }
     } else {
-        buf.as_slice()
+        tail.buf.as_slice()
     };
 
     let targets: HashSet<&str> = tool_use_ids.iter().map(String::as_str).collect();
-    let scan = scan_window_backwards(window, &targets);
-    let complete = scan.found_turn_start || !tail_cut;
+    let scan = scan_window_backwards(window, &targets, turn_started_ms);
+    let complete = scan.found_turn_start || !tail.tail_truncated;
     let first_user_raw = if scan.found_turn_start {
         scan.turn_user_text
-    } else if !tail_cut {
-        scan.latest_turn_user_text
+    } else if !tail.tail_truncated {
+        scan.latest_unmatched_user_text
     } else {
         None
     };
@@ -208,17 +208,39 @@ fn open_nofollow_readonly(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn read_tail(path: &Path) -> io::Result<(Vec<u8>, bool)> {
+struct TailRead {
+    buf: Vec<u8>,
+    tail_truncated: bool,
+    starts_on_line_boundary: bool,
+}
+
+fn read_tail(path: &Path) -> io::Result<TailRead> {
     let mut file = open_nofollow_readonly(path)?;
     let len = file.metadata()?.len();
-    let tail_cut = len > MAX_TAIL_BYTES;
-    let start = len.saturating_sub(MAX_TAIL_BYTES);
-    file.seek(SeekFrom::Start(start))?;
+    if len <= MAX_TAIL_BYTES {
+        let cap = usize::try_from(len).unwrap_or(MAX_TAIL_BYTES as usize);
+        let mut buf = Vec::with_capacity(cap);
+        file.take(MAX_TAIL_BYTES).read_to_end(&mut buf)?;
+        return Ok(TailRead {
+            buf,
+            tail_truncated: false,
+            starts_on_line_boundary: true,
+        });
+    }
 
-    let cap = usize::try_from(len - start).unwrap_or(MAX_TAIL_BYTES as usize);
-    let mut buf = Vec::with_capacity(cap);
+    let start = len - MAX_TAIL_BYTES;
+    file.seek(SeekFrom::Start(start - 1))?;
+    let mut prev = [0u8; 1];
+    file.read_exact(&mut prev)?;
+    let starts_on_line_boundary = prev[0] == b'\n';
+
+    let mut buf = Vec::with_capacity(MAX_TAIL_BYTES as usize);
     file.take(MAX_TAIL_BYTES).read_to_end(&mut buf)?;
-    Ok((buf, tail_cut))
+    Ok(TailRead {
+        buf,
+        tail_truncated: true,
+        starts_on_line_boundary,
+    })
 }
 
 #[derive(Deserialize)]
@@ -257,6 +279,8 @@ impl MaybeBool {
 struct RawLine {
     #[serde(rename = "type", default)]
     kind: Option<MaybeString>,
+    #[serde(default)]
+    timestamp: Option<MaybeString>,
     #[serde(rename = "isMeta", default)]
     is_meta: Option<MaybeBool>,
     #[serde(default)]
@@ -314,19 +338,145 @@ struct AssistantLine {
     events: Vec<AssistantEvent>,
 }
 
+struct CollectedAssistant {
+    line: AssistantLine,
+    ts_ms: Option<u64>,
+}
+
+struct TurnCandidate {
+    user_text: Option<String>,
+    assistant_lines_rev: Vec<AssistantLine>,
+}
+
 struct WindowScan {
     assistant_lines_rev: Vec<AssistantLine>,
     found_turn_start: bool,
     turn_user_text: Option<String>,
-    latest_turn_user_text: Option<String>,
+    latest_unmatched_user_text: Option<String>,
 }
 
-fn scan_window_backwards(window: &[u8], targets: &HashSet<&str>) -> WindowScan {
-    let mut assistant_lines_rev = Vec::new();
-    let mut seen_target = false;
-    let mut found_turn_start = false;
-    let mut turn_user_text = None;
-    let mut latest_turn_user_text: Option<Option<String>> = None;
+fn parse_ascii_digits(bytes: &[u8]) -> Option<u32> {
+    let mut acc: u32 = 0;
+    for &b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        acc = acc * 10 + u32::from(b - b'0');
+    }
+    Some(acc)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap =
+                year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+            if leap { 29 } else { 28 }
+        }
+        _ => 0,
+    }
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400) as u64;
+    let m = u64::from(month);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + (doe as i64) - 719_468
+}
+
+/// Parses fixed-format ISO 8601 UTC timestamps (`YYYY-MM-DDTHH:MM:SS(.fff)Z`) to Unix ms.
+fn parse_iso_utc_ms(raw: &str) -> Option<u64> {
+    if !raw.is_ascii() || raw.len() < 20 {
+        return None;
+    }
+    let b = raw.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+
+    let year = parse_ascii_digits(&b[0..4])?;
+    let month = parse_ascii_digits(&b[5..7])?;
+    let day = parse_ascii_digits(&b[8..10])?;
+    let hour = parse_ascii_digits(&b[11..13])?;
+    let minute = parse_ascii_digits(&b[14..16])?;
+    let second = parse_ascii_digits(&b[17..19])?;
+
+    if year < 1970
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+
+    let millis = match &b[19..] {
+        b"Z" => 0u64,
+        [b'.', frac @ .., b'Z'] if !frac.is_empty() && frac.len() <= 9 => {
+            if !frac.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let d0 = u64::from(frac[0] - b'0');
+            let d1 = frac.get(1).map_or(0, |&c| u64::from(c - b'0'));
+            let d2 = frac.get(2).map_or(0, |&c| u64::from(c - b'0'));
+            d0 * 100 + d1 * 10 + d2
+        }
+        _ => return None,
+    };
+
+    let days = days_from_civil(i64::from(year), month, day);
+    let days_u64 = u64::try_from(days).ok()?;
+    let day_ms = days_u64.checked_mul(86_400_000)?;
+    let time_ms = u64::from(hour) * 3_600_000
+        + u64::from(minute) * 60_000
+        + u64::from(second) * 1_000
+        + millis;
+    day_ms.checked_add(time_ms)
+}
+
+fn into_assistant_lines(items: Vec<CollectedAssistant>) -> Vec<AssistantLine> {
+    items.into_iter().map(|c| c.line).collect()
+}
+
+fn filter_assistant_lines_since(
+    items: Vec<CollectedAssistant>,
+    cutoff_ms: u64,
+) -> Vec<AssistantLine> {
+    items
+        .into_iter()
+        .filter(|c| c.ts_ms.is_none_or(|t| t >= cutoff_ms))
+        .map(|c| c.line)
+        .collect()
+}
+
+fn found_scan(
+    assistant_lines_rev: Vec<AssistantLine>,
+    turn_user_text: Option<String>,
+) -> WindowScan {
+    WindowScan {
+        assistant_lines_rev,
+        found_turn_start: true,
+        turn_user_text,
+        latest_unmatched_user_text: None,
+    }
+}
+
+fn scan_window_backwards(
+    window: &[u8],
+    targets: &HashSet<&str>,
+    turn_started_ms: u64,
+) -> WindowScan {
+    let cutoff_ms = turn_started_ms.saturating_sub(TURN_START_SLACK_MS);
+    let mut current_rev: Vec<CollectedAssistant> = Vec::new();
+    let mut current_has_target = false;
+    let mut candidate: Option<TurnCandidate> = None;
+    let mut latest_unmatched_user_text: Option<Option<String>> = None;
 
     for raw_line in window.rsplit(|&b| b == b'\n') {
         let trimmed = raw_line.trim_ascii();
@@ -339,16 +489,27 @@ fn scan_window_backwards(window: &[u8], targets: &HashSet<&str>) -> WindowScan {
         let Some(kind) = parsed.kind.and_then(MaybeString::into_string) else {
             continue;
         };
+        let line_ts_ms = parsed
+            .timestamp
+            .and_then(MaybeString::into_string)
+            .as_deref()
+            .and_then(parse_iso_utc_ms);
 
         match kind.as_str() {
             "assistant" => {
                 if let Some(line) = parse_assistant_line(parsed.message) {
-                    if line.events.iter().any(|ev| {
+                    let has_target = line.events.iter().any(|ev| {
                         matches!(ev, AssistantEvent::ToolUse(id) if targets.contains(id.as_str()))
-                    }) {
-                        seen_target = true;
+                    });
+                    if has_target && line_ts_ms.is_none_or(|ts| ts >= cutoff_ms) {
+                        current_has_target = true;
+                        // Any later user boundary we passed belongs to a later turn.
+                        candidate = None;
                     }
-                    assistant_lines_rev.push(line);
+                    current_rev.push(CollectedAssistant {
+                        line,
+                        ts_ms: line_ts_ms,
+                    });
                 }
             }
             "user" => {
@@ -362,26 +523,60 @@ fn scan_window_backwards(window: &[u8], targets: &HashSet<&str>) -> WindowScan {
                 let Some(user_text) = parse_turn_user_text(parsed.message) else {
                     continue;
                 };
-                if targets.is_empty() || seen_target {
-                    found_turn_start = true;
-                    turn_user_text = user_text;
-                    break;
+
+                match line_ts_ms {
+                    Some(ts) if ts >= cutoff_ms => {
+                        if current_has_target {
+                            return found_scan(into_assistant_lines(current_rev), user_text);
+                        }
+                        candidate = Some(TurnCandidate {
+                            user_text,
+                            assistant_lines_rev: into_assistant_lines(std::mem::take(
+                                &mut current_rev,
+                            )),
+                        });
+                        current_has_target = false;
+                    }
+                    Some(_) => {
+                        if let Some(cand) = candidate.take() {
+                            return found_scan(cand.assistant_lines_rev, cand.user_text);
+                        }
+                        let assistant_lines_rev = if current_has_target {
+                            filter_assistant_lines_since(current_rev, cutoff_ms)
+                        } else {
+                            Vec::new()
+                        };
+                        return WindowScan {
+                            assistant_lines_rev,
+                            found_turn_start: false,
+                            turn_user_text: None,
+                            latest_unmatched_user_text: latest_unmatched_user_text.flatten(),
+                        };
+                    }
+                    None => {
+                        if current_has_target || (targets.is_empty() && candidate.is_none()) {
+                            return found_scan(into_assistant_lines(current_rev), user_text);
+                        }
+                        if candidate.is_none() && latest_unmatched_user_text.is_none() {
+                            latest_unmatched_user_text = Some(user_text);
+                        }
+                        current_rev.clear();
+                    }
                 }
-                // Target tool uses belong to an earlier turn; discard newer turn chatter and keep scanning.
-                if latest_turn_user_text.is_none() {
-                    latest_turn_user_text = Some(user_text);
-                }
-                assistant_lines_rev.clear();
             }
             _ => {}
         }
     }
 
-    WindowScan {
-        assistant_lines_rev,
-        found_turn_start,
-        turn_user_text,
-        latest_turn_user_text: latest_turn_user_text.flatten(),
+    if let Some(cand) = candidate {
+        found_scan(cand.assistant_lines_rev, cand.user_text)
+    } else {
+        WindowScan {
+            assistant_lines_rev: filter_assistant_lines_since(current_rev, cutoff_ms),
+            found_turn_start: false,
+            turn_user_text: None,
+            latest_unmatched_user_text: latest_unmatched_user_text.flatten(),
+        }
     }
 }
 
@@ -551,13 +746,12 @@ fn resolve_quote(
 }
 
 fn format_quote(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if raw.trim().is_empty() {
         return None;
     }
-    let scan_end = floor_char_boundary(trimmed, PROMPT_SCAN_BYTES);
-    let may_be_truncated = scan_end < trimmed.len();
-    let redacted = redact_secrets_at_boundary(&trimmed[..scan_end], may_be_truncated);
+    let scan_end = floor_char_boundary(raw, PROMPT_SCAN_BYTES);
+    let may_be_truncated = scan_end < raw.len();
+    let redacted = redact_secrets_at_boundary(&raw[..scan_end], may_be_truncated);
     let cut = truncate_chars(&redacted, QUOTE_MAX_CHARS);
     if cut.trim().is_empty() {
         return None;
@@ -619,11 +813,18 @@ mod tests {
         (temp, cfg, valid_canon)
     }
 
+    const NOV_13_2026_MIDNIGHT_MS: u64 = 1_794_528_000_000;
+
+    fn nov_13_utc_ms(hour: u64, minute: u64, second: u64, millis: u64) -> u64 {
+        NOV_13_2026_MIDNIGHT_MS + hour * 3_600_000 + minute * 60_000 + second * 1_000 + millis
+    }
+
     #[test]
     fn quote_from_same_message_before_tool_use() {
         let path = synthetic_fixture("same_message.jsonl");
         let ids = vec!["toolu_01".to_string()];
-        let out = read_quotes(&path, &ids, 0).expect("read same_message.jsonl");
+        let out = read_quotes(&path, &ids, nov_13_utc_ms(10, 1, 0, 250))
+            .expect("read same_message.jsonl");
 
         assert!(out.complete);
         assert_eq!(
@@ -642,7 +843,8 @@ mod tests {
     fn shared_fallback_from_earlier_text() {
         let path = synthetic_fixture("shared_fallback.jsonl");
         let ids = vec!["toolu_02".to_string(), "toolu_03".to_string()];
-        let out = read_quotes(&path, &ids, 0).expect("read shared_fallback.jsonl");
+        let out = read_quotes(&path, &ids, nov_13_utc_ms(10, 2, 0, 250))
+            .expect("read shared_fallback.jsonl");
 
         assert!(out.complete);
         let q2 = out.quotes.get("toolu_02").expect("quote for toolu_02");
@@ -657,7 +859,8 @@ mod tests {
     fn no_text_gives_no_quote() {
         let path = synthetic_fixture("no_text.jsonl");
         let ids = vec!["toolu_04".to_string()];
-        let out = read_quotes(&path, &ids, 0).expect("read no_text.jsonl");
+        let out =
+            read_quotes(&path, &ids, nov_13_utc_ms(10, 4, 0, 250)).expect("read no_text.jsonl");
 
         assert!(out.complete);
         assert!(out.quotes.is_empty());
@@ -671,7 +874,8 @@ mod tests {
     fn thinking_is_never_read() {
         let path = synthetic_fixture("thinking_secret.jsonl");
         let ids = vec!["toolu_05".to_string(), "toolu_06".to_string()];
-        let out = read_quotes(&path, &ids, 0).expect("read thinking_secret.jsonl");
+        let out = read_quotes(&path, &ids, nov_13_utc_ms(10, 5, 0, 250))
+            .expect("read thinking_secret.jsonl");
 
         assert!(out.complete);
         let q5 = out.quotes.get("toolu_05").expect("quote for toolu_05");
@@ -694,7 +898,8 @@ mod tests {
     fn malformed_lines_are_skipped() {
         let path = synthetic_fixture("malformed.jsonl");
         let ids = vec!["toolu_07".to_string()];
-        let out = read_quotes(&path, &ids, 0).expect("read malformed.jsonl");
+        let out =
+            read_quotes(&path, &ids, nov_13_utc_ms(10, 6, 0, 250)).expect("read malformed.jsonl");
 
         assert!(out.complete);
         let q = out.quotes.get("toolu_07").expect("quote for toolu_07");
@@ -704,18 +909,24 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let bad_utf8 = temp.path().join("bad_utf8.jsonl");
         let mut f = File::create(&bad_utf8).expect("create bad_utf8");
-        f.write_all(br#"{"type":"user","message":{"role":"user","content":"Recover cleanly"}}"#)
-            .expect("write user");
+        f.write_all(
+            br#"{"type":"user","timestamp":"2026-11-13T10:06:30.000Z","message":{"role":"user","content":"Recover cleanly"}}"#,
+        )
+        .expect("write user");
         f.write_all(b"\n\xff\xfe\xfd not utf8\n")
             .expect("write invalid utf8");
         f.write_all(
-            br#"{"type":"assistant","message":{"id":"msg_u","role":"assistant","content":[{"type":"text","text":"Recovered after bad bytes."},{"type":"tool_use","id":"toolu_utf8","name":"Edit"}]}}"#,
+            br#"{"type":"assistant","timestamp":"2026-11-13T10:06:31.000Z","message":{"id":"msg_u","role":"assistant","content":[{"type":"text","text":"Recovered after bad bytes."},{"type":"tool_use","id":"toolu_utf8","name":"Edit"}]}}"#,
         )
         .expect("write assistant");
         f.write_all(b"\n").expect("newline");
 
-        let out_utf8 =
-            read_quotes(&bad_utf8, &["toolu_utf8".to_string()], 0).expect("read bad_utf8");
+        let out_utf8 = read_quotes(
+            &bad_utf8,
+            &["toolu_utf8".to_string()],
+            nov_13_utc_ms(10, 6, 30, 250),
+        )
+        .expect("read bad_utf8");
         assert!(out_utf8.complete);
         assert_eq!(
             out_utf8.quotes.get("toolu_utf8").map(|q| q.text.as_str()),
@@ -727,7 +938,8 @@ mod tests {
     fn quote_is_redacted_and_cut() {
         let path = synthetic_fixture("redact_and_cut.jsonl");
         let ids = vec!["toolu_08".to_string()];
-        let out = read_quotes(&path, &ids, 0).expect("read redact_and_cut.jsonl");
+        let out = read_quotes(&path, &ids, nov_13_utc_ms(10, 7, 0, 250))
+            .expect("read redact_and_cut.jsonl");
 
         assert!(out.complete);
         let q = out.quotes.get("toolu_08").expect("quote for toolu_08");
@@ -749,25 +961,29 @@ mod tests {
             let mut f = File::create(&path_incomplete).expect("create beyond_8mib");
             writeln!(
                 f,
-                r#"{{"type":"user","message":{{"role":"user","content":"Initial prompt outside 8 MiB"}}}}"#
+                r#"{{"type":"user","timestamp":"2026-11-13T10:09:00.000Z","message":{{"role":"user","content":"Initial prompt outside 8 MiB"}}}}"#
             )
             .expect("write user");
             let pad = "a".repeat(2048);
             let filler = format!(
-                r#"{{"type":"assistant","message":{{"id":"msg_pad","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
+                r#"{{"type":"assistant","timestamp":"2026-11-13T10:09:01.000Z","message":{{"id":"msg_pad","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
             );
             for _ in 0..4200 {
                 writeln!(f, "{filler}").expect("write filler");
             }
             writeln!(
                 f,
-                r#"{{"type":"assistant","message":{{"id":"msg_tail","role":"assistant","content":[{{"type":"text","text":"Editing file near tail."}},{{"type":"tool_use","id":"toolu_tail","name":"Edit"}}]}}}}"#
+                r#"{{"type":"assistant","timestamp":"2026-11-13T10:09:02.000Z","message":{{"id":"msg_tail","role":"assistant","content":[{{"type":"text","text":"Editing file near tail."}},{{"type":"tool_use","id":"toolu_tail","name":"Edit"}}]}}}}"#
             )
             .expect("write tail assistant");
         }
 
-        let out = read_quotes(&path_incomplete, &["toolu_tail".to_string()], 0)
-            .expect("read beyond_8mib");
+        let out = read_quotes(
+            &path_incomplete,
+            &["toolu_tail".to_string()],
+            nov_13_utc_ms(10, 9, 0, 250),
+        )
+        .expect("read beyond_8mib");
         assert!(!out.complete);
         assert_eq!(out.first_user_text, None);
         let q = out.quotes.get("toolu_tail").expect("quote for toolu_tail");
@@ -779,25 +995,29 @@ mod tests {
             let mut f = File::create(&path_complete).expect("create turn_inside_8mib");
             let pad = "b".repeat(2048);
             let filler = format!(
-                r#"{{"type":"assistant","message":{{"id":"msg_old","role":"assistant","content":[{{"type":"text","text":"{pad}"}}]}}}}"#
+                r#"{{"type":"assistant","timestamp":"2026-11-13T10:09:30.000Z","message":{{"id":"msg_old","role":"assistant","content":[{{"type":"text","text":"{pad}"}}]}}}}"#
             );
             for _ in 0..4200 {
                 writeln!(f, "{filler}").expect("write filler");
             }
             writeln!(
                 f,
-                r#"{{"type":"user","message":{{"role":"user","content":"Recent prompt inside window"}}}}"#
+                r#"{{"type":"user","timestamp":"2026-11-13T10:10:00.000Z","message":{{"role":"user","content":"Recent prompt inside window"}}}}"#
             )
             .expect("write recent user");
             writeln!(
                 f,
-                r#"{{"type":"assistant","message":{{"id":"msg_new","role":"assistant","content":[{{"type":"tool_use","id":"toolu_new","name":"Edit"}}]}}}}"#
+                r#"{{"type":"assistant","timestamp":"2026-11-13T10:10:01.000Z","message":{{"id":"msg_new","role":"assistant","content":[{{"type":"tool_use","id":"toolu_new","name":"Edit"}}]}}}}"#
             )
             .expect("write recent assistant");
         }
 
-        let out2 = read_quotes(&path_complete, &["toolu_new".to_string()], 0)
-            .expect("read turn_inside_8mib");
+        let out2 = read_quotes(
+            &path_complete,
+            &["toolu_new".to_string()],
+            nov_13_utc_ms(10, 10, 0, 250),
+        )
+        .expect("read turn_inside_8mib");
         assert!(out2.complete);
         assert_eq!(
             out2.first_user_text,
@@ -809,7 +1029,8 @@ mod tests {
     #[test]
     fn first_user_text_for_subagent() {
         let path = synthetic_fixture("subagent_prompt.jsonl");
-        let out = read_quotes(&path, &[], 0).expect("read subagent_prompt.jsonl");
+        let out = read_quotes(&path, &[], nov_13_utc_ms(10, 8, 1, 250))
+            .expect("read subagent_prompt.jsonl");
 
         assert!(out.complete);
         assert_eq!(
@@ -825,16 +1046,395 @@ mod tests {
         let long_prompt = format!("Key AKIAABCDEFGHIJKLMNOP {}", "p".repeat(1200));
         let line = serde_json::json!({
             "type": "user",
+            "timestamp": "2026-11-13T10:08:30.000Z",
             "message": { "role": "user", "content": long_prompt }
         });
         fs::write(&long_path, format!("{line}\n")).expect("write long_subagent");
 
-        let out_long = read_quotes(&long_path, &[], 0).expect("read long_subagent");
+        let out_long = read_quotes(&long_path, &[], nov_13_utc_ms(10, 8, 30, 250))
+            .expect("read long_subagent");
         assert!(out_long.complete);
         let (text, truncated) = out_long.first_user_text.expect("long first_user_text");
         assert!(truncated);
         assert!(!text.contains("AKIAABCDEFGHIJKLMNOP"));
         assert_eq!(text.chars().count(), rocky_proto::redact::PROMPT_MAX_CHARS);
+    }
+
+    #[test]
+    fn delayed_read_after_later_turn_selects_requested_turn() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("multi_turn.jsonl");
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:11:00.000Z","message":{"role":"user","content":"Turn 0 prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:11:01.000Z","message":{"id":"msg_t0","role":"assistant","content":[{"type":"text","text":"Turn 0 quote"},{"type":"tool_use","id":"toolu_t0","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-11-13T09:12:00.000Z","message":{"role":"user","content":"Turn 1 prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:12:02.000Z","message":{"id":"msg_t1","role":"assistant","content":[{"type":"text","text":"Turn 1 quote"},{"type":"tool_use","id":"toolu_t1","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-11-13T09:13:00.000Z","message":{"role":"user","content":"Turn 2 prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:13:02.000Z","message":{"id":"msg_t2","role":"assistant","content":[{"type":"text","text":"Turn 2 quote"},{"type":"tool_use","id":"toolu_t2","name":"Edit"}]}}"#,
+        ];
+        fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write multi_turn");
+
+        let turn1_start = nov_13_utc_ms(9, 12, 3, 456);
+        let out_empty = read_quotes(&path, &[], turn1_start).expect("read turn 1 empty ids");
+        assert!(out_empty.complete);
+        assert_eq!(
+            out_empty.first_user_text,
+            Some(("Turn 1 prompt".to_string(), false))
+        );
+        assert!(out_empty.quotes.is_empty());
+
+        let out_t1 = read_quotes(&path, &["toolu_t1".to_string()], turn1_start)
+            .expect("read turn 1 with tool id");
+        assert!(out_t1.complete);
+        assert_eq!(
+            out_t1.first_user_text,
+            Some(("Turn 1 prompt".to_string(), false))
+        );
+        assert_eq!(
+            out_t1.quotes.get("toolu_t1").map(|q| q.text.as_str()),
+            Some("Turn 1 quote")
+        );
+
+        let out_missing = read_quotes(&path, &["toolu_missing".to_string()], turn1_start)
+            .expect("read turn 1 missing tool id");
+        assert!(out_missing.complete);
+        assert_eq!(
+            out_missing.first_user_text,
+            Some(("Turn 1 prompt".to_string(), false))
+        );
+        assert!(out_missing.quotes.is_empty());
+
+        let turn2_start = nov_13_utc_ms(9, 13, 1, 0);
+        let out_no_cross = read_quotes(&path, &["toolu_t1".to_string()], turn2_start)
+            .expect("read turn 2 must not cross boundary");
+        assert!(out_no_cross.complete);
+        assert_eq!(
+            out_no_cross.first_user_text,
+            Some(("Turn 2 prompt".to_string(), false))
+        );
+        assert!(out_no_cross.quotes.is_empty());
+
+        let two_turn = temp.path().join("two_turn_from_top.jsonl");
+        fs::write(&two_turn, format!("{}\n", lines[2..].join("\n"))).expect("write two_turn");
+        let out_first = read_quotes(&two_turn, &[], turn1_start).expect("read first turn of two");
+        assert!(out_first.complete);
+        assert_eq!(
+            out_first.first_user_text,
+            Some(("Turn 1 prompt".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn in_window_prompt_with_missing_tool_id_beyond_8_mib_is_complete() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("missing_tool_in_window.jsonl");
+        {
+            let mut f = File::create(&path).expect("create missing_tool_in_window");
+            writeln!(
+                f,
+                r#"{{"type":"user","timestamp":"2026-11-13T09:14:00.000Z","message":{{"role":"user","content":"Old turn outside 8 MiB"}}}}"#
+            )
+            .expect("write old user");
+            let pad = "c".repeat(2048);
+            let filler = format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:01.000Z","message":{{"id":"msg_fill","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
+            );
+            for _ in 0..4200 {
+                writeln!(f, "{filler}").expect("write filler");
+            }
+            writeln!(
+                f,
+                r#"{{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{{"role":"user","content":"In-window prompt pending tool"}}}}"#
+            )
+            .expect("write in-window user");
+            writeln!(
+                f,
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:15:02.000Z","message":{{"id":"msg_pending","role":"assistant","content":[{{"type":"text","text":"Preparing edit."}}]}}}}"#
+            )
+            .expect("write pending assistant");
+            writeln!(
+                f,
+                r#"{{"type":"user","timestamp":"2026-11-13T09:16:00.000Z","message":{{"role":"user","content":"Later turn prompt"}}}}"#
+            )
+            .expect("write later user");
+        }
+
+        let out = read_quotes(
+            &path,
+            &["toolu_pending".to_string()],
+            nov_13_utc_ms(9, 15, 1, 0),
+        )
+        .expect("read missing_tool_in_window");
+        assert!(out.complete);
+        assert_eq!(
+            out.first_user_text,
+            Some(("In-window prompt pending tool".to_string(), false))
+        );
+        assert!(out.quotes.is_empty());
+
+        let path_before = temp.path().join("early_prompt_outside_later_inside.jsonl");
+        {
+            let mut f = File::create(&path_before).expect("create path_before");
+            writeln!(
+                f,
+                r#"{{"type":"user","timestamp":"2026-11-13T09:14:00.000Z","message":{{"role":"user","content":"Early turn outside 8 MiB"}}}}"#
+            )
+            .expect("write early user");
+            let pad = "d".repeat(2048);
+            let filler = format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:01.000Z","message":{{"id":"msg_fill2","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
+            );
+            for _ in 0..4200 {
+                writeln!(f, "{filler}").expect("write filler");
+            }
+            writeln!(
+                f,
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:02.000Z","message":{{"id":"msg_early","role":"assistant","content":[{{"type":"text","text":"Early turn quote"}},{{"type":"tool_use","id":"toolu_early","name":"Edit"}}]}}}}"#
+            )
+            .expect("write early assistant");
+            writeln!(
+                f,
+                r#"{{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{{"role":"user","content":"Later turn prompt"}}}}"#
+            )
+            .expect("write later user");
+        }
+
+        let out_before = read_quotes(
+            &path_before,
+            &["toolu_early".to_string()],
+            nov_13_utc_ms(9, 14, 0, 500),
+        )
+        .expect("read path_before");
+        assert!(!out_before.complete);
+        assert_eq!(out_before.first_user_text, None);
+        assert_eq!(
+            out_before
+                .quotes
+                .get("toolu_early")
+                .map(|q| q.text.as_str()),
+            Some("Early turn quote")
+        );
+    }
+
+    #[test]
+    fn exact_8_mib_boundary_alignment_preserves_first_line() {
+        let temp = TempDir::new().expect("tempdir");
+        let max_tail = MAX_TAIL_BYTES as usize;
+        let prefix = r#"{"type":"user","timestamp":"2026-11-13T09:19:00.000Z","message":{"role":"user","content":"Prefix outside window."}}"#.to_string() + "\n";
+
+        let user_line = r#"{"type":"user","timestamp":"2026-11-13T09:20:00.000Z","message":{"role":"user","content":"Aligned boundary prompt."}}"#.to_string() + "\n";
+        let tail_assistant = r#"{"type":"assistant","timestamp":"2026-11-13T09:20:02.000Z","message":{"id":"msg_al","role":"assistant","content":[{"type":"text","text":"Aligned quote."},{"type":"tool_use","id":"toolu_aligned","name":"Edit"}]}}"#.to_string() + "\n";
+
+        let build_exact_tail = |head: &str, tail_end: &str, total: usize| -> String {
+            let chunk_pad = "e".repeat(2048);
+            let chunk = format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:20:01.000Z","message":{{"id":"msg_pad","role":"assistant","content":[{{"type":"thinking","thinking":"{chunk_pad}"}}]}}}}"#
+            ) + "\n";
+            let empty_pad_prefix = r#"{"type":"assistant","timestamp":"2026-11-13T09:20:01.000Z","message":{"id":"msg_pad_end","role":"assistant","content":[{"type":"thinking","thinking":""}]}}"#.to_string() + "\n";
+
+            let mut mid = String::new();
+            let remaining_after_ends = total - head.len() - tail_end.len();
+            while mid.len() + chunk.len() + empty_pad_prefix.len() <= remaining_after_ends {
+                mid.push_str(&chunk);
+            }
+            let final_pad_len = remaining_after_ends - mid.len() - empty_pad_prefix.len();
+            let final_pad = "f".repeat(final_pad_len);
+            let final_line = format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:20:01.000Z","message":{{"id":"msg_pad_end","role":"assistant","content":[{{"type":"thinking","thinking":"{final_pad}"}}]}}}}"#
+            ) + "\n";
+            mid.push_str(&final_line);
+            assert_eq!(head.len() + mid.len() + tail_end.len(), total);
+            mid
+        };
+
+        let aligned_mid = build_exact_tail(&user_line, &tail_assistant, max_tail);
+        let aligned_path = temp.path().join("aligned_user.jsonl");
+        {
+            let mut f = File::create(&aligned_path).expect("create aligned_user");
+            f.write_all(prefix.as_bytes()).expect("write prefix");
+            f.write_all(user_line.as_bytes()).expect("write user_line");
+            f.write_all(aligned_mid.as_bytes()).expect("write mid");
+            f.write_all(tail_assistant.as_bytes()).expect("write tail");
+        }
+        let aligned_len = fs::metadata(&aligned_path).expect("meta").len();
+        assert_eq!(aligned_len - MAX_TAIL_BYTES, prefix.len() as u64);
+
+        let out_aligned = read_quotes(
+            &aligned_path,
+            &["toolu_aligned".to_string()],
+            nov_13_utc_ms(9, 20, 0, 250),
+        )
+        .expect("read aligned_user");
+        assert!(out_aligned.complete);
+        assert_eq!(
+            out_aligned.first_user_text,
+            Some(("Aligned boundary prompt.".to_string(), false))
+        );
+        assert_eq!(
+            out_aligned
+                .quotes
+                .get("toolu_aligned")
+                .map(|q| q.text.as_str()),
+            Some("Aligned quote.")
+        );
+
+        let partial_path = temp.path().join("partial_user.jsonl");
+        let partial_mid = build_exact_tail(&user_line[1..], &tail_assistant, max_tail);
+        {
+            let mut f = File::create(&partial_path).expect("create partial_user");
+            f.write_all(prefix.as_bytes()).expect("write prefix");
+            f.write_all(user_line.as_bytes()).expect("write user_line");
+            f.write_all(partial_mid.as_bytes()).expect("write mid");
+            f.write_all(tail_assistant.as_bytes()).expect("write tail");
+        }
+        let out_partial = read_quotes(
+            &partial_path,
+            &["toolu_aligned".to_string()],
+            nov_13_utc_ms(9, 20, 0, 250),
+        )
+        .expect("read partial_user");
+        assert!(!out_partial.complete);
+        assert_eq!(out_partial.first_user_text, None);
+        assert_eq!(
+            out_partial
+                .quotes
+                .get("toolu_aligned")
+                .map(|q| q.text.as_str()),
+            Some("Aligned quote.")
+        );
+
+        let aligned_assist = r#"{"type":"assistant","timestamp":"2026-11-13T09:21:01.000Z","message":{"id":"msg_al_a","role":"assistant","content":[{"type":"text","text":"Aligned tool quote."},{"type":"tool_use","id":"toolu_aligned_assist","name":"Edit"}]}}"#.to_string() + "\n";
+        let assist_end = r#"{"type":"assistant","timestamp":"2026-11-13T09:21:02.000Z","message":{"id":"msg_end","role":"assistant","content":[{"type":"thinking","thinking":"done"}]}}"#.to_string() + "\n";
+        let assist_mid = build_exact_tail(&aligned_assist, &assist_end, max_tail);
+        let aligned_assist_path = temp.path().join("aligned_assistant.jsonl");
+        {
+            let mut f = File::create(&aligned_assist_path).expect("create aligned_assistant");
+            let early_user = r#"{"type":"user","timestamp":"2026-11-13T09:21:00.000Z","message":{"role":"user","content":"Before window user."}}"#.to_string() + "\n";
+            f.write_all(early_user.as_bytes()).expect("write early");
+            f.write_all(aligned_assist.as_bytes())
+                .expect("write aligned_assist");
+            f.write_all(assist_mid.as_bytes()).expect("write mid");
+            f.write_all(assist_end.as_bytes()).expect("write end");
+        }
+        let out_assist = read_quotes(
+            &aligned_assist_path,
+            &["toolu_aligned_assist".to_string()],
+            nov_13_utc_ms(9, 21, 0, 250),
+        )
+        .expect("read aligned_assistant");
+        assert!(!out_assist.complete);
+        assert_eq!(out_assist.first_user_text, None);
+        assert_eq!(
+            out_assist
+                .quotes
+                .get("toolu_aligned_assist")
+                .map(|q| q.text.as_str()),
+            Some("Aligned tool quote.")
+        );
+    }
+
+    #[test]
+    fn missing_and_unparseable_timestamps_fall_back_to_tool_ids() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("fallback_timestamps.jsonl");
+        let lines = [
+            r#"{"type":"user","message":{"role":"user","content":"First untimestamped prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"not-a-timestamp","message":{"id":"msg_u1","role":"assistant","content":[{"type":"text","text":"First untimestamped quote"},{"type":"tool_use","id":"toolu_un_1","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-11-13 09:22:00Z","message":{"role":"user","content":"Second space-sep prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:22:00+00:00","message":{"id":"msg_u2","role":"assistant","content":[{"type":"text","text":"Second offset quote"},{"type":"tool_use","id":"toolu_un_2","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-02-29T00:00:00Z","message":{"role":"user","content":"Third invalid leap prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:23:00.Z","message":{"id":"msg_u3","role":"assistant","content":[{"type":"text","text":"Third bad frac quote"},{"type":"tool_use","id":"toolu_un_3","name":"Edit"}]}}"#,
+        ];
+        fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write fallback_timestamps");
+
+        let out = read_quotes(
+            &path,
+            &["toolu_un_1".to_string()],
+            nov_13_utc_ms(9, 22, 5, 0),
+        )
+        .expect("read fallback_timestamps");
+        assert!(out.complete);
+        assert_eq!(
+            out.first_user_text,
+            Some(("First untimestamped prompt".to_string(), false))
+        );
+        assert_eq!(
+            out.quotes.get("toolu_un_1").map(|q| q.text.as_str()),
+            Some("First untimestamped quote")
+        );
+    }
+
+    #[test]
+    fn quote_preserves_leading_and_trailing_whitespace() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("verbatim_ws.jsonl");
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:25:00.000Z","message":{"role":"user","content":"Keep quote whitespace."}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:25:01.000Z","message":{"id":"msg_ws","role":"assistant","content":[{"type":"text","text":"  Keep indentation.\n"},{"type":"tool_use","id":"toolu_ws","name":"Edit"}]}}"#,
+        ];
+        fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write verbatim_ws");
+
+        let out = read_quotes(
+            &path,
+            &["toolu_ws".to_string()],
+            nov_13_utc_ms(9, 25, 0, 250),
+        )
+        .expect("read verbatim_ws");
+        assert_eq!(
+            out.quotes.get("toolu_ws").map(|q| q.text.as_str()),
+            Some("  Keep indentation.\n")
+        );
+    }
+
+    #[test]
+    fn parse_iso_utc_ms_valid_and_invalid_formats() {
+        assert_eq!(parse_iso_utc_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso_utc_ms("1970-01-01T00:00:00.456Z"), Some(456));
+        assert_eq!(
+            parse_iso_utc_ms("2026-11-13T09:12:03.456Z"),
+            Some(nov_13_utc_ms(9, 12, 3, 456))
+        );
+        assert_eq!(
+            parse_iso_utc_ms("2026-11-13T09:12:03Z"),
+            Some(nov_13_utc_ms(9, 12, 3, 0))
+        );
+        assert_eq!(
+            parse_iso_utc_ms("2026-11-13T09:12:03.4Z"),
+            Some(nov_13_utc_ms(9, 12, 3, 400))
+        );
+        assert_eq!(
+            parse_iso_utc_ms("2026-11-13T09:12:03.45Z"),
+            Some(nov_13_utc_ms(9, 12, 3, 450))
+        );
+        assert_eq!(
+            parse_iso_utc_ms("2026-11-13T09:12:03.456789Z"),
+            Some(nov_13_utc_ms(9, 12, 3, 456))
+        );
+        assert!(parse_iso_utc_ms("2024-02-29T23:59:59.999Z").is_some());
+        assert!(parse_iso_utc_ms("2000-02-29T00:00:00Z").is_some());
+
+        for bad in [
+            "",
+            "1969-12-31T23:59:59Z",
+            "1900-02-29T00:00:00Z",
+            "2025-02-29T00:00:00Z",
+            "2026-11-31T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-00-01T00:00:00Z",
+            "2026-11-00T00:00:00Z",
+            "2026-11-13T24:00:00Z",
+            "2026-11-13T00:60:00Z",
+            "2026-11-13T00:00:60Z",
+            "2026-11-13 09:12:03Z",
+            "2026-11-13T09:12:03+00:00",
+            "2026-11-13T09:12:03",
+            "2026-11-13T09:12:03.Z",
+            "2026-11-13T09:12:03.1234567890Z",
+            "2026-11-13T09:12:03.abcZ",
+            "2026-11-13t09:12:03z",
+        ] {
+            assert_eq!(parse_iso_utc_ms(bad), None, "expected None for {bad:?}");
+        }
     }
 
     #[test]
