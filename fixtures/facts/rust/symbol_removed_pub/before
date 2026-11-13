@@ -1,0 +1,5 @@
+pub fn removed_fn() {}
+
+fn kept() -> u32 {
+    1
+}

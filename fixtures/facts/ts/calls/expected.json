@@ -1,0 +1,28 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "sync",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "call_added",
+          "args": {
+            "name": "notify"
+          }
+        },
+        {
+          "id": "call_removed",
+          "args": {
+            "name": "log"
+          }
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

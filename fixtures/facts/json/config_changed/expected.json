@@ -1,0 +1,51 @@
+{
+  "lang": "json",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "a",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "a.b",
+            "before": "1",
+            "after": "2"
+          }
+        },
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "a.c",
+            "before": "true",
+            "after": null
+          }
+        }
+      ],
+      "importance": "medium"
+    },
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "e",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "e",
+            "before": null,
+            "after": "[1,2]"
+          }
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

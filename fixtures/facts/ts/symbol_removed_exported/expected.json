@@ -1,0 +1,20 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "b",
+        "container": null,
+        "exported": true
+      },
+      "labels": [
+        {
+          "id": "symbol_removed",
+          "args": {}
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

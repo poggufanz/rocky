@@ -1,0 +1,15 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": null,
+      "labels": [
+        {
+          "id": "body_changed",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+struct Repo;
+
+impl Repo {
+    fn save(&self, _x: i32) {}
+
+    fn sync(&self, x: i32) {
+        let item = Bar::new(x);
+        self.save(x);
+        let _ = item;
+    }
+}

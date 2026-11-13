@@ -1,0 +1,4 @@
+export function greet(name: string): string {
+  const msg = "hi " + name;
+  return msg;
+}

@@ -1,0 +1,6 @@
+export class Cart {
+  add(price: number): number {
+    const fee = 25;
+    return price + fee;
+  }
+}

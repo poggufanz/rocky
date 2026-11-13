@@ -1,0 +1,18 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": null,
+      "labels": [
+        {
+          "id": "lines_changed",
+          "args": {
+            "added": 1,
+            "removed": 0
+          }
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

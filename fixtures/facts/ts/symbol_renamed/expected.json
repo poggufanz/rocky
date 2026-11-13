@@ -1,0 +1,22 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "computeTotal",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "symbol_renamed",
+          "args": {
+            "from": "calcTotal"
+          }
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

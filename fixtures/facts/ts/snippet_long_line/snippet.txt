@@ -1,0 +1,5 @@
+## function banner
+  function banner(): string {
++   const label = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀…
+    return "ok";
+  }

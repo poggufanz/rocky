@@ -1,0 +1,4 @@
+function computeTotal(items) {
+  const count = items.length;
+  return count;
+}

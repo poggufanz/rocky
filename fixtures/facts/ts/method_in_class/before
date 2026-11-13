@@ -1,0 +1,10 @@
+export class Cart {
+  add(price: number): number {
+    const fee = 10;
+    return price + fee;
+  }
+
+  private log(msg: string): void {
+    const line = msg;
+  }
+}

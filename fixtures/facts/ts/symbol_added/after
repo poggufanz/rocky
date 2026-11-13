@@ -1,0 +1,8 @@
+export function total(items: number[]): number {
+  return items.length;
+}
+
+function applyDiscount(cart, m) {
+  const factor = 1 - m;
+  return cart * factor;
+}

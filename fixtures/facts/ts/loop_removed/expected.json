@@ -1,0 +1,20 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "sum",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "loop_removed",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

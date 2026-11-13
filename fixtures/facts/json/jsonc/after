@@ -1,0 +1,7 @@
+{
+  // TypeScript configuration
+  "compilerOptions": {
+    "target": "ES2023",
+    "strict": true
+  }
+}

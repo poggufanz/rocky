@@ -1,0 +1,6 @@
+struct Cart {
+    items: u32,
+    discount: u32,
+}
+
+pub trait Price {}

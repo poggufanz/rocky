@@ -1,0 +1,8 @@
+## function apply
+  fn apply(ok: bool, total: i32, e: &'static str) -> Result<i32, &'static str> {
++     if !ok {
++         return Err(e);
++     }
+… 1 lines
+      return Ok(scaled);
+  }

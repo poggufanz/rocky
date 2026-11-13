@@ -1,0 +1,4 @@
+function processItem(x: number) {
+  save(x);
+  return x;
+}

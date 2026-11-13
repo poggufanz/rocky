@@ -1,0 +1,4 @@
+fn read_val(x: Option<i32>) -> Option<i32> {
+    let v = x?;
+    Some(v)
+}

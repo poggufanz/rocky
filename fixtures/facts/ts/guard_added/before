@@ -1,0 +1,3 @@
+function apply(cart, m) {
+  return cart.total * m.rate
+}

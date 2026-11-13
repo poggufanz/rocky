@@ -1,0 +1,7 @@
+function apply(ok: boolean, x: boolean, y: number) {
+  if (!ok) return;
+  if (x) {
+    y = 1;
+  }
+  save(y);
+}

@@ -1,0 +1,15 @@
+{
+  "lang": "plain",
+  "changes": [
+    {
+      "symbol": null,
+      "labels": [
+        {
+          "id": "not_captured",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

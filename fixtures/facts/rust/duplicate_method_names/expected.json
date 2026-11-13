@@ -1,0 +1,21 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "method",
+        "name": "fmt",
+        "container": "Foo",
+        "exported": false,
+        "nth": 1
+      },
+      "labels": [
+        {
+          "id": "body_changed",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

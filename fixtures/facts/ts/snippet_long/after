@@ -1,0 +1,33 @@
+function compute(x: number): number {
+  let a01 = x + 101;
+  let a02 = x + 102;
+  let a03 = x + 103;
+  let a04 = x + 104;
+  let a05 = x + 105;
+  let a06 = x + 106;
+  let a07 = x + 107;
+  let a08 = x + 108;
+  let a09 = x + 109;
+  let a10 = x + 110;
+  let a11 = x + 111;
+  let a12 = x + 112;
+  let a13 = x + 113;
+  let a14 = x + 114;
+  let a15 = x + 115;
+  let a16 = x + 116;
+  let a17 = x + 117;
+  let a18 = x + 118;
+  let a19 = x + 119;
+  let a20 = x + 120;
+  let a21 = x + 121;
+  let a22 = x + 122;
+  let a23 = x + 123;
+  let a24 = x + 124;
+  let a25 = x + 125;
+  let a26 = x + 126;
+  let a27 = x + 127;
+  let a28 = x + 128;
+  let a29 = x + 129;
+  let a30 = x + 130;
+  return a30;
+}

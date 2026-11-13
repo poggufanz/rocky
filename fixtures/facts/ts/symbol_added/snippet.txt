@@ -1,0 +1,5 @@
+## function applyDiscount
++ function applyDiscount(cart, m) {
++   const factor = 1 - m;
++   return cart * factor;
++ }

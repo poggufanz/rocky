@@ -1,0 +1,15 @@
+use std::fmt::{Debug, Display, Formatter, Result};
+
+struct Foo;
+
+impl Display for Foo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.write_str("display")
+    }
+}
+
+impl Debug for Foo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.write_str("debug")
+    }
+}

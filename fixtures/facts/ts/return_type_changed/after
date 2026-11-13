@@ -1,0 +1,4 @@
+function f(x: number): string {
+  const y = x;
+  return y;
+}

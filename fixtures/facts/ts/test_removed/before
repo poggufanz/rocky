@@ -1,0 +1,8 @@
+describe("cart", () => {
+  it("keeps base price", () => {
+    expect(100).toBe(100);
+  });
+  it("applies member rate", () => {
+    expect(90).toBe(90);
+  });
+});

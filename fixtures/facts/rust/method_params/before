@@ -1,0 +1,5 @@
+struct Cart;
+
+impl Cart {
+    pub fn add(&mut self, x: u32) {}
+}

@@ -1,0 +1,6 @@
+function processItem(x: number) {
+  if (x <= 0) return;
+  save(x);
+  notify(x);
+  return x;
+}

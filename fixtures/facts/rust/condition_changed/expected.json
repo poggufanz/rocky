@@ -1,0 +1,20 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "check",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "condition_changed",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

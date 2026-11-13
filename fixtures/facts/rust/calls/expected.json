@@ -1,0 +1,34 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "method",
+        "name": "sync",
+        "container": "Repo",
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "call_added",
+          "args": {
+            "name": "Bar::new"
+          }
+        },
+        {
+          "id": "call_added",
+          "args": {
+            "name": "save"
+          }
+        },
+        {
+          "id": "call_removed",
+          "args": {
+            "name": "Foo::new"
+          }
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

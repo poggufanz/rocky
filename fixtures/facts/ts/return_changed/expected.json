@@ -1,0 +1,20 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "calc",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "return_changed",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

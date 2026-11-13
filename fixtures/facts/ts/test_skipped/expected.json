@@ -1,0 +1,22 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "test",
+        "name": "applies member rate",
+        "container": "cart",
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "test_skipped",
+          "args": {
+            "name": "applies member rate"
+          }
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

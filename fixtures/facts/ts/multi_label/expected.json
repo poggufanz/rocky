@@ -1,0 +1,26 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "processItem",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "guard_added",
+          "args": {}
+        },
+        {
+          "id": "call_added",
+          "args": {
+            "name": "notify"
+          }
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

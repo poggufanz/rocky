@@ -1,0 +1,28 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "persist",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "call_added",
+          "args": {
+            "name": "repo.insert"
+          }
+        },
+        {
+          "id": "call_removed",
+          "args": {
+            "name": "repo.save"
+          }
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

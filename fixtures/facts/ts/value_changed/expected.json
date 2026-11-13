@@ -1,0 +1,24 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "const",
+        "name": "SESSION_TTL",
+        "container": null,
+        "exported": true
+      },
+      "labels": [
+        {
+          "id": "value_changed",
+          "args": {
+            "name": "SESSION_TTL",
+            "before": "60",
+            "after": "3600"
+          }
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

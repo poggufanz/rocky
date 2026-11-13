@@ -1,0 +1,15 @@
+{
+  "lang": "plain",
+  "changes": [
+    {
+      "symbol": null,
+      "labels": [
+        {
+          "id": "file_new",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

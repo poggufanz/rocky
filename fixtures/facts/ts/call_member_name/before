@@ -1,0 +1,3 @@
+function persist(x: string) {
+  this.repo.save(x);
+}

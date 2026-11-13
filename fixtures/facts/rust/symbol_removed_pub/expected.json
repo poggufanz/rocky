@@ -1,0 +1,20 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "removed_fn",
+        "container": null,
+        "exported": true
+      },
+      "labels": [
+        {
+          "id": "symbol_removed",
+          "args": {}
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

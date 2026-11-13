@@ -1,0 +1,4 @@
+async function load(u: string) {
+  const r = fetch(u);
+  return r;
+}

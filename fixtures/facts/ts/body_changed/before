@@ -1,0 +1,4 @@
+function greet() {
+  const msg = "hello";
+  return msg;
+}

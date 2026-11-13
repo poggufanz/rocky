@@ -1,0 +1,5 @@
+describe("cart", () => {
+  it("keeps base price", () => {
+    expect(100).toBe(100);
+  });
+});

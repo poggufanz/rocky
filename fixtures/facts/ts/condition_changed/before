@@ -1,0 +1,6 @@
+function check(a: number) {
+  if (a > 1) {
+    return true;
+  }
+  return false;
+}

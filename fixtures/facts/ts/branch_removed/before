@@ -1,0 +1,14 @@
+function label(code: number) {
+  let res = "other";
+  switch (code) {
+    case 1:
+      res = "one";
+      break;
+    case 2:
+      res = "two";
+      break;
+    default:
+      res = "other";
+  }
+  return res;
+}

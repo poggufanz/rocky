@@ -1,0 +1,4 @@
+fn apply(ok: bool, total: i32, e: &'static str) -> Result<i32, &'static str> {
+    let scaled = total * 2;
+    return Ok(scaled);
+}

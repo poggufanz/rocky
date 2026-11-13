@@ -1,0 +1,26 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "load",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "error_handling_added",
+          "args": {}
+        },
+        {
+          "id": "call_added",
+          "args": {
+            "name": "log"
+          }
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "method",
+        "name": "add",
+        "container": "Cart",
+        "exported": true
+      },
+      "labels": [
+        {
+          "id": "body_changed",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    },
+    {
+      "symbol": {
+        "kind": "method",
+        "name": "log",
+        "container": "Cart",
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "symbol_removed",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

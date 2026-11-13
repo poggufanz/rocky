@@ -1,0 +1,5 @@
+function load(id: string) {
+  const raw = read(id);
+  const item = parse(raw);
+  return item;
+}

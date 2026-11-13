@@ -1,0 +1,22 @@
+{
+  "lang": "javascript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "test",
+        "name": "works",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "test_skipped",
+          "args": {
+            "name": "works"
+          }
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

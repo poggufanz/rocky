@@ -1,0 +1,7 @@
+fn process(x: Option<i32>, y: Option<i32>, w: Option<i32>) -> Option<i32> {
+    let a = x?;
+    let b = y?;
+    panic!("z");
+    let c = w.expect("w");
+    Some(a + b + c)
+}

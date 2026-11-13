@@ -1,0 +1,20 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "apply",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "guard_added",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

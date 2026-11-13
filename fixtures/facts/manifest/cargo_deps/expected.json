@@ -1,0 +1,86 @@
+{
+  "lang": "cargo_toml",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "dependencies",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "dep_version",
+          "args": {
+            "name": "similar",
+            "before": "2",
+            "after": "3"
+          }
+        },
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "dependencies.serde",
+            "before": "1",
+            "after": "{\"features\":[\"derive\"],\"version\":\"1\"}"
+          }
+        }
+      ],
+      "importance": "high"
+    },
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "dev-dependencies",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "dep_removed",
+          "args": {
+            "name": "tempfile"
+          }
+        }
+      ],
+      "importance": "high"
+    },
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "package",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "package.edition",
+            "before": "2021",
+            "after": "2024"
+          }
+        }
+      ],
+      "importance": "medium"
+    },
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "target",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "dep_added",
+          "args": {
+            "name": "libc",
+            "version": "0.2"
+          }
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

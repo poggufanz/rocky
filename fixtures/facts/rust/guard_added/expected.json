@@ -1,0 +1,24 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "apply",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "guard_added",
+          "args": {}
+        },
+        {
+          "id": "error_handling_added",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "helper",
+        "container": "util",
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "body_changed",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

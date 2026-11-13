@@ -1,0 +1,23 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "load",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "await_changed",
+          "args": {
+            "added": 1,
+            "removed": 0
+          }
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

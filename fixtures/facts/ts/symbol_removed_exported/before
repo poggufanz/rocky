@@ -1,0 +1,7 @@
+export function a(x: number): number {
+  return x + 1;
+}
+
+export function b(x: number): number {
+  return x + 2;
+}

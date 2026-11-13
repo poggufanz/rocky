@@ -1,0 +1,9 @@
+function load(id: string) {
+  try {
+    const raw = read(id);
+    const item = parse(raw);
+    return item;
+  } catch (e) {
+    log(e);
+  }
+}
