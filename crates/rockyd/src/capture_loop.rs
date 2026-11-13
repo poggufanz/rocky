@@ -20,7 +20,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::paths::{listening_dir, repo_consents_path};
 use rocky_proto::pipe::{CaptureHealth, ServerMsg};
 use rockyd::capture::child::{CHILD_STOP_GRACE, CaptureChild};
-use rockyd::capture::{Action, Capture, CaptureConsts, CaptureLine, RESTARTS};
+use rockyd::capture::{Action, Capture, CaptureConsts, CaptureLine, CaptureResult, RESTARTS};
 use rockyd::guard::records::{CliRecord, cli_status, read_cli};
 use rockyd::log::RotatingLog;
 use rockyd::server::Hub;
@@ -157,18 +157,19 @@ impl CaptureLoop {
         shared: &Mutex<Shared>,
         hub: &Hub,
         log: &RotatingLog,
-    ) {
+    ) -> Vec<CaptureResult> {
         let pinged = self.consent_pings.try_iter().count() > 0;
         if pinged || *allowed != self.last_allowed {
             self.check(allowed);
         }
-        self.drain_child(log);
+        let results = self.drain_child(log);
         self.wake_changed_roots();
         self.run_actions(log);
         self.sync_watches(log);
         let health = self.capture.health();
         self.note_restart_refusal(&health, log);
         self.publish(health, shared, hub);
+        results
     }
 
     /// Stops the child before the daemon exits: closes its input, waits for it, and kills it only
@@ -193,10 +194,11 @@ impl CaptureLoop {
 
     /// Hands the core every line the child wrote, then reaps the child when it has exited or
     /// closed its output.
-    fn drain_child(&mut self, log: &RotatingLog) {
+    fn drain_child(&mut self, log: &RotatingLog) -> Vec<CaptureResult> {
         let Some(child) = self.child.as_mut() else {
-            return;
+            return Vec::new();
         };
+        let mut results = Vec::new();
         let mut output_closed = false;
         loop {
             match child.lines().try_recv() {
@@ -206,7 +208,9 @@ impl CaptureLoop {
                     if matches!(line, CaptureLine::Roots(_)) {
                         self.failed_watches.clear();
                     }
-                    self.capture.line(line);
+                    if let Some(result) = self.capture.line(line) {
+                        results.push(result);
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -218,6 +222,7 @@ impl CaptureLoop {
         if output_closed || child.try_exit().is_some() {
             self.lose_child(log);
         }
+        results
     }
 
     /// Tells the core which owned roots had file events since the last pass.

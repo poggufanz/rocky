@@ -546,3 +546,81 @@ fn parse_line_rejects_a_result_with_any_field_missing() {
         assert_eq!(parse_line(&broken.to_string()), None, "missing {key}");
     }
 }
+
+#[test]
+fn flush_skips_send_gap_keeps_debounce() {
+    let mut cap = running(&["C:/r"], &[]);
+    cap.line(roots(&[("C:/r", true)]));
+
+    cap.fs_event("C:/r", 0);
+    assert_eq!(cap.next_action(300), Some(Action::Send("C:/r".into())));
+
+    // Flush at +500 ms skips the 2_000 ms send gap but keeps the 300 ms debounce.
+    cap.flush("C:/r", 800);
+    assert_eq!(cap.next_action(1_099), None);
+    assert_eq!(cap.next_action(1_100), Some(Action::Send("C:/r".into())));
+    assert_eq!(cap.next_action(1_100), None);
+}
+
+#[test]
+fn result_carries_sent_ms_fifo() {
+    let mut cap = running(&["C:/r"], &[]);
+    cap.line(roots(&[("C:/r", true)]));
+
+    cap.fs_event("C:/r", 0);
+    assert_eq!(cap.next_action(300), Some(Action::Send("C:/r".into())));
+
+    cap.fs_event("C:/r", 2_000);
+    assert_eq!(cap.next_action(2_300), Some(Action::Send("C:/r".into())));
+
+    let first = cap
+        .line(result("C:/r", Coverage::Complete, None, 2_500))
+        .expect("first result");
+    assert_eq!(
+        first,
+        CaptureResult {
+            root: "C:/r".into(),
+            sent_ms: 300,
+            at_ms: 2_500,
+            coverage: "complete".into(),
+        }
+    );
+
+    let second = cap
+        .line(result("C:/r", Coverage::Partial, None, 2_800))
+        .expect("second result");
+    assert_eq!(
+        second,
+        CaptureResult {
+            root: "C:/r".into(),
+            sent_ms: 2_300,
+            at_ms: 2_800,
+            coverage: "partial".into(),
+        }
+    );
+}
+
+#[test]
+fn in_flight_result_does_not_end_window() {
+    let mut cap = running(&["C:/r"], &[]);
+    cap.line(roots(&[("C:/r", true)]));
+
+    cap.fs_event("C:/r", 0);
+    assert_eq!(cap.next_action(300), Some(Action::Send("C:/r".into())));
+
+    let post_ms = 500;
+    cap.flush("C:/r", post_ms);
+
+    let in_flight = cap
+        .line(result("C:/r", Coverage::Complete, None, 600))
+        .expect("in-flight result");
+    assert_eq!(in_flight.sent_ms, 300);
+    assert!(in_flight.sent_ms < post_ms);
+
+    assert_eq!(cap.next_action(800), Some(Action::Send("C:/r".into())));
+    let after = cap
+        .line(result("C:/r", Coverage::Complete, None, 900))
+        .expect("post-flush result");
+    assert_eq!(after.sent_ms, 800);
+    assert!(after.sent_ms >= post_ms);
+}

@@ -11,7 +11,7 @@ pub mod child;
 use rocky_proto::pipe::{CaptureHealth, CaptureState};
 use rocky_proto::respawn::RespawnPolicy;
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const CLI_MISSING: &str = "Rocky cannot find Node. Run rocky once.";
 pub const SPAWN_FAILED: &str = "Node could not start.";
@@ -50,6 +50,16 @@ pub enum Coverage {
     Unknown,
 }
 
+impl Coverage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// One root the child lists, and whether this child is the one capturing it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RootOwner {
@@ -65,6 +75,15 @@ pub struct Report {
     pub gaps: u64,
     pub reason: Option<String>,
     pub at_ms: u64,
+}
+
+/// Capture child result paired with the timestamp of the request that prompted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureResult {
+    pub root: String,
+    pub sent_ms: u64,
+    pub at_ms: u64,
+    pub coverage: String,
 }
 
 /// A line the capture child writes to stdout.
@@ -157,6 +176,8 @@ struct ChildRun {
     /// Root to the time of its first file event since its last send.
     pending: BTreeMap<String, u64>,
     last_send: BTreeMap<String, u64>,
+    /// Send timestamps awaiting a `result` line per root, in FIFO order.
+    sent_at: BTreeMap<String, VecDeque<u64>>,
 }
 
 #[derive(Debug)]
@@ -217,13 +238,30 @@ impl Capture {
         self.running = false;
     }
 
-    pub fn line(&mut self, line: CaptureLine) {
+    pub fn line(&mut self, line: CaptureLine) -> Option<CaptureResult> {
         match line {
-            CaptureLine::Roots(roots) => self.replace_roots(roots),
+            CaptureLine::Roots(roots) => {
+                self.replace_roots(roots);
+                None
+            }
             CaptureLine::Result(report) => {
-                if self.is_row(&report.root) {
-                    self.run.results.insert(report.root.clone(), report);
+                if !self.is_row(&report.root) {
+                    return None;
                 }
+                let sent_ms = self
+                    .run
+                    .sent_at
+                    .get_mut(&report.root)
+                    .and_then(VecDeque::pop_front)
+                    .unwrap_or(0);
+                let out = CaptureResult {
+                    root: report.root.clone(),
+                    sent_ms,
+                    at_ms: report.at_ms,
+                    coverage: report.coverage.as_str().to_owned(),
+                };
+                self.run.results.insert(report.root.clone(), report);
+                Some(out)
             }
         }
     }
@@ -231,6 +269,14 @@ impl Capture {
     /// A file under `root` changed. Only roots this child owns are tracked.
     pub fn fs_event(&mut self, root: &str, now_ms: u64) {
         if self.owned().any(|owned| owned == root) {
+            self.run.pending.entry(root.to_owned()).or_insert(now_ms);
+        }
+    }
+
+    /// Requests a debounce-only capture for an owned root, bypassing any active send gap.
+    pub fn flush(&mut self, root: &str, now_ms: u64) {
+        if self.owned().any(|owned| owned == root) {
+            self.run.last_send.remove(root);
             self.run.pending.entry(root.to_owned()).or_insert(now_ms);
         }
     }
@@ -332,6 +378,8 @@ impl Capture {
             .retain(|root, _| roots.iter().any(|row| row.root == *root));
         run.pending
             .retain(|root, _| roots.iter().any(|row| row.owner && row.root == *root));
+        run.sent_at
+            .retain(|root, _| roots.iter().any(|row| row.root == *root));
         run.watch_failed.clear();
         run.listed = Some(roots);
     }
@@ -344,6 +392,11 @@ impl Capture {
             .cloned();
         if let Some(root) = unsent_extra {
             self.run.extras_sent.insert(root.clone());
+            self.run
+                .sent_at
+                .entry(root.clone())
+                .or_default()
+                .push_back(now_ms);
             return Some(Action::Send(root));
         }
         let due = self
@@ -354,6 +407,11 @@ impl Capture {
             .map(|(root, _)| root.clone())?;
         self.run.pending.remove(&due);
         self.run.last_send.insert(due.clone(), now_ms);
+        self.run
+            .sent_at
+            .entry(due.clone())
+            .or_default()
+            .push_back(now_ms);
         Some(Action::Send(due))
     }
 

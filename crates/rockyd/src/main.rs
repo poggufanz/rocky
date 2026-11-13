@@ -378,7 +378,7 @@ fn main() {
 
         guards.service(&shared, &hub, &log);
         // ponytail: rebuilt every 25 ms; cache it on the guard if the set grows large.
-        captures.service(&guards.allowed_roots(), &shared, &hub, &log);
+        let _ = captures.service(&guards.allowed_roots(), &shared, &hub, &log);
         thread::sleep(Duration::from_millis(25));
     }
 }
