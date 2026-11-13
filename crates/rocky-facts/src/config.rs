@@ -16,7 +16,7 @@ const PACKAGE_DEP_SECTIONS: &[&str] = &[
 const CARGO_DEP_SECTIONS: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
 
 /// Normalized configuration value backed by `BTreeMap` so object key order is always deterministic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Eq)]
 enum ConfigValue {
     Null,
     Bool(bool),
@@ -26,6 +26,57 @@ enum ConfigValue {
     Object(BTreeMap<String, ConfigValue>),
 }
 
+impl PartialEq for ConfigValue {
+    fn eq(&self, other: &Self) -> bool {
+        let mut stack = vec![(self, other)];
+        while let Some((a, b)) = stack.pop() {
+            match (a, b) {
+                (Self::Null, Self::Null) => {}
+                (Self::Bool(x), Self::Bool(y)) if x == y => {}
+                (Self::Number(x), Self::Number(y)) if x == y => {}
+                (Self::String(x), Self::String(y)) if x == y => {}
+                (Self::Array(xs), Self::Array(ys)) if xs.len() == ys.len() => {
+                    stack.extend(xs.iter().zip(ys.iter()));
+                }
+                (Self::Object(xm), Self::Object(ym)) if xm.len() == ym.len() => {
+                    for ((xk, xv), (yk, yv)) in xm.iter().zip(ym.iter()) {
+                        if xk != yk {
+                            return false;
+                        }
+                        stack.push((xv, yv));
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+impl Drop for ConfigValue {
+    fn drop(&mut self) {
+        let mut stack = Vec::new();
+        match self {
+            Self::Array(items) => stack.append(items),
+            Self::Object(map) => {
+                let owned = std::mem::take(map);
+                stack.extend(owned.into_values());
+            }
+            _ => return,
+        }
+        while let Some(mut val) = stack.pop() {
+            match &mut val {
+                Self::Array(items) => stack.append(items),
+                Self::Object(map) => {
+                    let owned = std::mem::take(map);
+                    stack.extend(owned.into_values());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 enum RenderTask<'a> {
     Value(&'a ConfigValue),
     Raw(&'static str),
@@ -33,6 +84,14 @@ enum RenderTask<'a> {
 }
 
 impl ConfigValue {
+    fn into_object(mut self) -> Option<BTreeMap<String, ConfigValue>> {
+        if let Self::Object(map) = &mut self {
+            Some(std::mem::take(map))
+        } else {
+            None
+        }
+    }
+
     /// Renders as compact JSON with object keys sorted lexicographically.
     fn render_compact(&self) -> String {
         let mut out = String::new();
@@ -88,54 +147,128 @@ impl ConfigValue {
     }
 }
 
-fn from_json(value: serde_json::Value) -> ConfigValue {
-    match value {
-        serde_json::Value::Null => ConfigValue::Null,
-        serde_json::Value::Bool(b) => ConfigValue::Bool(b),
-        serde_json::Value::Number(n) => ConfigValue::Number(n.to_string()),
-        serde_json::Value::String(s) => ConfigValue::String(s),
-        serde_json::Value::Array(items) => {
-            ConfigValue::Array(items.into_iter().map(from_json).collect())
+enum PendingContainer {
+    Array { start: usize },
+    Object { keys: Vec<String>, start: usize },
+}
+
+fn finish_container(values: &mut Vec<ConfigValue>, pending: PendingContainer) {
+    match pending {
+        PendingContainer::Array { start } => {
+            let items = values.split_off(start);
+            values.push(ConfigValue::Array(items));
         }
-        serde_json::Value::Object(map) => {
-            let sorted = map.into_iter().map(|(k, v)| (k, from_json(v))).collect();
-            ConfigValue::Object(sorted)
+        PendingContainer::Object { keys, start } => {
+            let vals = values.split_off(start);
+            let map: BTreeMap<String, ConfigValue> = keys.into_iter().zip(vals).collect();
+            values.push(ConfigValue::Object(map));
         }
     }
 }
 
-fn from_toml_table(table: toml::Table) -> BTreeMap<String, ConfigValue> {
-    table
-        .into_iter()
-        .map(|(k, v)| (k, from_toml_value(v)))
-        .collect()
+fn from_json(value: serde_json::Value) -> ConfigValue {
+    enum Step {
+        Value(serde_json::Value),
+        Finish(PendingContainer),
+    }
+
+    let mut values: Vec<ConfigValue> = Vec::new();
+    let mut work = vec![Step::Value(value)];
+
+    while let Some(step) = work.pop() {
+        match step {
+            Step::Finish(pending) => finish_container(&mut values, pending),
+            Step::Value(val) => match val {
+                serde_json::Value::Null => values.push(ConfigValue::Null),
+                serde_json::Value::Bool(b) => values.push(ConfigValue::Bool(b)),
+                serde_json::Value::Number(n) => values.push(ConfigValue::Number(n.to_string())),
+                serde_json::Value::String(s) => values.push(ConfigValue::String(s)),
+                serde_json::Value::Array(items) => {
+                    let start = values.len();
+                    work.push(Step::Finish(PendingContainer::Array { start }));
+                    for item in items.into_iter().rev() {
+                        work.push(Step::Value(item));
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    let start = values.len();
+                    let mut keys = Vec::with_capacity(map.len());
+                    let mut vals = Vec::with_capacity(map.len());
+                    for (k, v) in map {
+                        keys.push(k);
+                        vals.push(v);
+                    }
+                    work.push(Step::Finish(PendingContainer::Object { keys, start }));
+                    for v in vals.into_iter().rev() {
+                        work.push(Step::Value(v));
+                    }
+                }
+            },
+        }
+    }
+
+    values.pop().unwrap_or(ConfigValue::Null)
 }
 
 fn from_toml_value(value: toml::Value) -> ConfigValue {
-    match value {
-        toml::Value::String(s) => ConfigValue::String(s),
-        toml::Value::Integer(i) => ConfigValue::Number(i.to_string()),
-        toml::Value::Float(f) => match serde_json::Number::from_f64(f) {
-            Some(n) => ConfigValue::Number(n.to_string()),
-            None => ConfigValue::String(f.to_string()),
-        },
-        toml::Value::Boolean(b) => ConfigValue::Bool(b),
-        toml::Value::Datetime(dt) => ConfigValue::String(dt.to_string()),
-        toml::Value::Array(items) => {
-            ConfigValue::Array(items.into_iter().map(from_toml_value).collect())
-        }
-        toml::Value::Table(table) => ConfigValue::Object(from_toml_table(table)),
+    enum Step {
+        Value(toml::Value),
+        Finish(PendingContainer),
     }
+
+    let mut values: Vec<ConfigValue> = Vec::new();
+    let mut work = vec![Step::Value(value)];
+
+    while let Some(step) = work.pop() {
+        match step {
+            Step::Finish(pending) => finish_container(&mut values, pending),
+            Step::Value(val) => match val {
+                toml::Value::String(s) => values.push(ConfigValue::String(s)),
+                toml::Value::Integer(i) => values.push(ConfigValue::Number(i.to_string())),
+                toml::Value::Float(f) => match serde_json::Number::from_f64(f) {
+                    Some(n) => values.push(ConfigValue::Number(n.to_string())),
+                    None => values.push(ConfigValue::String(f.to_string())),
+                },
+                toml::Value::Boolean(b) => values.push(ConfigValue::Bool(b)),
+                toml::Value::Datetime(dt) => values.push(ConfigValue::String(dt.to_string())),
+                toml::Value::Array(items) => {
+                    let start = values.len();
+                    work.push(Step::Finish(PendingContainer::Array { start }));
+                    for item in items.into_iter().rev() {
+                        work.push(Step::Value(item));
+                    }
+                }
+                toml::Value::Table(table) => {
+                    let start = values.len();
+                    let mut keys = Vec::with_capacity(table.len());
+                    let mut vals = Vec::with_capacity(table.len());
+                    for (k, v) in table {
+                        keys.push(k);
+                        vals.push(v);
+                    }
+                    work.push(Step::Finish(PendingContainer::Object { keys, start }));
+                    for v in vals.into_iter().rev() {
+                        work.push(Step::Value(v));
+                    }
+                }
+            },
+        }
+    }
+
+    values.pop().unwrap_or(ConfigValue::Null)
+}
+
+fn from_toml_table(table: toml::Table) -> BTreeMap<String, ConfigValue> {
+    from_toml_value(toml::Value::Table(table))
+        .into_object()
+        .unwrap_or_default()
 }
 
 fn parse_root(lang: Lang, text: &str) -> Option<BTreeMap<String, ConfigValue>> {
     match lang {
         Lang::Json | Lang::PackageJson => {
             let value: serde_json::Value = serde_json::from_str(text).ok()?;
-            match from_json(value) {
-                ConfigValue::Object(map) => Some(map),
-                _ => None,
-            }
+            from_json(value).into_object()
         }
         Lang::Toml | Lang::CargoToml => {
             let table: toml::Table = toml::from_str(text).ok()?;
@@ -218,38 +351,57 @@ fn dep_section_paths(
     candidates
 }
 
+fn get_object_mut_at<'a>(
+    map: &'a mut BTreeMap<String, ConfigValue>,
+    path: &[String],
+) -> Option<&'a mut BTreeMap<String, ConfigValue>> {
+    let (first, rest) = match path.split_first() {
+        Some(parts) => parts,
+        None => return Some(map),
+    };
+    let mut current = map.get_mut(first)?;
+    for segment in rest {
+        let ConfigValue::Object(child) = current else {
+            return None;
+        };
+        current = child.get_mut(segment)?;
+    }
+    match current {
+        ConfigValue::Object(obj) => Some(obj),
+        _ => None,
+    }
+}
+
 fn take_object_at(
     map: &mut BTreeMap<String, ConfigValue>,
     path: &[String],
 ) -> BTreeMap<String, ConfigValue> {
-    let Some((first, rest)) = path.split_first() else {
+    let Some((last, prefix)) = path.split_last() else {
         return BTreeMap::new();
     };
-    if rest.is_empty() {
-        return match map.remove(first) {
-            Some(ConfigValue::Object(obj)) => obj,
-            _ => BTreeMap::new(),
-        };
-    }
-    let Some(mut current) = map.get_mut(first) else {
+    let Some(parent) = get_object_mut_at(map, prefix) else {
         return BTreeMap::new();
     };
-    for segment in &rest[..rest.len() - 1] {
-        let ConfigValue::Object(child) = current else {
-            return BTreeMap::new();
-        };
-        let Some(next) = child.get_mut(segment) else {
-            return BTreeMap::new();
-        };
-        current = next;
+    let taken = parent
+        .remove(last)
+        .and_then(ConfigValue::into_object)
+        .unwrap_or_default();
+    // Extracting a nested dependency section (e.g. target.<cfg>.dependencies) can leave empty
+    // implicit parent tables that should not be reported as separate empty-object config leaves.
+    for depth in (1..path.len()).rev() {
+        let ancestor_empty = matches!(
+            get_at(map, &path[..depth]),
+            Some(ConfigValue::Object(obj)) if obj.is_empty()
+        );
+        if ancestor_empty {
+            if let Some(ancestor_parent) = get_object_mut_at(map, &path[..depth - 1]) {
+                ancestor_parent.remove(&path[depth - 1]);
+            }
+        } else {
+            break;
+        }
     }
-    let ConfigValue::Object(parent) = current else {
-        return BTreeMap::new();
-    };
-    match parent.remove(&rest[rest.len() - 1]) {
-        Some(ConfigValue::Object(obj)) => obj,
-        _ => BTreeMap::new(),
-    }
+    taken
 }
 
 fn dep_version(val: &ConfigValue) -> Option<&str> {
@@ -260,6 +412,16 @@ fn dep_version(val: &ConfigValue) -> Option<&str> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn render_diff_pair(before: &ConfigValue, after: &ConfigValue) -> (String, String) {
+    let b_disp = before.render_leaf();
+    let a_disp = after.render_leaf();
+    if b_disp == a_disp {
+        (before.render_compact(), after.render_compact())
+    } else {
+        (b_disp, a_disp)
     }
 }
 
@@ -297,11 +459,14 @@ fn diff_dep_section(
                         before: cut(b_ver, MAX_VALUE_CHARS),
                         after: cut(a_ver, MAX_VALUE_CHARS),
                     },
-                    _ => Label::ConfigChanged {
-                        key: cut(&format!("{section_name}.{name}"), MAX_KEY_CHARS),
-                        before: Some(cut(&before_val.render_leaf(), MAX_VALUE_CHARS)),
-                        after: Some(cut(&after_val.render_leaf(), MAX_VALUE_CHARS)),
-                    },
+                    _ => {
+                        let (b_str, a_str) = render_diff_pair(before_val, after_val);
+                        Label::ConfigChanged {
+                            key: cut(&format!("{section_name}.{name}"), MAX_KEY_CHARS),
+                            before: Some(cut(&b_str, MAX_VALUE_CHARS)),
+                            after: Some(cut(&a_str, MAX_VALUE_CHARS)),
+                        }
+                    }
                 }
             }
             (None, None) => unreachable!(),
@@ -310,7 +475,7 @@ fn diff_dep_section(
     }
 }
 
-fn flatten_leaves(root: &BTreeMap<String, ConfigValue>) -> BTreeMap<Vec<String>, String> {
+fn flatten_leaves(root: &BTreeMap<String, ConfigValue>) -> BTreeMap<Vec<String>, &ConfigValue> {
     let mut leaves = BTreeMap::new();
     let mut stack: Vec<(Vec<String>, &ConfigValue)> = Vec::new();
     for (k, v) in root.iter().rev() {
@@ -319,7 +484,7 @@ fn flatten_leaves(root: &BTreeMap<String, ConfigValue>) -> BTreeMap<Vec<String>,
 
     while let Some((path, val)) = stack.pop() {
         match val {
-            ConfigValue::Object(map) => {
+            ConfigValue::Object(map) if !map.is_empty() => {
                 for (k, v) in map.iter().rev() {
                     let mut child_path = path.clone();
                     child_path.push(k.clone());
@@ -327,7 +492,7 @@ fn flatten_leaves(root: &BTreeMap<String, ConfigValue>) -> BTreeMap<Vec<String>,
                 }
             }
             _ => {
-                leaves.insert(path, val.render_leaf());
+                leaves.insert(path, val);
             }
         }
     }
@@ -335,23 +500,32 @@ fn flatten_leaves(root: &BTreeMap<String, ConfigValue>) -> BTreeMap<Vec<String>,
 }
 
 fn diff_leaves(
-    before_leaves: &BTreeMap<Vec<String>, String>,
-    after_leaves: &BTreeMap<Vec<String>, String>,
+    before_leaves: &BTreeMap<Vec<String>, &ConfigValue>,
+    after_leaves: &BTreeMap<Vec<String>, &ConfigValue>,
     groups: &mut BTreeMap<String, Vec<Label>>,
 ) {
     let paths: BTreeSet<&Vec<String>> = before_leaves.keys().chain(after_leaves.keys()).collect();
     for path in paths {
-        let before_val = before_leaves.get(path);
-        let after_val = after_leaves.get(path);
+        let before_val = before_leaves.get(path).copied();
+        let after_val = after_leaves.get(path).copied();
         if before_val == after_val {
             continue;
         }
+        let (before_str, after_str) = match (before_val, after_val) {
+            (Some(b), Some(a)) => {
+                let (b_str, a_str) = render_diff_pair(b, a);
+                (Some(b_str), Some(a_str))
+            }
+            (Some(b), None) => (Some(b.render_leaf()), None),
+            (None, Some(a)) => (None, Some(a.render_leaf())),
+            (None, None) => unreachable!(),
+        };
         let top_key = &path[0];
         let full_key = path.join(".");
         let label = Label::ConfigChanged {
             key: cut(&full_key, MAX_KEY_CHARS),
-            before: before_val.map(|v| cut(v, MAX_VALUE_CHARS)),
-            after: after_val.map(|v| cut(v, MAX_VALUE_CHARS)),
+            before: before_str.map(|v| cut(&v, MAX_VALUE_CHARS)),
+            after: after_str.map(|v| cut(&v, MAX_VALUE_CHARS)),
         };
         groups.entry(top_key.clone()).or_default().push(label);
     }
@@ -386,7 +560,7 @@ pub(crate) fn config_changes(lang: Lang, before: &str, after: &str) -> Option<Ve
         .map(|(top_key, labels)| {
             let symbol = Symbol {
                 kind: SymbolKind::Key,
-                name: cut(&top_key, MAX_KEY_CHARS),
+                name: top_key,
                 container: None,
                 exported: false,
                 nth: 0,
@@ -459,8 +633,8 @@ mod tests {
         let changes = config_changes(Lang::Json, &before, &after).expect("valid JSON");
         assert_eq!(changes.len(), 1);
         let sym = changes[0].symbol.as_ref().expect("key symbol");
-        assert_eq!(sym.name.chars().count(), MAX_KEY_CHARS);
-        assert!(sym.name.ends_with('…'));
+        assert_eq!(sym.name, long_key);
+        assert_eq!(sym.nth, 0);
 
         match &changes[0].labels[0] {
             Label::ConfigChanged { key, before, after } => {
@@ -600,5 +774,230 @@ cc = "1.1"
 
         let deep_toml = format!("a = {open}1{close}");
         assert!(config_changes(Lang::Toml, &deep_toml, "").is_none());
+    }
+
+    #[test]
+    fn json_empty_containers_and_scalar_type_changes() {
+        let base = r#"{"a":{"b":1,"c":true},"d":"x"}"#;
+        let with_empty = r#"{"a":{"b":1,"c":true},"d":"x","empty":{},"empty_arr":[]}"#;
+
+        let added = config_changes(Lang::Json, base, with_empty).expect("valid JSON");
+        assert_eq!(added.len(), 2);
+        assert_eq!(added[0].symbol.as_ref().unwrap().name, "empty");
+        assert_eq!(
+            added[0].labels,
+            vec![Label::ConfigChanged {
+                key: "empty".to_string(),
+                before: None,
+                after: Some("{}".to_string()),
+            }]
+        );
+        assert_eq!(added[1].symbol.as_ref().unwrap().name, "empty_arr");
+        assert_eq!(
+            added[1].labels,
+            vec![Label::ConfigChanged {
+                key: "empty_arr".to_string(),
+                before: None,
+                after: Some("[]".to_string()),
+            }]
+        );
+
+        let removed = config_changes(Lang::Json, with_empty, base).expect("valid JSON");
+        assert_eq!(removed.len(), 2);
+        assert_eq!(
+            removed[0].labels,
+            vec![Label::ConfigChanged {
+                key: "empty".to_string(),
+                before: Some("{}".to_string()),
+                after: None,
+            }]
+        );
+        assert_eq!(
+            removed[1].labels,
+            vec![Label::ConfigChanged {
+                key: "empty_arr".to_string(),
+                before: Some("[]".to_string()),
+                after: None,
+            }]
+        );
+
+        let typed_before = r#"{"a":{"b":1,"c":true},"n":null,"e":{}}"#;
+        let typed_after = r#"{"a":{"b":"1","c":"true"},"n":"null","e":"{}"}"#;
+        let typed = config_changes(Lang::Json, typed_before, typed_after).expect("valid JSON");
+        assert_eq!(typed.len(), 3);
+        assert_eq!(
+            typed[0].labels,
+            vec![
+                Label::ConfigChanged {
+                    key: "a.b".to_string(),
+                    before: Some("1".to_string()),
+                    after: Some("\"1\"".to_string()),
+                },
+                Label::ConfigChanged {
+                    key: "a.c".to_string(),
+                    before: Some("true".to_string()),
+                    after: Some("\"true\"".to_string()),
+                },
+            ]
+        );
+        assert_eq!(
+            typed[1].labels,
+            vec![Label::ConfigChanged {
+                key: "e".to_string(),
+                before: Some("{}".to_string()),
+                after: Some("\"{}\"".to_string()),
+            }]
+        );
+        assert_eq!(
+            typed[2].labels,
+            vec![Label::ConfigChanged {
+                key: "n".to_string(),
+                before: Some("null".to_string()),
+                after: Some("\"null\"".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn toml_empty_tables_and_scalar_type_changes() {
+        let base = "count = 1\nflag = true\n";
+        let with_empty = "count = 1\nflag = true\n\n[empty]\n";
+
+        let added = config_changes(Lang::Toml, base, with_empty).expect("valid TOML");
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].symbol.as_ref().unwrap().name, "empty");
+        assert_eq!(
+            added[0].labels,
+            vec![Label::ConfigChanged {
+                key: "empty".to_string(),
+                before: None,
+                after: Some("{}".to_string()),
+            }]
+        );
+
+        let removed = config_changes(Lang::Toml, with_empty, base).expect("valid TOML");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            removed[0].labels,
+            vec![Label::ConfigChanged {
+                key: "empty".to_string(),
+                before: Some("{}".to_string()),
+                after: None,
+            }]
+        );
+
+        let typed_after = "count = \"1\"\nflag = \"true\"\n";
+        let typed = config_changes(Lang::Toml, base, typed_after).expect("valid TOML");
+        assert_eq!(typed.len(), 2);
+        assert_eq!(
+            typed[0].labels,
+            vec![Label::ConfigChanged {
+                key: "count".to_string(),
+                before: Some("1".to_string()),
+                after: Some("\"1\"".to_string()),
+            }]
+        );
+        assert_eq!(
+            typed[1].labels,
+            vec![Label::ConfigChanged {
+                key: "flag".to_string(),
+                before: Some("true".to_string()),
+                after: Some("\"true\"".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn long_top_level_keys_with_shared_prefix_stay_distinct() {
+        let prefix = "A".repeat(80);
+        let key_x = format!("{prefix}X");
+        let key_y = format!("{prefix}Y");
+        let after = format!(r#"{{"{key_x}":1,"{key_y}":2}}"#);
+
+        let changes = config_changes(Lang::Json, "{}", &after).expect("valid JSON");
+        assert_eq!(changes.len(), 2);
+
+        let sym_x = changes[0].symbol.as_ref().expect("key x symbol");
+        let sym_y = changes[1].symbol.as_ref().expect("key y symbol");
+        assert_eq!(sym_x.name, key_x);
+        assert_eq!(sym_y.name, key_y);
+        assert_eq!(sym_x.nth, 0);
+        assert_eq!(sym_y.nth, 0);
+        assert_ne!(sym_x, sym_y);
+
+        for change in &changes {
+            match &change.labels[0] {
+                Label::ConfigChanged { key, .. } => {
+                    assert_eq!(key.chars().count(), MAX_KEY_CHARS);
+                    assert!(key.ends_with('…'));
+                }
+                other => panic!("unexpected label: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_deep_nesting_reaches_conversion() {
+        let depth = 100;
+        let json_before = format!(
+            "{{\"k\":{}1{}}}",
+            "{\"k\":".repeat(depth),
+            "}".repeat(depth)
+        );
+        let json_after = format!(
+            "{{\"k\":{}2{}}}",
+            "{\"k\":".repeat(depth),
+            "}".repeat(depth)
+        );
+        let json_changes =
+            config_changes(Lang::Json, &json_before, &json_after).expect("accepted deep JSON");
+        assert_eq!(json_changes.len(), 1);
+        assert_eq!(json_changes[0].symbol.as_ref().unwrap().name, "k");
+
+        let toml_depth = 50;
+        let toml_before = format!("a = {}1{}", "[".repeat(toml_depth), "]".repeat(toml_depth));
+        let toml_after = format!("a = {}2{}", "[".repeat(toml_depth), "]".repeat(toml_depth));
+        let toml_changes =
+            config_changes(Lang::Toml, &toml_before, &toml_after).expect("accepted deep TOML");
+        assert_eq!(toml_changes.len(), 1);
+        assert_eq!(toml_changes[0].symbol.as_ref().unwrap().name, "a");
+    }
+
+    #[test]
+    fn iterative_config_conversion_and_drop_handle_extreme_depth() {
+        let handle = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                let mut json_a = serde_json::Value::Number(serde_json::Number::from(1));
+                let mut json_b = serde_json::Value::Number(serde_json::Number::from(2));
+                for _ in 0..10_000 {
+                    let mut map_a = serde_json::Map::new();
+                    map_a.insert("n".to_string(), json_a);
+                    json_a = serde_json::Value::Object(map_a);
+
+                    let mut map_b = serde_json::Map::new();
+                    map_b.insert("n".to_string(), json_b);
+                    json_b = serde_json::Value::Object(map_b);
+                }
+                let cfg_a = from_json(json_a);
+                let cfg_b = from_json(json_b);
+                assert_ne!(cfg_a, cfg_b);
+                assert_eq!(cfg_a, cfg_a);
+
+                let mut toml_a = toml::Value::Integer(1);
+                for _ in 0..10_000 {
+                    let mut tbl = toml::Table::new();
+                    tbl.insert("t".to_string(), toml_a);
+                    toml_a = toml::Value::Table(tbl);
+                }
+                let cfg_toml = from_toml_value(toml_a);
+                let rendered = cfg_toml.render_compact();
+                assert!(rendered.starts_with("{\"t\":"));
+            })
+            .expect("spawn 1 MiB stack thread");
+
+        handle
+            .join()
+            .expect("iterative conversion and drop should not overflow stack");
     }
 }
