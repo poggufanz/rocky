@@ -1,0 +1,3 @@
+struct Cart {
+    items: u32,
+}

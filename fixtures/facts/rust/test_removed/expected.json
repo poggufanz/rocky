@@ -1,0 +1,22 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "test",
+        "name": "subtracts",
+        "container": "tests",
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "test_removed",
+          "args": {
+            "name": "subtracts"
+          }
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

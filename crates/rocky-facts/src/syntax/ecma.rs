@@ -4,8 +4,9 @@ use tree_sitter::Node;
 
 use crate::model::{Symbol, SymbolKind};
 use crate::syntax::{
-    Extracted, ExtractedSymbol, Param, SkelKind, SkelNode, TestMode, is_comment_kind, node_lines,
-    node_text, normalized_code_text,
+    Extracted, ExtractedSymbol, Param, SkelKind, SkelNode, TestMode, extract_return_type,
+    first_non_comment_named_child, is_comment_kind, new_symbol, node_lines, node_text,
+    normalized_code_text, single_non_comment_named_child, strip_outer_parens,
 };
 use crate::text::cut;
 
@@ -116,13 +117,6 @@ fn extract_params(fn_node: Node<'_>, src: &str) -> Vec<Param> {
     Vec::new()
 }
 
-fn extract_return_type(fn_node: Node<'_>, src: &str) -> Option<String> {
-    fn_node
-        .child_by_field_name("return_type")
-        .map(|rt| normalized_code_text(rt, src))
-        .filter(|s| !s.is_empty())
-}
-
 fn has_template_substitution(node: Node<'_>) -> bool {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
@@ -187,45 +181,6 @@ fn symbol_name_or_default(node: Node<'_>, src: &str) -> (String, Option<(usize, 
         .unwrap_or_else(|| "default".to_string());
     let name_span = name_node.map(|n| (n.start_byte(), n.end_byte()));
     (name, name_span)
-}
-
-fn new_symbol(kind: SymbolKind, name: String, container: Option<String>, exported: bool) -> Symbol {
-    Symbol {
-        kind,
-        name,
-        container,
-        exported,
-        nth: 0,
-    }
-}
-
-fn first_non_comment_named_child(node: Node<'_>) -> Option<Node<'_>> {
-    let mut cursor = node.walk();
-    node.named_children(&mut cursor)
-        .find(|child| !is_comment_kind(child.kind()))
-}
-
-fn single_non_comment_named_child(node: Node<'_>) -> Option<Node<'_>> {
-    let mut cursor = node.walk();
-    let mut found = None;
-    for child in node.named_children(&mut cursor) {
-        if is_comment_kind(child.kind()) {
-            continue;
-        }
-        if found.is_some() {
-            return None;
-        }
-        found = Some(child);
-    }
-    found
-}
-
-fn strip_outer_parens(node: Node<'_>) -> Node<'_> {
-    if node.kind() == "parenthesized_expression" {
-        single_non_comment_named_child(node).unwrap_or(node)
-    } else {
-        node
-    }
 }
 
 fn unwrap_callee(mut node: Node<'_>) -> Node<'_> {

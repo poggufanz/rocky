@@ -1,0 +1,35 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "struct",
+        "name": "Cart",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "body_changed",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    },
+    {
+      "symbol": {
+        "kind": "trait",
+        "name": "Price",
+        "container": null,
+        "exported": true
+      },
+      "labels": [
+        {
+          "id": "symbol_added",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

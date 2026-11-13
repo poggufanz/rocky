@@ -1,4 +1,5 @@
 mod ecma;
+mod rust;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +36,6 @@ pub(crate) enum SkelKind {
     Throw,
     Try,
     Catch,
-    #[allow(dead_code)] // Constructed by the Rust syntax extractor.
     ErrorOp,
     Await,
     Call,
@@ -187,51 +187,99 @@ pub(crate) fn normalized_code_text(node: Node<'_>, src: &str) -> String {
     tokens.join(" ")
 }
 
-fn ts_language_for(lang: Lang) -> Option<tree_sitter::Language> {
+pub(crate) fn new_symbol(
+    kind: SymbolKind,
+    name: String,
+    container: Option<String>,
+    exported: bool,
+) -> Symbol {
+    Symbol {
+        kind,
+        name,
+        container,
+        exported,
+        nth: 0,
+    }
+}
+
+pub(crate) fn first_non_comment_named_child(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find(|child| !is_comment_kind(child.kind()))
+}
+
+pub(crate) fn single_non_comment_named_child(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    let mut found = None;
+    for child in node.named_children(&mut cursor) {
+        if is_comment_kind(child.kind()) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(child);
+    }
+    found
+}
+
+pub(crate) fn strip_outer_parens(node: Node<'_>) -> Node<'_> {
+    if node.kind() == "parenthesized_expression" {
+        single_non_comment_named_child(node).unwrap_or(node)
+    } else {
+        node
+    }
+}
+
+pub(crate) fn extract_return_type(fn_node: Node<'_>, src: &str) -> Option<String> {
+    fn_node
+        .child_by_field_name("return_type")
+        .map(|rt| normalized_code_text(rt, src))
+        .filter(|s| !s.is_empty())
+}
+
+fn empty_error_syntax() -> FileSyntax {
+    FileSyntax {
+        has_error: true,
+        all: Vec::new(),
+        symbols: Vec::new(),
+        imports: BTreeSet::new(),
+        outside: Vec::new(),
+    }
+}
+
+fn language_for(lang: Lang) -> Option<tree_sitter::Language> {
     match lang {
         Lang::Typescript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
         Lang::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         Lang::Javascript => Some(tree_sitter_javascript::LANGUAGE.into()),
+        Lang::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
         _ => None,
     }
 }
 
 /// Parses `src` with the grammar for `lang` into a language-neutral `FileSyntax`.
 pub(crate) fn parse(lang: Lang, src: &str) -> FileSyntax {
-    let Some(ts_lang) = ts_language_for(lang) else {
-        return FileSyntax {
-            has_error: true,
-            all: Vec::new(),
-            symbols: Vec::new(),
-            imports: BTreeSet::new(),
-            outside: Vec::new(),
-        };
+    let Some(ts_lang) = language_for(lang) else {
+        return empty_error_syntax();
     };
 
     let mut parser = Parser::new();
     if parser.set_language(&ts_lang).is_err() {
-        return FileSyntax {
-            has_error: true,
-            all: Vec::new(),
-            symbols: Vec::new(),
-            imports: BTreeSet::new(),
-            outside: Vec::new(),
-        };
+        return empty_error_syntax();
     }
 
     let Some(tree) = parser.parse(src, None) else {
-        return FileSyntax {
-            has_error: true,
-            all: Vec::new(),
-            symbols: Vec::new(),
-            imports: BTreeSet::new(),
-            outside: Vec::new(),
-        };
+        return empty_error_syntax();
     };
 
     let root = tree.root_node();
     let has_error = root.has_error();
-    let mut extracted = ecma::extract(root, src);
+    let mut extracted = match lang {
+        Lang::Typescript | Lang::Tsx | Lang::Javascript => ecma::extract(root, src),
+        Lang::Rust => rust::extract(root, src),
+        _ => return empty_error_syntax(),
+    };
 
     // Order outer before inner when spans share a start byte so nested exclusions remain exact.
     extracted
@@ -347,6 +395,7 @@ mod tests {
             ),
             ("tsx", tree_sitter_typescript::LANGUAGE_TSX.into()),
             ("javascript", tree_sitter_javascript::LANGUAGE.into()),
+            ("rust", tree_sitter_rust::LANGUAGE.into()),
         ];
 
         for (name, lang) in languages {
@@ -760,6 +809,390 @@ function helper() {
             .spawn(move || {
                 analyze(&FileInput {
                     path: "src/deep_cf.ts",
+                    before: Side::Text(&before),
+                    after: Side::Text(&after),
+                })
+            })
+            .expect("spawn 1 MiB stack thread");
+
+        let facts = handle.join().expect("should not overflow stack");
+        assert_eq!(facts.changes.len(), 1);
+        assert_eq!(
+            facts.changes[0].labels,
+            vec![
+                Label::CallAdded {
+                    name: "b".to_string()
+                },
+                Label::CallRemoved {
+                    name: "a".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_extracts_all_symbol_kinds_containers_and_nesting() {
+        use super::TestMode;
+        use crate::model::{Lang, SymbolKind};
+
+        let src = r###"
+use std::collections::{BTreeMap, HashSet};
+use crate::util::helper;
+
+pub(crate) fn pub_crate(mut x: i32, _: u8, (a, b): (i32, i32)) -> i32 {
+    fn local_inner() {}
+    const LOCAL_K: i32 = 1;
+    x + a + b
+}
+
+#[derive(Debug)]
+struct Boxed<T> {
+    inner: T,
+}
+
+pub(super) enum Mode {
+    Fast,
+    Safe,
+}
+
+pub trait Priced {
+    fn total(&self) -> u32;
+    fn discounted(&mut self, pct: u32) -> u32 {
+        pct
+    }
+    const BASE: u32;
+}
+
+trait InternalTrait {
+    fn ping(self);
+}
+
+pub type Alias<T> = Vec<T>;
+
+const INT_C: i32 = 10;
+const NEG_INT_C: i32 = -42;
+const FLOAT_C: f64 = 1.5;
+const NEG_FLOAT_C: f64 = -2.25;
+const STR_C: &str = "hi";
+const RAW_C: &str = r#"raw"#;
+const CHAR_C: char = 'x';
+const BOOL_C: bool = true;
+
+impl<T> Boxed<T> {
+    pub fn make(val: T) -> Self {
+        Boxed { inner: val }
+    }
+}
+
+mod outer {
+    pub mod inner {
+        pub fn helper() -> u32 {
+            1
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    /// doc comment between attribute and fn
+    fn unit_ok() {}
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "slow"]
+    async fn async_skipped() {}
+}
+"###;
+
+        let parsed = super::parse(Lang::Rust, src);
+        assert!(!parsed.has_error);
+        assert!(
+            parsed
+                .imports
+                .contains("std::collections::{BTreeMap,HashSet}")
+        );
+        assert!(parsed.imports.contains("crate::util::helper"));
+
+        let summary: Vec<(SymbolKind, &str, Option<&str>, bool, TestMode)> = parsed
+            .symbols
+            .iter()
+            .map(|s| {
+                (
+                    s.symbol.kind,
+                    s.symbol.name.as_str(),
+                    s.symbol.container.as_deref(),
+                    s.symbol.exported,
+                    s.test_mode,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    SymbolKind::Function,
+                    "pub_crate",
+                    None,
+                    true,
+                    TestMode::Normal
+                ),
+                (SymbolKind::Struct, "Boxed", None, false, TestMode::Normal),
+                (SymbolKind::Enum, "Mode", None, true, TestMode::Normal),
+                (SymbolKind::Trait, "Priced", None, true, TestMode::Normal),
+                (
+                    SymbolKind::Method,
+                    "total",
+                    Some("Priced"),
+                    true,
+                    TestMode::Normal
+                ),
+                (
+                    SymbolKind::Method,
+                    "discounted",
+                    Some("Priced"),
+                    true,
+                    TestMode::Normal
+                ),
+                (
+                    SymbolKind::Const,
+                    "BASE",
+                    Some("Priced"),
+                    true,
+                    TestMode::Normal
+                ),
+                (
+                    SymbolKind::Trait,
+                    "InternalTrait",
+                    None,
+                    false,
+                    TestMode::Normal
+                ),
+                (
+                    SymbolKind::Method,
+                    "ping",
+                    Some("InternalTrait"),
+                    false,
+                    TestMode::Normal
+                ),
+                (SymbolKind::Type, "Alias", None, true, TestMode::Normal),
+                (SymbolKind::Const, "INT_C", None, false, TestMode::Normal),
+                (
+                    SymbolKind::Const,
+                    "NEG_INT_C",
+                    None,
+                    false,
+                    TestMode::Normal
+                ),
+                (SymbolKind::Const, "FLOAT_C", None, false, TestMode::Normal),
+                (
+                    SymbolKind::Const,
+                    "NEG_FLOAT_C",
+                    None,
+                    false,
+                    TestMode::Normal
+                ),
+                (SymbolKind::Const, "STR_C", None, false, TestMode::Normal),
+                (SymbolKind::Const, "RAW_C", None, false, TestMode::Normal),
+                (SymbolKind::Const, "CHAR_C", None, false, TestMode::Normal),
+                (SymbolKind::Const, "BOOL_C", None, false, TestMode::Normal),
+                (
+                    SymbolKind::Method,
+                    "make",
+                    Some("Boxed"),
+                    true,
+                    TestMode::Normal
+                ),
+                (
+                    SymbolKind::Function,
+                    "helper",
+                    Some("outer::inner"),
+                    true,
+                    TestMode::Normal
+                ),
+                (
+                    SymbolKind::Test,
+                    "unit_ok",
+                    Some("tests"),
+                    false,
+                    TestMode::Normal
+                ),
+                (
+                    SymbolKind::Test,
+                    "async_skipped",
+                    Some("tests"),
+                    false,
+                    TestMode::Skip
+                ),
+            ]
+        );
+
+        let by_name = |name: &str| {
+            parsed
+                .symbols
+                .iter()
+                .find(|s| s.symbol.name == name)
+                .unwrap()
+        };
+
+        assert_eq!(by_name("INT_C").literal.as_deref(), Some("10"));
+        assert_eq!(by_name("NEG_INT_C").literal.as_deref(), Some("-42"));
+        assert_eq!(by_name("FLOAT_C").literal.as_deref(), Some("1.5"));
+        assert_eq!(by_name("NEG_FLOAT_C").literal.as_deref(), Some("-2.25"));
+        assert_eq!(by_name("STR_C").literal.as_deref(), Some("\"hi\""));
+        assert_eq!(by_name("RAW_C").literal.as_deref(), Some("r#\"raw\"#"));
+        assert_eq!(by_name("CHAR_C").literal.as_deref(), Some("'x'"));
+        assert_eq!(by_name("BOOL_C").literal.as_deref(), Some("true"));
+
+        let pub_crate_params: Vec<(&str, &str)> = by_name("pub_crate")
+            .params
+            .iter()
+            .map(|p| (p.name.as_str(), p.text.as_str()))
+            .collect();
+        assert_eq!(
+            pub_crate_params,
+            vec![
+                ("x", "mut x : i32"),
+                ("_", "_ : u8"),
+                ("( a , b )", "( a , b ) : ( i32 , i32 )"),
+            ]
+        );
+        assert_eq!(by_name("pub_crate").return_type.as_deref(), Some("i32"));
+        assert_eq!(by_name("total").params[0].name, "self");
+        assert_eq!(by_name("total").params[0].text, "& self");
+        assert_eq!(by_name("discounted").params[0].name, "self");
+        assert_eq!(by_name("discounted").params[0].text, "& mut self");
+        assert!(
+            !by_name("Priced").all.iter().any(|t| t == "total"),
+            "trait own tokens must exclude trait methods"
+        );
+    }
+
+    #[test]
+    fn rust_skeleton_nodes_guards_errors_and_callees() {
+        use super::SkelKind;
+        use crate::model::Lang;
+
+        let long_fn = "f".repeat(100);
+        let src = format!(
+            r#"impl Repo {{
+async fn demo(&self, ok: bool, a: i32, opt: Option<i32>, xs: Vec<i32>) -> Result<i32, i32> {{
+    if !ok {{
+        return Err(1);
+    }}
+    if a > 10 {{
+        s1();
+        s2();
+        s3();
+        return Ok(a);
+    }}
+    if a == 1 {{
+        return Ok(1);
+    }} else if a == 2 {{
+        return Ok(2);
+    }} else {{
+        let _ = 3;
+    }}
+    while a > 0 {{
+        break;
+    }}
+    for x in xs {{
+        if x < 0 {{ continue }}
+    }}
+    loop {{
+        break
+    }}
+    match opt {{
+        Some(v) if v > 0 => v,
+        _ => 0,
+    }};
+    let q = opt?;
+    let u = opt.unwrap();
+    let e = opt.expect("bad");
+    std::panic!("boom");
+    println!("ignored");
+    self.save(a);
+    self.repo.persist(a);
+    a.b.c.d(a);
+    Foo::<i32>::new();
+    crate::x::y::z();
+    opt.map(|v| v);
+    fetch(u).await;
+    {long_fn}();
+    Ok(q + e)
+}}
+}}"#
+        );
+
+        let parsed = super::parse(Lang::Rust, &src);
+        assert!(!parsed.has_error);
+        let skel = &parsed.symbols[0].skeleton;
+
+        let summary: Vec<(SkelKind, &str, &str, bool, u32)> = skel
+            .iter()
+            .map(|n| (n.kind, n.key.as_str(), n.text.as_str(), n.guard, n.line))
+            .collect();
+
+        let cut_long = format!("call:{}…", "f".repeat(79));
+        assert_eq!(
+            summary,
+            vec![
+                (SkelKind::If, "if:guard", "! ok", true, 3),
+                (SkelKind::Return, "return", "Err ( 1 )", false, 4),
+                (SkelKind::ErrorOp, "err:return_err", "", false, 4),
+                (SkelKind::If, "if", "a > 10", false, 6),
+                (SkelKind::Call, "call:s1", "", false, 7),
+                (SkelKind::Call, "call:s2", "", false, 8),
+                (SkelKind::Call, "call:s3", "", false, 9),
+                (SkelKind::Return, "return", "Ok ( a )", false, 10),
+                (SkelKind::If, "if", "a == 1", false, 12),
+                (SkelKind::Return, "return", "Ok ( 1 )", false, 13),
+                (SkelKind::Else, "else", "", false, 14),
+                (SkelKind::If, "if", "a == 2", false, 14),
+                (SkelKind::Return, "return", "Ok ( 2 )", false, 15),
+                (SkelKind::Else, "else", "", false, 16),
+                (SkelKind::While, "while", "a > 0", false, 19),
+                (SkelKind::Loop, "loop", "", false, 22),
+                (SkelKind::If, "if:guard", "x < 0", true, 23),
+                (SkelKind::Loop, "loop", "", false, 25),
+                (SkelKind::Match, "match", "opt", false, 28),
+                (SkelKind::Arm, "arm", "", false, 29),
+                (SkelKind::Arm, "arm", "", false, 30),
+                (SkelKind::ErrorOp, "err:?", "", false, 32),
+                (SkelKind::ErrorOp, "err:unwrap", "", false, 33),
+                (SkelKind::ErrorOp, "err:expect", "", false, 34),
+                (SkelKind::ErrorOp, "err:panic", "", false, 35),
+                (SkelKind::Call, "call:save", "", false, 37),
+                (SkelKind::Call, "call:repo.persist", "", false, 38),
+                (SkelKind::Call, "call:c.d", "", false, 39),
+                (SkelKind::Call, "call:Foo::new", "", false, 40),
+                (SkelKind::Call, "call:y::z", "", false, 41),
+                (SkelKind::Call, "call:opt.map", "", false, 42),
+                (SkelKind::Await, "await", "", false, 43),
+                (SkelKind::Call, "call:fetch", "", false, 43),
+                (SkelKind::Call, cut_long.as_str(), "", false, 44),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_deep_nesting_does_not_overflow() {
+        let mut before = String::from("fn deep(x: bool) {\n");
+        for _ in 0..10_000 {
+            before.push_str("if x { ");
+        }
+        before.push_str("a();");
+        for _ in 0..10_000 {
+            before.push_str(" }");
+        }
+        before.push_str("\n}\n");
+        let after = before.replacen("a();", "b();", 1);
+
+        let handle = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                analyze(&FileInput {
+                    path: "src/deep_cf.rs",
                     before: Side::Text(&before),
                     after: Side::Text(&after),
                 })

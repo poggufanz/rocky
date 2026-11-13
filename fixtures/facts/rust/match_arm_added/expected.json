@@ -1,0 +1,20 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "pick",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "branch_added",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

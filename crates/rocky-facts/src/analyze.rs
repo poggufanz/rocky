@@ -68,7 +68,7 @@ pub fn analyze(input: &FileInput<'_>) -> FileFacts {
                 lines_changed_facts(lang, &norm_before, &norm_after)
             }
         }
-        Lang::Typescript | Lang::Tsx | Lang::Javascript => {
+        Lang::Typescript | Lang::Tsx | Lang::Javascript | Lang::Rust => {
             let before_syntax = syntax::parse(lang, &norm_before);
             let after_syntax = syntax::parse(lang, &norm_after);
             if before_syntax.has_error || after_syntax.has_error {
@@ -80,7 +80,7 @@ pub fn analyze(input: &FileInput<'_>) -> FileFacts {
                 }
             }
         }
-        Lang::Plain | Lang::Rust => lines_changed_facts(lang, &norm_before, &norm_after),
+        Lang::Plain => lines_changed_facts(lang, &norm_before, &norm_after),
     }
 }
 

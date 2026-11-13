@@ -1,0 +1,10 @@
+struct Repo;
+
+impl Repo {
+    fn save(&self, _x: i32) {}
+
+    fn sync(&self, x: i32) {
+        let item = Foo::new(x);
+        let _ = item;
+    }
+}

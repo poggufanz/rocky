@@ -1,0 +1,20 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "count",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "loop_added",
+          "args": {}
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

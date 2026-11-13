@@ -719,4 +719,56 @@ function pick(a: boolean, c: boolean, x: number) {
         assert_eq!(facts.changes.len(), 1);
         assert_eq!(facts.changes[0].labels, vec![Label::ConditionChanged {}]);
     }
+
+    #[test]
+    fn rust_else_if_return_is_not_a_guard_and_guard_before_if() {
+        let else_if_facts = analyze(&FileInput {
+            path: "src/pick.rs",
+            before: Side::Text(
+                "fn pick(a: bool, c: bool, x: i32) -> i32 {\n    let mut y = 0;\n    if a {\n        y = 2;\n    }\n    y\n}\n",
+            ),
+            after: Side::Text(
+                "fn pick(a: bool, c: bool, x: i32) -> i32 {\n    let mut y = 0;\n    if a {\n        y = 2;\n    } else if c {\n        return x;\n    }\n    y\n}\n",
+            ),
+        });
+        assert_eq!(else_if_facts.changes.len(), 1);
+        assert_eq!(else_if_facts.changes[0].labels, vec![Label::BranchAdded {}]);
+
+        let guard_before_if = analyze(&FileInput {
+            path: "src/guard_if.rs",
+            before: Side::Text(
+                "fn apply(ok: bool, x: bool) {\n    let mut y = 0;\n    if x {\n        y = 1;\n    }\n    save(y);\n}\n",
+            ),
+            after: Side::Text(
+                "fn apply(ok: bool, x: bool) {\n    let mut y = 0;\n    if !ok {\n        return;\n    }\n    if x {\n        y = 1;\n    }\n    save(y);\n}\n",
+            ),
+        });
+        assert_eq!(guard_before_if.changes.len(), 1);
+        assert_eq!(
+            guard_before_if.changes[0].labels,
+            vec![Label::GuardAdded {}]
+        );
+    }
+
+    #[test]
+    fn rust_renamed_test_stays_removed_and_added() {
+        let facts = analyze(&FileInput {
+            path: "src/lib.rs",
+            before: Side::Text("#[test]\nfn old_name() {\n    check(1);\n}\n"),
+            after: Side::Text("#[test]\nfn new_name() {\n    check(1);\n}\n"),
+        });
+        assert_eq!(facts.changes.len(), 2);
+        assert_eq!(
+            facts.changes[0].labels,
+            vec![Label::TestAdded {
+                name: "new_name".to_string()
+            }]
+        );
+        assert_eq!(
+            facts.changes[1].labels,
+            vec![Label::TestRemoved {
+                name: "old_name".to_string()
+            }]
+        );
+    }
 }

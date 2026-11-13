@@ -1,0 +1,4 @@
+fn process(x: Option<i32>, y: Option<i32>, w: Option<i32>) -> Option<i32> {
+    let a = x?;
+    Some(a)
+}

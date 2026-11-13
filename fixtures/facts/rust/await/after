@@ -1,0 +1,4 @@
+async fn load(u: &str) -> String {
+    let r = fetch(u).await;
+    r
+}

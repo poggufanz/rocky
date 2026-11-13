@@ -1,0 +1,23 @@
+{
+  "lang": "rust",
+  "changes": [
+    {
+      "symbol": null,
+      "labels": [
+        {
+          "id": "import_added",
+          "args": {
+            "module": "std::collections::BTreeMap"
+          }
+        },
+        {
+          "id": "import_removed",
+          "args": {
+            "module": "std::fs"
+          }
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}
