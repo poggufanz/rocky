@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { cardsFilePath } from "../desk/cards-path.js";
 import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import {
   getRepoConsentDetail,
@@ -14,7 +15,8 @@ import {
   readRepoDecision,
 } from "../listening/repo-consent-read.js";
 import { storeListeningObject } from "../listening/event-log.js";
-import { consentsPath } from "../listening/store-paths.js";
+import { consentsPath, repoSlug } from "../listening/store-paths.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 function freshHome(): string {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-listen-consent-")));
@@ -194,4 +196,112 @@ test("read side carries no writer imports", () => {
   assert.ok(!source.includes("writeFileSync"));
   assert.ok(!source.includes("mkdirSync"));
   assert.ok(!source.includes("renameSync"));
+});
+
+test("purge deletes the repo's change card file and adds its size to freedBytes", (t) => {
+  const home = freshHome();
+  const root = gitRepo();
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
+  assert.equal(storeListeningObject(root, Buffer.from("alpha"), home).ok, true);
+  const cardsPath = cardsFilePath(root, home);
+  assert.equal(cardsPath, join(home, "desk", "cards", `${repoSlug(root)}.jsonl`));
+  mkdirSync(dirname(cardsPath), { recursive: true });
+  const payload = '{"card":1}\n';
+  writeFileSync(cardsPath, payload, "utf8");
+  const purged = purgeRepoCapture(root, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(purged.ok, true);
+  assert.equal(purged.freedBytes, 5 + Buffer.byteLength(payload, "utf8"));
+  assert.equal(existsSync(cardsPath), false);
+  assert.equal(isRepoCaptureAllowed(root, home), false);
+});
+
+test("purge deletes the change card file for both root spellings", (t) => {
+  if (skipIfSymlinkUnavailable(t, "dir")) return;
+  const home = freshHome();
+  const real = gitRepo();
+  const linkParent = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-consent-link-")));
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(real, { recursive: true, force: true });
+    rmSync(linkParent, { recursive: true, force: true });
+  });
+  const link = join(linkParent, "alias");
+  symlinkSync(real, link, "dir");
+  const typed = normalizeRepoRoot(link);
+  const own = normalizeRepoRoot(realpathSync(link));
+  assert.notEqual(typed, own);
+  const typedCards = cardsFilePath(typed, home);
+  const ownCards = cardsFilePath(own, home);
+  assert.notEqual(typedCards, ownCards);
+  mkdirSync(dirname(typedCards), { recursive: true });
+  const typedPayload = "typed-card\n";
+  const ownPayload = "own-card-two\n";
+  writeFileSync(typedCards, typedPayload, "utf8");
+  writeFileSync(ownCards, ownPayload, "utf8");
+  const purged = purgeRepoCapture(link, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(purged.ok, true);
+  assert.equal(
+    purged.freedBytes,
+    Buffer.byteLength(typedPayload, "utf8") + Buffer.byteLength(ownPayload, "utf8"),
+  );
+  assert.equal(existsSync(typedCards), false);
+  assert.equal(existsSync(ownCards), false);
+});
+
+test("purge succeeds when no card file exists", (t) => {
+  const home = freshHome();
+  const root = gitRepo();
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
+  const purged = purgeRepoCapture(root, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(purged.ok, true);
+  assert.equal(purged.freedBytes, 0);
+});
+
+test("purge leaves a linked worktree's card file alone", (t) => {
+  const home = freshHome();
+  const { main, wt } = worktree();
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(main, { recursive: true, force: true });
+    rmSync(dirname(wt), { recursive: true, force: true });
+  });
+  assert.equal(setRepoCapture(main, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
+  const mainCards = cardsFilePath(main, home);
+  const wtCards = cardsFilePath(wt, home);
+  mkdirSync(dirname(mainCards), { recursive: true });
+  writeFileSync(mainCards, "main\n", "utf8");
+  writeFileSync(wtCards, "worktree\n", "utf8");
+  const purged = purgeRepoCapture(main, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(purged.ok, true);
+  assert.equal(purged.freedBytes, Buffer.byteLength("main\n", "utf8"));
+  assert.equal(existsSync(mainCards), false);
+  assert.equal(existsSync(wtCards), true);
+  assert.equal(readFileSync(wtCards, "utf8"), "worktree\n");
+});
+
+test("purge reports cards-delete-failed when the card file cannot be removed", (t) => {
+  const home = freshHome();
+  const root = gitRepo();
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  assert.equal(setRepoCapture(root, true, { yes: true, actor: "cli", onRevoke: "delete" }, home).ok, true);
+  assert.equal(storeListeningObject(root, Buffer.from("alpha"), home).ok, true);
+  const cardPath = cardsFilePath(root, home);
+  mkdirSync(cardPath, { recursive: true });
+  writeFileSync(join(cardPath, "keep.txt"), "non-empty", "utf8");
+  const purged = purgeRepoCapture(root, { yes: true, actor: "cli", onRevoke: "delete" }, home);
+  assert.equal(purged.ok, false);
+  assert.equal(purged.reason, "cards-delete-failed");
+  assert.equal(purged.freedBytes, 5);
+  assert.equal(existsSync(cardPath), true);
 });

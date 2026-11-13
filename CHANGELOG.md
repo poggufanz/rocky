@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+The desk hook records the prompt you submit to Claude Code (redacted, at most 1,000 characters) for change cards. The background process removes it before writing history or status. While `<ROCKY_HOME>/desk/cards-off` exists, the hook records no prompt. Purging a repo's capture also deletes that repo's change cards.
+
 With `CLAUDE_CONFIG_DIR` set, the desktop app's setup also keeps Rocky's hooks in `~/.claude/settings.json` when that folder holds Claude Code config. Some terminal hosts copy that file over the profile on every new terminal, so hooks written only to the profile were gone before the session read them.
 
 - Automatic setup reads MCP JSON configs that contain `//` or `/* */` comments. After Rocky writes such a file, it is plain JSON and the comments are gone.
