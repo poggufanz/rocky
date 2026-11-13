@@ -1,0 +1,15 @@
+{
+  "lang": "lockfile",
+  "changes": [
+    {
+      "symbol": null,
+      "labels": [
+        {
+          "id": "lockfile_changed",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}
