@@ -16,6 +16,7 @@ fn ev(name: &str, sid: &str, aid: Option<&str>) -> HookEvent {
         target_path: None,
         command: None,
         description: None,
+        prompt: None,
         truncated: false,
     }
 }

@@ -5,9 +5,10 @@
  * CLI share this backend; opening or selecting a repo never grants.
  */
 import { execFileSync } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
+import { cardsFilePath } from "./cards-path.js";
 import { consentsPath, listeningHome } from "./store-paths.js";
 import { mainRepoRootOf, normalizeRepoRoot } from "./repo-consent-read.js";
 import { purgeListeningStore } from "./event-log.js";
@@ -115,12 +116,28 @@ export function setRepoCapture(
 }
 
 /**
- * Stop capture and delete one repo's Listening history; the setup CLI and
- * the GUI share it. Revoke always runs first (idempotent, and it clears a
- * key stored under the realpath spelling), so no writer starts again. The
- * target's own store is deleted under both the typed and the realpath
- * spelling, which can hash to different directories; a worktree keeps its
- * own history even when the revoke names its main repo.
+ * Unlink one repo's change card file if present; missing files count as zero
+ * freed bytes and any other failure reports an unremovable path.
+ */
+function deleteCardsFile(path: string): { ok: true; freedBytes: number } | { ok: false } {
+  try {
+    const stats = lstatSync(path);
+    const size = stats.isFile() && !stats.isSymbolicLink() ? stats.size : 0;
+    unlinkSync(path);
+    return { ok: true, freedBytes: size };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, freedBytes: 0 };
+    return { ok: false };
+  }
+}
+
+/**
+ * Stop capture and delete one repo's Listening history and change cards; the
+ * setup CLI and the GUI share it. Revoke always runs first (idempotent, and it
+ * clears a key stored under the realpath spelling), so no writer starts again.
+ * The target's own store and card file are deleted under both the typed and
+ * the realpath spelling, which can hash to different names; a worktree keeps
+ * its own history and cards even when the revoke names its main repo.
  */
 export function purgeRepoCapture(
   target: string,
@@ -139,11 +156,17 @@ export function purgeRepoCapture(
   } catch {
     own = typed;
   }
+  const spellings = [...new Set([typed, own])];
   let freedBytes = 0;
-  for (const spelling of new Set([typed, own])) {
+  for (const spelling of spellings) {
     const purged = purgeListeningStore(spelling, home);
     if (!purged.ok) return { ok: false, freedBytes, reason: purged.reason };
     freedBytes += purged.freedBytes;
+  }
+  for (const spelling of spellings) {
+    const removed = deleteCardsFile(cardsFilePath(spelling, home));
+    if (!removed.ok) return { ok: false, freedBytes, reason: "cards-delete-failed" };
+    freedBytes += removed.freedBytes;
   }
   return { ok: true, freedBytes, root };
 }

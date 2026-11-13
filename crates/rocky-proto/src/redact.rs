@@ -37,6 +37,10 @@ use regex_lite::Regex;
 pub const TOOL_TEXT_SCAN_BYTES: usize = 4096;
 /// Characters kept by [`bound_tool_text`].
 pub const TOOL_TEXT_MAX_CHARS: usize = 200;
+/// Bytes of raw text inspected by [`bound_prompt`].
+pub const PROMPT_SCAN_BYTES: usize = 16 * 1024;
+/// Characters kept by [`bound_prompt`].
+pub const PROMPT_MAX_CHARS: usize = 1000;
 
 const AMBIGUOUS_SECRET_CONTINUATION: &str = "[redacted ambiguous continuation]";
 
@@ -670,24 +674,67 @@ fn is_mapped_control(character: char) -> bool {
     code <= 0x1f || (0x7f..=0x9f).contains(&code)
 }
 
+struct BoundSpec {
+    scan_bytes: usize,
+    max_chars: usize,
+    always_may_be_truncated: bool,
+    keep_newlines_and_tabs: bool,
+}
+
+const TOOL_TEXT_SPEC: BoundSpec = BoundSpec {
+    scan_bytes: TOOL_TEXT_SCAN_BYTES,
+    max_chars: TOOL_TEXT_MAX_CHARS,
+    always_may_be_truncated: true,
+    keep_newlines_and_tabs: false,
+};
+
+const PROMPT_SPEC: BoundSpec = BoundSpec {
+    scan_bytes: PROMPT_SCAN_BYTES,
+    max_chars: PROMPT_MAX_CHARS,
+    always_may_be_truncated: false,
+    keep_newlines_and_tabs: true,
+};
+
 /// Cut to the scan cap, redact the raw prefix, and map controls to spaces.
-fn bound_tool_text_step(raw: &str) -> (String, bool) {
-    let mut end = raw.len().min(TOOL_TEXT_SCAN_BYTES);
+fn bound_step(raw: &str, spec: &BoundSpec) -> (String, bool) {
+    let mut end = raw.len().min(spec.scan_bytes);
     while !raw.is_char_boundary(end) {
         end -= 1;
     }
-    let redacted = redact_secrets_at_boundary(&raw[..end], true);
+    let cut_bytes = end < raw.len();
+    let redacted =
+        redact_secrets_at_boundary(&raw[..end], spec.always_may_be_truncated || cut_bytes);
     let mapped: String = redacted
         .chars()
         .map(|character| {
-            if is_mapped_control(character) {
+            let keep = spec.keep_newlines_and_tabs && matches!(character, '\n' | '\t');
+            if is_mapped_control(character) && !keep {
                 ' '
             } else {
                 character
             }
         })
         .collect();
-    (mapped, end < raw.len())
+    (mapped, cut_bytes)
+}
+
+fn bound_with(raw: &str, spec: &BoundSpec) -> (String, bool) {
+    let (mut text, mut was_cut) = bound_step(raw, spec);
+    if let Some((index, _)) = text.char_indices().nth(spec.max_chars) {
+        text.truncate(index);
+        was_cut = true;
+    }
+    (text, was_cut)
+}
+
+#[cfg(test)]
+fn bound_tool_text_step(raw: &str) -> (String, bool) {
+    bound_step(raw, &TOOL_TEXT_SPEC)
+}
+
+#[cfg(test)]
+fn bound_prompt_step(raw: &str) -> (String, bool) {
+    bound_step(raw, &PROMPT_SPEC)
 }
 
 /// Bound a tool-text field for capture: scan cap, redaction, control mapping,
@@ -698,13 +745,16 @@ fn bound_tool_text_step(raw: &str) -> (String, bool) {
 ///
 /// Returns the bounded text and whether either cut removed anything.
 pub fn bound_tool_text(raw: &str) -> (String, bool) {
-    let (redacted, mut was_cut) = bound_tool_text_step(raw);
-    let mut text = redacted;
-    if let Some((index, _)) = text.char_indices().nth(TOOL_TEXT_MAX_CHARS) {
-        text.truncate(index);
-        was_cut = true;
-    }
-    (text, was_cut)
+    bound_with(raw, &TOOL_TEXT_SPEC)
+}
+
+/// Bound a user prompt for capture: scan cap, redaction (fragment scrubbing
+/// enabled only when the scan cap removed bytes), control mapping preserving
+/// `\n` and `\t`, then character cap.
+///
+/// Returns the bounded prompt and whether either cut removed anything.
+pub fn bound_prompt(raw: &str) -> (String, bool) {
+    bound_with(raw, &PROMPT_SPEC)
 }
 
 #[cfg(test)]
@@ -834,5 +884,33 @@ mod tests {
         assert!(redacted.contains("[redacted github token]"), "{redacted:?}");
         let (bounded, _) = bound_tool_text(input);
         assert!(!bounded.contains("github_pat_"), "{bounded:?}");
+    }
+
+    #[test]
+    fn bound_prompt_drops_a_secret_split_by_the_byte_cut() {
+        let raw = format!(
+            "{}ghp_abcdefghijklmnopqrstuvwxyz",
+            " ".repeat(PROMPT_SCAN_BYTES - 10)
+        );
+        let (text, was_cut) = bound_prompt_step(&raw);
+        assert!(was_cut);
+        assert!(!text.contains("ghp_"));
+        assert!(!text.contains("abcdef"));
+        assert!(text.trim_end().is_empty(), "unexpected tail: {text:?}");
+    }
+
+    #[test]
+    fn bound_prompt_redacts_before_the_char_cut() {
+        let raw = format!(
+            "{} ghp_{}{}",
+            "x".repeat(989),
+            "a".repeat(36),
+            "y".repeat(20)
+        );
+        let (text, was_cut) = bound_prompt(&raw);
+        assert!(!text.contains("ghp_"));
+        assert!(text.chars().count() <= PROMPT_MAX_CHARS);
+        assert!(text.contains("[redacted "));
+        assert!(was_cut);
     }
 }

@@ -3174,6 +3174,7 @@ const LISTEN_REASONS = {
   "path-unresolvable": "That folder does not exist here.",
   "symlink-rejected": "Symlinked repo roots stay off.",
   "store-unavailable": "The consent store could not be written.",
+  "cards-delete-failed": "Rocky could not delete this repo's change cards. Try the purge again.",
 };
 // Posts one consent action; a refusal shows its reason and returns null.
 async function postListenConsent(repo, action) {

@@ -175,14 +175,14 @@ fn main() {
     };
     log.line("serving");
 
-    // 1. Settings, marker, and the machine's tool-text flag before replay, so
+    // 1. Settings, markers, and the machine's tool-text flag before replay, so
     // replayed events drop text exactly like live ones.
     let loaded = settings::load(&settings_path(&home));
     if loaded.unreadable {
         log.line("settings unreadable, using defaults");
     }
-    if let Err(e) = settings::sync_marker(&home, loaded.settings.tool_text) {
-        log.line(&format!("tool-text marker sync failed: {e}"));
+    if let Err(e) = settings::sync_markers(&home, &loaded.settings) {
+        log.line(&format!("marker sync failed: {e}"));
     }
     let settings = loaded.settings;
     {
@@ -509,7 +509,7 @@ fn tick_once(shared: &Arc<Mutex<Shared>>, hub: &Hub, log: &RotatingLog) {
     }
 }
 
-/// Applies one `set` control request: validate, save, sync the marker and the
+/// Applies one `set` control request: validate, save, sync the markers and the
 /// machine's tool-text flag, switch history, broadcast, then return the ack.
 fn handle_set(
     id: u64,
@@ -540,10 +540,12 @@ fn handle_set(
                     }
                 }
                 Ok(()) => {
+                    if (next.tool_text != current.tool_text || next.cards != current.cards)
+                        && let Err(e) = settings::sync_markers(home, &next)
+                    {
+                        log.line(&format!("marker sync failed: {e}"));
+                    }
                     if next.tool_text != current.tool_text {
-                        if let Err(e) = settings::sync_marker(home, next.tool_text) {
-                            log.line(&format!("tool-text marker sync failed: {e}"));
-                        }
                         for key in s.state.set_tool_text(next.tool_text) {
                             if let Some(agent) = s.state.get(&key) {
                                 s.last_known.insert(key.clone(), agent.clone());

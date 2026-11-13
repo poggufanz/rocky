@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import { startGui } from "../gui/server.js";
 import { setRepoCapture } from "../listening/consent.js";
 import { appendListeningEvent, purgeListeningStore, storeListeningObject } from "../listening/event-log.js";
 import { listeningStoreUsage } from "../listening/event-log-read.js";
+import { cardsFilePath } from "../listening/cards-path.js";
 import { isRepoCaptureAllowed } from "../listening/repo-consent-read.js";
 import { repoDir } from "../listening/store-paths.js";
 import { LISTENING_DISK_BUDGET_BYTES_PER_REPO, type EventEnvelope } from "../listening/types.js";
@@ -272,6 +273,18 @@ test("GUI purge needs explicit yes, then stops capture and deletes history", asy
   const app = readFileSync(join(packageRoot, "assets", "gui", "app.js"), "utf8");
   assert.match(app, /Delete history/);
   assert.match(app, /no undo/);
+});
+
+test("purge-capture explains a change card file it cannot delete", async () => {
+  const home = freshHome();
+  const root = grantedRepo(home);
+  const cardPath = cardsFilePath(root, home);
+  mkdirSync(cardPath, { recursive: true });
+  writeFileSync(join(cardPath, "keep.txt"), "non-empty", "utf8");
+  const out = await captureStderr(() => setup(["--repo", root, "--purge-capture", "--yes"], deps(home, true)));
+  assert.equal(out.code, 1);
+  assert.ok(out.stderr.includes("Rocky could not delete this repo's change cards. Try the purge again."), out.stderr);
+  assert.equal(out.stderr.includes("cards-delete-failed"), false);
 });
 
 test("purge-capture declined by the human changes nothing", async () => {

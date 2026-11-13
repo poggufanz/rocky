@@ -50,6 +50,10 @@ pub fn tool_text_off_marker(rocky_home: &Path) -> PathBuf {
     desk_dir(rocky_home).join("tool-text-off")
 }
 
+pub fn cards_off_marker(rocky_home: &Path) -> PathBuf {
+    desk_dir(rocky_home).join("cards-off")
+}
+
 pub fn bin_dir(rocky_home: &Path) -> PathBuf {
     rocky_home.join("bin")
 }
@@ -166,10 +170,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        absolutize, bad_dir, bin_dir, binaries_record_path, cli_record_path, consent_path,
-        desk_mutex_name, expected_path, history_dir, home_hash, listening_dir, log_path, pipe_name,
-        repo_consents_path, rocky_home_from, settings_path, setup_dir, spool_dir,
-        tool_text_off_marker,
+        absolutize, bad_dir, bin_dir, binaries_record_path, cards_off_marker, cli_record_path,
+        consent_path, desk_mutex_name, expected_path, history_dir, home_hash, listening_dir,
+        log_path, pipe_name, repo_consents_path, rocky_home_from, settings_path, setup_dir,
+        spool_dir, tool_text_off_marker,
     };
 
     #[test]
@@ -231,6 +235,7 @@ mod tests {
         assert_eq!(bad_dir(p), desk.join("spool").join("bad"));
         assert_eq!(log_path(p), desk.join("rockyd.log"));
         assert_eq!(tool_text_off_marker(p), desk.join("tool-text-off"));
+        assert_eq!(cards_off_marker(p), desk.join("cards-off"));
         assert_eq!(settings_path(p), desk.join("settings.json"));
         assert_eq!(history_dir(p), desk.join("history"));
     }

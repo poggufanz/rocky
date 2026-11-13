@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
 use interprocess::os::windows::named_pipe::{PipeStream, RecvPipeStream, SendPipeStream};
 use rocky_proto::paths::{
-    desk_dir, log_path, pipe_name, settings_path, spool_dir, tool_text_off_marker,
+    cards_off_marker, desk_dir, log_path, pipe_name, settings_path, spool_dir, tool_text_off_marker,
 };
 use rocky_proto::pipe::{
     AgentKey, ClientMsg, CmdName, Gap, GapReason, Outcome, ServerMsg, Status, StatusOp,
@@ -998,4 +998,71 @@ fn timeline_for_unknown_agent_is_empty() {
         ServerMsg::Ack { ok, .. } => assert!(ok),
         other => panic!("expected ack, got {other:?}"),
     }
+}
+
+#[test]
+fn cards_setting_syncs_marker_at_start_and_on_set() {
+    let home = home();
+    let marker = cards_off_marker(home.path());
+    let tool_marker = tool_text_off_marker(home.path());
+    fs::create_dir_all(desk_dir(home.path())).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    let mut daemon = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut daemon);
+    let mut client = connect(&pipe_name(home.path()));
+    let snapshot = client.hello_subscribe();
+    assert!(
+        matches!(&snapshot, ServerMsg::Snapshot { settings, .. } if settings.cards),
+        "{snapshot:?}"
+    );
+    let start = Instant::now();
+    while marker.exists() {
+        assert!(start.elapsed() < GUARD, "stale cards marker never removed");
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    client.send(&encode(&ClientMsg::Set {
+        id: 2,
+        name: "cards".into(),
+        value: serde_json::json!(false),
+    }));
+    let start = Instant::now();
+    let (mut settings_seen, mut ack_seen) = (false, false);
+    while !(settings_seen && ack_seen) {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        match msg {
+            ServerMsg::Settings { settings } => {
+                assert!(!settings.cards, "{settings:?}");
+                assert!(settings.tool_text, "{settings:?}");
+                settings_seen = true;
+            }
+            ServerMsg::Ack { id: 2, ok, error } => {
+                assert!(ok, "{error:?}");
+                ack_seen = true;
+            }
+            _ => {}
+        }
+        assert!(start.elapsed() < GUARD, "set cards reply never arrived");
+    }
+    assert!(marker.is_file());
+    assert!(!tool_marker.exists());
+
+    let _ = daemon.0.kill();
+    let _ = daemon.0.wait();
+    drop(client);
+
+    fs::remove_file(&marker).unwrap();
+    let mut daemon = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut daemon);
+    let mut client = connect(&pipe_name(home.path()));
+    let first_snapshot = client.hello_subscribe();
+    snapshot_until(
+        &mut client,
+        first_snapshot,
+        "cards off at start",
+        |m| matches!(m, ServerMsg::Snapshot { settings, .. } if !settings.cards),
+    );
+    assert!(marker.is_file(), "cards marker not recreated at start");
+    assert!(!tool_marker.exists());
 }

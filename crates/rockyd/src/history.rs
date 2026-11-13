@@ -7,6 +7,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
+use rocky_proto::hook::HookEvent;
 use rocky_proto::pipe::{Gap, GapReason, RepoInfo};
 
 use crate::gaps::Gaps;
@@ -238,6 +239,10 @@ pub fn replay(
             }
             match line.body {
                 HistoryBody::Event { recv_ms, event, .. } => {
+                    let event = HookEvent {
+                        prompt: None,
+                        ..event
+                    };
                     let event = state.prepare(event);
                     state.apply(&event, recv_ms, repo_of);
                 }

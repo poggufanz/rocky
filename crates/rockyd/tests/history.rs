@@ -39,6 +39,7 @@ fn event(name: &str, sid: &str) -> HookEvent {
         target_path: None,
         command: None,
         description: None,
+        prompt: None,
         truncated: false,
     }
 }
@@ -388,4 +389,31 @@ fn gaps_cap_and_age() {
     gaps.push(small_gap(now));
     assert!(!gaps.prune(now));
     assert_eq!(gaps.to_vec().len(), 2);
+}
+
+#[test]
+fn replay_drops_prompt_from_history_event() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("history");
+    fs::create_dir_all(&dir).unwrap();
+    let mut ev = event("UserPromptSubmit", "S1");
+    ev.prompt = Some("SECRET_HISTORY_PROMPT".into());
+    write_lines(&dir, &segment_name(H0), &[event_line(ev, 1, Some("a"))]);
+    let history = History::open(&dir, HISTORY_CAP_BYTES, true);
+    let mut state = StatusState::new();
+    let mut gaps = Gaps::new();
+    replay(&history, &mut state, &mut gaps, &mut repo);
+
+    let agents = state.agents();
+    assert_eq!(agents.len(), 1);
+    let agents_json = serde_json::to_string(&agents).unwrap();
+    assert!(
+        !agents_json.contains("SECRET_HISTORY_PROMPT"),
+        "{agents_json}"
+    );
+    let timeline_json = serde_json::to_string(&state.timeline(&main_key("S1"))).unwrap();
+    assert!(
+        !timeline_json.contains("SECRET_HISTORY_PROMPT"),
+        "{timeline_json}"
+    );
 }
