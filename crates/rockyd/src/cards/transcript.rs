@@ -126,19 +126,16 @@ pub fn read_quotes(
 
     let targets: HashSet<&str> = tool_use_ids.iter().map(String::as_str).collect();
     let scan = scan_window_backwards(window, &targets, turn_started_ms);
-    let complete = scan.found_turn_start || !tail.tail_truncated;
-    let first_user_raw = if scan.found_turn_start {
-        scan.turn_user_text
-    } else if !tail.tail_truncated {
-        scan.latest_unmatched_user_text
+    let first_user_text = if scan.found_turn_start {
+        scan.turn_user_text.as_deref().map(bound_prompt)
     } else {
         None
     };
 
     Ok(TranscriptRead {
         quotes: replay_turn(scan.assistant_lines_rev, &targets),
-        first_user_text: first_user_raw.as_deref().map(bound_prompt),
-        complete,
+        first_user_text,
+        complete: scan.found_turn_start,
     })
 }
 
@@ -343,16 +340,10 @@ struct CollectedAssistant {
     ts_ms: Option<u64>,
 }
 
-struct TurnCandidate {
-    user_text: Option<String>,
-    assistant_lines_rev: Vec<AssistantLine>,
-}
-
 struct WindowScan {
     assistant_lines_rev: Vec<AssistantLine>,
     found_turn_start: bool,
     turn_user_text: Option<String>,
-    latest_unmatched_user_text: Option<String>,
 }
 
 fn parse_ascii_digits(bytes: &[u8]) -> Option<u32> {
@@ -455,15 +446,28 @@ fn filter_assistant_lines_since(
         .collect()
 }
 
-fn found_scan(
-    assistant_lines_rev: Vec<AssistantLine>,
-    turn_user_text: Option<String>,
-) -> WindowScan {
+fn found_scan(current_rev: Vec<CollectedAssistant>, turn_user_text: Option<String>) -> WindowScan {
     WindowScan {
-        assistant_lines_rev,
+        assistant_lines_rev: into_assistant_lines(current_rev),
         found_turn_start: true,
         turn_user_text,
-        latest_unmatched_user_text: None,
+    }
+}
+
+fn incomplete_scan(
+    current_rev: Vec<CollectedAssistant>,
+    current_has_target: bool,
+    min_ts: u64,
+) -> WindowScan {
+    let assistant_lines_rev = if current_has_target {
+        filter_assistant_lines_since(current_rev, min_ts)
+    } else {
+        Vec::new()
+    };
+    WindowScan {
+        assistant_lines_rev,
+        found_turn_start: false,
+        turn_user_text: None,
     }
 }
 
@@ -472,11 +476,10 @@ fn scan_window_backwards(
     targets: &HashSet<&str>,
     turn_started_ms: u64,
 ) -> WindowScan {
-    let cutoff_ms = turn_started_ms.saturating_sub(TURN_START_SLACK_MS);
+    let min_ts = turn_started_ms.saturating_sub(TURN_START_SLACK_MS);
+    let max_ts = turn_started_ms.saturating_add(TURN_START_SLACK_MS);
     let mut current_rev: Vec<CollectedAssistant> = Vec::new();
     let mut current_has_target = false;
-    let mut candidate: Option<TurnCandidate> = None;
-    let mut latest_unmatched_user_text: Option<Option<String>> = None;
 
     for raw_line in window.rsplit(|&b| b == b'\n') {
         let trimmed = raw_line.trim_ascii();
@@ -501,10 +504,8 @@ fn scan_window_backwards(
                     let has_target = line.events.iter().any(|ev| {
                         matches!(ev, AssistantEvent::ToolUse(id) if targets.contains(id.as_str()))
                     });
-                    if has_target && line_ts_ms.is_none_or(|ts| ts >= cutoff_ms) {
+                    if has_target && line_ts_ms.is_none_or(|ts| ts >= min_ts) {
                         current_has_target = true;
-                        // Any later user boundary we passed belongs to a later turn.
-                        candidate = None;
                     }
                     current_rev.push(CollectedAssistant {
                         line,
@@ -525,40 +526,20 @@ fn scan_window_backwards(
                 };
 
                 match line_ts_ms {
-                    Some(ts) if ts >= cutoff_ms => {
-                        if current_has_target {
-                            return found_scan(into_assistant_lines(current_rev), user_text);
-                        }
-                        candidate = Some(TurnCandidate {
-                            user_text,
-                            assistant_lines_rev: into_assistant_lines(std::mem::take(
-                                &mut current_rev,
-                            )),
-                        });
+                    Some(ts) if ts > max_ts => {
+                        // Later turn prompt: discard any assistant lines collected after it.
+                        current_rev.clear();
                         current_has_target = false;
                     }
+                    Some(ts) if ts >= min_ts => {
+                        return found_scan(current_rev, user_text);
+                    }
                     Some(_) => {
-                        if let Some(cand) = candidate.take() {
-                            return found_scan(cand.assistant_lines_rev, cand.user_text);
-                        }
-                        let assistant_lines_rev = if current_has_target {
-                            filter_assistant_lines_since(current_rev, cutoff_ms)
-                        } else {
-                            Vec::new()
-                        };
-                        return WindowScan {
-                            assistant_lines_rev,
-                            found_turn_start: false,
-                            turn_user_text: None,
-                            latest_unmatched_user_text: latest_unmatched_user_text.flatten(),
-                        };
+                        return incomplete_scan(current_rev, current_has_target, min_ts);
                     }
                     None => {
-                        if current_has_target || (targets.is_empty() && candidate.is_none()) {
-                            return found_scan(into_assistant_lines(current_rev), user_text);
-                        }
-                        if candidate.is_none() && latest_unmatched_user_text.is_none() {
-                            latest_unmatched_user_text = Some(user_text);
+                        if current_has_target || targets.is_empty() {
+                            return found_scan(current_rev, user_text);
                         }
                         current_rev.clear();
                     }
@@ -568,16 +549,7 @@ fn scan_window_backwards(
         }
     }
 
-    if let Some(cand) = candidate {
-        found_scan(cand.assistant_lines_rev, cand.user_text)
-    } else {
-        WindowScan {
-            assistant_lines_rev: filter_assistant_lines_since(current_rev, cutoff_ms),
-            found_turn_start: false,
-            turn_user_text: None,
-            latest_unmatched_user_text: latest_unmatched_user_text.flatten(),
-        }
-    }
+    incomplete_scan(current_rev, current_has_target, min_ts)
 }
 
 fn parse_assistant_line(message: Option<RawMessage>) -> Option<AssistantLine> {
@@ -1172,32 +1144,7 @@ mod tests {
         );
         assert!(out.quotes.is_empty());
 
-        let path_before = temp.path().join("early_prompt_outside_later_inside.jsonl");
-        {
-            let mut f = File::create(&path_before).expect("create path_before");
-            writeln!(
-                f,
-                r#"{{"type":"user","timestamp":"2026-11-13T09:14:00.000Z","message":{{"role":"user","content":"Early turn outside 8 MiB"}}}}"#
-            )
-            .expect("write early user");
-            let pad = "d".repeat(2048);
-            let filler = format!(
-                r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:01.000Z","message":{{"id":"msg_fill2","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
-            );
-            for _ in 0..4200 {
-                writeln!(f, "{filler}").expect("write filler");
-            }
-            writeln!(
-                f,
-                r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:02.000Z","message":{{"id":"msg_early","role":"assistant","content":[{{"type":"text","text":"Early turn quote"}},{{"type":"tool_use","id":"toolu_early","name":"Edit"}}]}}}}"#
-            )
-            .expect("write early assistant");
-            writeln!(
-                f,
-                r#"{{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{{"role":"user","content":"Later turn prompt"}}}}"#
-            )
-            .expect("write later user");
-        }
+        let path_before = write_early_prompt_outside_later_inside(temp.path());
 
         let out_before = read_quotes(
             &path_before,
@@ -1214,6 +1161,176 @@ mod tests {
                 .map(|q| q.text.as_str()),
             Some("Early turn quote")
         );
+    }
+
+    fn write_early_prompt_outside_later_inside(dir: &Path) -> PathBuf {
+        let path = dir.join("early_prompt_outside_later_inside.jsonl");
+        let mut f = File::create(&path).expect("create early_prompt_outside_later_inside");
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-11-13T09:14:00.000Z","message":{{"role":"user","content":"Early turn outside 8 MiB"}}}}"#
+        )
+        .expect("write early user");
+        let pad = "d".repeat(2048);
+        let filler = format!(
+            r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:01.000Z","message":{{"id":"msg_fill2","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
+        );
+        for _ in 0..4200 {
+            writeln!(f, "{filler}").expect("write filler");
+        }
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:02.000Z","message":{{"id":"msg_early","role":"assistant","content":[{{"type":"text","text":"Early turn quote"}},{{"type":"tool_use","id":"toolu_early","name":"Edit"}}]}}}}"#
+        )
+        .expect("write early assistant");
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{{"role":"user","content":"Later turn prompt"}}}}"#
+        )
+        .expect("write later user");
+        path
+    }
+
+    #[test]
+    fn truncated_window_with_later_prompt_and_empty_or_absent_ids_is_incomplete() {
+        let temp = TempDir::new().expect("tempdir");
+        let path_before = write_early_prompt_outside_later_inside(temp.path());
+        let requested_start = nov_13_utc_ms(9, 14, 0, 500);
+
+        let out_empty = read_quotes(&path_before, &[], requested_start).expect("read empty ids");
+        assert!(!out_empty.complete);
+        assert_eq!(out_empty.first_user_text, None);
+        assert!(out_empty.quotes.is_empty());
+
+        let out_absent = read_quotes(&path_before, &["toolu_absent".to_string()], requested_start)
+            .expect("read absent id");
+        assert!(!out_absent.complete);
+        assert_eq!(out_absent.first_user_text, None);
+        assert!(out_absent.quotes.is_empty());
+
+        let small_later_only = temp.path().join("small_later_only.jsonl");
+        let small_lines = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{"role":"user","content":"Later turn prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:02.000Z","message":{"id":"msg_later","role":"assistant","content":[{"type":"text","text":"Later quote"},{"type":"tool_use","id":"toolu_later","name":"Edit"}]}}"#,
+        ];
+        fs::write(&small_later_only, format!("{}\n", small_lines.join("\n")))
+            .expect("write small_later_only");
+
+        for ids in [
+            Vec::new(),
+            vec!["toolu_absent".to_string()],
+            vec!["toolu_later".to_string()],
+        ] {
+            let out_small = read_quotes(&small_later_only, &ids, requested_start)
+                .expect("read small_later_only");
+            assert!(!out_small.complete);
+            assert_eq!(out_small.first_user_text, None);
+            assert!(out_small.quotes.is_empty());
+        }
+    }
+
+    #[test]
+    fn in_range_prompt_followed_by_later_out_of_range_prompt_is_complete() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("in_range_then_later.jsonl");
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-11-13T09:15:00.000Z","message":{"role":"user","content":"In-range turn prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:02.000Z","message":{"id":"msg_in","role":"assistant","content":[{"type":"text","text":"In-range quote"},{"type":"tool_use","id":"toolu_in_range","name":"Edit"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:15:20.000Z","message":{"id":"msg_in_late","role":"assistant","content":[{"type":"text","text":"Follow-up step"},{"type":"tool_use","id":"toolu_late_step","name":"Edit"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-11-13T09:16:00.000Z","message":{"role":"user","content":"Later out-of-range prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-13T09:16:02.000Z","message":{"id":"msg_after","role":"assistant","content":[{"type":"text","text":"Later quote"},{"type":"tool_use","id":"toolu_later","name":"Edit"}]}}"#,
+        ];
+        fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write in_range_then_later");
+
+        let requested_start = nov_13_utc_ms(9, 15, 1, 0);
+        let out_empty = read_quotes(&path, &[], requested_start).expect("read empty ids");
+        assert!(out_empty.complete);
+        assert_eq!(
+            out_empty.first_user_text,
+            Some(("In-range turn prompt".to_string(), false))
+        );
+        assert!(out_empty.quotes.is_empty());
+
+        let out_absent = read_quotes(&path, &["toolu_absent".to_string()], requested_start)
+            .expect("read absent id");
+        assert!(out_absent.complete);
+        assert_eq!(
+            out_absent.first_user_text,
+            Some(("In-range turn prompt".to_string(), false))
+        );
+        assert!(out_absent.quotes.is_empty());
+
+        let out_tools = read_quotes(
+            &path,
+            &["toolu_in_range".to_string(), "toolu_late_step".to_string()],
+            requested_start,
+        )
+        .expect("read with tools");
+        assert!(out_tools.complete);
+        assert_eq!(
+            out_tools.first_user_text,
+            Some(("In-range turn prompt".to_string(), false))
+        );
+        assert_eq!(
+            out_tools
+                .quotes
+                .get("toolu_in_range")
+                .map(|q| q.text.as_str()),
+            Some("In-range quote")
+        );
+        assert_eq!(
+            out_tools
+                .quotes
+                .get("toolu_late_step")
+                .map(|q| q.text.as_str()),
+            Some("Follow-up step")
+        );
+
+        let prompt_ms = nov_13_utc_ms(9, 15, 0, 0);
+        for in_bounds in [prompt_ms + 5_000, prompt_ms.saturating_sub(5_000)] {
+            let out = read_quotes(&path, &[], in_bounds).expect("read slack bound");
+            assert!(out.complete);
+            assert_eq!(
+                out.first_user_text,
+                Some(("In-range turn prompt".to_string(), false))
+            );
+        }
+        for out_of_bounds in [prompt_ms + 5_001, prompt_ms - 5_001] {
+            let out = read_quotes(&path, &[], out_of_bounds).expect("read outside slack");
+            assert!(!out.complete);
+            assert_eq!(out.first_user_text, None);
+            assert!(out.quotes.is_empty());
+        }
+
+        let truncated_with_in_range = temp.path().join("truncated_in_range_then_later.jsonl");
+        {
+            let mut f = File::create(&truncated_with_in_range).expect("create truncated_in_range");
+            writeln!(
+                f,
+                r#"{{"type":"user","timestamp":"2026-11-13T09:14:00.000Z","message":{{"role":"user","content":"Old turn outside 8 MiB"}}}}"#
+            )
+            .expect("write old user");
+            let pad = "g".repeat(2048);
+            let filler = format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-13T09:14:01.000Z","message":{{"id":"msg_fill3","role":"assistant","content":[{{"type":"thinking","thinking":"{pad}"}}]}}}}"#
+            );
+            for _ in 0..4200 {
+                writeln!(f, "{filler}").expect("write filler");
+            }
+            for line in &lines {
+                writeln!(f, "{line}").expect("write tail lines");
+            }
+        }
+        for ids in [Vec::new(), vec!["toolu_absent".to_string()]] {
+            let out_trunc = read_quotes(&truncated_with_in_range, &ids, requested_start)
+                .expect("read truncated_in_range");
+            assert!(out_trunc.complete);
+            assert_eq!(
+                out_trunc.first_user_text,
+                Some(("In-range turn prompt".to_string(), false))
+            );
+            assert!(out_trunc.quotes.is_empty());
+        }
     }
 
     #[test]
