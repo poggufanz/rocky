@@ -309,19 +309,23 @@ on pre-edit(file_path, tool_name, session_id, cwd):
 
 Where the harness allows it, the same hook may also rewrite arguments before execution, redact the tool result afterwards, or ask the human (confirm/select dialog) and treat a "no" as deny. If several pre-tool hooks are installed, let the first deny win, and treat an adapter crash as deny (fail-closed) so a broken gate cannot silently allow an edit.
 
-## Step 7 — Project contract (fallback, opt-in — skip when global hooks from Steps 3–6 are active)
+## Step 7 — Global or project contract (fallback, opt-in — skip when global hooks from Steps 3–6 are active)
 
-The steps above wire *this* session. Future sessions read none of it — they read the project instruction file. You MUST persist the contract there, or every next agent starts deaf.
+The steps above wire *this* session. Future sessions read none of it — they read your global or project instruction file. You MUST persist the contract there, or every next agent starts deaf.
 
-Pick the file by the harness the human set Rocky up from:
+Prefer **Global (User-level / Machine-wide)** instruction files so Rocky rules apply across all repositories on this machine without manually editing every project. Fall back to **Project-level** files when you need repository-scoped instructions or team-shared rules.
 
-| Harness | File (project root) |
-| --- | --- |
-| Claude Code | `CLAUDE.md` |
-| Codex, Cursor, OpenCode, Gemini CLI, and every AGENTS.md-reading harness | `AGENTS.md` |
-| Both present | The one this harness actually reads; when still unsure, both. |
+### Global vs. Project Attachment Points
 
-Create the file when it does not exist. **Merge, never overwrite** — if a `## Rocky (MUST)` section already exists, update that section only and leave the rest of the file alone. Show the human the exact block before writing it. Replace `<vendor>` once, at write time: `claude-code` in Claude Code, `codex` in Codex, `generic` anywhere else.
+| Harness | Global File (recommended, user home) | Project File (fallback, project root) |
+| --- | --- | --- |
+| Claude Code | `~/.claude/CLAUDE.md` (or `~/.config/claude/CLAUDE.md`) | `CLAUDE.md` |
+| Codex | `~/.config/agents/AGENTS.md` or `~/.agents/AGENTS.md` (or profile `system_prompt_file` in `~/.codex/config.toml`) | `AGENTS.md` |
+| Cursor | `~/.cursor/rules/rocky.mdc` or `~/.cursorrules` | `.cursor/rules/rocky.mdc` / `.cursorrules` |
+| OpenCode, Gemini CLI, Windsurf, Cline, Roo Code, and all AGENTS.md harnesses | `~/.config/agents/AGENTS.md` (XDG standard) or `~/.agents/AGENTS.md` | `AGENTS.md` |
+| Multiple / Unsure | `~/.claude/CLAUDE.md` for Claude Code, `~/.config/agents/AGENTS.md` for general agents | `AGENTS.md` |
+
+Create parent directories and files when they do not exist (e.g. `mkdir -p ~/.config/agents` or `mkdir -p ~/.claude`). **Merge, never overwrite** — if a `## Rocky (MUST)` section already exists, update that section only and leave the rest of the file alone. Show the human the exact block before writing it. Replace `<vendor>` once, at write time: `claude-code` in Claude Code, `codex` in Codex, `generic` anywhere else.
 
 Append this block verbatim:
 
@@ -344,7 +348,7 @@ Rocky is this machine's local failure/why memory. These rules are mandatory, eve
 - Skip chatter turns; this is evidence, not ritual.
 ```
 
-Then read the file back and confirm the section landed intact. When Steps 3–6 installed global hooks, skip this step: the hooks survive compaction because they are code, not context. Use the project block only when this machine mixes hook-less harnesses or this repo needs `ROCKY_GATE_MODE=strict`.
+Then read the file back and confirm the section landed intact. When Steps 3–6 installed global hooks, skip this step: the hooks survive compaction because they are code, not context. Use the instruction block only when this machine mixes hook-less harnesses or this repo needs `ROCKY_GATE_MODE=strict`.
 
 ### Enforcement honesty matrix
 
