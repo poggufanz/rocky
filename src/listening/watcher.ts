@@ -361,6 +361,7 @@ export function reconcileRepo(
   }
   for (const [rel, prior] of known) {
     if (live.has(rel)) continue;
+    if (prior.deleted) continue;
     try {
       lstatSync(join(root, rel));
       continue;

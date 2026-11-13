@@ -226,6 +226,58 @@ test("a deletion event carries refs.prev of the last live version", () => {
   assert.notEqual(del.refs.version, events[1].refs.version);
 });
 
+test("a file still missing after repeated reconciles has exactly one deletion event", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  rmSync(join(root, "a.txt"));
+  reconcileRepo(root, {}, home);
+  reconcileRepo(root, {}, home);
+  reconcileRepo(root, {}, home);
+
+  const deletions = fileVersionEvents(root, home, "a.txt").filter((e) => e.refs.deleted === true);
+  assert.equal(deletions.length, 1);
+});
+
+test("a file re-created after a single deletion has refs.created and no refs.prev", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  rmSync(join(root, "a.txt"));
+  reconcileRepo(root, {}, home);
+  reconcileRepo(root, {}, home);
+  writeFileSync(join(root, "a.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+
+  const events = fileVersionEvents(root, home, "a.txt");
+  assert.equal(events.length, 3);
+  assert.equal(events[2].refs.created, true);
+  assert.equal("prev" in events[2].refs, false);
+});
+
+test("deleting a re-created file again appends a second deletion carrying the re-created sha as refs.prev", () => {
+  const home = freshHome();
+  const root = consentedRepo(home);
+  writeFileSync(join(root, "a.txt"), "one\n");
+  assert.equal(ensureBaseline(root, home).ok, true);
+  rmSync(join(root, "a.txt"));
+  reconcileRepo(root, {}, home);
+  writeFileSync(join(root, "a.txt"), "two\n");
+  reconcileRepo(root, {}, home);
+  rmSync(join(root, "a.txt"));
+  reconcileRepo(root, {}, home);
+  reconcileRepo(root, {}, home);
+
+  const events = fileVersionEvents(root, home, "a.txt");
+  const deletions = events.filter((e) => e.refs.deleted === true);
+  assert.equal(deletions.length, 2);
+  const recreated = events[2];
+  assert.equal(recreated.refs.created, true);
+  assert.equal(deletions[1].refs.prev, recreated.refs.version);
+});
+
 test("an eviction gap blocks refs.created", () => {
   const home = freshHome();
   const root = consentedRepo(home);
