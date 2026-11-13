@@ -1,0 +1,56 @@
+{
+  "lang": "package_json",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "dependencies",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "dep_added",
+          "args": {
+            "name": "d",
+            "version": "^3.0.0"
+          }
+        },
+        {
+          "id": "dep_removed",
+          "args": {
+            "name": "b"
+          }
+        },
+        {
+          "id": "dep_version",
+          "args": {
+            "name": "a",
+            "before": "^1.0.0",
+            "after": "^1.1.0"
+          }
+        }
+      ],
+      "importance": "high"
+    },
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "scripts",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "scripts.test",
+            "before": "x",
+            "after": "y"
+          }
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}

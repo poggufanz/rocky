@@ -4520,6 +4520,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]

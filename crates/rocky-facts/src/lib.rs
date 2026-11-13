@@ -1,4 +1,5 @@
 pub mod analyze;
+mod config;
 pub mod lang;
 pub mod model;
 mod text;

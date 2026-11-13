@@ -1,3 +1,4 @@
+use crate::config;
 use crate::lang::lang_for_path;
 use crate::model::{Change, FileFacts, FileInput, Label, Lang, MAX_BYTES, Side};
 use crate::text;
@@ -11,6 +12,11 @@ fn single_change(lang: Lang, label: Label) -> FileFacts {
         lang,
         changes: vec![Change::new(None, vec![label])],
     }
+}
+
+fn lines_changed_facts(lang: Lang, before: &str, after: &str) -> FileFacts {
+    let (added, removed) = text::line_counts(before, after);
+    single_change(lang, Label::LinesChanged { added, removed })
 }
 
 /// Analyzes a file change from its path and before/after states into structured `FileFacts`.
@@ -51,23 +57,19 @@ pub fn analyze(input: &FileInput<'_>) -> FileFacts {
         return single_change(lang, Label::FormatOnly {});
     }
 
-    let label = match lang {
-        Lang::Lockfile => Label::LockfileChanged {},
-        Lang::Plain
-        | Lang::Typescript
-        | Lang::Tsx
-        | Lang::Javascript
-        | Lang::Rust
-        | Lang::PackageJson
-        | Lang::CargoToml
-        | Lang::Json
-        | Lang::Toml => {
-            let (added, removed) = text::line_counts(&norm_before, &norm_after);
-            Label::LinesChanged { added, removed }
+    match lang {
+        Lang::Lockfile => single_change(lang, Label::LockfileChanged {}),
+        Lang::Json | Lang::Toml | Lang::PackageJson | Lang::CargoToml => {
+            if let Some(changes) = config::config_changes(lang, &norm_before, &norm_after) {
+                FileFacts { lang, changes }
+            } else {
+                lines_changed_facts(lang, &norm_before, &norm_after)
+            }
         }
-    };
-
-    single_change(lang, label)
+        Lang::Plain | Lang::Typescript | Lang::Tsx | Lang::Javascript | Lang::Rust => {
+            lines_changed_facts(lang, &norm_before, &norm_after)
+        }
+    }
 }
 
 #[cfg(test)]

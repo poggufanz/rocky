@@ -1,0 +1,10 @@
+[package]
+name = "x"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+similar = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,0 +1,10 @@
+[package]
+name = "x"
+edition = "2021"
+
+[dependencies]
+serde = "1"
+similar = { version = "2" }
+
+[dev-dependencies]
+tempfile = "3"

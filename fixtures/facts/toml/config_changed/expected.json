@@ -1,0 +1,43 @@
+{
+  "lang": "toml",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "edition",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "edition",
+            "before": null,
+            "after": "2024"
+          }
+        }
+      ],
+      "importance": "medium"
+    },
+    {
+      "symbol": {
+        "kind": "key",
+        "name": "max_width",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "config_changed",
+          "args": {
+            "key": "max_width",
+            "before": "100",
+            "after": "120"
+          }
+        }
+      ],
+      "importance": "medium"
+    }
+  ]
+}
