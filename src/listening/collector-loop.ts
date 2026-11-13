@@ -33,8 +33,11 @@ export interface ReconcileReport {
   gaps: number;
   /** Set only when `coverage` is `"unknown"`. */
   reason?: "root-unusable" | "repo-consent-required" | "git-unreadable" | "not-a-repo" | "capture-failed";
+  startedMs: number;
   atMs: number;
 }
+
+type WorkerReport = Omit<ReconcileReport, "startedMs">;
 
 export interface CollectorLoop {
   /** Run one tick soon, e.g. right after a consent change. */
@@ -72,13 +75,16 @@ export function startCollectorLoop(opts: {
   const pending = new Set<string>();
   const dirty = new Set<string>();
   const lastPostAt = new Map<string, number>();
+  const startedAt = new Map<string, number>();
   let stopped = false;
   let ticked = false;
   let lastRoots: string | undefined;
 
   const post = (root: string): void => {
+    const now = Date.now();
     pending.add(root);
-    lastPostAt.set(root, Date.now());
+    startedAt.set(root, now);
+    lastPostAt.set(root, now);
     worker.postMessage(root);
   };
 
@@ -199,17 +205,21 @@ export function startCollectorLoop(opts: {
       pending.clear();
       dirty.clear();
       lastPostAt.clear();
+      startedAt.clear();
     }).finally(() => finish(outcome));
     return shutdown;
   };
-  worker.on("message", (report: ReconcileReport) => {
-    pending.delete(report.root);
+  worker.on("message", (msg: WorkerReport) => {
+    pending.delete(msg.root);
+    const startedMs = startedAt.get(msg.root) ?? msg.atMs;
+    startedAt.delete(msg.root);
+    const report: ReconcileReport = { ...msg, startedMs };
     try {
       opts.onResult?.(report);
     } catch {
       // an observer's failure never stops capture
     }
-    if (dirty.delete(report.root) && !stopped && owned.has(report.root)) post(report.root);
+    if (dirty.delete(msg.root) && !stopped && owned.has(msg.root)) post(msg.root);
   });
   worker.once("error", (error: Error) => {
     if (!stopped) outcome = "failed";
@@ -229,7 +239,7 @@ export function startCollectorLoop(opts: {
   };
 }
 
-function toReport(root: string, result: ReturnType<typeof reconcileRepo>): ReconcileReport {
+function toReport(root: string, result: ReturnType<typeof reconcileRepo>): WorkerReport {
   const atMs = Date.now();
   const gaps = result.gaps.length;
   if (result.coverage !== "unknown") return { root, coverage: result.coverage, gaps, atMs };
@@ -243,7 +253,7 @@ function toReport(root: string, result: ReturnType<typeof reconcileRepo>): Recon
 // Lease renewal stays on the HTTP thread; only bounded snapshot work moves.
 if (!isMainThread && workerData?.rockyCollector === true) {
   parentPort!.on("message", (root: string) => {
-    let report: ReconcileReport;
+    let report: WorkerReport;
     try {
       report = toReport(root, reconcileRepo(root, undefined, workerData.home));
     } catch {

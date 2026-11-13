@@ -11,7 +11,7 @@ pub mod child;
 use rocky_proto::pipe::{CaptureHealth, CaptureState};
 use rocky_proto::respawn::RespawnPolicy;
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const CLI_MISSING: &str = "Rocky cannot find Node. Run rocky once.";
 pub const SPAWN_FAILED: &str = "Node could not start.";
@@ -74,14 +74,19 @@ pub struct Report {
     pub coverage: Coverage,
     pub gaps: u64,
     pub reason: Option<String>,
+    pub started_ms: u64,
     pub at_ms: u64,
 }
 
-/// Capture child result paired with the timestamp of the request that prompted it.
+/// Capture child result carrying the collector's reconcile start timestamp.
+///
+/// Window rule downstream: a window ends at the `at_ms` of the first result for that root
+/// with `started_ms >= post_ms`, capped at `post_ms + 30_000`. `started_ms == 0` never ends
+/// a window early.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureResult {
     pub root: String,
-    pub sent_ms: u64,
+    pub started_ms: u64,
     pub at_ms: u64,
     pub coverage: String,
 }
@@ -120,6 +125,8 @@ enum Wire {
         gaps: u64,
         #[serde(deserialize_with = "Option::deserialize")]
         reason: Option<String>,
+        #[serde(default)]
+        started_ms: u64,
         at_ms: u64,
     },
 }
@@ -138,12 +145,14 @@ pub fn parse_line(line: &str) -> Option<CaptureLine> {
             coverage,
             gaps,
             reason,
+            started_ms,
             at_ms,
         } => Some(CaptureLine::Result(Report {
             root,
             coverage,
             gaps,
             reason,
+            started_ms,
             at_ms,
         })),
         _ => None,
@@ -176,8 +185,6 @@ struct ChildRun {
     /// Root to the time of its first file event since its last send.
     pending: BTreeMap<String, u64>,
     last_send: BTreeMap<String, u64>,
-    /// Send timestamps awaiting a `result` line per root, in FIFO order.
-    sent_at: BTreeMap<String, VecDeque<u64>>,
 }
 
 #[derive(Debug)]
@@ -248,15 +255,9 @@ impl Capture {
                 if !self.is_row(&report.root) {
                     return None;
                 }
-                let sent_ms = self
-                    .run
-                    .sent_at
-                    .get_mut(&report.root)
-                    .and_then(VecDeque::pop_front)
-                    .unwrap_or(0);
                 let out = CaptureResult {
                     root: report.root.clone(),
-                    sent_ms,
+                    started_ms: report.started_ms,
                     at_ms: report.at_ms,
                     coverage: report.coverage.as_str().to_owned(),
                 };
@@ -378,8 +379,6 @@ impl Capture {
             .retain(|root, _| roots.iter().any(|row| row.root == *root));
         run.pending
             .retain(|root, _| roots.iter().any(|row| row.owner && row.root == *root));
-        run.sent_at
-            .retain(|root, _| roots.iter().any(|row| row.root == *root));
         run.watch_failed.clear();
         run.listed = Some(roots);
     }
@@ -392,11 +391,6 @@ impl Capture {
             .cloned();
         if let Some(root) = unsent_extra {
             self.run.extras_sent.insert(root.clone());
-            self.run
-                .sent_at
-                .entry(root.clone())
-                .or_default()
-                .push_back(now_ms);
             return Some(Action::Send(root));
         }
         let due = self
@@ -407,11 +401,6 @@ impl Capture {
             .map(|(root, _)| root.clone())?;
         self.run.pending.remove(&due);
         self.run.last_send.insert(due.clone(), now_ms);
-        self.run
-            .sent_at
-            .entry(due.clone())
-            .or_default()
-            .push_back(now_ms);
         Some(Action::Send(due))
     }
 

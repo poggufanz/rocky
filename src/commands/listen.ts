@@ -38,6 +38,7 @@ function writeResult(report: ReconcileReport): void {
     coverage: report.coverage,
     gaps: report.gaps,
     reason: report.reason ?? null,
+    started_ms: report.startedMs,
     at_ms: report.atMs,
   });
 }

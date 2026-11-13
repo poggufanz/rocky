@@ -1,6 +1,6 @@
 //! Turn and tool-window tracking for change cards.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rocky_proto::hook::HookEvent;
 use rocky_proto::paths::canonical_path;
@@ -73,11 +73,28 @@ pub enum TrackerSignal {
     Late(AgentKey),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowRef {
+    turn_id: u64,
+    window_idx: usize,
+}
+
 /// Tracks open turns per agent and keeps closed turns for their 60 s revision window.
 #[derive(Debug, Default)]
 pub struct Tracker {
-    open: BTreeMap<AgentKey, Turn>,
-    closed: Vec<Turn>,
+    next_turn_id: u64,
+    /// Open and retained-closed turns indexed by unique turn ID.
+    turns: HashMap<u64, Turn>,
+    /// Currently open turn ID per agent.
+    open_by_agent: HashMap<AgentKey, u64>,
+    /// Open agents grouped by session ID so SessionEnd touches only that session.
+    open_by_session: HashMap<String, HashSet<AgentKey>>,
+    /// Retained closed turn IDs per agent ordered by `(started_ms, turn_id)`.
+    closed_by_agent: HashMap<AgentKey, BTreeMap<(u64, u64), u64>>,
+    /// Retained closed turns ordered by `(ended_ms, turn_id)` for bounded expiration.
+    expire_index: BTreeSet<(u64, u64)>,
+    /// Outstanding (unclosed) tool windows indexed by `(AgentKey, tool_use_id)`.
+    open_windows: HashMap<(AgentKey, String), Vec<WindowRef>>,
 }
 
 impl Tracker {
@@ -86,11 +103,16 @@ impl Tracker {
     }
 
     pub fn open_turn(&self, key: &AgentKey) -> Option<&Turn> {
-        self.open.get(key)
+        self.open_by_agent
+            .get(key)
+            .and_then(|id| self.turns.get(id))
     }
 
     pub fn closed_turn(&self, key: &AgentKey) -> Option<&Turn> {
-        self.closed.iter().rev().find(|turn| &turn.agent == key)
+        self.closed_by_agent
+            .get(key)
+            .and_then(|by_start| by_start.values().next_back())
+            .and_then(|id| self.turns.get(id))
     }
 
     /// Processes one hook event and returns signals for closed turns, late updates, and edits.
@@ -108,10 +130,8 @@ impl Tracker {
                 if !key.agent_id.is_empty() {
                     return signals;
                 }
-                self.close_open_unclosed(&key, recv_ms, &mut signals);
-                self.open.insert(
-                    key.clone(),
-                    Turn {
+                if self.close_open_if_not_newer(&key, recv_ms, &mut signals) {
+                    self.insert_open_turn(Turn {
                         agent: key,
                         agent_type: ev.agent_type.clone().unwrap_or_default(),
                         parent: None,
@@ -123,40 +143,38 @@ impl Tracker {
                         status: TurnEnd::Open,
                         transcript_path: ev.transcript_path.clone(),
                         windows: Vec::new(),
-                    },
-                );
+                    });
+                }
             }
             "Stop" | "StopFailure" => {
                 if !key.agent_id.is_empty() {
                     return signals;
                 }
-                if let Some(mut turn) = self.open.remove(&key) {
-                    turn.ended_ms = Some(recv_ms);
-                    turn.status = if ev.hook_event_name == "Stop" {
-                        TurnEnd::Done
-                    } else {
-                        TurnEnd::Failed
-                    };
-                    if ev.transcript_path.is_some() {
-                        turn.transcript_path = ev.transcript_path.clone();
-                    }
-                    fill_metadata(&mut turn, ev, repo);
-                    self.closed.push(turn);
-                    signals.push(TrackerSignal::TurnClosed(key));
-                }
+                let status = if ev.hook_event_name == "Stop" {
+                    TurnEnd::Done
+                } else {
+                    TurnEnd::Failed
+                };
+                self.handle_terminal(
+                    key,
+                    recv_ms,
+                    status,
+                    ev.transcript_path.as_ref(),
+                    ev,
+                    repo,
+                    &mut signals,
+                );
             }
             "SubagentStart" => {
                 if key.agent_id.is_empty() {
                     return signals;
                 }
-                self.close_open_unclosed(&key, recv_ms, &mut signals);
-                let parent = AgentKey {
-                    session_id: ev.session_id.clone(),
-                    agent_id: String::new(),
-                };
-                self.open.insert(
-                    key.clone(),
-                    Turn {
+                if self.close_open_if_not_newer(&key, recv_ms, &mut signals) {
+                    let parent = AgentKey {
+                        session_id: ev.session_id.clone(),
+                        agent_id: String::new(),
+                    };
+                    self.insert_open_turn(Turn {
                         agent: key,
                         agent_type: ev.agent_type.clone().unwrap_or_default(),
                         parent: Some(parent),
@@ -168,53 +186,70 @@ impl Tracker {
                         status: TurnEnd::Open,
                         transcript_path: None,
                         windows: Vec::new(),
-                    },
-                );
+                    });
+                }
             }
             "SubagentStop" => {
                 if key.agent_id.is_empty() {
                     return signals;
                 }
-                if let Some(mut turn) = self.open.remove(&key) {
-                    turn.ended_ms = Some(recv_ms);
-                    turn.status = TurnEnd::Done;
-                    if ev.agent_transcript_path.is_some() {
-                        turn.transcript_path = ev.agent_transcript_path.clone();
-                    }
-                    fill_metadata(&mut turn, ev, repo);
-                    self.closed.push(turn);
-                    signals.push(TrackerSignal::TurnClosed(key));
-                }
+                self.handle_terminal(
+                    key,
+                    recv_ms,
+                    TurnEnd::Done,
+                    ev.agent_transcript_path.as_ref(),
+                    ev,
+                    repo,
+                    &mut signals,
+                );
             }
             "SessionEnd" => {
-                let keys: Vec<AgentKey> = self
-                    .open
-                    .keys()
-                    .filter(|k| k.session_id == ev.session_id)
-                    .cloned()
-                    .collect();
-                for k in keys {
-                    if let Some(mut turn) = self.open.remove(&k) {
-                        turn.ended_ms = Some(recv_ms);
-                        turn.status = TurnEnd::Unclosed;
+                let Some(agents) = self.open_by_session.remove(&ev.session_id) else {
+                    return signals;
+                };
+                let mut kept = HashSet::new();
+                for k in agents {
+                    let Some(&turn_id) = self.open_by_agent.get(&k) else {
+                        continue;
+                    };
+                    if self
+                        .turns
+                        .get(&turn_id)
+                        .is_some_and(|t| recv_ms < t.started_ms)
+                    {
+                        kept.insert(k);
+                        continue;
+                    }
+                    self.move_open_to_closed(&k, turn_id, recv_ms, TurnEnd::Unclosed);
+                    if let Some(turn) = self.turns.get_mut(&turn_id) {
                         if k.agent_id.is_empty()
                             && turn.transcript_path.is_none()
                             && ev.transcript_path.is_some()
                         {
                             turn.transcript_path = ev.transcript_path.clone();
                         }
-                        fill_metadata(&mut turn, ev, repo);
-                        self.closed.push(turn);
-                        signals.push(TrackerSignal::TurnClosed(k));
+                        fill_metadata(turn, ev, repo);
                     }
+                    signals.push(TrackerSignal::TurnClosed(k));
+                }
+                if !kept.is_empty() {
+                    self.open_by_session.insert(ev.session_id.clone(), kept);
                 }
             }
             "PreToolUse" => {
                 let Some(tool) = ev.tool_name.clone() else {
                     return signals;
                 };
+                let (turn_id, is_late) = if let Some(id) = self.open_turn_for(&key, recv_ms) {
+                    (id, false)
+                } else if let Some(id) = self.closed_turn_for(&key, recv_ms) {
+                    (id, true)
+                } else {
+                    return signals;
+                };
+                let tool_use_id = ev.tool_use_id.clone().unwrap_or_default();
                 let window = ToolWindow {
-                    tool_use_id: ev.tool_use_id.clone().unwrap_or_default(),
+                    tool_use_id: tool_use_id.clone(),
                     agent: key.clone(),
                     kind: classify_tool(&tool),
                     tool,
@@ -224,13 +259,22 @@ impl Tracker {
                     post_ms: None,
                     ok: None,
                 };
-                if let Some(turn) = self.open.get_mut(&key) {
+                if let Some(turn) = self.turns.get_mut(&turn_id) {
                     fill_metadata(turn, ev, repo);
+                    let window_idx = turn.windows.len();
                     turn.windows.push(window);
-                } else if let Some(turn) = self.latest_closed_within_window_mut(&key, recv_ms) {
-                    fill_metadata(turn, ev, repo);
-                    turn.windows.push(window);
-                    signals.push(TrackerSignal::Late(key));
+                    if !tool_use_id.is_empty() {
+                        self.open_windows
+                            .entry((key.clone(), tool_use_id))
+                            .or_default()
+                            .push(WindowRef {
+                                turn_id,
+                                window_idx,
+                            });
+                    }
+                    if is_late {
+                        signals.push(TrackerSignal::Late(key));
+                    }
                 }
             }
             "PostToolUse" | "PostToolUseFailure" => {
@@ -239,26 +283,31 @@ impl Tracker {
                 else {
                     return signals;
                 };
-                if let Some(turn) = self.open.get_mut(&key)
-                    && let Some(edit_signal) =
-                        close_matching_window(turn, tool_use_id, recv_ms, ok, ev, repo)
-                {
-                    if let Some(sig) = edit_signal {
-                        signals.push(sig);
-                    }
+                let lookup_key = (key.clone(), tool_use_id.to_owned());
+                let Some(refs) = self.open_windows.get_mut(&lookup_key) else {
                     return signals;
+                };
+                let Some(pos) = refs.iter().rposition(|wref| {
+                    self.turns.get(&wref.turn_id).is_some_and(|turn| {
+                        turn.status == TurnEnd::Open || within_revision_window(turn, recv_ms)
+                    })
+                }) else {
+                    return signals;
+                };
+                let wref = refs.remove(pos);
+                if refs.is_empty() {
+                    self.open_windows.remove(&lookup_key);
                 }
-                if let Some(turn) = self.closed.iter_mut().rev().find(|turn| {
-                    turn.agent == key
-                        && within_revision_window(turn, recv_ms)
-                        && has_open_window(turn, tool_use_id)
-                }) && let Some(edit_signal) =
-                    close_matching_window(turn, tool_use_id, recv_ms, ok, ev, repo)
-                {
+                let Some(turn) = self.turns.get_mut(&wref.turn_id) else {
+                    return signals;
+                };
+                let is_late = turn.status != TurnEnd::Open;
+                let edit_signal = close_window_at(turn, wref.window_idx, recv_ms, ok, ev, repo);
+                if is_late {
                     signals.push(TrackerSignal::Late(key));
-                    if let Some(sig) = edit_signal {
-                        signals.push(sig);
-                    }
+                }
+                if let Some(sig) = edit_signal {
+                    signals.push(sig);
                 }
             }
             _ => {}
@@ -273,52 +322,165 @@ impl Tracker {
             session_id: p.session_id.clone(),
             agent_id: String::new(),
         };
-        if let Some(turn) = self.open.get_mut(&key) {
+        if let Some(&turn_id) = self.open_by_agent.get(&key)
+            && let Some(turn) = self.turns.get_mut(&turn_id)
+        {
             turn.prompt = Some(p);
         }
     }
 
     /// Removes and returns closed turns that have passed the 60 s revision window.
     pub fn expire(&mut self, now_ms: u64) -> Vec<Turn> {
+        let Some(cutoff) = now_ms.checked_sub(REVISION_WINDOW_MS) else {
+            return Vec::new();
+        };
         let mut expired = Vec::new();
-        let mut kept = Vec::with_capacity(self.closed.len());
-        for turn in self.closed.drain(..) {
-            if turn
-                .ended_ms
-                .is_some_and(|ended| now_ms.saturating_sub(ended) >= REVISION_WINDOW_MS)
-            {
-                expired.push(turn);
-            } else {
-                kept.push(turn);
+        while let Some(&(ended_ms, turn_id)) = self.expire_index.first() {
+            if ended_ms > cutoff {
+                break;
             }
+            self.expire_index.pop_first();
+            let Some(turn) = self.turns.remove(&turn_id) else {
+                continue;
+            };
+            if let Some(by_start) = self.closed_by_agent.get_mut(&turn.agent) {
+                by_start.remove(&(turn.started_ms, turn_id));
+                if by_start.is_empty() {
+                    self.closed_by_agent.remove(&turn.agent);
+                }
+            }
+            for w in &turn.windows {
+                if w.post_ms.is_none() && !w.tool_use_id.is_empty() {
+                    let lookup = (turn.agent.clone(), w.tool_use_id.clone());
+                    if let Some(refs) = self.open_windows.get_mut(&lookup) {
+                        refs.retain(|wref| wref.turn_id != turn_id);
+                        if refs.is_empty() {
+                            self.open_windows.remove(&lookup);
+                        }
+                    }
+                }
+            }
+            expired.push(turn);
         }
-        self.closed = kept;
         expired
     }
 
-    fn close_open_unclosed(
+    fn insert_open_turn(&mut self, turn: Turn) -> u64 {
+        let turn_id = self.next_turn_id;
+        self.next_turn_id += 1;
+        let key = turn.agent.clone();
+        self.turns.insert(turn_id, turn);
+        self.open_by_agent.insert(key.clone(), turn_id);
+        self.open_by_session
+            .entry(key.session_id.clone())
+            .or_default()
+            .insert(key);
+        turn_id
+    }
+
+    /// Closes an open turn as Unclosed if it started at or before `recv_ms`.
+    /// Returns `false` when an existing open turn is newer than `recv_ms`.
+    fn close_open_if_not_newer(
         &mut self,
         key: &AgentKey,
         recv_ms: u64,
         signals: &mut Vec<TrackerSignal>,
-    ) {
-        if let Some(mut prev) = self.open.remove(key) {
-            prev.ended_ms = Some(recv_ms);
-            prev.status = TurnEnd::Unclosed;
-            self.closed.push(prev);
+    ) -> bool {
+        if let Some(&prev_id) = self.open_by_agent.get(key) {
+            if self
+                .turns
+                .get(&prev_id)
+                .is_some_and(|prev| recv_ms < prev.started_ms)
+            {
+                return false;
+            }
+            self.move_open_to_closed(key, prev_id, recv_ms, TurnEnd::Unclosed);
             signals.push(TrackerSignal::TurnClosed(key.clone()));
         }
+        true
     }
 
-    fn latest_closed_within_window_mut(
+    fn move_open_to_closed(
         &mut self,
         key: &AgentKey,
+        turn_id: u64,
+        ended_ms: u64,
+        status: TurnEnd,
+    ) {
+        self.open_by_agent.remove(key);
+        if let Some(agents) = self.open_by_session.get_mut(&key.session_id) {
+            agents.remove(key);
+            if agents.is_empty() {
+                self.open_by_session.remove(&key.session_id);
+            }
+        }
+        let Some(turn) = self.turns.get_mut(&turn_id) else {
+            return;
+        };
+        turn.ended_ms = Some(ended_ms);
+        turn.status = status;
+        self.closed_by_agent
+            .entry(key.clone())
+            .or_default()
+            .insert((turn.started_ms, turn_id), turn_id);
+        self.expire_index.insert((ended_ms, turn_id));
+    }
+
+    fn open_turn_for(&self, key: &AgentKey, recv_ms: u64) -> Option<u64> {
+        let &turn_id = self.open_by_agent.get(key)?;
+        self.turns
+            .get(&turn_id)
+            .is_some_and(|turn| turn.started_ms <= recv_ms)
+            .then_some(turn_id)
+    }
+
+    fn closed_turn_for(&self, key: &AgentKey, recv_ms: u64) -> Option<u64> {
+        let &turn_id = self
+            .closed_by_agent
+            .get(key)?
+            .range(..=(recv_ms, u64::MAX))
+            .next_back()?
+            .1;
+        let turn = self.turns.get(&turn_id)?;
+        within_revision_window(turn, recv_ms).then_some(turn_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_terminal(
+        &mut self,
+        key: AgentKey,
         recv_ms: u64,
-    ) -> Option<&mut Turn> {
-        self.closed
-            .iter_mut()
-            .rev()
-            .find(|turn| &turn.agent == key && within_revision_window(turn, recv_ms))
+        status: TurnEnd,
+        transcript_path: Option<&String>,
+        ev: &HookEvent,
+        repo: &RepoInfo,
+        signals: &mut Vec<TrackerSignal>,
+    ) {
+        let (turn_id, signal) = if let Some(open_id) = self.open_turn_for(&key, recv_ms) {
+            self.move_open_to_closed(&key, open_id, recv_ms, status);
+            (open_id, TrackerSignal::TurnClosed(key))
+        } else if let Some(closed_id) = self.closed_turn_for(&key, recv_ms) {
+            let Some(turn) = self.turns.get_mut(&closed_id) else {
+                return;
+            };
+            if let Some(old_ended) = turn.ended_ms {
+                self.expire_index.remove(&(old_ended, closed_id));
+            }
+            turn.ended_ms = Some(recv_ms);
+            turn.status = status;
+            self.expire_index.insert((recv_ms, closed_id));
+            (closed_id, TrackerSignal::Late(key))
+        } else {
+            return;
+        };
+
+        if let Some(turn) = self.turns.get_mut(&turn_id) {
+            if let Some(path) = transcript_path {
+                turn.transcript_path = Some(path.clone());
+            }
+            fill_metadata(turn, ev, repo);
+        }
+        signals.push(signal);
     }
 }
 
@@ -342,12 +504,6 @@ fn within_revision_window(turn: &Turn, recv_ms: u64) -> bool {
         .is_some_and(|ended| recv_ms.saturating_sub(ended) < REVISION_WINDOW_MS)
 }
 
-fn has_open_window(turn: &Turn, tool_use_id: &str) -> bool {
-    turn.windows
-        .iter()
-        .any(|w| w.post_ms.is_none() && w.tool_use_id == tool_use_id)
-}
-
 fn fill_metadata(turn: &mut Turn, ev: &HookEvent, repo: &RepoInfo) {
     if turn.cwd.is_none() && ev.cwd.is_some() {
         turn.cwd = ev.cwd.clone();
@@ -357,20 +513,16 @@ fn fill_metadata(turn: &mut Turn, ev: &HookEvent, repo: &RepoInfo) {
     }
 }
 
-/// Closes the matching open window and returns `Some(optional EditDone)` when one matched.
-fn close_matching_window(
+/// Closes the window at `window_idx` and returns `Some(EditDone)` when it is an in-repo edit.
+fn close_window_at(
     turn: &mut Turn,
-    tool_use_id: &str,
+    window_idx: usize,
     recv_ms: u64,
     ok: bool,
     ev: &HookEvent,
     repo: &RepoInfo,
-) -> Option<Option<TrackerSignal>> {
-    let window = turn
-        .windows
-        .iter_mut()
-        .rev()
-        .find(|w| w.post_ms.is_none() && w.tool_use_id == tool_use_id)?;
+) -> Option<TrackerSignal> {
+    let window = turn.windows.get_mut(window_idx)?;
     window.post_ms = Some(recv_ms);
     window.ok = Some(ok);
     if window.target_path.is_none() && ev.target_path.is_some() {
@@ -383,7 +535,7 @@ fn close_matching_window(
     let target_path = window.target_path.clone();
     fill_metadata(turn, ev, repo);
 
-    let edit_signal = if ok && kind == ToolKind::Edit {
+    if ok && kind == ToolKind::Edit {
         let root = turn.repo.root.as_deref().or(repo.root.as_deref());
         match (root, target_path.as_deref()) {
             (Some(root), Some(target)) if path_under_root(target, root) => {
@@ -396,8 +548,7 @@ fn close_matching_window(
         }
     } else {
         None
-    };
-    Some(edit_signal)
+    }
 }
 
 fn normalize_absolute_lexical(path: &str) -> Option<String> {
@@ -1038,5 +1189,408 @@ mod tests {
             &no_repo,
         );
         assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn delayed_stop_after_next_prompt_closes_earlier_turn() {
+        let mut tracker = Tracker::new();
+        let r = repo(Some("C:/repo"));
+
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 1_000, &r);
+        tracker.on_prompt(PromptIn {
+            session_id: "S1".into(),
+            text: "first prompt".into(),
+            truncated: false,
+            recv_ms: 1_000,
+        });
+        tracker.on_event(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Edit",
+                "t1",
+                Some("C:/repo/a.ts"),
+                None,
+            ),
+            1_200,
+            &r,
+        );
+        tracker.on_event(
+            &tool_ev(
+                "PostToolUse",
+                "S1",
+                None,
+                "Edit",
+                "t1",
+                Some("C:/repo/a.ts"),
+                None,
+            ),
+            1_400,
+            &r,
+        );
+
+        let next_sigs = tracker.on_event(&ev("UserPromptSubmit", "S1", None), 3_000, &r);
+        assert_eq!(next_sigs, vec![TrackerSignal::TurnClosed(key("S1", ""))]);
+        tracker.on_prompt(PromptIn {
+            session_id: "S1".into(),
+            text: "second prompt".into(),
+            truncated: false,
+            recv_ms: 3_000,
+        });
+
+        let mut delayed_stop = ev("Stop", "S1", None);
+        delayed_stop.transcript_path = Some("C:/cfg/projects/repo/S1.jsonl".into());
+        let late_sigs = tracker.on_event(&delayed_stop, 2_000, &r);
+        assert_eq!(late_sigs, vec![TrackerSignal::Late(key("S1", ""))]);
+
+        // Newer open turn remains open and untouched.
+        let open = tracker
+            .open_turn(&key("S1", ""))
+            .expect("second turn still open");
+        assert_eq!(open.started_ms, 3_000);
+        assert_eq!(open.ended_ms, None);
+        assert_eq!(open.status, TurnEnd::Open);
+        assert_eq!(
+            open.prompt.as_ref().map(|p| p.text.as_str()),
+            Some("second prompt")
+        );
+
+        // Stray Stop earlier than any turn start is ignored while the turn is open.
+        assert!(
+            tracker
+                .on_event(&ev("Stop", "S1", None), 500, &r)
+                .is_empty()
+        );
+        assert!(tracker.open_turn(&key("S1", "")).is_some());
+
+        // Close the second turn at 4_000 and verify expiration of Turn 1 uses revised ended_ms 2_000.
+        assert_eq!(
+            tracker.on_event(&ev("Stop", "S1", None), 4_000, &r),
+            vec![TrackerSignal::TurnClosed(key("S1", ""))]
+        );
+        let expired_first = tracker.expire(2_000 + 60_000);
+        assert_eq!(expired_first.len(), 1);
+        assert_eq!(expired_first[0].started_ms, 1_000);
+        assert_eq!(expired_first[0].ended_ms, Some(2_000));
+        assert_eq!(expired_first[0].status, TurnEnd::Done);
+        assert_eq!(
+            expired_first[0].transcript_path.as_deref(),
+            Some("C:/cfg/projects/repo/S1.jsonl")
+        );
+        assert_eq!(
+            expired_first[0].prompt.as_ref().map(|p| p.text.as_str()),
+            Some("first prompt")
+        );
+
+        let kept_second = tracker
+            .closed_turn(&key("S1", ""))
+            .expect("second turn retained");
+        assert_eq!(kept_second.started_ms, 3_000);
+        assert_eq!(kept_second.ended_ms, Some(4_000));
+        assert_eq!(kept_second.status, TurnEnd::Done);
+
+        assert_eq!(tracker.expire(4_000 + 60_000).len(), 1);
+    }
+
+    #[test]
+    fn terminal_correction_after_session_end_revises_retained_turn() {
+        let mut tracker = Tracker::new();
+        let r = repo(Some("C:/repo"));
+
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 1_000, &r);
+        let mut sub_start = ev("SubagentStart", "S1", Some("A1"));
+        sub_start.agent_type = Some("Explore".into());
+        tracker.on_event(&sub_start, 1_500, &r);
+
+        let end_sigs = tracker.on_event(&ev("SessionEnd", "S1", None), 3_000, &r);
+        assert_eq!(end_sigs.len(), 2);
+
+        // Late Stop arriving after SessionEnd (within 60 s) updates status, end time, and transcript.
+        let mut late_stop = ev("Stop", "S1", None);
+        late_stop.transcript_path = Some("C:/cfg/projects/repo/S1.jsonl".into());
+        let main_late = tracker.on_event(&late_stop, 3_500, &r);
+        assert_eq!(main_late, vec![TrackerSignal::Late(key("S1", ""))]);
+
+        let main_closed = tracker.closed_turn(&key("S1", "")).unwrap();
+        assert_eq!(main_closed.status, TurnEnd::Done);
+        assert_eq!(main_closed.ended_ms, Some(3_500));
+        assert_eq!(
+            main_closed.transcript_path.as_deref(),
+            Some("C:/cfg/projects/repo/S1.jsonl")
+        );
+
+        // Delayed SubagentStop timestamped before SessionEnd revises the retained subagent turn too.
+        let mut late_sub = ev("SubagentStop", "S1", Some("A1"));
+        late_sub.agent_transcript_path =
+            Some("C:/cfg/projects/repo/S1/subagents/agent-A1.jsonl".into());
+        let sub_late = tracker.on_event(&late_sub, 2_500, &r);
+        assert_eq!(sub_late, vec![TrackerSignal::Late(key("S1", "A1"))]);
+
+        let sub_closed = tracker.closed_turn(&key("S1", "A1")).unwrap();
+        assert_eq!(sub_closed.status, TurnEnd::Done);
+        assert_eq!(sub_closed.ended_ms, Some(2_500));
+        assert_eq!(
+            sub_closed.transcript_path.as_deref(),
+            Some("C:/cfg/projects/repo/S1/subagents/agent-A1.jsonl")
+        );
+
+        // StopFailure after SessionEnd revises status to Failed.
+        tracker.on_event(&ev("UserPromptSubmit", "S2", None), 1_000, &r);
+        tracker.on_event(&ev("SessionEnd", "S2", None), 3_000, &r);
+        assert_eq!(
+            tracker.on_event(&ev("StopFailure", "S2", None), 3_200, &r),
+            vec![TrackerSignal::Late(key("S2", ""))]
+        );
+        let failed = tracker.closed_turn(&key("S2", "")).unwrap();
+        assert_eq!(failed.status, TurnEnd::Failed);
+        assert_eq!(failed.ended_ms, Some(3_200));
+
+        // Expired terminal correction (>= 60 s after SessionEnd) is ignored.
+        tracker.on_event(&ev("UserPromptSubmit", "S3", None), 1_000, &r);
+        tracker.on_event(&ev("SessionEnd", "S3", None), 3_000, &r);
+        let mut expired_stop = ev("Stop", "S3", None);
+        expired_stop.transcript_path = Some("C:/cfg/projects/repo/S3.jsonl".into());
+        assert!(
+            tracker
+                .on_event(&expired_stop, 3_000 + 60_000, &r)
+                .is_empty()
+        );
+        let s3_closed = tracker.closed_turn(&key("S3", "")).unwrap();
+        assert_eq!(s3_closed.status, TurnEnd::Unclosed);
+        assert_eq!(s3_closed.ended_ms, Some(3_000));
+        assert_eq!(s3_closed.transcript_path, None);
+    }
+
+    #[test]
+    fn out_of_order_tool_completions_across_multiple_retained_turns() {
+        let mut tracker = Tracker::new();
+        let r = repo(Some("C:/repo"));
+
+        // Populate unrelated sessions with both retained closed turns and open turns.
+        for i in 0..20 {
+            let sid = format!("OTHER_{i}");
+            tracker.on_event(&ev("UserPromptSubmit", &sid, None), 500, &r);
+            tracker.on_event(
+                &tool_ev(
+                    "PreToolUse",
+                    &sid,
+                    None,
+                    "Read",
+                    &format!("o_closed_{i}"),
+                    Some("C:/repo/x.ts"),
+                    None,
+                ),
+                600,
+                &r,
+            );
+            tracker.on_event(&ev("Stop", &sid, None), 700, &r);
+            tracker.on_event(&ev("UserPromptSubmit", &sid, None), 800, &r);
+            tracker.on_event(
+                &tool_ev(
+                    "PreToolUse",
+                    &sid,
+                    None,
+                    "Read",
+                    &format!("o_open_{i}"),
+                    Some("C:/repo/y.ts"),
+                    None,
+                ),
+                900,
+                &r,
+            );
+        }
+
+        // S1 Turn 1 (1_000..2_000) with two unclosed windows t1, t2.
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 1_000, &r);
+        tracker.on_event(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Edit",
+                "t1",
+                Some("C:/repo/one.ts"),
+                None,
+            ),
+            1_100,
+            &r,
+        );
+        tracker.on_event(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Bash",
+                "t2",
+                None,
+                Some("cargo test"),
+            ),
+            1_200,
+            &r,
+        );
+        tracker.on_event(&ev("Stop", "S1", None), 2_000, &r);
+
+        // S1 Turn 2 (3_000..4_000) with unclosed window t3.
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 3_000, &r);
+        tracker.on_event(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Write",
+                "t3",
+                Some("C:/repo/two.ts"),
+                None,
+            ),
+            3_100,
+            &r,
+        );
+        tracker.on_event(&ev("Stop", "S1", None), 4_000, &r);
+
+        // S1 Turn 3 (5_000..open) with window t4.
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 5_000, &r);
+        tracker.on_event(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Read",
+                "t4",
+                Some("C:/repo/three.ts"),
+                None,
+            ),
+            5_100,
+            &r,
+        );
+
+        // Delayed PreToolUse timestamped inside Turn 2 attaches to Turn 2, not open Turn 3.
+        let late_pre = tracker.on_event(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "Edit",
+                "t5",
+                Some("C:/repo/four.ts"),
+                None,
+            ),
+            3_200,
+            &r,
+        );
+        assert_eq!(late_pre, vec![TrackerSignal::Late(key("S1", ""))]);
+
+        // Out-of-order completions across Turn 2, Turn 1, and open Turn 3.
+        assert_eq!(
+            tracker.on_event(
+                &tool_ev("PostToolUse", "S1", None, "Write", "t3", None, None),
+                5_200,
+                &r
+            ),
+            vec![
+                TrackerSignal::Late(key("S1", "")),
+                TrackerSignal::EditDone {
+                    root: "C:/repo".into(),
+                    post_ms: 5_200,
+                },
+            ]
+        );
+        assert_eq!(
+            tracker.on_event(
+                &tool_ev("PostToolUse", "S1", None, "Edit", "t5", None, None),
+                5_250,
+                &r
+            ),
+            vec![
+                TrackerSignal::Late(key("S1", "")),
+                TrackerSignal::EditDone {
+                    root: "C:/repo".into(),
+                    post_ms: 5_250,
+                },
+            ]
+        );
+        assert_eq!(
+            tracker.on_event(
+                &tool_ev("PostToolUseFailure", "S1", None, "Bash", "t2", None, None),
+                5_300,
+                &r
+            ),
+            vec![TrackerSignal::Late(key("S1", ""))]
+        );
+        assert_eq!(
+            tracker.on_event(
+                &tool_ev("PostToolUse", "S1", None, "Edit", "t1", None, None),
+                5_400,
+                &r
+            ),
+            vec![
+                TrackerSignal::Late(key("S1", "")),
+                TrackerSignal::EditDone {
+                    root: "C:/repo".into(),
+                    post_ms: 5_400,
+                },
+            ]
+        );
+        assert!(
+            tracker
+                .on_event(
+                    &tool_ev("PostToolUse", "S1", None, "Read", "t4", None, None),
+                    5_500,
+                    &r
+                )
+                .is_empty()
+        );
+
+        let open_turn3 = tracker.open_turn(&key("S1", "")).unwrap();
+        assert_eq!(open_turn3.windows.len(), 1);
+        assert_eq!(open_turn3.windows[0].tool_use_id, "t4");
+        assert_eq!(open_turn3.windows[0].post_ms, Some(5_500));
+
+        let closed_turn2 = tracker.closed_turn(&key("S1", "")).unwrap();
+        assert_eq!(closed_turn2.started_ms, 3_000);
+        assert_eq!(closed_turn2.windows.len(), 2);
+        assert_eq!(closed_turn2.windows[0].post_ms, Some(5_200));
+        assert_eq!(closed_turn2.windows[1].post_ms, Some(5_250));
+
+        // SessionEnd closes S1's open Turn 3 without affecting OTHER_* sessions.
+        let end_sigs = tracker.on_event(&ev("SessionEnd", "S1", None), 6_000, &r);
+        assert_eq!(end_sigs, vec![TrackerSignal::TurnClosed(key("S1", ""))]);
+        assert!(tracker.open_turn(&key("S1", "")).is_none());
+        assert!(tracker.open_turn(&key("OTHER_0", "")).is_some());
+
+        // Turn 1 expires at 2_000 + 60_000 while Turn 2 (4_000) and Turn 3 (6_000) remain.
+        // Note: OTHER_* turns closed at 700 also expire here; filter for S1 to verify Turn 1 fields.
+        let expired = tracker.expire(2_000 + 60_000);
+        let s1_expired: Vec<_> = expired
+            .into_iter()
+            .filter(|t| t.agent == key("S1", ""))
+            .collect();
+        assert_eq!(s1_expired.len(), 1);
+        assert_eq!(s1_expired[0].started_ms, 1_000);
+        assert_eq!(s1_expired[0].windows[0].tool_use_id, "t1");
+        assert_eq!(s1_expired[0].windows[0].post_ms, Some(5_400));
+        assert_eq!(s1_expired[0].windows[0].ok, Some(true));
+        assert_eq!(s1_expired[0].windows[1].tool_use_id, "t2");
+        assert_eq!(s1_expired[0].windows[1].post_ms, Some(5_300));
+        assert_eq!(s1_expired[0].windows[1].ok, Some(false));
+
+        // Unclosed window from an expired OTHER_* turn is cleaned from the index.
+        assert!(
+            tracker
+                .on_event(
+                    &tool_ev(
+                        "PostToolUse",
+                        "OTHER_0",
+                        None,
+                        "Read",
+                        "o_closed_0",
+                        None,
+                        None
+                    ),
+                    2_000 + 60_001,
+                    &r
+                )
+                .is_empty()
+        );
     }
 }
