@@ -49,7 +49,7 @@ The experimental desk and its daemon run on Linux: a per-user Unix socket with l
 - A version tag runs the release workflow in CI, and npm trusts the workflow's OIDC identity instead of a stored token.
 - On Windows, the git and setup helper commands Rocky starts no longer open a console window.
 - The desktop app's background process now restores Rocky's hook and MCP entries when another program removes them, backs off when a file keeps losing them, and shows every failure in the health strip.
-- While consent is approved, the desktop app also restores Rocky entries that something else removed, including `rocky hook uninstall` and `rocky setup --remove`. To remove them for good, run `rocky setup --auto remove --json`, which records `removed` consent.
+- While consent is approved, `rocky hook uninstall` also turns the shell hook off in the desktop app, so the background process leaves it removed. `rocky setup --remove`, `--uninstall-agent-hooks` and `--uninstall-desk-hooks` refuse while consent is approved; use the harness switch in Settings, Remove Rocky, or `rocky setup --auto remove --json` (which records `removed` consent) instead.
 - The shell hooks report config directory variables once per shell, so entries also reach profiles that use `CLAUDE_CONFIG_DIR` and similar variables. Shell hook protocol is now 0.6.0: run `rocky hook install` once so installed hook files pick up the change; `rocky hook status` names the mismatch until then.
 - Breaking: the desk groups a session under the repo where it started, and its header branch is also the one it started on; a later prompt in another directory no longer moves it.
 

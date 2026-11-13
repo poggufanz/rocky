@@ -96,7 +96,7 @@ The first run fails and Rocky remembers it; the second run works, and Rocky know
 | Dictionary | `rocky what`, `rocky how`, `rocky why`, `rocky digest`, `rocky quiz`, and `rocky export` turn remembered changes back into plain explanations. |
 | `rocky mcp` | Exposes bounded memory and knowledge tools over local stdio, with sanitized output by default. |
 | Rationale gate | A concept lexicon (`rocky concepts`) plus a PreToolUse gate that nudges an editing agent to state why before touching a file; deny-once, fail-open. |
-| Host setup | `rocky setup` registers supported hosts after consent; `rocky setup --remove` also removes a voice skill left by an older release. |
+| Host setup | `rocky setup` registers supported hosts after consent; `rocky setup --remove` also removes a voice skill left by an older release (refuses while desk consent is approved). |
 | `rocky hook` | Manage the optional Bash, WSL, and PowerShell shell hooks. |
 | `rocky model` | Configure optional loopback Ollama (`status\|use\|off`). |
 | `rocky hook gate-event`, `rocky hook agent-event generic` | PreToolUse rationale-gate enforcement and the universal agent notify endpoint. |
@@ -110,6 +110,8 @@ rocky setup --agent-hooks
 rocky setup --uninstall-agent-hooks
 rocky setup --status
 ```
+
+While desk consent is approved, `rocky setup --remove`, `--uninstall-agent-hooks`, and `--uninstall-desk-hooks` refuse; use Settings or Remove Rocky in the desktop app instead.
 
 For optional local ranking, install and manage Ollama yourself, then opt in:
 

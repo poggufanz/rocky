@@ -69,7 +69,7 @@ rocky setup --uninstall-agent-hooks
 rocky setup --status
 ```
 
-`rocky setup` configures detected hosts with sanitized MCP exposure after consent. By itself it never edits `.bashrc`, installs or pulls an Ollama model, or enables local AI. Shell integration is a separate `rocky hook install` step.
+`rocky setup` configures detected hosts with sanitized MCP exposure after consent. By itself it never edits `.bashrc`, installs or pulls an Ollama model, or enables local AI. Shell integration is a separate `rocky hook install` step. While desk consent is approved, `rocky setup --remove`, `--uninstall-agent-hooks`, and `--uninstall-desk-hooks` refuse; use the desktop app's Settings or Remove Rocky instead.
 
 Codex registration is capability-gated, not a name-only mutation: Rocky proves the existing Rocky entry originates from the base user config layer through Codex's official app-server config protocol, then writes with a version-checked compare-and-swap. Whenever provenance, capability, or version cannot be proven, Rocky falls back to manual instructions.
 
@@ -79,7 +79,7 @@ Claude Code registration goes through a private stage. Rocky clones the effectiv
 
 That staged path does not activate in this release. Rocky ships no complete Claude Code policy manifest, so any `rocky setup` run that still has to write reports `claude-code: failed` with `Claude Code policy-equivalent automation is unavailable; use manual registration` and exits 1. Rocky prints the exact CLI argv to paste; run it yourself. Once the entry exists, later runs report `claude-code: already-configured`.
 
-Older releases could install a managed voice skill for Codex and Claude Code. That option is gone. `rocky setup --check` and `rocky setup --status` report a leftover copy, for example `legacy voice skill codex: installed; rocky setup --remove removes it.`, and `rocky setup --remove` moves a managed copy into that host's backup folder after the same consent as the rest of the removal. A copy whose files changed after install, or that carries no Rocky ownership marker, is reported and left in place for you to delete. These results never change the exit code; an unexpected failure to move a managed copy makes `--remove` exit 1.
+Older releases could install a managed voice skill for Codex and Claude Code. That option is gone. `rocky setup --check` and `rocky setup --status` report a leftover copy, for example `legacy voice skill codex: installed; rocky setup --remove removes it.`, and `rocky setup --remove` moves a managed copy into that host's backup folder after the same consent as the rest of the removal. A copy whose files changed after install, or that carries no Rocky ownership marker, is reported and left in place for you to delete. These results never change the exit code; an unexpected failure to move a managed copy makes `--remove` exit 1. While desk consent is approved, `rocky setup --remove` refuses; use the desktop app's Settings or Remove Rocky instead.
 
 ## Nervous System (v0.5.0)
 
@@ -87,7 +87,7 @@ Plan 01 ships in v0.5.0. Rocky captures the user prompt, every unique edited pat
 
 This feature adds no new egress and no daemon. Rocky does not capture screens or keystrokes, and never rewrites, injects, or submits a prompt. With Ollama disabled or unavailable, deterministic degraded annotation still records the evidence. An optional configured loopback Ollama may compact only rationale, tags, and the passive label; it never changes the captured intent, path, or excerpt evidence. Rationale is quoted, untrusted hearsay — never fact and never hidden chain-of-thought.
 
-Claude Code setup via `rocky setup --agent-hooks` asks for explicit consent before changing settings. Use a pre-created private parent for the settings file (mode `0700` where supported): `~/.claude` by default, or `$CLAUDE_CONFIG_DIR` when that variable is set. Rocky fails closed when that parent is missing. When `CLAUDE_CONFIG_DIR` is set, setup uses `$CLAUDE_CONFIG_DIR/settings.json`, prints the path it used, and refuses an empty or non-canonical value. When `settings.json` already exists, a write keeps a recovery copy of the previous bytes in `.settings.json.transaction-*/displaced` inside the Claude config directory; only the latest completed copy is kept, it can include secrets the settings file held, and setup reports it only when its bytes differ from what setup read. Codex setup prints a manual Codex TOML block and writes no Codex config; review and trust the command through Codex `/hooks` before pasting it. `rocky setup --uninstall-agent-hooks` removes Rocky's Claude hooks only and never edits Codex `config.toml`.
+Claude Code setup via `rocky setup --agent-hooks` asks for explicit consent before changing settings. Use a pre-created private parent for the settings file (mode `0700` where supported): `~/.claude` by default, or `$CLAUDE_CONFIG_DIR` when that variable is set. Rocky fails closed when that parent is missing. When `CLAUDE_CONFIG_DIR` is set, setup uses `$CLAUDE_CONFIG_DIR/settings.json`, prints the path it used, and refuses an empty or non-canonical value. When `settings.json` already exists, a write keeps a recovery copy of the previous bytes in `.settings.json.transaction-*/displaced` inside the Claude config directory; only the latest completed copy is kept, it can include secrets the settings file held, and setup reports it only when its bytes differ from what setup read. Codex setup prints a manual Codex TOML block and writes no Codex config; review and trust the command through Codex `/hooks` before pasting it. `rocky setup --uninstall-agent-hooks` removes Rocky's Claude hooks only and never edits Codex `config.toml`. While desk consent is approved, both `--uninstall-agent-hooks` and `--uninstall-desk-hooks` refuse; use the desktop app's Settings or Remove Rocky instead.
 
 Claude Code capture requires hook payload field `prompt_id`; without `prompt_id`, Rocky records nothing and never merges turns. `rocky setup --agent-hooks` and `rocky setup --status` print this capability boundary alongside their setup/status output. Setup status scope is host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.
 
@@ -351,7 +351,9 @@ rocky: Run it anyway? [y/N]
 Answer anything but `y` and the command never runs. Rules live in
 `~/.rocky/guard.rules` — plain text, edit freely, Rocky never overwrites an
 edited file. `ROCKY_OFF=1` turns the hook off for a session;
-`rocky hook uninstall` removes the block and keeps the memory.
+`rocky hook uninstall` removes the block and keeps the memory. While desk
+consent is approved, it also turns the shell hook switch off, so the
+background process does not restore it.
 
 ## How the memory works
 

@@ -1,17 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { ROCKY_HOOK_PROTOCOL_VERSION } from "../commands/hook.js";
 import { POWERSHELL_HOOK_LINE, addHookBlockBytes } from "../core/hook-block.js";
+import { removeShellOnly, type AutoContext } from "../setup/auto/engine.js";
 import {
   applyShell,
+  createShellHookPort,
   inspectShell,
   removeShell,
   shellSnippets,
   type ShellHookPort,
 } from "../setup/auto/shell.js";
+import { readExpected, writeExpected } from "../setup/auto/state.js";
 
 const VERSION_LITERAL = `ROCKY_HOOK_VERSION="${ROCKY_HOOK_PROTOCOL_VERSION}"`;
 const BEGIN_MARKER = "# >>> rocky hook >>>";
@@ -130,4 +133,89 @@ test("auto shell: snippets name the bytes each file must keep", (t) => {
   }
   expected.push({ path: profile, snippets: [POWERSHELL_HOOK_LINE] });
   assert.deepEqual(entries, expected);
+});
+
+test("auto shell: createShellHookPort probes PowerShell profiles at most once across removeShellOnly", (t) => {
+  const value = fixture(t);
+  const psDir = join(value.root, "PowerShell");
+  mkdirSync(psDir, { recursive: true });
+  const profile = join(psDir, "Microsoft.PowerShell_profile.ps1");
+  writeFileSync(profile, "# profile\n");
+  const retained = join(psDir, `.${basename(profile)}.transaction-1234-abcd`);
+  mkdirSync(retained);
+  writeFileSync(
+    join(retained, "manifest.json"),
+    JSON.stringify({ version: 1, state: "committed", target: profile }),
+  );
+  writeExpected(value.rockyHome, {
+    v: 1,
+    files: [
+      { path: value.bashrc, snippets: [BEGIN_MARKER] },
+      { path: profile, snippets: [POWERSHELL_HOOK_LINE] },
+    ],
+    history: {},
+  });
+
+  let probeCalls = 0;
+  const shell = createShellHookPort({
+    platform: "win32",
+    uninstall: () => 0,
+    bashrcPath: () => value.bashrc,
+    rockyHome: () => value.rockyHome,
+    detectPowerShellHosts: () => {
+      probeCalls += 1;
+      return [{ profile }];
+    },
+  });
+  const ctx: AutoContext = {
+    rockyHome: value.rockyHome,
+    detect: {
+      home: value.root,
+      env: {},
+      platform: "win32",
+      fileExists: existsSync,
+      isFile: (path) => {
+        try {
+          return statSync(path).isFile();
+        } catch {
+          return false;
+        }
+      },
+    },
+    paths: { nodePath: process.execPath, entryPath: join(value.root, "entry.js") },
+    registration: {
+      name: "rocky",
+      command: process.execPath,
+      args: [join(value.root, "entry.js"), "mcp"],
+      env: { ROCKY_HOME: value.rockyHome, ROCKY_MCP_EXPOSURE: "sanitized" },
+    },
+    shell,
+    now: () => 1_700_000_000_000,
+  };
+
+  const reports = removeShellOnly(ctx);
+
+  assert.equal(reports[0]?.state, "missing");
+  assert.equal(probeCalls, 1);
+  assert.deepEqual(readExpected(value.rockyHome).files, []);
+  assert.equal(existsSync(retained), false);
+
+  const profiles = shell.powerShellProfiles();
+  profiles.push(join(psDir, "other.ps1"));
+  assert.deepEqual(shell.powerShellProfiles(), [profile]);
+  assert.equal(probeCalls, 1);
+});
+
+test("auto shell: createShellHookPort skips the PowerShell probe off win32", () => {
+  let probeCalls = 0;
+  const shell = createShellHookPort({
+    platform: "linux",
+    detectPowerShellHosts: () => {
+      probeCalls += 1;
+      return [{ profile: "/tmp/profile.ps1" }];
+    },
+  });
+  assert.deepEqual(shell.powerShellProfiles(), []);
+  assert.deepEqual(shell.powerShellProfiles(), []);
+  assert.equal(probeCalls, 0);
 });
