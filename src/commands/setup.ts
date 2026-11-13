@@ -1,12 +1,13 @@
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { basename, join, posix, resolve, win32 } from "node:path";
-import { configuredRockyHome } from "../core/state-paths.js";
+import { configuredRockyHome, resolveRockyPaths } from "../core/state-paths.js";
 import type {
   InspectionResult,
   McpRegistration,
   SetupClientAdapter,
   SetupClientId,
   SetupMode,
+  SetupOptions,
   SetupResult,
 } from "../setup/clients.js";
 import { createClaudeCodeAdapter } from "../setup/claude-code.js";
@@ -30,6 +31,7 @@ import {
 } from "../listening/types.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 import { defaultAutoContext, runAutoSetup } from "../setup/auto/command.js";
+import { consentApproved } from "../setup/auto/state.js";
 import { createPlatformServices, type PlatformServices } from "../setup/platform.js";
 import { processRunner, type ProcessRunner } from "../setup/process.js";
 import { createPromptPort, type PromptInput } from "../setup/prompt.js";
@@ -782,6 +784,12 @@ function usageMessage(message: string): string {
   return `${sentence.replace(/\.$/u, "")}. Run rocky --help --all to list every option.`;
 }
 
+function isLegacyRemoval(options: SetupOptions): boolean {
+  return options.mode === "remove"
+    || options.agentHooksAction === "uninstall"
+    || options.deskHooksAction === "uninstall";
+}
+
 export async function setup(argv: readonly string[], deps?: SetupDependencies): Promise<number> {
   if (argv[0] === "--auto") {
     // Hidden, prompt-free entry for the desktop app: one JSON object on
@@ -806,6 +814,12 @@ export async function setup(argv: readonly string[], deps?: SetupDependencies): 
   // non-TTY guard still fires for piped/redirected stdin.
   const stdinTTY = deps?.isTTY ?? (deps === undefined ? process.stdin.isTTY ?? false : true);
   const dependencies = deps ?? defaultDependencies();
+  const rockyHome = dependencies.rockyHome ?? resolveRockyPaths(process.env, dependencies.platform.home).home;
+  if (isLegacyRemoval(options) && consentApproved(rockyHome)) {
+    say("Rocky manages these entries from the desk app.");
+    detail("Turn the harness off in Settings, or remove everything with Remove Rocky.");
+    return 1;
+  }
   if (options.repoAction !== undefined && options.repo !== undefined) {
     return runRepoCaptureAction(options.repo, options.repoAction, options.yes, dependencies.confirmation, dependencies.rockyHome);
   }

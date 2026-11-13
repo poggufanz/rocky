@@ -108,6 +108,12 @@ export function readConsentRecord(
   return record === undefined ? { status: "invalid" } : { status: "valid", record };
 }
 
+/** True only when a readable, valid consent record currently approves desk management. */
+export function consentApproved(rockyHome: string): boolean {
+  const consent = readConsentRecord(rockyHome);
+  return consent.status === "valid" && consent.record.state === "approved";
+}
+
 export function writeConsentRecord(rockyHome: string, record: ConsentRecord): void {
   const target = consentFile(rockyHome);
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
