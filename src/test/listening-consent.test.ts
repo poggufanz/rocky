@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { cardsFilePath } from "../desk/cards-path.js";
+import { cardsFilePath } from "../listening/cards-path.js";
 import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import {
   getRepoConsentDetail,

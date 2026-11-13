@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
-import { cardsFilePath } from "../desk/cards-path.js";
+import { cardsFilePath } from "./cards-path.js";
 import { consentsPath, listeningHome } from "./store-paths.js";
 import { mainRepoRootOf, normalizeRepoRoot } from "./repo-consent-read.js";
 import { purgeListeningStore } from "./event-log.js";

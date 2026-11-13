@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import { repoSlug } from "../listening/store-paths.js";
+import { repoSlug } from "./store-paths.js";
 
 /**
  * Pure change-card log path for one canonical repository root.
