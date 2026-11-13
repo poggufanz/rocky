@@ -20,6 +20,7 @@ pub struct Settings {
     pub subagent_tree: bool,
     pub history: bool,
     pub tool_text: bool,
+    pub cards: bool,
     pub notify_needs_you: bool,
     pub notify_failed: bool,
     pub notify_done: bool,
@@ -34,6 +35,7 @@ impl Default for Settings {
             subagent_tree: true,
             history: true,
             tool_text: true,
+            cards: true,
             notify_needs_you: true,
             notify_failed: true,
             notify_done: true,
@@ -51,7 +53,7 @@ mod tests {
     fn default_settings_wire_matches_spec() {
         assert_eq!(
             serde_json::to_string(&Settings::default()).unwrap(),
-            r#"{"v":1,"subagent_tree":true,"history":true,"tool_text":true,"notify_needs_you":true,"notify_failed":true,"notify_done":true,"lang":"auto","autostart_asked":false}"#
+            r#"{"v":1,"subagent_tree":true,"history":true,"tool_text":true,"cards":true,"notify_needs_you":true,"notify_failed":true,"notify_done":true,"lang":"auto","autostart_asked":false}"#
         );
     }
 

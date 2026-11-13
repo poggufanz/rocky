@@ -10,6 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
+use rocky_proto::hook::HookEvent;
 use rocky_proto::pipe::{Gap, GapReason, Health, RepoInfo};
 use rocky_proto::spool::{
     SHELL_ENV_VARS, SPOOL_VERSION, SpoolBody, SpoolRecord, peek_spool_version,
@@ -169,6 +170,10 @@ impl Ingestor {
                             if let Some(dir) = config_dir {
                                 config_locations.push(("claude-code".to_string(), dir.to_string()));
                             }
+                            let event = HookEvent {
+                                prompt: None,
+                                ..event
+                            };
                             let ev = state.prepare(event);
                             if let ApplyOutcome::Changed(c) = state.apply(&ev, rec.recv_ms, repo_of)
                             {
@@ -413,5 +418,94 @@ mod tests {
         assert_eq!(out.changes.upserted[0].session_id, "S1");
         assert!(out.gaps.is_empty());
         assert_eq!(out.history_errors, 0);
+    }
+
+    #[test]
+    fn prompt_never_reaches_history_or_status() {
+        let spool = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(history_dir.path(), HISTORY_CAP_BYTES, true);
+        let mut state = StatusState::new();
+        let mut ingestor = Ingestor::new();
+        let record = r#"{"v":1,"harness":"claude-code","recv_ms":1,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"S1","prompt":"SECRET_PROMPT_TEXT"}}"#;
+        fs::write(spool.path().join("0000000000001-1.json"), record).unwrap();
+
+        let out = ingestor.ingest_once(
+            spool.path(),
+            &mut state,
+            &mut |_: &str| RepoInfo {
+                root: None,
+                name: "repo".into(),
+                branch: None,
+            },
+            &mut history,
+            1_700_000_000_000,
+        );
+
+        assert_eq!(out.history_errors, 0);
+        assert!(!spool.path().join("0000000000001-1.json").exists());
+
+        let mut history_bytes = Vec::new();
+        for entry in fs::read_dir(history_dir.path()).unwrap().flatten() {
+            history_bytes.extend(fs::read(entry.path()).unwrap());
+        }
+        assert!(!history_bytes.is_empty());
+        let history_text = String::from_utf8_lossy(&history_bytes);
+        assert!(history_text.contains(r#""kind":"event""#), "{history_text}");
+        assert!(
+            !history_text.contains("SECRET_PROMPT_TEXT"),
+            "prompt text leaked into history: {history_text}"
+        );
+        assert!(
+            !history_text.contains(r#""prompt""#),
+            "prompt key leaked into history: {history_text}"
+        );
+
+        let agents = state.agents();
+        assert_eq!(agents.len(), 1);
+        let agents_json = serde_json::to_string(&agents).unwrap();
+        assert!(!agents_json.contains("SECRET_PROMPT_TEXT"), "{agents_json}");
+        assert!(!agents_json.contains(r#""prompt""#), "{agents_json}");
+
+        let timeline = state.timeline(&agents[0].key);
+        assert!(!timeline.is_empty());
+        let timeline_json = serde_json::to_string(&timeline).unwrap();
+        assert!(
+            !timeline_json.contains("SECRET_PROMPT_TEXT"),
+            "{timeline_json}"
+        );
+        assert!(!timeline_json.contains(r#""prompt""#), "{timeline_json}");
+    }
+
+    #[test]
+    fn old_spool_record_without_prompt_ingests() {
+        let spool = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(history_dir.path(), HISTORY_CAP_BYTES, true);
+        let mut state = StatusState::new();
+        let mut ingestor = Ingestor::new();
+        let record = r#"{"v":1,"harness":"claude-code","recv_ms":49492,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"S1","cwd":"C:\\scratch-capture","transcript_path":"<CLAUDE_CONFIG>\\projects\\C--scratch-capture\\S1.jsonl"}}"#;
+        let path = spool.path().join("0000000049492-1.json");
+        fs::write(&path, record).unwrap();
+
+        let out = ingestor.ingest_once(
+            spool.path(),
+            &mut state,
+            &mut |_: &str| RepoInfo {
+                root: None,
+                name: "repo".into(),
+                branch: None,
+            },
+            &mut history,
+            1_700_000_000_000,
+        );
+
+        assert!(!path.exists());
+        assert_eq!(out.changes.upserted.len(), 1);
+        assert_eq!(out.changes.upserted[0].session_id, "S1");
+        assert!(out.gaps.is_empty());
+        assert_eq!(out.history_errors, 0);
+        assert_eq!(ingestor.health.bad_files, 0);
+        assert_eq!(state.agents().len(), 1);
     }
 }

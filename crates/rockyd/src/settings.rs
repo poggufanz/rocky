@@ -1,11 +1,11 @@
-//! The desk settings file: load, save, `set` validation, and the tool-text
-//! marker the hook side reads.
+//! The desk settings file: load, save, `set` validation, and the hook markers
+//! the hook side reads.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rocky_proto::paths::tool_text_off_marker;
+use rocky_proto::paths::{cards_off_marker, tool_text_off_marker};
 use rocky_proto::settings::{Lang, SETTINGS_VERSION, Settings};
 use serde_json::Value;
 
@@ -63,6 +63,7 @@ pub fn apply_set(s: &Settings, name: &str, value: &Value) -> Result<Settings, &'
         "subagent_tree" => next.subagent_tree = b(value)?,
         "history" => next.history = b(value)?,
         "tool_text" => next.tool_text = b(value)?,
+        "cards" => next.cards = b(value)?,
         "notify_needs_you" => next.notify_needs_you = b(value)?,
         "notify_failed" => next.notify_failed = b(value)?,
         "notify_done" => next.notify_done = b(value)?,
@@ -76,12 +77,22 @@ pub fn apply_set(s: &Settings, name: &str, value: &Value) -> Result<Settings, &'
     Ok(next)
 }
 
-/// Keeps `<home>/desk/tool-text-off` in step with the setting: present while
-/// tool text is off, absent otherwise. Removing a missing marker is fine.
-pub fn sync_marker(home: &Path, tool_text: bool) -> io::Result<()> {
-    let marker = tool_text_off_marker(home);
-    if tool_text {
-        match fs::remove_file(&marker) {
+/// Keeps `<home>/desk/tool-text-off` and `<home>/desk/cards-off` in step with
+/// the settings: present while each setting is off, absent otherwise. Removing
+/// a missing marker is fine.
+pub fn sync_markers(home: &Path, s: &Settings) -> io::Result<()> {
+    for (marker, on) in [
+        (tool_text_off_marker(home), s.tool_text),
+        (cards_off_marker(home), s.cards),
+    ] {
+        sync_off_marker(&marker, on)?;
+    }
+    Ok(())
+}
+
+fn sync_off_marker(marker: &Path, on: bool) -> io::Result<()> {
+    if on {
+        match fs::remove_file(marker) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
@@ -89,6 +100,6 @@ pub fn sync_marker(home: &Path, tool_text: bool) -> io::Result<()> {
         if let Some(parent) = marker.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&marker, [])
+        fs::write(marker, [])
     }
 }

@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::Path;
 
-use rocky_proto::paths::{settings_path, tool_text_off_marker};
+use rocky_proto::paths::{cards_off_marker, settings_path, tool_text_off_marker};
 use rocky_proto::settings::{Lang, Settings};
-use rockyd::settings::{apply_set, load, save, sync_marker};
+use rockyd::settings::{apply_set, load, save, sync_markers};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -95,6 +95,7 @@ fn every_bool_setting_is_settable() {
         "subagent_tree",
         "history",
         "tool_text",
+        "cards",
         "notify_needs_you",
         "notify_failed",
         "notify_done",
@@ -110,9 +111,127 @@ fn every_bool_setting_is_settable() {
 fn marker_follows_tool_text() {
     let tmp = home();
     let marker = tool_text_off_marker(tmp.path());
-    sync_marker(tmp.path(), false).unwrap();
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            tool_text: false,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
     assert!(marker.exists());
-    sync_marker(tmp.path(), true).unwrap();
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            tool_text: true,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
     assert!(!marker.exists());
-    sync_marker(tmp.path(), true).unwrap();
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            tool_text: true,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn cards_setting_round_trip() {
+    let tmp = home();
+    let path = settings_path(tmp.path());
+    let d = Settings::default();
+    assert!(d.cards);
+    let next = apply_set(&d, "cards", &json!(false)).unwrap();
+    assert!(!next.cards);
+    save(&path, &next).unwrap();
+    let loaded = load(&path);
+    assert_eq!(loaded.settings, next);
+    assert!(!loaded.unreadable);
+    assert_eq!(apply_set(&d, "cards", &json!("no")), Err("invalid value"));
+    assert_eq!(apply_set(&d, "cards", &json!(1)), Err("invalid value"));
+}
+
+#[test]
+fn sync_markers_tracks_cards() {
+    let tmp = home();
+    let cards_off = cards_off_marker(tmp.path());
+    let tool_off = tool_text_off_marker(tmp.path());
+
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            cards: false,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    assert!(cards_off.exists());
+    assert!(!tool_off.exists());
+
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            tool_text: false,
+            cards: false,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    assert!(cards_off.exists());
+    assert!(tool_off.exists());
+
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            tool_text: false,
+            cards: true,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    assert!(!cards_off.exists());
+    assert!(tool_off.exists());
+
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            tool_text: false,
+            cards: false,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    sync_markers(
+        tmp.path(),
+        &Settings {
+            tool_text: true,
+            cards: false,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    assert!(cards_off.exists());
+    assert!(!tool_off.exists());
+
+    sync_markers(tmp.path(), &Settings::default()).unwrap();
+    assert!(!cards_off.exists());
+    assert!(!tool_off.exists());
+    sync_markers(tmp.path(), &Settings::default()).unwrap();
+}
+
+#[test]
+fn settings_without_cards_default_on() {
+    let tmp = home();
+    let path = settings_path(tmp.path());
+    write(
+        &path,
+        br#"{"v":1,"subagent_tree":true,"history":true,"tool_text":true,"notify_needs_you":true,"notify_failed":true,"notify_done":true,"lang":"auto","autostart_asked":false}"#,
+    );
+    let l = load(&path);
+    assert!(l.settings.cards);
+    assert!(!l.unreadable);
 }
