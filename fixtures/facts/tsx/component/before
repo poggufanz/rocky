@@ -1,0 +1,4 @@
+export function Button() {
+  const el = <button>Save</button>;
+  return el;
+}

@@ -1,0 +1,22 @@
+{
+  "lang": "typescript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "compute",
+        "container": null,
+        "exported": false
+      },
+      "labels": [
+        {
+          "id": "rewrite",
+          "args": {
+            "pct": 82
+          }
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

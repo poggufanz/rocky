@@ -1,0 +1,4 @@
+export function login(user: User, ttl = 60, remember: boolean): boolean {
+  const ok = ttl > 0;
+  return ok;
+}

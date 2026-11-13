@@ -1,0 +1,20 @@
+{
+  "lang": "tsx",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "Button",
+        "container": null,
+        "exported": true
+      },
+      "labels": [
+        {
+          "id": "body_changed",
+          "args": {}
+        }
+      ],
+      "importance": "low"
+    }
+  ]
+}

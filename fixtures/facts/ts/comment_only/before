@@ -1,0 +1,4 @@
+function square(n: number): number {
+  // old comment
+  return n * n;
+}

@@ -17,7 +17,6 @@ pub(crate) fn normalize(s: &str) -> Cow<'_, str> {
 }
 
 /// Truncates `s` to at most `max_chars` Unicode scalar values, appending `…` when shortened.
-#[allow(dead_code)] // Used by upcoming config and syntax analyzers.
 pub(crate) fn cut(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -90,7 +89,6 @@ pub(crate) fn line_counts(before: &str, after: &str) -> (u32, u32) {
 }
 
 /// Computes `100 - round(100 * matched / max(len_a, len_b))` over token slices.
-#[allow(dead_code)] // Used by upcoming syntax analyzers.
 pub(crate) fn token_change_pct(a: &[String], b: &[String]) -> u32 {
     let max_len = a.len().max(b.len());
     if max_len == 0 {

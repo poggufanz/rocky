@@ -1,0 +1,24 @@
+{
+  "lang": "javascript",
+  "changes": [
+    {
+      "symbol": {
+        "kind": "function",
+        "name": "handler",
+        "container": null,
+        "exported": true
+      },
+      "labels": [
+        {
+          "id": "params_changed",
+          "args": {
+            "added": 1,
+            "removed": 0,
+            "changed": 0
+          }
+        }
+      ],
+      "importance": "high"
+    }
+  ]
+}

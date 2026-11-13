@@ -1,6 +1,8 @@
+use crate::compare;
 use crate::config;
 use crate::lang::lang_for_path;
 use crate::model::{Change, FileFacts, FileInput, Label, Lang, MAX_BYTES, Side};
+use crate::syntax;
 use crate::text;
 
 fn too_large(side: Side<'_>) -> bool {
@@ -66,9 +68,19 @@ pub fn analyze(input: &FileInput<'_>) -> FileFacts {
                 lines_changed_facts(lang, &norm_before, &norm_after)
             }
         }
-        Lang::Plain | Lang::Typescript | Lang::Tsx | Lang::Javascript | Lang::Rust => {
-            lines_changed_facts(lang, &norm_before, &norm_after)
+        Lang::Typescript | Lang::Tsx | Lang::Javascript => {
+            let before_syntax = syntax::parse(lang, &norm_before);
+            let after_syntax = syntax::parse(lang, &norm_after);
+            if before_syntax.has_error || after_syntax.has_error {
+                lines_changed_facts(lang, &norm_before, &norm_after)
+            } else {
+                FileFacts {
+                    lang,
+                    changes: compare::compare(&before_syntax, &after_syntax),
+                }
+            }
         }
+        Lang::Plain | Lang::Rust => lines_changed_facts(lang, &norm_before, &norm_after),
     }
 }
 
