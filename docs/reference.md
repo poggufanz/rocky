@@ -351,7 +351,7 @@ rocky: Run it anyway? [y/N]
 Answer anything but `y` and the command never runs. Rules live in
 `~/.rocky/guard.rules` — plain text, edit freely, Rocky never overwrites an
 edited file. `ROCKY_OFF=1` turns the hook off for a session;
-`rocky hook uninstall` removes the block and keeps the memory.
+`rocky hook uninstall` removes the block and keeps the memory. While desk consent is approved, it also turns the shell hook switch off, so the background process does not restore it.
 
 ## How the memory works
 

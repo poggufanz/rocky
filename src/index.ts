@@ -542,7 +542,7 @@ async function main(): Promise<number> {
           case "install":
             return (await import("./commands/hook.js")).hookInstall();
           case "uninstall":
-            return (await import("./commands/hook.js")).hookUninstall();
+            return (await import("./commands/hook-uninstall.js")).hookUninstallCommand();
           case "status":
             return (await import("./commands/hook.js")).hookStatus();
           case "agent-event":
