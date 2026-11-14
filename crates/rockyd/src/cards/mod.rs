@@ -1,6 +1,7 @@
 //! Read-only Listening store reader and worker-backed change card engine.
 
 pub mod attribute;
+pub mod detail;
 pub mod storage;
 pub mod store;
 pub mod transcript;

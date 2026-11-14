@@ -1,0 +1,812 @@
+//! Card detail assembly, list capping, and paged unified block diffing.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use rocky_facts::{
+    FileInput, Side, SnippetLine as FactSnippetLine, Symbol as FactSymbol,
+    SymbolKind as FactSymbolKind, snippets,
+};
+use rocky_proto::cards::{Block, BlockSymbol, Card, Label, SymbolKind as ProtoSymbolKind};
+use rocky_proto::paths::{listening_store_dir, repo_id};
+use rocky_proto::pipe::{
+    BlockSnippet, DiffLine, DiffLineKind, LINE_CAP, ServerMsg, SnippetLine, encode,
+};
+use similar::{ChangeTag, TextDiff};
+
+use crate::cards::store::{ObjectRead, read_object};
+
+/// Maximum number of cards returned in a single `Cards` page reply.
+pub const MAX_CARD_LIST_LIMIT: usize = 20;
+
+/// Maximum Unicode scalar characters kept in a block's quote inside list replies.
+pub const LIST_QUOTE_MAX_CHARS: usize = 200;
+
+/// Maximum number of blocks in a `CardDetail` reply that carry code snippets.
+pub const MAX_DETAIL_CODE_BLOCKS: usize = 20;
+
+/// Maximum serialized JSON bytes of `DiffLine` entries per `BlockDiff` page.
+pub const DIFF_PAGE_BYTES: usize = 48 * 1024;
+
+/// Maximum UTF-8 bytes kept in a single emitted `DiffLine` before wrapping onto the next line.
+const MAX_SINGLE_LINE_BYTES: usize = 16 * 1024;
+
+/// Formats the opaque pagination cursor `<key_ms>:<card_id>` for `card`.
+pub fn card_cursor(card: &Card) -> String {
+    let key_ms = card.ended_ms.unwrap_or(card.started_ms);
+    format!("{key_ms}:{}", card.card_id)
+}
+
+/// Truncates list-view fields on a card (block `quote.text` capped to 200 chars).
+pub fn prepare_list_card(card: &mut Card) {
+    for block in &mut card.blocks {
+        if let Some(quote) = &mut block.quote {
+            truncate_chars_in_place(&mut quote.text, LIST_QUOTE_MAX_CHARS);
+        }
+    }
+}
+
+/// Builds a `ServerMsg::Cards` reply that fits within `LINE_CAP`.
+pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>) -> ServerMsg {
+    if items.len() > MAX_CARD_LIST_LIMIT {
+        items.truncate(MAX_CARD_LIST_LIMIT);
+        next = items.last().map(card_cursor);
+    }
+    for card in &mut items {
+        prepare_list_card(card);
+    }
+
+    let mut msg = ServerMsg::Cards { id, items, next };
+    while encode(&msg).len() > LINE_CAP {
+        let ServerMsg::Cards {
+            items: ref mut list,
+            next: ref mut cursor,
+            ..
+        } = msg
+        else {
+            unreachable!();
+        };
+        if list.pop().is_none() {
+            *cursor = None;
+            break;
+        }
+        *cursor = list.last().map(card_cursor);
+    }
+    msg
+}
+
+/// Builds a live `ServerMsg::Card` broadcast message that fits within `LINE_CAP`.
+pub fn build_card_broadcast(mut item: Card) -> ServerMsg {
+    prepare_list_card(&mut item);
+    let mut msg = ServerMsg::Card { item };
+    if encode(&msg).len() <= LINE_CAP {
+        return msg;
+    }
+
+    let ServerMsg::Card { ref mut item } = msg else {
+        unreachable!();
+    };
+    while encode(&ServerMsg::Card { item: item.clone() }).len() > LINE_CAP {
+        if item.blocks.pop().is_none() {
+            truncate_chars_in_place(&mut item.prompt, LIST_QUOTE_MAX_CHARS);
+            break;
+        }
+    }
+    msg
+}
+
+/// Builds a `ServerMsg::CardDetail` reply reading Listening objects from `home`.
+pub fn build_card_detail(id: u64, card: &Card, home: &Path) -> ServerMsg {
+    let store_dir = card_store_dir(card, home);
+    build_card_detail_with(id, card, |sha| match store_dir.as_deref() {
+        Some(dir) => read_object(dir, sha),
+        None => ObjectRead::Missing,
+    })
+}
+
+/// Testable core of [`build_card_detail`] taking an explicit object reader.
+pub fn build_card_detail_with<F>(id: u64, card: &Card, mut read_obj: F) -> ServerMsg
+where
+    F: FnMut(&str) -> ObjectRead,
+{
+    let selected: Vec<usize> = card
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| block_is_codable(b))
+        .take(MAX_DETAIL_CODE_BLOCKS)
+        .map(|(idx, _)| idx)
+        .collect();
+
+    // Cache every object read by SHA so files edited across multiple blocks are read once.
+    let mut objects: HashMap<String, ObjectRead> = HashMap::new();
+    for &idx in &selected {
+        let b = &card.blocks[idx];
+        for sha in [&b.before, &b.after].into_iter().flatten() {
+            if !objects.contains_key(sha) {
+                objects.insert(sha.clone(), read_obj(sha));
+            }
+        }
+    }
+
+    // Group selected blocks by (path, before, after) so `rocky_facts::snippets` runs once per file version pair.
+    type GroupKey<'a> = (&'a str, Option<&'a str>, Option<&'a str>);
+    let mut group_order: Vec<(GroupKey<'_>, Vec<usize>)> = Vec::new();
+    let mut group_index: HashMap<GroupKey<'_>, usize> = HashMap::new();
+    for &idx in &selected {
+        let b = &card.blocks[idx];
+        let key: GroupKey<'_> = (b.path.as_str(), b.before.as_deref(), b.after.as_deref());
+        if let Some(&pos) = group_index.get(&key) {
+            group_order[pos].1.push(idx);
+        } else {
+            let pos = group_order.len();
+            group_index.insert(key, pos);
+            group_order.push((key, vec![idx]));
+        }
+    }
+
+    let mut per_block: Vec<Option<BlockSnippet>> = vec![None; card.blocks.len()];
+    for ((path, before_sha, after_sha), block_indices) in group_order {
+        let is_new = block_indices.iter().any(|&i| {
+            card.blocks[i]
+                .labels
+                .iter()
+                .any(|l| matches!(l, Label::FileNew {}))
+        });
+        let is_deleted = block_indices.iter().any(|&i| {
+            card.blocks[i]
+                .labels
+                .iter()
+                .any(|l| matches!(l, Label::FileDeleted {}))
+        });
+
+        let before_side = resolve_side(before_sha, is_new, &objects);
+        let after_side = resolve_side(after_sha, is_deleted, &objects);
+        if !matches!(before_side, Side::Text(_)) && !matches!(after_side, Side::Text(_)) {
+            continue;
+        }
+
+        let converted_syms: Vec<Option<FactSymbol>> = block_indices
+            .iter()
+            .map(|&i| card.blocks[i].symbol.as_ref().map(to_fact_symbol))
+            .collect();
+        let sym_refs: Vec<Option<&FactSymbol>> =
+            converted_syms.iter().map(|s| s.as_ref()).collect();
+
+        let rendered = snippets(
+            &FileInput {
+                path,
+                before: before_side,
+                after: after_side,
+            },
+            &sym_refs,
+        );
+
+        for (block_idx, lines) in block_indices.into_iter().zip(rendered) {
+            if lines.is_empty() {
+                continue;
+            }
+            per_block[block_idx] = Some(BlockSnippet {
+                seq: card.blocks[block_idx].seq,
+                lines: lines.into_iter().map(to_wire_snippet_line).collect(),
+            });
+        }
+    }
+
+    let snippets: Vec<BlockSnippet> = per_block.into_iter().flatten().collect();
+    let mut msg = ServerMsg::CardDetail {
+        id,
+        card: card.clone(),
+        snippets,
+    };
+    while encode(&msg).len() > LINE_CAP {
+        let ServerMsg::CardDetail {
+            ref mut card,
+            ref mut snippets,
+            ..
+        } = msg
+        else {
+            unreachable!();
+        };
+        if snippets.pop().is_some() {
+            continue;
+        }
+        if card.blocks.pop().is_some() {
+            continue;
+        }
+        truncate_chars_in_place(&mut card.prompt, LIST_QUOTE_MAX_CHARS);
+        break;
+    }
+    msg
+}
+
+/// Builds a paged `ServerMsg::BlockDiff` reply reading Listening objects from `home`.
+pub fn build_block_diff(id: u64, card: &Card, seq: u32, page: u32, home: &Path) -> ServerMsg {
+    let store_dir = card_store_dir(card, home);
+    build_block_diff_with(id, card, seq, page, |sha| match store_dir.as_deref() {
+        Some(dir) => read_object(dir, sha),
+        None => ObjectRead::Missing,
+    })
+}
+
+/// Testable core of [`build_block_diff`] taking an explicit object reader.
+pub fn build_block_diff_with<F>(
+    id: u64,
+    card: &Card,
+    seq: u32,
+    page: u32,
+    mut read_obj: F,
+) -> ServerMsg
+where
+    F: FnMut(&str) -> ObjectRead,
+{
+    let Some(block) = card.blocks.iter().find(|b| b.seq == seq) else {
+        return missing_diff(id);
+    };
+    if !block.recorded {
+        return missing_diff(id);
+    }
+
+    let is_new = block.labels.iter().any(|l| matches!(l, Label::FileNew {}));
+    let is_deleted = block
+        .labels
+        .iter()
+        .any(|l| matches!(l, Label::FileDeleted {}));
+
+    let Some(before_text) = resolve_diff_text(block.before.as_deref(), is_new, &mut read_obj)
+    else {
+        return missing_diff(id);
+    };
+    let Some(after_text) = resolve_diff_text(block.after.as_deref(), is_deleted, &mut read_obj)
+    else {
+        return missing_diff(id);
+    };
+
+    let before_norm = before_text.replace("\r\n", "\n");
+    let after_norm = after_text.replace("\r\n", "\n");
+    let diff = TextDiff::from_lines(&before_norm, &after_norm);
+
+    let mut all_lines = Vec::new();
+    for change in diff.iter_all_changes() {
+        let kind = match change.tag() {
+            ChangeTag::Equal => DiffLineKind::Context,
+            ChangeTag::Insert => DiffLineKind::Added,
+            ChangeTag::Delete => DiffLineKind::Removed,
+        };
+        let raw = change.as_str().unwrap_or_default();
+        let line_text = raw.strip_suffix('\n').unwrap_or(raw);
+        push_chunked_diff_lines(&mut all_lines, kind, line_text);
+    }
+
+    let pages_vec = paginate_diff_lines(all_lines);
+    let total_pages = pages_vec.len() as u32;
+    let lines = pages_vec.into_iter().nth(page as usize).unwrap_or_default();
+
+    ServerMsg::BlockDiff {
+        id,
+        lines,
+        page,
+        pages: total_pages,
+        missing: false,
+    }
+}
+
+fn missing_diff(id: u64) -> ServerMsg {
+    ServerMsg::BlockDiff {
+        id,
+        lines: Vec::new(),
+        page: 0,
+        pages: 0,
+        missing: true,
+    }
+}
+
+fn card_store_dir(card: &Card, home: &Path) -> Option<PathBuf> {
+    if card.root.is_empty() {
+        return None;
+    }
+    let rid = repo_id(&card.root, cfg!(windows));
+    Some(listening_store_dir(home, &rid))
+}
+
+fn block_is_codable(block: &Block) -> bool {
+    block.recorded && (block.before.is_some() || block.after.is_some())
+}
+
+fn resolve_side<'a>(
+    sha: Option<&str>,
+    absent_allowed: bool,
+    objects: &'a HashMap<String, ObjectRead>,
+) -> Side<'a> {
+    match sha {
+        Some(hash) => match objects.get(hash) {
+            Some(ObjectRead::Text(text)) => Side::Text(text.as_str()),
+            _ => Side::Unknown,
+        },
+        None => {
+            if absent_allowed {
+                Side::Absent
+            } else {
+                Side::Unknown
+            }
+        }
+    }
+}
+
+fn resolve_diff_text<F>(sha: Option<&str>, absent_allowed: bool, read_obj: &mut F) -> Option<String>
+where
+    F: FnMut(&str) -> ObjectRead,
+{
+    match sha {
+        Some(hash) => match read_obj(hash) {
+            ObjectRead::Text(text) => Some(text),
+            ObjectRead::Missing | ObjectRead::TooLarge | ObjectRead::Invalid => None,
+        },
+        None => absent_allowed.then(String::new),
+    }
+}
+
+fn to_fact_symbol(sym: &BlockSymbol) -> FactSymbol {
+    FactSymbol {
+        kind: match sym.kind {
+            ProtoSymbolKind::Function => FactSymbolKind::Function,
+            ProtoSymbolKind::Method => FactSymbolKind::Method,
+            ProtoSymbolKind::Class => FactSymbolKind::Class,
+            ProtoSymbolKind::Struct => FactSymbolKind::Struct,
+            ProtoSymbolKind::Enum => FactSymbolKind::Enum,
+            ProtoSymbolKind::Trait => FactSymbolKind::Trait,
+            ProtoSymbolKind::Interface => FactSymbolKind::Interface,
+            ProtoSymbolKind::Type => FactSymbolKind::Type,
+            ProtoSymbolKind::Const => FactSymbolKind::Const,
+            ProtoSymbolKind::Test => FactSymbolKind::Test,
+            ProtoSymbolKind::Key => FactSymbolKind::Key,
+        },
+        name: sym.name.clone(),
+        container: sym.container.clone(),
+        exported: sym.exported,
+        nth: sym.nth,
+    }
+}
+
+fn to_wire_snippet_line(line: FactSnippetLine) -> SnippetLine {
+    match line {
+        FactSnippetLine::Context { text } => SnippetLine::Context { text },
+        FactSnippetLine::Added { text } => SnippetLine::Added { text },
+        FactSnippetLine::Removed { text } => SnippetLine::Removed { text },
+        FactSnippetLine::Fold { lines } => SnippetLine::Fold { lines },
+        FactSnippetLine::More { lines } => SnippetLine::More { lines },
+    }
+}
+
+fn truncate_chars_in_place(text: &mut String, max_chars: usize) {
+    if let Some((byte_idx, _)) = text.char_indices().nth(max_chars) {
+        text.truncate(byte_idx);
+    }
+}
+
+fn push_chunked_diff_lines(out: &mut Vec<DiffLine>, kind: DiffLineKind, mut text: &str) {
+    if text.len() <= MAX_SINGLE_LINE_BYTES {
+        out.push(DiffLine {
+            kind,
+            text: text.to_string(),
+        });
+        return;
+    }
+    while !text.is_empty() {
+        let split_at = text
+            .char_indices()
+            .take_while(|&(idx, ch)| idx + ch.len_utf8() <= MAX_SINGLE_LINE_BYTES)
+            .last()
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or_else(|| text.chars().next().map(char::len_utf8).unwrap_or(0));
+        let (head, tail) = text.split_at(split_at);
+        out.push(DiffLine {
+            kind,
+            text: head.to_string(),
+        });
+        text = tail;
+    }
+}
+
+fn paginate_diff_lines(all_lines: Vec<DiffLine>) -> Vec<Vec<DiffLine>> {
+    if all_lines.is_empty() {
+        return vec![Vec::new()];
+    }
+    let mut pages = Vec::new();
+    let mut cur: Vec<DiffLine> = Vec::new();
+    let mut cur_bytes = 2usize; // JSON array `[` + `]`
+
+    for line in all_lines {
+        let elem_bytes = serde_json::to_string(&line).map(|s| s.len()).unwrap_or(0);
+        let sep = usize::from(!cur.is_empty());
+        if !cur.is_empty() && cur_bytes + sep + elem_bytes > DIFF_PAGE_BYTES {
+            pages.push(std::mem::take(&mut cur));
+            cur_bytes = 2 + elem_bytes;
+            cur.push(line);
+        } else {
+            cur_bytes += sep + elem_bytes;
+            cur.push(line);
+        }
+    }
+    if !cur.is_empty() {
+        pages.push(cur);
+    }
+    pages
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use rocky_proto::cards::{
+        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageState,
+        Importance, Label, Quote, SymbolKind,
+    };
+    use rocky_proto::pipe::{LINE_CAP, ServerMsg, encode};
+
+    use super::*;
+
+    fn test_block(
+        seq: u32,
+        path: &str,
+        symbol: Option<&str>,
+        before: Option<&str>,
+        after: Option<&str>,
+        recorded: bool,
+    ) -> Block {
+        Block {
+            seq,
+            path: path.to_string(),
+            symbol: symbol.map(|name| BlockSymbol {
+                kind: SymbolKind::Function,
+                name: name.to_string(),
+                container: None,
+                exported: true,
+                nth: 0,
+            }),
+            labels: Vec::new(),
+            importance: Importance::Medium,
+            via: BlockVia::Edit,
+            tool_use_ids: vec!["tu-1".to_string()],
+            bash: None,
+            before: before.map(str::to_string),
+            after: after.map(str::to_string),
+            recorded,
+            line: Some(1),
+            added: Some(1),
+            removed: Some(1),
+            quote: None,
+        }
+    }
+
+    fn quoted_block(mut block: Block, text: &str) -> Block {
+        block.quote = Some(Quote {
+            text: text.to_string(),
+            shared: false,
+        });
+        block
+    }
+
+    fn labeled_block(mut block: Block, labels: Vec<Label>) -> Block {
+        block.labels = labels;
+        block
+    }
+
+    fn test_card(card_id: &str, blocks: Vec<Block>) -> Card {
+        Card {
+            v: CARD_VERSION,
+            card_id: card_id.to_string(),
+            rev: 1,
+            repo_id: "r1".to_string(),
+            root: "C:/repo".to_string(),
+            main_root: None,
+            branch: Some("main".to_string()),
+            session_id: "s1".to_string(),
+            agent_id: "a1".to_string(),
+            agent_type: "claude".to_string(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "fix bug".to_string(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks,
+            flow: Vec::new(),
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn cards_reply_fits_line_cap_with_20_large_cards() {
+        let long_quote = "q".repeat(350);
+        let big_blocks: Vec<Block> = (1..=16)
+            .map(|seq| {
+                quoted_block(
+                    test_block(
+                        seq,
+                        &format!(
+                            "src/very/deep/nested/module_{seq:02}/component_implementation.rs"
+                        ),
+                        Some("process_request_payload"),
+                        Some(&"a".repeat(64)),
+                        Some(&"b".repeat(64)),
+                        true,
+                    ),
+                    &long_quote,
+                )
+            })
+            .collect();
+        let cards: Vec<Card> = (0..20)
+            .map(|i| {
+                let mut c = test_card(&format!("card-{i:02}"), big_blocks.clone());
+                c.ended_ms = Some(10_000 - i as u64);
+                c
+            })
+            .collect();
+        let expected_items = cards.clone();
+
+        let reply = build_cards_reply(7, cards, Some("initial-next".into()));
+        let wire = encode(&reply);
+        assert!(
+            wire.len() <= LINE_CAP,
+            "reply exceeded LINE_CAP: {}",
+            wire.len()
+        );
+
+        let ServerMsg::Cards { id, items, next } = reply else {
+            panic!("expected ServerMsg::Cards");
+        };
+        assert_eq!(id, 7);
+        assert!(!items.is_empty(), "expected at least one card to fit");
+        assert!(
+            items.len() < expected_items.len(),
+            "expected trimming from 20 large cards"
+        );
+        for item in &items {
+            for block in &item.blocks {
+                if let Some(q) = &block.quote {
+                    assert!(
+                        q.text.chars().count() <= LIST_QUOTE_MAX_CHARS,
+                        "quote not truncated: {}",
+                        q.text.chars().count()
+                    );
+                }
+            }
+        }
+        let last = items.last().unwrap();
+        assert_eq!(next, Some(card_cursor(last)));
+    }
+
+    #[test]
+    fn card_detail_reads_each_file_once() {
+        let card = test_card(
+            "c-reads",
+            vec![
+                test_block(
+                    1,
+                    "src/a.rs",
+                    Some("alpha"),
+                    Some("sha-a-old"),
+                    Some("sha-a-new"),
+                    true,
+                ),
+                test_block(
+                    2,
+                    "src/a.rs",
+                    Some("beta"),
+                    Some("sha-a-old"),
+                    Some("sha-a-new"),
+                    true,
+                ),
+                labeled_block(
+                    test_block(3, "src/unrecorded.rs", None, Some("sha-unrec"), None, false),
+                    vec![Label::NotCaptured {}],
+                ),
+                test_block(4, "src/path_only.rs", None, None, None, true),
+                labeled_block(
+                    test_block(5, "src/b.rs", Some("gamma"), None, Some("sha-b-new"), true),
+                    vec![Label::FileNew {}],
+                ),
+            ],
+        );
+
+        let a_old = "fn alpha() {\n    let x = 1;\n}\n\nfn beta() {\n    let y = 2;\n}\n";
+        let a_new = "fn alpha() {\n    let x = 2;\n}\n\nfn beta() {\n    let y = 3;\n}\n";
+        let b_new = "fn gamma() {\n    println!(\"hi\");\n}\n";
+
+        let mut reads: BTreeMap<String, usize> = BTreeMap::new();
+        let reply = build_card_detail_with(11, &card, |sha| {
+            *reads.entry(sha.to_string()).or_insert(0) += 1;
+            match sha {
+                "sha-a-old" => ObjectRead::Text(a_old.to_string()),
+                "sha-a-new" => ObjectRead::Text(a_new.to_string()),
+                "sha-b-new" => ObjectRead::Text(b_new.to_string()),
+                _ => ObjectRead::Missing,
+            }
+        });
+
+        let ServerMsg::CardDetail { id, snippets, .. } = &reply else {
+            panic!("expected CardDetail");
+        };
+        assert_eq!(*id, 11);
+        assert_eq!(reads.get("sha-a-old").copied(), Some(1));
+        assert_eq!(reads.get("sha-a-new").copied(), Some(1));
+        assert_eq!(reads.get("sha-b-new").copied(), Some(1));
+        assert!(!reads.contains_key("sha-unrec"));
+
+        let seqs: Vec<u32> = snippets.iter().map(|s| s.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 5]);
+        assert!(snippets.iter().all(|s| !s.lines.is_empty()));
+        assert!(encode(&reply).len() <= LINE_CAP);
+    }
+
+    #[test]
+    fn card_detail_caps_20_code_blocks() {
+        let mut blocks = vec![labeled_block(
+            test_block(1, "src/unrecorded.rs", None, Some("sha-u"), None, false),
+            vec![Label::NotCaptured {}],
+        )];
+        for seq in 2..=26 {
+            blocks.push(test_block(
+                seq,
+                &format!("src/f{seq}.rs"),
+                Some("work"),
+                Some("sha-before"),
+                Some("sha-after"),
+                true,
+            ));
+        }
+        let card = test_card("c-cap", blocks);
+
+        let reply = build_card_detail_with(22, &card, |sha| match sha {
+            "sha-before" => ObjectRead::Text("fn work() {\n    1\n}\n".to_string()),
+            "sha-after" => ObjectRead::Text("fn work() {\n    2\n}\n".to_string()),
+            _ => ObjectRead::Missing,
+        });
+
+        let ServerMsg::CardDetail { snippets, .. } = &reply else {
+            panic!("expected CardDetail");
+        };
+        assert_eq!(snippets.len(), MAX_DETAIL_CODE_BLOCKS);
+        let seqs: Vec<u32> = snippets.iter().map(|s| s.seq).collect();
+        let expected: Vec<u32> = (2..=21).collect();
+        assert_eq!(seqs, expected);
+        assert!(encode(&reply).len() <= LINE_CAP);
+    }
+
+    #[test]
+    fn block_diff_pages_under_48_kib() {
+        let mut before = String::new();
+        let mut after = String::new();
+        for i in 0..1_200 {
+            let suffix = "x".repeat(80);
+            before.push_str(&format!("line {i:04} old {suffix}\n"));
+            after.push_str(&format!("line {i:04} new {suffix}\n"));
+        }
+
+        let card = test_card(
+            "c-diff",
+            vec![test_block(
+                1,
+                "src/big.txt",
+                None,
+                Some("sha-before"),
+                Some("sha-after"),
+                true,
+            )],
+        );
+
+        let read = |sha: &str| match sha {
+            "sha-before" => ObjectRead::Text(before.clone()),
+            "sha-after" => ObjectRead::Text(after.clone()),
+            _ => ObjectRead::Missing,
+        };
+
+        let first = build_block_diff_with(31, &card, 1, 0, read);
+        let ServerMsg::BlockDiff {
+            lines,
+            page,
+            pages,
+            missing,
+            ..
+        } = &first
+        else {
+            panic!("expected BlockDiff");
+        };
+        assert!(!missing);
+        assert_eq!(*page, 0);
+        assert!(*pages >= 3, "expected multiple pages, got {pages}");
+        assert!(!lines.is_empty());
+
+        let mut total_lines = 0usize;
+        for p in 0..*pages {
+            let reply = build_block_diff_with(31, &card, 1, p, read);
+            assert!(encode(&reply).len() <= LINE_CAP);
+            let ServerMsg::BlockDiff {
+                lines,
+                page: got_page,
+                pages: got_pages,
+                missing,
+                ..
+            } = reply
+            else {
+                panic!("expected BlockDiff");
+            };
+            assert!(!missing);
+            assert_eq!(got_page, p);
+            assert_eq!(got_pages, *pages);
+            assert!(!lines.is_empty());
+            let page_bytes = serde_json::to_vec(&lines).unwrap().len();
+            assert!(
+                page_bytes <= DIFF_PAGE_BYTES,
+                "page {p} too large: {page_bytes} > {DIFF_PAGE_BYTES}"
+            );
+            total_lines += lines.len();
+        }
+        assert_eq!(total_lines, 2_400);
+    }
+
+    #[test]
+    fn block_diff_missing_object() {
+        let card = test_card(
+            "c-miss",
+            vec![
+                test_block(
+                    1,
+                    "src/a.rs",
+                    None,
+                    Some("sha-missing"),
+                    Some("sha-after"),
+                    true,
+                ),
+                test_block(2, "src/b.rs", None, Some("sha-a"), Some("sha-b"), false),
+            ],
+        );
+
+        let reply_missing_obj = build_block_diff_with(41, &card, 1, 0, |sha| match sha {
+            "sha-after" => ObjectRead::Text("hello\n".to_string()),
+            _ => ObjectRead::Missing,
+        });
+        assert_eq!(
+            reply_missing_obj,
+            ServerMsg::BlockDiff {
+                id: 41,
+                lines: Vec::new(),
+                page: 0,
+                pages: 0,
+                missing: true,
+            }
+        );
+
+        let reply_unrecorded = build_block_diff_with(42, &card, 2, 0, |_| {
+            ObjectRead::Text("should not matter".to_string())
+        });
+        assert_eq!(
+            reply_unrecorded,
+            ServerMsg::BlockDiff {
+                id: 42,
+                lines: Vec::new(),
+                page: 0,
+                pages: 0,
+                missing: true,
+            }
+        );
+
+        let reply_unknown_seq = build_block_diff_with(43, &card, 99, 0, |_| ObjectRead::Missing);
+        assert_eq!(
+            reply_unknown_seq,
+            ServerMsg::BlockDiff {
+                id: 43,
+                lines: Vec::new(),
+                page: 0,
+                pages: 0,
+                missing: true,
+            }
+        );
+    }
+}

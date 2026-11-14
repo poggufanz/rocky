@@ -362,6 +362,54 @@ fn main() {
                 }) => {
                     guards.repo_request(id, root, allow, reply);
                 }
+                Ok(Control::Cards {
+                    id,
+                    query,
+                    before,
+                    limit,
+                    reply,
+                }) => {
+                    let (items, next) = shared.lock().unwrap().cards.page(
+                        query.as_deref(),
+                        before.as_deref(),
+                        limit as usize,
+                    );
+                    let _ = reply.send(rockyd::cards::detail::build_cards_reply(id, items, next));
+                }
+                Ok(Control::CardDetail { id, card_id, reply }) => {
+                    let card = shared.lock().unwrap().cards.get(&card_id);
+                    let msg = match card {
+                        Some(card) => rockyd::cards::detail::build_card_detail(id, &card, &home),
+                        None => ServerMsg::Ack {
+                            id,
+                            ok: false,
+                            error: Some("card not found".to_string()),
+                        },
+                    };
+                    let _ = reply.send(msg);
+                }
+                Ok(Control::BlockDiff {
+                    id,
+                    card_id,
+                    seq,
+                    page,
+                    reply,
+                }) => {
+                    let card = shared.lock().unwrap().cards.get(&card_id);
+                    let msg = match card {
+                        Some(card) => {
+                            rockyd::cards::detail::build_block_diff(id, &card, seq, page, &home)
+                        }
+                        None => ServerMsg::BlockDiff {
+                            id,
+                            lines: Vec::new(),
+                            page: 0,
+                            pages: 0,
+                            missing: true,
+                        },
+                    };
+                    let _ = reply.send(msg);
+                }
                 Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
             }
         }
@@ -408,6 +456,7 @@ fn main() {
             &captures.owned_roots(),
             &config_dirs,
             &shared,
+            &hub,
             &log,
         );
         thread::sleep(Duration::from_millis(25));
@@ -517,6 +566,7 @@ fn service_cards(
     owned_roots: &std::collections::BTreeSet<String>,
     config_dirs: &[std::path::PathBuf],
     shared: &Arc<Mutex<Shared>>,
+    hub: &Hub,
     log: &RotatingLog,
 ) {
     let ctx = {
@@ -536,16 +586,22 @@ fn service_cards(
     }
     if !built.is_empty() {
         let mut errs = 0u64;
+        let mut appended = Vec::with_capacity(built.len());
         {
             let mut s = shared.lock().unwrap();
-            for card in &built {
-                if s.cards.append(card).is_err() {
+            for card in built {
+                if s.cards.append(&card).is_err() {
                     errs += 1;
+                } else {
+                    appended.push(card);
                 }
             }
         }
         if errs > 0 {
             log.line(&format!("cards: {errs} append errors"));
+        }
+        for card in appended {
+            hub.broadcast(&rockyd::cards::detail::build_card_broadcast(card));
         }
     }
 }
