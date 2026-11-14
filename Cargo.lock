@@ -4555,6 +4555,7 @@ dependencies = [
  "interprocess",
  "libc",
  "notify",
+ "rocky-facts",
  "rocky-proto",
  "serde",
  "serde_json",
