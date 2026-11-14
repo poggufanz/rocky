@@ -251,7 +251,7 @@ fn main() {
     let workers = thread::available_parallelism().map_or(1, |n| n.get().min(4));
     let mut cards = Engine::new(home.clone(), workers);
     cards.set_enabled(settings.cards);
-    let mut queries = CardQueryLoop::new(home.clone());
+    let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
 
     let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
     guards.check(&shared, &hub, &log);
@@ -394,7 +394,7 @@ fn main() {
             &hub,
             &log,
         );
-        queries.service();
+        service_queries(&mut queries, &log);
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -550,6 +550,14 @@ fn broadcast_appended_cards(appended: Vec<rocky_proto::cards::Card>, hub: &Hub, 
     }
     if skipped > 0 {
         log.line(&format!("cards: {skipped} broadcasts too large"));
+    }
+}
+
+fn service_queries(queries: &mut CardQueryLoop, log: &RotatingLog) {
+    queries.service();
+    let panics = queries.take_worker_panics();
+    if panics > 0 {
+        log.line(&format!("cards: {panics} query worker panics"));
     }
 }
 
@@ -879,6 +887,7 @@ mod tests {
             let mut cards = Engine::new(home_bg.clone(), 1);
             let mut queries = CardQueryLoop::new_with_object_reader(
                 home_bg.clone(),
+                cards.worker_count(),
                 Arc::new(move |sha: &str| {
                     let _ = entered_tx.lock().unwrap().send(());
                     let _ = release_rx.lock().unwrap().recv();
@@ -985,5 +994,204 @@ mod tests {
             contents.contains("cards: 1 broadcasts too large"),
             "expected broadcast skip count in log, got: {contents}"
         );
+    }
+
+    #[test]
+    fn cards_query_worker_panic_is_contained_and_daemon_keeps_serving() {
+        if std::env::var_os("ROCKY_QUERY_PANIC_HOOK_TEST").is_some() {
+            let home = std::path::PathBuf::from(
+                std::env::var_os("ROCKY_QUERY_PANIC_HOME").expect("home dir env"),
+            );
+            let spool = spool_dir(&home);
+            std::fs::create_dir_all(&spool).unwrap();
+            let log = Arc::new(RotatingLog::new(&log_path(&home)));
+            rockyd::log::install_panic_hook(Arc::clone(&log));
+
+            let shared = make_test_shared(&home);
+            let hub = Arc::new(Hub::new());
+            let mut card_panic = make_test_card(&home, "card-panic");
+            card_panic.blocks[0].before = Some("a".repeat(64));
+            card_panic.blocks[0].after = Some("b".repeat(64));
+            let card_ok = make_test_card(&home, "card-ok");
+            {
+                let mut s = shared.lock().unwrap();
+                s.cards.append(&card_panic).unwrap();
+                s.cards.append(&card_ok).unwrap();
+            }
+
+            let mut ingest = Ingestor::new();
+            let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+            let mut cards = Engine::new(home.clone(), 2);
+            assert_eq!(cards.worker_count(), 2);
+            let observed_thread = Arc::new(Mutex::new(None::<String>));
+            let observed_thread_ref = Arc::clone(&observed_thread);
+            let mut queries = CardQueryLoop::new_with_object_reader(
+                home.clone(),
+                cards.worker_count(),
+                Arc::new(move |sha: &str| {
+                    *observed_thread_ref.lock().unwrap() =
+                        std::thread::current().name().map(str::to_owned);
+                    if sha.starts_with('a') {
+                        panic!("SECRET_QUERY_LEAK_TOKEN");
+                    }
+                    if sha.starts_with('1') {
+                        ObjectRead::Text("fn f() {\n    1\n}\n".to_string())
+                    } else {
+                        ObjectRead::Text("fn f() {\n    2\n}\n".to_string())
+                    }
+                }),
+            );
+
+            let (tx1, rx1) = mpsc::sync_channel(1);
+            let (tx2, rx2) = mpsc::sync_channel(1);
+            let _ = handle_control(
+                Control::CardDetail {
+                    id: 10,
+                    card_id: "card-panic".to_string(),
+                    reply: tx1,
+                },
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+            let _ = handle_control(
+                Control::CardDetail {
+                    id: 11,
+                    card_id: "card-ok".to_string(),
+                    reply: tx2,
+                },
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+
+            let mut reply1 = None;
+            let mut reply2 = None;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline && (reply1.is_none() || reply2.is_none()) {
+                service_queries(&mut queries, &log);
+                if reply1.is_none()
+                    && let Ok(msg) = rx1.try_recv()
+                {
+                    reply1 = Some(msg);
+                }
+                if reply2.is_none()
+                    && let Ok(msg) = rx2.try_recv()
+                {
+                    reply2 = Some(msg);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(queries.worker_panics(), 0);
+            assert_eq!(
+                reply1,
+                Some(ServerMsg::Error {
+                    code: "internal".to_string(),
+                })
+            );
+            assert!(matches!(reply2, Some(ServerMsg::CardDetail { id: 11, .. })));
+
+            let (tx3, rx3) = mpsc::sync_channel(1);
+            let _ = handle_control(
+                Control::Cards {
+                    id: 12,
+                    query: None,
+                    before: None,
+                    limit: 20,
+                    reply: tx3,
+                },
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let reply3 = loop {
+                service_queries(&mut queries, &log);
+                if let Ok(msg) = rx3.try_recv() {
+                    break msg;
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for cards");
+                thread::sleep(Duration::from_millis(5));
+            };
+            let ServerMsg::Cards { id: 12, items, .. } = reply3 else {
+                panic!("expected ServerMsg::Cards after query panic");
+            };
+            assert_eq!(items.len(), 2);
+
+            std::fs::write(
+                spool.join("0000000001000-1-0.json"),
+                r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"live-after-query-panic","cwd":"C:\\repo"}}"#,
+            )
+            .unwrap();
+            rescan(
+                &spool,
+                &shared,
+                &hub,
+                &log,
+                &mut ingest,
+                &mut guards,
+                &mut cards,
+                None,
+            );
+            assert!(
+                shared
+                    .lock()
+                    .unwrap()
+                    .state
+                    .agents()
+                    .iter()
+                    .any(|a| a.key.session_id == "live-after-query-panic"),
+                "hook event should ingest after query worker panic"
+            );
+            assert_eq!(
+                observed_thread.lock().unwrap().as_deref(),
+                Some("rocky-card-worker-2")
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().expect("current test exe");
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "tests::cards_query_worker_panic_is_contained_and_daemon_keeps_serving",
+                "--nocapture",
+            ])
+            .env("ROCKY_QUERY_PANIC_HOOK_TEST", "1")
+            .env("ROCKY_QUERY_PANIC_HOME", tmp.path())
+            .output()
+            .expect("run query panic child");
+        assert!(
+            out.status.success(),
+            "query panic child aborted or failed: status={:?}, stdout={}, stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let log_text = std::fs::read_to_string(log_path(tmp.path())).expect("read rockyd.log");
+        assert!(
+            log_text.contains("cards: 1 worker panic"),
+            "expected panic-hook count line, got: {log_text:?}"
+        );
+        assert!(
+            log_text.contains("cards: 1 query worker panics"),
+            "expected service_queries count line, got: {log_text:?}"
+        );
+        assert!(!log_text.contains("SECRET_QUERY_LEAK_TOKEN"));
+        assert!(!log_text.contains("panic, aborting"));
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("SECRET_QUERY_LEAK_TOKEN"));
     }
 }

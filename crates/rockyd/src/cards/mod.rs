@@ -298,6 +298,11 @@ impl Engine {
         self.enabled = enabled;
     }
 
+    /// Returns the number of build worker threads configured for this engine.
+    pub fn worker_count(&self) -> usize {
+        self.pool.workers
+    }
+
     /// Returns the number of currently uncollected worker panics.
     pub fn worker_panics(&self) -> u64 {
         self.pool.panics.load(Ordering::Relaxed)
