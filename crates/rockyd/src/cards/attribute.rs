@@ -14,7 +14,7 @@ use rocky_proto::cards::{
     MAX_FLOW_STEPS, Quote, SymbolKind,
 };
 use rocky_proto::paths::{canonical_path, repo_id};
-use rocky_proto::pipe::CaptureState;
+use rocky_proto::pipe::{AgentKey, CaptureState};
 
 use crate::capture::CaptureResult;
 use crate::cards::store::{Before, ObjectRead, Version};
@@ -483,12 +483,26 @@ fn collect_windows(
     (edits, bashes)
 }
 
-/// Extracts normalized `(repo_rel_key, pre_ms, end_ms)` edit windows from `turn` within `session_root_raw`.
-pub(crate) fn collect_edit_windows_for_turn(
-    turn: &Turn,
+/// Closed other-agent edit window captured at ingest time for worker-side attribution resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndexedEdit {
+    pub agent: AgentKey,
+    pub tool_use_id: String,
+    pub target_path: String,
+    pub session_root: Option<String>,
+    pub cwd: Option<String>,
+    pub pre_ms: u64,
+    pub post_ms: u64,
+}
+
+/// Resolves overlapping other-agent [`IndexedEdit`] records into normalized `(repo_rel_key, pre_ms, end_ms)` windows.
+pub(crate) fn resolve_other_edits(
+    entries: &[IndexedEdit],
+    turn_started_ms: u64,
     session_root_raw: Option<&str>,
     home_dir: &Path,
     results: &[CaptureResult],
+    through_ms: u64,
 ) -> Vec<(String, u64, u64)> {
     let Some(root_raw) = session_root_raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Vec::new();
@@ -499,23 +513,34 @@ pub(crate) fn collect_edit_windows_for_turn(
     let home_str = home_dir.to_string_lossy();
     let home_abs = AbsPath::parse_abs(home_str.as_ref());
     let root_cmp = canonical_path(root_raw, cfg!(windows));
-    let cwd = turn.cwd.as_deref();
-    let mut out = Vec::new();
-    for win in &turn.windows {
-        if win.kind != ToolKind::Edit {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some(entry_root) = entry
+            .session_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            && canonical_path(entry_root, cfg!(windows)) != root_cmp
+        {
             continue;
         }
         let (_, repo_rel, _) = classify_target_path(
-            win.target_path.as_deref(),
-            &win.tool,
+            Some(entry.target_path.as_str()),
+            "",
             Some(&session_root_abs),
             home_abs.as_ref(),
-            cwd,
+            entry.cwd.as_deref(),
         );
         if let Some(rel) = repo_rel {
-            let (end_ms, _) =
-                compute_window_end(win, turn.ended_ms, Some(root_cmp.as_str()), results);
-            out.push((normalize_rel_key(&rel), win.pre_ms, end_ms));
+            let (end_ms, _) = compute_window_end_for_anchor(
+                entry.pre_ms,
+                entry.post_ms,
+                Some(root_cmp.as_str()),
+                results,
+            );
+            if entry.pre_ms <= through_ms && end_ms >= turn_started_ms {
+                out.push((normalize_rel_key(&rel), entry.pre_ms, end_ms));
+            }
         }
     }
     out
@@ -528,6 +553,15 @@ fn compute_window_end(
     results: &[CaptureResult],
 ) -> (u64, bool) {
     let anchor = win.post_ms.or(turn_ended_ms).unwrap_or(win.pre_ms);
+    compute_window_end_for_anchor(win.pre_ms, anchor, root_cmp, results)
+}
+
+fn compute_window_end_for_anchor(
+    pre_ms: u64,
+    anchor: u64,
+    root_cmp: Option<&str>,
+    results: &[CaptureResult],
+) -> (u64, bool) {
     let cap = anchor.saturating_add(WINDOW_CAP_MS);
     let Some(expected_root) = root_cmp else {
         return (cap, true);
@@ -543,7 +577,7 @@ fn compute_window_end(
         .min_by_key(|r| (r.started_ms, r.at_ms));
 
     match matching {
-        Some(res) if res.at_ms <= cap => (res.at_ms.max(win.pre_ms), false),
+        Some(res) if res.at_ms <= cap => (res.at_ms.max(pre_ms), false),
         _ => (cap, true),
     }
 }

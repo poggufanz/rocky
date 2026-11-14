@@ -81,6 +81,18 @@ pub enum TrackerSignal {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClosedEdit {
+    pub turn_id: u64,
+    pub agent: AgentKey,
+    pub tool_use_id: String,
+    pub target_path: String,
+    pub session_root: Option<String>,
+    pub cwd: Option<String>,
+    pub pre_ms: u64,
+    pub post_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WindowRef {
     turn_id: u64,
@@ -196,6 +208,27 @@ impl Tracker {
         ev: &HookEvent,
         recv_ms: u64,
         repo: &RepoInfo,
+    ) -> Vec<TrackerSignal> {
+        self.on_event_impl(ev, recv_ms, repo, None)
+    }
+
+    /// Processes one hook event while collecting any edit window closed by this event.
+    pub(crate) fn on_event_recording_edits(
+        &mut self,
+        ev: &HookEvent,
+        recv_ms: u64,
+        repo: &RepoInfo,
+        closed_edits: &mut Vec<ClosedEdit>,
+    ) -> Vec<TrackerSignal> {
+        self.on_event_impl(ev, recv_ms, repo, Some(closed_edits))
+    }
+
+    fn on_event_impl(
+        &mut self,
+        ev: &HookEvent,
+        recv_ms: u64,
+        repo: &RepoInfo,
+        closed_edits: Option<&mut Vec<ClosedEdit>>,
     ) -> Vec<TrackerSignal> {
         let mut signals = Vec::new();
         let key = agent_key(ev);
@@ -381,7 +414,11 @@ impl Tracker {
                 };
                 let is_late = turn.status != TurnEnd::Open;
                 let started_ms = turn.started_ms;
-                let edit_signal = close_window_at(turn, wref.window_idx, recv_ms, ok, ev, repo);
+                let (edit_signal, closed_edit) =
+                    close_window_at(wref.turn_id, turn, wref.window_idx, recv_ms, ok, ev, repo);
+                if let (Some(out), Some(edit)) = (closed_edits, closed_edit) {
+                    out.push(edit);
+                }
                 if is_late {
                     signals.push(TrackerSignal::Late {
                         agent: key,
@@ -413,6 +450,14 @@ impl Tracker {
 
     /// Removes and returns closed turns that have passed the 60 s revision window.
     pub fn expire(&mut self, now_ms: u64) -> Vec<Turn> {
+        self.expire_with_ids(now_ms)
+            .into_iter()
+            .map(|(_, turn)| turn)
+            .collect()
+    }
+
+    /// Removes and returns `(turn_id, turn)` pairs that have passed the 60 s revision window.
+    pub(crate) fn expire_with_ids(&mut self, now_ms: u64) -> Vec<(u64, Turn)> {
         let Some(cutoff) = now_ms.checked_sub(REVISION_WINDOW_MS) else {
             return Vec::new();
         };
@@ -442,7 +487,7 @@ impl Tracker {
                     }
                 }
             }
-            expired.push(turn);
+            expired.push((turn_id, turn));
         }
         expired
     }
@@ -601,16 +646,19 @@ fn fill_metadata(turn: &mut Turn, ev: &HookEvent, repo: &RepoInfo) {
     }
 }
 
-/// Closes the window at `window_idx` and returns `Some(EditDone)` when it is an in-repo edit.
+/// Closes the window at `window_idx` and returns `(Some(EditDone), Some(ClosedEdit))` as applicable.
 fn close_window_at(
+    turn_id: u64,
     turn: &mut Turn,
     window_idx: usize,
     recv_ms: u64,
     ok: bool,
     ev: &HookEvent,
     repo: &RepoInfo,
-) -> Option<TrackerSignal> {
-    let window = turn.windows.get_mut(window_idx)?;
+) -> (Option<TrackerSignal>, Option<ClosedEdit>) {
+    let Some(window) = turn.windows.get_mut(window_idx) else {
+        return (None, None);
+    };
     window.post_ms = Some(recv_ms);
     window.ok = Some(ok);
     if window.target_path.is_none() && ev.target_path.is_some() {
@@ -620,10 +668,27 @@ fn close_window_at(
         window.command = ev.command.clone();
     }
     let kind = window.kind;
+    let tool_use_id = window.tool_use_id.clone();
     let target_path = window.target_path.clone();
+    let pre_ms = window.pre_ms;
     fill_metadata(turn, ev, repo);
 
-    if ok && kind == ToolKind::Edit {
+    if kind != ToolKind::Edit {
+        return (None, None);
+    }
+
+    let closed_edit = ClosedEdit {
+        turn_id,
+        agent: turn.agent.clone(),
+        tool_use_id,
+        target_path: target_path.clone().unwrap_or_default(),
+        session_root: turn.repo.root.clone(),
+        cwd: turn.cwd.clone(),
+        pre_ms,
+        post_ms: recv_ms,
+    };
+
+    let signal = if ok {
         let root = turn.repo.root.as_deref().or(repo.root.as_deref());
         match (root, target_path.as_deref()) {
             (Some(root), Some(target)) if path_under_root(target, root) => {
@@ -638,7 +703,9 @@ fn close_window_at(
         }
     } else {
         None
-    }
+    };
+
+    (signal, Some(closed_edit))
 }
 
 fn normalize_absolute_lexical(path: &str) -> Option<String> {
