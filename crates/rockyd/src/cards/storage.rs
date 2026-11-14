@@ -494,9 +494,9 @@ struct CardGroup {
     card_id: String,
     latest_rev: u32,
     latest_ended_ms: Option<u64>,
-    last_line_idx: usize,
-    total_bytes: u64,
-    lines: Vec<(usize, Vec<u8>)>,
+    latest_sort_key: u64,
+    line_idx: usize,
+    line_bytes: Vec<u8>,
 }
 
 fn rotate_file(path: &Path) -> io::Result<()> {
@@ -532,16 +532,19 @@ fn rotate_file(path: &Path) -> io::Result<()> {
                 continue;
             };
             let line_bytes = trimmed.to_vec();
-            let byte_len = line_bytes.len() as u64 + 1;
+            let sort_key = card_sort_key(&card);
             match groups.get_mut(&card.card_id) {
                 Some(group) => {
-                    group.last_line_idx = cur_idx;
-                    if card.rev >= group.latest_rev {
+                    let is_newer = card.rev > group.latest_rev
+                        || (card.rev == group.latest_rev
+                            && card.ended_ms >= group.latest_ended_ms);
+                    if is_newer {
                         group.latest_rev = card.rev;
                         group.latest_ended_ms = card.ended_ms;
+                        group.latest_sort_key = sort_key;
+                        group.line_idx = cur_idx;
+                        group.line_bytes = line_bytes;
                     }
-                    group.total_bytes = group.total_bytes.saturating_add(byte_len);
-                    group.lines.push((cur_idx, line_bytes));
                 }
                 None => {
                     groups.insert(
@@ -550,9 +553,9 @@ fn rotate_file(path: &Path) -> io::Result<()> {
                             card_id: card.card_id,
                             latest_rev: card.rev,
                             latest_ended_ms: card.ended_ms,
-                            last_line_idx: cur_idx,
-                            total_bytes: byte_len,
-                            lines: vec![(cur_idx, line_bytes)],
+                            latest_sort_key: sort_key,
+                            line_idx: cur_idx,
+                            line_bytes,
                         },
                     );
                 }
@@ -562,20 +565,21 @@ fn rotate_file(path: &Path) -> io::Result<()> {
 
     let mut ordered: Vec<CardGroup> = groups.into_values().collect();
     ordered.sort_by(|a, b| {
-        b.latest_ended_ms
-            .cmp(&a.latest_ended_ms)
-            .then_with(|| b.last_line_idx.cmp(&a.last_line_idx))
+        b.latest_sort_key
+            .cmp(&a.latest_sort_key)
+            .then_with(|| b.line_idx.cmp(&a.line_idx))
             .then_with(|| a.card_id.cmp(&b.card_id))
     });
 
     let mut kept_bytes = 0u64;
     let mut kept_lines: Vec<(usize, Vec<u8>)> = Vec::new();
-    for group in ordered {
-        if kept_bytes.saturating_add(group.total_bytes) > ROTATE_TARGET_BYTES {
+    for (idx, group) in ordered.into_iter().enumerate() {
+        let byte_len = group.line_bytes.len() as u64 + 1;
+        if idx > 0 && kept_bytes.saturating_add(byte_len) > ROTATE_TARGET_BYTES {
             break;
         }
-        kept_bytes += group.total_bytes;
-        kept_lines.extend(group.lines);
+        kept_bytes = kept_bytes.saturating_add(byte_len);
+        kept_lines.push((group.line_idx, group.line_bytes));
     }
     kept_lines.sort_by_key(|(idx, _)| *idx);
 
@@ -854,7 +858,7 @@ mod tests {
         let kept = store.get("kept-multi").expect("kept-multi retained");
         assert_eq!(kept.rev, 2);
 
-        // All revisions of each kept card remain in the file on disk.
+        // Only the latest revision of each kept card remains on disk after rotation.
         let raw = fs::read_to_string(&path).unwrap();
         let revs: Vec<u32> = raw
             .lines()
@@ -862,7 +866,7 @@ mod tests {
             .filter(|c| c.card_id == "kept-multi")
             .map(|c| c.rev)
             .collect();
-        assert_eq!(revs, vec![1, 2]);
+        assert_eq!(revs, vec![2]);
     }
 
     #[test]
@@ -1448,6 +1452,55 @@ mod tests {
         let final_len = fs::metadata(&path).unwrap().len();
         assert!(final_len > 0 && final_len <= ROTATE_TARGET_BYTES);
         assert!(store.get("overflow-stale").is_some());
+    }
+
+    #[test]
+    fn rotation_keeps_only_latest_revision_and_never_drops_newest_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo_multi = "61616161616161616161616161616161";
+
+        let mut older = make_card("multi-rev", 1, repo_multi, Some("/work/m"), Some(1_000), &["a.rs"]);
+        older.prompt = "a".repeat(4_500_000);
+        store.append(&older).unwrap();
+
+        let mut latest = make_card("multi-rev", 2, repo_multi, Some("/work/m"), Some(2_000), &["a.rs"]);
+        latest.prompt = "b".repeat(4_500_000);
+        store.append(&latest).unwrap();
+
+        let kept = store
+            .get("multi-rev")
+            .expect("card with revisions totaling over 6 MiB must survive rotation");
+        assert_eq!(kept.rev, 2);
+        let path_multi = cards_file(dir.path(), repo_multi);
+        let raw_multi = fs::read_to_string(&path_multi).unwrap();
+        let revs: Vec<u32> = raw_multi
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Card>(line).ok())
+            .filter(|c| c.card_id == "multi-rev")
+            .map(|c| c.rev)
+            .collect();
+        assert_eq!(revs, vec![2]);
+
+        let repo_huge = "62626262626262626262626262626262";
+        let old_small = make_card("old-small", 1, repo_huge, Some("/work/h"), Some(100), &["a.rs"]);
+        store.append(&old_small).unwrap();
+
+        let mut huge_newest = make_card(
+            "huge-newest",
+            1,
+            repo_huge,
+            Some("/work/h"),
+            Some(9_000),
+            &["b.rs"],
+        );
+        huge_newest.prompt = "z".repeat(MAX_CARD_FILE_BYTES as usize + 1_024);
+        store.append(&huge_newest).unwrap();
+
+        let path_huge = cards_file(dir.path(), repo_huge);
+        assert!(fs::metadata(&path_huge).unwrap().len() > 0);
+        assert!(store.get("huge-newest").is_some());
+        assert!(store.get("old-small").is_none());
     }
 
     #[test]
