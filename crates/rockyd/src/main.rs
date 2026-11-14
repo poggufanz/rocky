@@ -18,8 +18,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, settings_path, spool_dir};
 use rocky_proto::pipe::{
-    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, ServerMsg, SetupAction, SetupHealth,
-    StatusOp,
+    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, RepoInfo, ServerMsg, SetupAction,
+    SetupHealth, StatusOp,
 };
 use rocky_proto::settings::Settings;
 use rockyd::cards::query::CardQueryLoop;
@@ -444,11 +444,51 @@ fn rescan(
     captures: Option<&mut CaptureLoop>,
 ) {
     let mut repo_of = resolve_repo;
+    rescan_with(
+        spool,
+        shared,
+        hub,
+        log,
+        ingest,
+        guards,
+        cards,
+        captures,
+        &mut repo_of,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rescan_with(
+    spool: &Path,
+    shared: &Arc<Mutex<Shared>>,
+    hub: &Hub,
+    log: &RotatingLog,
+    ingest: &mut Ingestor,
+    guards: &mut GuardLoop,
+    cards: &mut Engine,
+    captures: Option<&mut CaptureLoop>,
+    resolve: &mut dyn FnMut(&str) -> RepoInfo,
+) {
     let now = now_ms();
+    let mut seen_cwds: HashMap<String, RepoInfo> = HashMap::new();
+    let mut cached_resolve = |cwd: &str| {
+        if let Some(info) = seen_cwds.get(cwd) {
+            return info.clone();
+        }
+        let info = resolve(cwd);
+        seen_cwds.insert(cwd.to_string(), info.clone());
+        info
+    };
     let (msgs, health, upserts, health_changed, out, cards_enabled) = {
         let mut guard = shared.lock().unwrap();
         let s = &mut *guard;
-        let out = ingest.ingest_once(spool, &mut s.state, &mut repo_of, &mut s.history, now);
+        let out = ingest.ingest_once(
+            spool,
+            &mut s.state,
+            &mut cached_resolve,
+            &mut s.history,
+            now,
+        );
         for gap in &out.gaps {
             s.gaps.push(*gap);
             s.state.record_gap(gap);
@@ -477,13 +517,31 @@ fn rescan(
         }
         let upserts = out.changes.upserted.len();
         let cards_enabled = s.settings.cards && !s.cards_removed;
+        if cards_enabled {
+            let sessions_starting: HashSet<&str> = out
+                .events
+                .iter()
+                .filter(|(ev, _)| {
+                    ev.hook_event_name == "SessionStart"
+                        && ev.cwd.as_deref().is_some_and(|c| !c.trim().is_empty())
+                })
+                .map(|(ev, _)| ev.session_id.as_str())
+                .collect();
+            for (ev, _) in &out.events {
+                if !sessions_starting.contains(ev.session_id.as_str())
+                    && let Some(repo) = s.state.session_repo(&ev.session_id)
+                {
+                    cards.seed_session_repo_if_absent(&ev.session_id, repo);
+                }
+            }
+        }
         (msgs, health, upserts, health_changed, out, cards_enabled)
     };
     for m in &msgs {
         hub.broadcast(m);
     }
     if cards_enabled {
-        let flushes = cards.on_ingest(&out, &mut repo_of, now);
+        let flushes = cards.on_ingest(&out, &mut cached_resolve, now);
         if let Some(cap) = captures {
             for req in flushes {
                 cap.flush(&req.root, now);
@@ -1429,5 +1487,97 @@ mod tests {
         assert!(shared.lock().unwrap().settings.cards);
         assert_eq!(std::fs::read(settings_path(&home)).unwrap(), saved_before);
         assert!(!cards_off_marker(&home).exists());
+    }
+
+    #[test]
+    fn rescan_reuses_state_repo_without_duplicate_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        std::fs::create_dir_all(&spool).unwrap();
+        let log = RotatingLog::new(&log_path(&home));
+        let shared = make_test_shared(&home);
+        let hub = Hub::new();
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut cards = Engine::new(home.clone(), 1);
+
+        let resolve_calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut resolver = |cwd: &str| {
+            resolve_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            RepoInfo {
+                root: None,
+                main_root: None,
+                name: Path::new(cwd)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                branch: None,
+            }
+        };
+
+        std::fs::write(
+            spool.join("0000000001000-1-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"sess-dup","cwd":"/tmp/plain-home"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spool.join("0000000001010-2-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1010,"kind":"event","event":{"hook_event_name":"PreToolUse","session_id":"sess-dup","cwd":"/tmp/plain-home"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // Existing session already in StatusState (e.g., from replay or cards disabled):
+        // turning cards on and receiving a non-SessionStart event reuses StatusState's repo.
+        shared.lock().unwrap().settings.cards = false;
+        std::fs::write(
+            spool.join("0000000002000-3-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":2000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"sess-prior","cwd":"/tmp/prior-dir"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        shared.lock().unwrap().settings.cards = true;
+        std::fs::write(
+            spool.join("0000000002100-4-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":2100,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"sess-prior","cwd":"/tmp/prior-dir","prompt":"hi"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }

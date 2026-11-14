@@ -570,6 +570,20 @@ impl Engine {
         self.turn_states.retain(|_, s| s.in_flight);
     }
 
+    /// Seeds a session's cached repository when cards have not seen the session yet.
+    pub fn seed_session_repo_if_absent(&mut self, session_id: &str, repo: &RepoInfo) {
+        if repo.root.is_none()
+            && repo.main_root.is_none()
+            && repo.name.is_empty()
+            && repo.branch.is_none()
+        {
+            return;
+        }
+        self.repo_cache
+            .entry(session_id.to_string())
+            .or_insert_with(|| repo.clone());
+    }
+
     fn resolve_session_repo(
         &mut self,
         ev: &HookEvent,
@@ -582,7 +596,7 @@ impl Engine {
         ) {
             ("SessionStart", _) => cwd.is_some(),
             (_, None) => cwd.is_some(),
-            (_, Some(cached)) => cached.root.is_none() && cwd.is_some(),
+            (_, Some(_)) => false,
         };
         if needs_update && let Some(path) = cwd {
             let info = repo_of(path);
@@ -842,7 +856,12 @@ impl Engine {
             compute_versions_through_ms(&turn, &results, root_canon.as_deref());
         let other_bash = self.collect_other_bash(&turn, versions_through_ms);
         let other_edits = if recorded {
-            self.collect_other_edits(&turn, session_root.as_deref(), &results, versions_through_ms)
+            self.collect_other_edits(
+                &turn,
+                session_root.as_deref(),
+                &results,
+                versions_through_ms,
+            )
         } else {
             Vec::new()
         };
@@ -1152,5 +1171,79 @@ mod tests {
         assert_eq!(card_id("s", "a", 123), "085fd43e5e4c84caf8d98e99af9d6ff2");
         assert_eq!(card_id("sa", "", 123), "a4a2a32beaaf4d9e15c7f0c649393eb4");
         assert_eq!(card_id("s", "a1", 23), "bcb390a344d2e7e6b1f5bf2650a1dd60");
+    }
+
+    fn test_hook_event(name: &str, session_id: &str, cwd: Option<&str>) -> HookEvent {
+        HookEvent {
+            hook_event_name: name.to_string(),
+            session_id: session_id.to_string(),
+            cwd: cwd.map(str::to_string),
+            agent_id: None,
+            agent_type: None,
+            tool_name: None,
+            tool_use_id: None,
+            transcript_path: None,
+            agent_transcript_path: None,
+            notification_type: None,
+            target_path: None,
+            command: None,
+            description: None,
+            prompt: None,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn resolve_session_repo_caches_non_git_sessions_after_first_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::new(dir.path().to_path_buf(), 1);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut repo_of = |cwd: &str| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            RepoInfo {
+                root: None,
+                main_root: None,
+                name: std::path::Path::new(cwd)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                branch: None,
+            }
+        };
+
+        let events = IngestOutput {
+            events: vec![
+                (
+                    test_hook_event("UserPromptSubmit", "non-git-sess", Some("/tmp/plain")),
+                    1_000,
+                ),
+                (
+                    test_hook_event("PreToolUse", "non-git-sess", Some("/tmp/plain")),
+                    1_100,
+                ),
+                (
+                    test_hook_event("PostToolUse", "non-git-sess", Some("/tmp/plain")),
+                    1_200,
+                ),
+                (
+                    test_hook_event("Stop", "non-git-sess", Some("/tmp/plain")),
+                    1_300,
+                ),
+            ],
+            ..IngestOutput::default()
+        };
+        let _ = engine.on_ingest(&events, &mut repo_of, 1_300);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let refresh = IngestOutput {
+            events: vec![(
+                test_hook_event("SessionStart", "non-git-sess", Some("/tmp/plain-2")),
+                2_000,
+            )],
+            ..IngestOutput::default()
+        };
+        let _ = engine.on_ingest(&refresh, &mut repo_of, 2_000);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }

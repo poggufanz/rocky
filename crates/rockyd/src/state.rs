@@ -129,6 +129,10 @@ impl StatusState {
         self.tool_text
     }
 
+    pub fn session_repo(&self, session_id: &str) -> Option<&RepoInfo> {
+        self.repos.get(session_id)
+    }
+
     /// Sets a session's repo from an event's cwd. `SessionStart` with a cwd
     /// always sets it. Any other event sets it only while the session has no
     /// repo or only the placeholder, so a later prompt elsewhere does not move it.
