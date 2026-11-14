@@ -12,7 +12,7 @@ const CMD_MAX_CHARS: usize = 80;
 const MAX_EDIT_ROWS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlockStatus {
+pub(crate) enum BlockStatus {
     Normal,
     Unrecorded,
     OutsideRepo,
@@ -63,7 +63,7 @@ pub(super) fn card_matches_query(card: &Card, needle_lower: &str) -> bool {
         .any(|block| block_matches_query(block, needle_lower))
 }
 
-pub(super) fn sanitize_single_line(text: &str) -> String {
+pub(crate) fn sanitize_single_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -175,7 +175,7 @@ where
     group
 }
 
-fn block_status(block: &Block, card_root: &str) -> BlockStatus {
+pub(crate) fn block_status(block: &Block, card_root: &str) -> BlockStatus {
     if is_outside_repo(&block.path, card_root) {
         BlockStatus::OutsideRepo
     } else if !block.recorded {
@@ -185,7 +185,7 @@ fn block_status(block: &Block, card_root: &str) -> BlockStatus {
     }
 }
 
-fn status_chip(status: BlockStatus, lang: UiLang) -> Option<String> {
+pub(crate) fn status_chip(status: BlockStatus, lang: UiLang) -> Option<String> {
     match status {
         BlockStatus::OutsideRepo => Some(card_text(lang, &CardMsg::OutsideRepo)),
         BlockStatus::Unrecorded => Some(card_text(lang, &CardMsg::UnrecordedChip)),
@@ -341,11 +341,11 @@ fn is_format_only_collapsible(block: &Block, card_root: &str) -> bool {
             .all(|l| matches!(l, Label::FormatOnly {}))
 }
 
-fn block_kind(block: &Block) -> Option<SymbolKind> {
+pub(crate) fn block_kind(block: &Block) -> Option<SymbolKind> {
     block.symbol.as_ref().map(|s| s.kind)
 }
 
-fn format_symbol(symbol: Option<&BlockSymbol>) -> Option<String> {
+pub(crate) fn format_symbol(symbol: Option<&BlockSymbol>) -> Option<String> {
     let sym = symbol?;
     let name = sanitize_single_line(&sym.name);
     if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) && !name.ends_with("()") {
@@ -355,7 +355,7 @@ fn format_symbol(symbol: Option<&BlockSymbol>) -> Option<String> {
     }
 }
 
-fn repo_name(card: &Card) -> Option<String> {
+pub(crate) fn repo_name(card: &Card) -> Option<String> {
     card.main_root
         .as_deref()
         .and_then(root_last_segment)

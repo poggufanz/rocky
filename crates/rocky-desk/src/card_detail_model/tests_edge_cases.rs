@@ -1,0 +1,182 @@
+use rocky_proto::cards::{BlockSymbol, FlowKind, FlowStep, Label, Quote, SymbolKind};
+use rocky_proto::pipe::{DiffLine, DiffLineKind};
+
+use super::tests::{sample_block, sample_card};
+use super::*;
+use crate::i18n::UiLang;
+
+fn assert_no_control_chars(label: &str, value: &str) {
+    assert!(
+        !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')),
+        "{label} contained control char: {value:?}"
+    );
+}
+
+#[test]
+fn edit_step_titles_and_single_sided_line_facts() {
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+
+    let mut b1 = sample_block(1, "src/added.rs", vec![Label::FileNew {}]);
+    b1.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "init".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    b1.line = None;
+    b1.added = Some(5);
+    b1.removed = Some(0);
+
+    let mut b2 = sample_block(2, "src/deleted.rs", vec![Label::FileDeleted {}]);
+    b2.line = None;
+    b2.added = Some(0);
+    b2.removed = Some(4);
+
+    let mut b3 = sample_block(3, "src/zero.rs", vec![Label::FormatOnly {}]);
+    b3.line = None;
+    b3.added = Some(0);
+    b3.removed = Some(0);
+
+    let mut b4 = sample_block(4, "~/outside.txt", Vec::new());
+    b4.recorded = false;
+    b4.line = None;
+    b4.added = None;
+    b4.removed = None;
+
+    card.blocks = vec![b1, b2, b3, b4];
+    card.flow = vec![
+        FlowStep {
+            kind: FlowKind::Edit,
+            text: "src/added.rs".to_string(),
+            ok: true,
+            dur_ms: 1_500,
+            seqs: vec![1],
+        },
+        FlowStep {
+            kind: FlowKind::Edit,
+            text: "src/deleted.rs".to_string(),
+            ok: true,
+            dur_ms: 500,
+            seqs: vec![2],
+        },
+        FlowStep {
+            kind: FlowKind::Edit,
+            text: String::new(),
+            ok: true,
+            dur_ms: 0,
+            seqs: vec![3, 4],
+        },
+    ];
+    card.flow_more = 2;
+
+    model.on_detail(1, card, Vec::new(), UiLang::Id);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+
+    assert_eq!(view.timeline[0].title, "src/added.rs \u{203a} init()");
+    assert_eq!(view.timeline[0].dur, "1s");
+    assert_eq!(
+        view.timeline[0].subs,
+        vec![("file baru".to_string(), "+5".to_string())]
+    );
+
+    assert_eq!(view.timeline[1].title, "src/deleted.rs");
+    assert_eq!(view.timeline[1].dur, "0s");
+    assert_eq!(
+        view.timeline[1].subs,
+        vec![("file dihapus".to_string(), "\u{2212}4".to_string())]
+    );
+
+    assert_eq!(view.timeline[2].title, "src/zero.rs");
+    assert_eq!(
+        view.timeline[2].subs,
+        vec![
+            ("hanya format".to_string(), String::new()),
+            ("di luar repo".to_string(), String::new()),
+        ]
+    );
+    assert_eq!(view.timeline_more.as_deref(), Some("+2 langkah"));
+}
+
+#[test]
+fn single_line_fields_sanitize_controls_while_detail_keeps_prompt_and_quote() {
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let mut card = sample_card("c1", 1_000, Some(10_000));
+    card.main_root = Some("/work/my\nrepo".to_string());
+    card.root = "/work/my\nrepo".to_string();
+    card.branch = Some("feat\tcards\r\n".to_string());
+    card.agent_type = "Ex\tplore\n".to_string();
+    card.prompt = "Line 1\nLine 2".to_string();
+
+    let mut blk = sample_block(
+        1,
+        "src/my\nfile.rs",
+        vec![Label::CallAdded {
+            name: "foo\nbar\t\x07".to_string(),
+        }],
+    );
+    blk.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "run\tcmd\x00".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    blk.line = Some(10);
+    blk.quote = Some(Quote {
+        text: "Para 1\nPara 2".to_string(),
+        shared: false,
+    });
+    card.blocks = vec![blk];
+    card.flow = vec![FlowStep {
+        kind: FlowKind::Cmd,
+        text: "  echo hi\r\nls\t-la  \n".to_string(),
+        ok: true,
+        dur_ms: 2_000,
+        seqs: vec![1],
+    }];
+
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+
+    assert_eq!(view.prompt, "Line 1\nLine 2");
+    assert_eq!(view.groups[0].quote.as_deref(), Some("Para 1\nPara 2"));
+    assert_eq!(
+        view.meta,
+        "my repo \u{00b7} feat cards \u{00b7} 9 s \u{00b7} Ex plore"
+    );
+    assert_no_control_chars("meta", &view.meta);
+    assert_no_control_chars("head", &view.groups[0].blocks[0].head);
+    for (chip, _) in &view.groups[0].blocks[0].chips {
+        assert_no_control_chars("chip", chip);
+    }
+    assert_eq!(view.timeline[0].title, "echo hi ls -la");
+    assert_no_control_chars("step.title", &view.timeline[0].title);
+    for (chip, fact) in &view.timeline[0].subs {
+        assert_no_control_chars("step.sub.chip", chip);
+        assert_no_control_chars("step.sub.fact", fact);
+    }
+}
+
+#[test]
+fn diff_zero_pages_blocks_navigation() {
+    let (mut diff, _) = DiffModel::open("c1".to_string(), 1, 1);
+    diff.on_diff(
+        1,
+        vec![DiffLine {
+            kind: DiffLineKind::Context,
+            text: String::new(),
+        }],
+        0,
+        0,
+        false,
+    );
+    assert!(diff.go(0, 2).is_none());
+}

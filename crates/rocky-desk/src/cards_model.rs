@@ -6,7 +6,10 @@ use rocky_proto::cards::Card;
 use rocky_proto::pipe::ClientMsg;
 
 use crate::i18n::UiLang;
-use rows::{build_card_row, card_matches_query, card_sort_key, sanitize_single_line};
+pub(crate) use rows::{
+    block_kind, block_status, format_symbol, repo_name, sanitize_single_line, status_chip,
+};
+use rows::{build_card_row, card_matches_query, card_sort_key};
 
 mod rows;
 

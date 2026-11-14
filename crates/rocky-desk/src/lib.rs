@@ -1,6 +1,7 @@
 pub mod app;
 pub mod autostart;
 pub mod capture_lines;
+pub mod card_detail_model;
 pub mod cards_model;
 pub mod client;
 pub mod clock;
