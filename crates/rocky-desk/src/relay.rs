@@ -54,6 +54,7 @@ pub fn send_cmd(rocky_home: &Path, name: CmdName, timeout: Duration) -> Result<(
                 id: 1,
                 ok: false,
                 error,
+                ..
             })) => return Err(RelayError::Rejected(error.unwrap_or_default())),
             // Snapshot, settings, and the command's own broadcast may arrive
             // before the ack; the ack is the only message that ends the wait.

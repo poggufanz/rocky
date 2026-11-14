@@ -1,0 +1,134 @@
+[
+  {
+    "input": "C:\\Repo\\x",
+    "platform": "win32",
+    "canonical": "c:/repo/x",
+    "id": "8317ba610c4af17409f6df2596bbecd8"
+  },
+  {
+    "input": "c:/repo/x/",
+    "platform": "win32",
+    "canonical": "c:/repo/x",
+    "id": "8317ba610c4af17409f6df2596bbecd8"
+  },
+  {
+    "input": "C:/repo//x/./y",
+    "platform": "win32",
+    "canonical": "c:/repo/x/y",
+    "id": "cbc4bac16383ce2365a15d556ebe9d9a"
+  },
+  {
+    "input": "\\\\server\\share\\r",
+    "platform": "win32",
+    "canonical": "//server/share/r",
+    "id": "dcc19ecaf0c20a02f0f04282b7217e91"
+  },
+  {
+    "input": "/home/u/r",
+    "platform": "linux",
+    "canonical": "/home/u/r",
+    "id": "df1869c9ea9b70f9658b0c08669d2e3e"
+  },
+  {
+    "input": "/home/u//r/",
+    "platform": "linux",
+    "canonical": "/home/u/r",
+    "id": "df1869c9ea9b70f9658b0c08669d2e3e"
+  },
+  {
+    "input": "C:\\Repo\\\u001b[31mx",
+    "platform": "win32",
+    "canonical": "c:/repo/ x",
+    "id": "a5c344ae3a39854e408ea5d5d75675fc"
+  },
+  {
+    "input": "/home/\u001b[31mu/r",
+    "platform": "linux",
+    "canonical": "/home/ u/r",
+    "id": "bcb6cc5814a514a4df18502aa0263088"
+  },
+  {
+    "input": "C:\\Repo\\x\u200b",
+    "platform": "win32",
+    "canonical": "c:/repo/x",
+    "id": "8317ba610c4af17409f6df2596bbecd8"
+  },
+  {
+    "input": "/home/u\u200b/r",
+    "platform": "linux",
+    "canonical": "/home/u/r",
+    "id": "df1869c9ea9b70f9658b0c08669d2e3e"
+  },
+  {
+    "input": "C:/",
+    "platform": "win32",
+    "canonical": "c:/",
+    "id": "508e9f1d9b22d5705a4eda7b70c585c6"
+  },
+  {
+    "input": "/",
+    "platform": "linux",
+    "canonical": "/",
+    "id": "8a5edab282632443219e051e4ade2d1d"
+  },
+  {
+    "input": "src/./core/../index.ts",
+    "platform": "linux",
+    "canonical": "src/core/../index.ts",
+    "id": "2e06e052108e3e5726f8b119e9171942"
+  },
+  {
+    "input": "/Home/U/Repo",
+    "platform": "linux",
+    "canonical": "/Home/U/Repo",
+    "id": "34531f3fbe9d8de828fdfbfbdc527bb6"
+  },
+  {
+    "input": "//server/share/r",
+    "platform": "linux",
+    "canonical": "/server/share/r",
+    "id": "919e0070a06290dfcac510f90658bbef"
+  },
+  {
+    "input": "C:folder/./sub",
+    "platform": "win32",
+    "canonical": "c:folder/sub",
+    "id": "740f43c69e263269083164e33e97d085"
+  },
+  {
+    "input": "C:",
+    "platform": "win32",
+    "canonical": "c:",
+    "id": "826c0d7d3c42f5c52210bfc49965904f"
+  },
+  {
+    "input": "\u001b]0;t\u0007/home/u/r\ufeff",
+    "platform": "linux",
+    "canonical": "/home/u/r",
+    "id": "df1869c9ea9b70f9658b0c08669d2e3e"
+  },
+  {
+    "input": "\u009b31mC:\\Repo\\x\u061c",
+    "platform": "win32",
+    "canonical": "c:/repo/x",
+    "id": "8317ba610c4af17409f6df2596bbecd8"
+  },
+  {
+    "input": "//./a",
+    "platform": "win32",
+    "canonical": "//a",
+    "id": "5c8a2365a30a1b8dfe20bf8559afbfa0"
+  },
+  {
+    "input": "///a/b",
+    "platform": "win32",
+    "canonical": "/a/b",
+    "id": "662b7b62a798bb2d53e67cad9778e12e"
+  },
+  {
+    "input": ".",
+    "platform": "linux",
+    "canonical": "",
+    "id": "e3b0c44298fc1c149afbf4c8996fb924"
+  }
+]

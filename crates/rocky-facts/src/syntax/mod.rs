@@ -2,7 +2,7 @@ mod ecma;
 mod rust;
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use tree_sitter::{Node, Parser};
 
@@ -74,6 +74,7 @@ pub(crate) struct SkelNode {
 }
 
 /// Line span and skeleton head lines of a matched symbol for snippet extraction.
+#[derive(Clone)]
 pub(crate) struct SymbolRegion {
     pub lines: (u32, u32),
     pub head_lines: BTreeSet<u32>,
@@ -403,10 +404,27 @@ fn is_head_skel_kind(kind: SkelKind) -> bool {
     )
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_parse_count() {
+    PARSE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn parse_count() -> usize {
+    PARSE_COUNT.with(|count| count.get())
+}
+
 fn parse_tree(lang: Lang, src: &str) -> Option<tree_sitter::Tree> {
     let ts_lang = language_for(lang)?;
     let mut parser = Parser::new();
     parser.set_language(&ts_lang).ok()?;
+    #[cfg(test)]
+    PARSE_COUNT.with(|count| count.set(count.get() + 1));
     parser.parse(src, None)
 }
 
@@ -423,29 +441,12 @@ fn extract_from_root<'a>(
     }
 }
 
-/// Extracts just the line span and optional head lines for one symbol without collecting file tokens.
-pub(crate) fn parse_symbol_region(
+fn build_symbol_region(
     lang: Lang,
     src: &str,
-    target: &Symbol,
+    matched: &ExtractedSymbol<'_>,
     collect_heads: bool,
-) -> Option<SymbolRegion> {
-    let tree = parse_tree(lang, src)?;
-    let extracted = extract_from_root(lang, tree.root_node(), src, false)?;
-    let mut matching: Vec<ExtractedSymbol<'_>> = extracted
-        .symbols
-        .into_iter()
-        .filter(|raw| {
-            raw.symbol.kind == target.kind
-                && raw.symbol.container.as_deref() == target.container.as_deref()
-                && raw.symbol.name == target.name
-        })
-        .collect();
-    if matching.is_empty() {
-        return None;
-    }
-    matching.sort_by_key(|sym| (sym.span.0, Reverse(sym.span.1)));
-    let matched = matching.into_iter().nth(target.nth as usize)?;
+) -> SymbolRegion {
     let mut head_lines = BTreeSet::new();
     if collect_heads {
         head_lines.insert(matched.lines.0);
@@ -463,10 +464,62 @@ pub(crate) fn parse_symbol_region(
             }
         }
     }
-    Some(SymbolRegion {
+    SymbolRegion {
         lines: matched.lines,
         head_lines,
-    })
+    }
+}
+
+/// Extracts line spans and optional head lines for many symbols from a single parse.
+pub(crate) fn parse_symbol_regions(
+    lang: Lang,
+    src: &str,
+    targets: &[Option<&Symbol>],
+    collect_heads: bool,
+) -> Vec<Option<SymbolRegion>> {
+    if !targets.iter().any(Option::is_some) {
+        return vec![None; targets.len()];
+    }
+    let Some(tree) = parse_tree(lang, src) else {
+        return vec![None; targets.len()];
+    };
+    let Some(mut extracted) = extract_from_root(lang, tree.root_node(), src, false) else {
+        return vec![None; targets.len()];
+    };
+    extracted
+        .symbols
+        .sort_by_key(|sym| (sym.span.0, Reverse(sym.span.1)));
+
+    let mut by_key: HashMap<(SymbolKind, Option<&str>, &str), Vec<usize>> =
+        HashMap::with_capacity(extracted.symbols.len());
+    for (idx, raw) in extracted.symbols.iter().enumerate() {
+        by_key
+            .entry((
+                raw.symbol.kind,
+                raw.symbol.container.as_deref(),
+                raw.symbol.name.as_str(),
+            ))
+            .or_default()
+            .push(idx);
+    }
+
+    let mut cached: HashMap<usize, SymbolRegion> = HashMap::new();
+    targets
+        .iter()
+        .map(|target| {
+            let sym = (*target)?;
+            let sym_idx = by_key
+                .get(&(sym.kind, sym.container.as_deref(), sym.name.as_str()))
+                .and_then(|indices| indices.get(sym.nth as usize))
+                .copied()?;
+            if let Some(region) = cached.get(&sym_idx) {
+                return Some(region.clone());
+            }
+            let region = build_symbol_region(lang, src, &extracted.symbols[sym_idx], collect_heads);
+            cached.insert(sym_idx, region.clone());
+            Some(region)
+        })
+        .collect()
 }
 
 /// Parses `src` with the grammar for `lang` into a language-neutral `FileSyntax`.

@@ -168,6 +168,7 @@ test("collect reports roots and results as JSON lines only", { skip: noGit }, as
   const repo = s.repo();
   const key = normalizeRepoRoot(repo);
   assert.equal(setRepoCapture(repo, true, CONSENT, home).ok, true);
+  const beforeSpawn = Date.now();
   const proc = s.listen(home);
   proc.send({ v: 1, root: repo });
   assert.ok(await until(() => proc.results().some((line) => line.root === key)), "a result line for the consented root");
@@ -181,12 +182,34 @@ test("collect reports roots and results as JSON lines only", { skip: noGit }, as
   assert.deepEqual(roots, { v: 1, kind: "roots", roots: [{ root: key, owner: true }] });
   const result = proc.results().find((line) => line.root === key);
   assert.ok(result !== undefined);
-  assert.deepEqual(Object.keys(result).sort(), ["at_ms", "coverage", "gaps", "kind", "reason", "root", "v"]);
+  assert.deepEqual(Object.keys(result).sort(), ["at_ms", "coverage", "gaps", "kind", "reason", "root", "started_ms", "v"]);
   assert.equal(result.coverage, "complete");
   assert.equal(result.gaps, 0);
   assert.equal(result.reason, null);
+  assert.equal(typeof result.started_ms, "number");
   assert.equal(typeof result.at_ms, "number");
+  assert.ok((result.started_ms as number) >= beforeSpawn);
+  assert.ok((result.started_ms as number) <= (result.at_ms as number));
   assert.ok((result.at_ms as number) > 0);
+});
+
+test("collect result carries started_ms from the post that started it", { skip: noGit }, async (t) => {
+  const s = new Scratch(t);
+  const home = s.dir("rocky-listen-home-");
+  const repo = s.repo();
+  const key = normalizeRepoRoot(repo);
+  assert.equal(setRepoCapture(repo, true, CONSENT, home).ok, true);
+  const proc = s.listen(home);
+  assert.ok(await untilResults(proc, key, 1), "startup reconcile finished");
+  const postedAt = Date.now();
+  proc.send({ v: 1, root: repo });
+  assert.ok(await untilResults(proc, key, 2), "request reconcile finished");
+  const second = proc.results().filter((line) => line.root === key)[1];
+  assert.ok(second !== undefined);
+  assert.equal(typeof second.started_ms, "number");
+  assert.equal(typeof second.at_ms, "number");
+  assert.ok((second.started_ms as number) >= postedAt, "started_ms must be >= post time");
+  assert.ok((second.started_ms as number) <= (second.at_ms as number), "started_ms must be <= at_ms");
 });
 
 test("collect exits 0 and releases its leases when stdin ends", { skip: noGit }, async (t) => {

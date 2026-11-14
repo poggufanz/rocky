@@ -1,11 +1,11 @@
-//! Pipe protocol v3 between rockyd and rocky-desk: one JSON object per line.
+//! Pipe protocol v4 between rockyd and rocky-desk: one JSON object per line.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const LINE_CAP: usize = 64 * 1024;
 pub const CLIENT_QUEUE_CAP: usize = 1024;
 /// Limit for [`TargetHealth::fights_10m`].
@@ -40,6 +40,8 @@ pub struct Action {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoInfo {
     pub root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_root: Option<String>,
     pub name: String,
     pub branch: Option<String>,
 }
@@ -324,6 +326,24 @@ pub enum ClientMsg {
         root: String,
         allow: bool,
     },
+    Cards {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        limit: u32,
+    },
+    CardDetail {
+        id: u64,
+        card_id: String,
+    },
+    BlockDiff {
+        id: u64,
+        card_id: String,
+        seq: u32,
+        page: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -365,6 +385,8 @@ pub enum ServerMsg {
         id: u64,
         ok: bool,
         error: Option<String>,
+        #[serde(default)]
+        cleanup_errors: u32,
     },
     ConsentPlan {
         id: u64,
@@ -382,6 +404,61 @@ pub enum ServerMsg {
     RepoPending {
         repos: Vec<PendingRepo>,
     },
+    Cards {
+        id: u64,
+        items: Vec<crate::cards::Card>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+    },
+    Card {
+        item: crate::cards::Card,
+    },
+    CardDetail {
+        id: u64,
+        card: crate::cards::Card,
+        snippets: Vec<BlockSnippet>,
+    },
+    BlockDiff {
+        id: u64,
+        lines: Vec<DiffLine>,
+        page: u32,
+        pages: u32,
+        missing: bool,
+    },
+}
+
+/// One line of a block's code snippet in a card detail reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum SnippetLine {
+    Context { text: String },
+    Added { text: String },
+    Removed { text: String },
+    Fold { lines: u32 },
+    More { lines: u32 },
+}
+
+/// Snippet lines attached to one block inside a card detail reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockSnippet {
+    pub seq: u32,
+    pub lines: Vec<SnippetLine>,
+}
+
+/// Classification of one line inside a paged block diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffLineKind {
+    Context,
+    Added,
+    Removed,
+}
+
+/// One line inside a paged block diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,9 +541,9 @@ mod tests {
     }
 
     #[test]
-    fn encode_uses_v3() {
+    fn encode_uses_v4() {
         let s = encode(&ClientMsg::Subscribe);
-        assert_eq!(s, "{\"v\":3,\"type\":\"subscribe\"}\n");
+        assert_eq!(s, "{\"v\":4,\"type\":\"subscribe\"}\n");
     }
     #[test]
     fn v1_line_is_a_version_error() {
@@ -478,14 +555,14 @@ mod tests {
     #[test]
     fn decode_rejects_other_major_before_body() {
         assert!(matches!(
-            decode::<ClientMsg>(r#"{"v":4,"type":"brand_new"}"#),
-            Err(WireError::Version(4))
+            decode::<ClientMsg>(r#"{"v":5,"type":"brand_new"}"#),
+            Err(WireError::Version(5))
         ));
     }
     #[test]
     fn decode_rejects_long_line() {
         let line = format!(
-            r#"{{"v":3,"type":"hello","client":"{}","version":"x"}}"#,
+            r#"{{"v":4,"type":"hello","client":"{}","version":"x"}}"#,
             "a".repeat(LINE_CAP)
         );
         assert!(matches!(
@@ -495,7 +572,7 @@ mod tests {
     }
     #[test]
     fn show_wire_shape() {
-        assert_eq!(encode(&ServerMsg::Show), "{\"v\":3,\"type\":\"show\"}\n");
+        assert_eq!(encode(&ServerMsg::Show), "{\"v\":4,\"type\":\"show\"}\n");
     }
     #[test]
     fn every_client_msg_roundtrips() {
@@ -575,6 +652,7 @@ mod tests {
             quiet_10m: false,
             repo: RepoInfo {
                 root: None,
+                main_root: None,
                 name: "rocky".into(),
                 branch: None,
             },
@@ -637,32 +715,58 @@ mod tests {
                 id: 7,
                 ok: true,
                 error: None,
+                cleanup_errors: 0,
             },
         ];
         for m in msgs {
             assert_eq!(decode::<ServerMsg>(encode(&m).trim_end()).unwrap(), m);
         }
+        let legacy: ServerMsg =
+            decode(r#"{"v":4,"type":"ack","id":8,"ok":true,"error":null}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ServerMsg::Ack {
+                id: 8,
+                ok: true,
+                error: None,
+                cleanup_errors: 0,
+            }
+        );
+        let with_cleanup = ServerMsg::Ack {
+            id: 9,
+            ok: true,
+            error: None,
+            cleanup_errors: 2,
+        };
+        assert_eq!(
+            decode::<ServerMsg>(encode(&with_cleanup).trim_end()).unwrap(),
+            with_cleanup
+        );
     }
     #[test]
-    fn quit_messages_round_trip_at_protocol_3() {
+    fn quit_messages_round_trip_at_protocol_4() {
         assert_eq!(
             encode(&ClientMsg::Cmd {
                 name: CmdName::Quit,
                 id: 7,
             }),
-            "{\"v\":3,\"type\":\"cmd\",\"name\":\"quit\",\"id\":7}\n"
+            "{\"v\":4,\"type\":\"cmd\",\"name\":\"quit\",\"id\":7}\n"
         );
         assert_eq!(
-            decode::<ServerMsg>(r#"{"v":3,"type":"quit"}"#).unwrap(),
+            decode::<ServerMsg>(r#"{"v":4,"type":"quit"}"#).unwrap(),
             ServerMsg::Quit
         );
     }
 
     #[test]
-    fn protocol_2_frames_are_rejected() {
+    fn prior_protocol_frames_are_rejected() {
         assert!(matches!(
             decode::<ClientMsg>(r#"{"v":2,"type":"subscribe"}"#),
             Err(WireError::Version(2))
+        ));
+        assert!(matches!(
+            decode::<ClientMsg>(r#"{"v":3,"type":"subscribe"}"#),
+            Err(WireError::Version(3))
         ));
     }
 
@@ -675,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_messages_round_trip_at_protocol_3() {
+    fn setup_messages_round_trip_at_protocol_4() {
         let setup = ClientMsg::Setup {
             id: 4,
             action: SetupAction::HarnessOn {
@@ -684,7 +788,7 @@ mod tests {
         };
         assert_eq!(
             encode(&setup),
-            "{\"v\":3,\"type\":\"setup\",\"id\":4,\"action\":{\"name\":\"harness_on\",\"harness\":\"codex\"}}\n"
+            "{\"v\":4,\"type\":\"setup\",\"id\":4,\"action\":{\"name\":\"harness_on\",\"harness\":\"codex\"}}\n"
         );
         let client = [
             setup,
@@ -723,7 +827,7 @@ mod tests {
 
     #[test]
     fn consent_plan_without_new_fields_decodes() {
-        let old = r#"{"v":3,"type":"consent_plan","id":1,"consent":"approved","targets":[]}"#;
+        let old = r#"{"v":4,"type":"consent_plan","id":1,"consent":"approved","targets":[]}"#;
         let ServerMsg::ConsentPlan {
             harness_off,
             shell_hook,
@@ -773,13 +877,13 @@ mod tests {
 
     #[test]
     fn health_without_setup_decodes_to_default() {
-        let bare = r#"{"v":3,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false}}"#;
+        let bare = r#"{"v":4,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false}}"#;
         let ServerMsg::Health { health } = decode::<ServerMsg>(bare).unwrap() else {
             panic!("expected a health frame");
         };
         assert_eq!(health.setup, SetupHealth::default());
 
-        let with_target = r#"{"v":3,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"setup":{"targets":[{"harness":"codex","kind":"mcp","path":"p","state":"foreign"}]}}}"#;
+        let with_target = r#"{"v":4,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"setup":{"targets":[{"harness":"codex","kind":"mcp","path":"p","state":"foreign"}]}}}"#;
         let ServerMsg::Health { health } = decode::<ServerMsg>(with_target).unwrap() else {
             panic!("expected a health frame");
         };
@@ -791,8 +895,8 @@ mod tests {
 
     #[test]
     fn health_without_capture_decodes_to_empty() {
-        let v3 = r#"{"v":3,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"settings_unreadable":false,"setup":{}}}"#;
-        let ServerMsg::Health { health } = decode::<ServerMsg>(v3).unwrap() else {
+        let v4 = r#"{"v":4,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"settings_unreadable":false,"setup":{}}}"#;
+        let ServerMsg::Health { health } = decode::<ServerMsg>(v4).unwrap() else {
             panic!("expected a health frame");
         };
         assert!(health.capture.is_empty());
@@ -838,5 +942,172 @@ mod tests {
             serde_json::to_string(&GapReason::HooksRestored).unwrap(),
             "\"hooks_restored\""
         );
+    }
+
+    #[test]
+    fn repo_info_main_root_omits_when_none_and_defaults_on_old_wire() {
+        let without_main = RepoInfo {
+            root: Some("C:/r".into()),
+            main_root: None,
+            name: "r".into(),
+            branch: Some("main".into()),
+        };
+        let encoded = serde_json::to_string(&without_main).unwrap();
+        assert!(
+            !encoded.contains("main_root"),
+            "unexpected field: {encoded}"
+        );
+
+        let legacy = r#"{"root":"C:/r","name":"r","branch":"main"}"#;
+        let decoded: RepoInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded, without_main);
+
+        let with_main = RepoInfo {
+            root: Some("C:/wt".into()),
+            main_root: Some("C:/r".into()),
+            name: "wt".into(),
+            branch: Some("feat".into()),
+        };
+        let encoded_with = serde_json::to_string(&with_main).unwrap();
+        assert!(encoded_with.contains("\"main_root\":\"C:/r\""));
+        assert_eq!(
+            serde_json::from_str::<RepoInfo>(&encoded_with).unwrap(),
+            with_main
+        );
+    }
+
+    #[test]
+    fn card_protocol_messages_round_trip() {
+        use crate::cards::{CARD_VERSION, Card, CardStatus, Coverage, CoverageState, Importance};
+        use crate::pipe::{BlockSnippet, DiffLine, DiffLineKind, SnippetLine};
+
+        let sample_card = Card {
+            v: CARD_VERSION,
+            card_id: "c1".into(),
+            rev: 1,
+            repo_id: "r1".into(),
+            root: String::new(),
+            main_root: None,
+            branch: Some("main".into()),
+            session_id: "s1".into(),
+            agent_id: "a1".into(),
+            agent_type: "claude".into(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "fix bug".into(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: Vec::new(),
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        };
+
+        let client_msgs = [
+            ClientMsg::Cards {
+                id: 10,
+                query: Some("auth".into()),
+                before: Some("2000:c1".into()),
+                limit: 20,
+            },
+            ClientMsg::Cards {
+                id: 11,
+                query: None,
+                before: None,
+                limit: 10,
+            },
+            ClientMsg::CardDetail {
+                id: 12,
+                card_id: "c1".into(),
+            },
+            ClientMsg::BlockDiff {
+                id: 13,
+                card_id: "c1".into(),
+                seq: 1,
+                page: 0,
+            },
+        ];
+        for msg in &client_msgs {
+            let wire = encode(msg);
+            assert!(wire.starts_with("{\"v\":4,"), "bad wire: {wire}");
+            let back: ClientMsg = decode(&wire).unwrap();
+            assert_eq!(&back, msg);
+        }
+
+        let server_msgs = [
+            ServerMsg::Cards {
+                id: 10,
+                items: vec![sample_card.clone()],
+                next: Some("2000:c1".into()),
+            },
+            ServerMsg::Cards {
+                id: 11,
+                items: Vec::new(),
+                next: None,
+            },
+            ServerMsg::Card {
+                item: sample_card.clone(),
+            },
+            ServerMsg::CardDetail {
+                id: 12,
+                card: sample_card,
+                snippets: vec![BlockSnippet {
+                    seq: 1,
+                    lines: vec![
+                        SnippetLine::Context {
+                            text: "fn f() {".into(),
+                        },
+                        SnippetLine::Removed {
+                            text: "  old();".into(),
+                        },
+                        SnippetLine::Added {
+                            text: "  new();".into(),
+                        },
+                        SnippetLine::Fold { lines: 3 },
+                        SnippetLine::More { lines: 5 },
+                    ],
+                }],
+            },
+            ServerMsg::BlockDiff {
+                id: 13,
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Context,
+                        text: "fn f() {".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        text: "  old();".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        text: "  new();".into(),
+                    },
+                ],
+                page: 0,
+                pages: 1,
+                missing: false,
+            },
+            ServerMsg::BlockDiff {
+                id: 14,
+                lines: Vec::new(),
+                page: 0,
+                pages: 0,
+                missing: true,
+            },
+        ];
+        for msg in &server_msgs {
+            let wire = encode(msg);
+            assert!(wire.starts_with("{\"v\":4,"), "bad wire: {wire}");
+            let back: ServerMsg = decode(&wire).unwrap();
+            assert_eq!(&back, msg);
+        }
     }
 }

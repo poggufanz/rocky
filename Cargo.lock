@@ -4544,6 +4544,7 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -4554,9 +4555,12 @@ dependencies = [
  "interprocess",
  "libc",
  "notify",
+ "rocky-facts",
  "rocky-proto",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "similar",
  "tempfile",
  "widestring",
  "windows-sys 0.61.2",

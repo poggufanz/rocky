@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rocky_facts::{FileInput, Side, analyze, debug, snippet};
+use rocky_facts::{FileInput, Side, SnippetLine, Symbol, analyze, debug, snippet, snippets};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -58,6 +58,52 @@ fn to_side<'a>(flag: &str, loaded: &'a Option<String>) -> Side<'a> {
     }
 }
 
+struct LoadedCase {
+    name: String,
+    dir: PathBuf,
+    meta: Meta,
+    before_text: Option<String>,
+    after_text: Option<String>,
+}
+
+impl LoadedCase {
+    fn input(&self) -> FileInput<'_> {
+        FileInput {
+            path: &self.meta.path,
+            before: to_side(&self.meta.before, &self.before_text),
+            after: to_side(&self.meta.after, &self.after_text),
+        }
+    }
+}
+
+fn load_case(lang_name: &str, case_dir: &Path) -> Result<LoadedCase, String> {
+    let name = format!(
+        "{lang_name}/{}",
+        case_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<non-utf8>")
+    );
+
+    let meta_raw = fs::read_to_string(case_dir.join("meta.json"))
+        .map_err(|err| format!("{name}: failed to read meta.json: {err}"))?;
+    let meta: Meta = serde_json::from_str(&meta_raw)
+        .map_err(|err| format!("{name}: invalid meta.json: {err}"))?;
+
+    let before_text = load_side(case_dir, "before", &meta.before, true)
+        .map_err(|err| format!("{name}: {err}"))?;
+    let after_text =
+        load_side(case_dir, "after", &meta.after, false).map_err(|err| format!("{name}: {err}"))?;
+
+    Ok(LoadedCase {
+        name,
+        dir: case_dir.to_path_buf(),
+        meta,
+        before_text,
+        after_text,
+    })
+}
+
 #[test]
 fn golden_fixtures() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/facts");
@@ -72,49 +118,15 @@ fn golden_fixtures() {
 
         for case_dir in sorted_subdirs(&lang_dir) {
             case_count += 1;
-            let case_name = format!(
-                "{lang_name}/{}",
-                case_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("<non-utf8>")
-            );
-
-            let meta_raw = match fs::read_to_string(case_dir.join("meta.json")) {
-                Ok(raw) => raw,
+            let case = match load_case(lang_name, &case_dir) {
+                Ok(case) => case,
                 Err(err) => {
-                    failures.push(format!("{case_name}: failed to read meta.json: {err}"));
+                    failures.push(err);
                     continue;
                 }
             };
-            let meta: Meta = match serde_json::from_str(&meta_raw) {
-                Ok(meta) => meta,
-                Err(err) => {
-                    failures.push(format!("{case_name}: invalid meta.json: {err}"));
-                    continue;
-                }
-            };
-
-            let before_text = match load_side(&case_dir, "before", &meta.before, true) {
-                Ok(text) => text,
-                Err(err) => {
-                    failures.push(format!("{case_name}: {err}"));
-                    continue;
-                }
-            };
-            let after_text = match load_side(&case_dir, "after", &meta.after, false) {
-                Ok(text) => text,
-                Err(err) => {
-                    failures.push(format!("{case_name}: {err}"));
-                    continue;
-                }
-            };
-
-            let input = FileInput {
-                path: &meta.path,
-                before: to_side(&meta.before, &before_text),
-                after: to_side(&meta.after, &after_text),
-            };
+            let case_name = &case.name;
+            let input = case.input();
 
             let facts = analyze(&input);
             let first = format!(
@@ -132,7 +144,7 @@ fn golden_fixtures() {
                 continue;
             }
 
-            match fs::read(case_dir.join("expected.json")) {
+            match fs::read(case.dir.join("expected.json")) {
                 Ok(expected_bytes) => {
                     if first.as_bytes() != expected_bytes.as_slice() {
                         let expected_str = String::from_utf8_lossy(&expected_bytes);
@@ -148,7 +160,7 @@ fn golden_fixtures() {
                 }
             }
 
-            let snippet_path = case_dir.join("snippet.txt");
+            let snippet_path = case.dir.join("snippet.txt");
             if snippet_path.exists() {
                 let render_all = || {
                     let blocks: Vec<String> = facts
@@ -200,6 +212,59 @@ fn golden_fixtures() {
     assert!(
         failures.is_empty(),
         "{} of {case_count} golden fixture(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n---\n")
+    );
+}
+
+#[test]
+fn snippets_match_single_calls() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/facts");
+    let mut checked = 0usize;
+    let mut failures = Vec::new();
+
+    for lang_dir in sorted_subdirs(&root) {
+        let lang_name = lang_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<non-utf8>");
+
+        for case_dir in sorted_subdirs(&lang_dir) {
+            if !case_dir.join("snippet.txt").exists() {
+                continue;
+            }
+            let case = match load_case(lang_name, &case_dir) {
+                Ok(case) => case,
+                Err(err) => {
+                    failures.push(err);
+                    continue;
+                }
+            };
+            checked += 1;
+            let input = case.input();
+            let facts = analyze(&input);
+            let symbols: Vec<Option<&Symbol>> =
+                facts.changes.iter().map(|c| c.symbol.as_ref()).collect();
+            let expected: Vec<Vec<SnippetLine>> =
+                symbols.iter().map(|&sym| snippet(&input, sym)).collect();
+            let actual = snippets(&input, &symbols);
+            if actual != expected {
+                failures.push(format!(
+                    "{}: snippets() mismatch against per-symbol snippet()",
+                    case.name
+                ));
+            }
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no snippet.txt golden fixtures found under {}",
+        root.display()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {checked} snippet fixture(s) failed:\n\n{}",
         failures.len(),
         failures.join("\n---\n")
     );

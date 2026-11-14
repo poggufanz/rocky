@@ -224,6 +224,7 @@ mod tests {
             id: 5,
             ok: false,
             error: Some("invalid value".into()),
+            cleanup_errors: 0,
         });
         assert_eq!(m.set_error(), Some("invalid value"));
         m.apply(ServerMsg::Settings {
@@ -239,6 +240,7 @@ mod tests {
             id: 9,
             ok: false,
             error: Some("boom".into()),
+            cleanup_errors: 0,
         });
         assert_eq!(m.set_error(), None);
     }

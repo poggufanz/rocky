@@ -737,3 +737,104 @@ test("auto command: shell on under approved consent installs only the shell bloc
   assert.equal(record.record.shell_hook, true);
   assert.equal((res.json as { shell_hook?: boolean }).shell_hook, true);
 });
+
+test("auto command: remove deletes change cards and spool files", async (t) => {
+  const f = fixture(t);
+  const cardsDir = join(f.rh, "desk", "cards");
+  const spoolDir = join(f.rh, "desk", "spool");
+  const badDir = join(spoolDir, "bad");
+  mkdirSync(join(cardsDir, "nested"), { recursive: true });
+  mkdirSync(badDir, { recursive: true });
+  writeFileSync(join(cardsDir, "repo-one.jsonl"), "{\"v\":1}\n");
+  writeFileSync(join(cardsDir, "nested", "extra.jsonl"), "{\"v\":1}\n");
+  writeFileSync(join(spoolDir, "1700000000000-1.json"), "{}\n");
+  writeFileSync(join(spoolDir, "1700000000001-2.json"), "{}\n");
+  writeFileSync(join(badDir, "corrupt.json"), "not json");
+
+  const res = await run(f, ["remove", "--json"]);
+
+  assert.equal(res.code, 0);
+  assert.equal(res.json.consent, "removed");
+  assert.deepEqual(res.json.notes, []);
+  assert.equal(existsSync(cardsDir), false);
+  assert.equal(existsSync(join(spoolDir, "1700000000000-1.json")), false);
+  assert.equal(existsSync(join(spoolDir, "1700000000001-2.json")), false);
+  assert.equal(existsSync(badDir), false);
+});
+
+test("auto command: remove keeps settings, history and markers", async (t) => {
+  const f = fixture(t);
+  const deskDir = join(f.rh, "desk");
+  const cardsDir = join(deskDir, "cards");
+  const spoolDir = join(deskDir, "spool");
+  const badDir = join(spoolDir, "bad");
+  const historyDir = join(deskDir, "history");
+  const listeningDir = join(f.rh, "listening");
+  mkdirSync(cardsDir, { recursive: true });
+  mkdirSync(badDir, { recursive: true });
+  mkdirSync(historyDir, { recursive: true });
+  mkdirSync(listeningDir, { recursive: true });
+
+  writeFileSync(join(cardsDir, "repo.jsonl"), "{\"v\":1}\n");
+  writeFileSync(join(spoolDir, "1700000000000-1.json"), "{}\n");
+  writeFileSync(join(badDir, "bad.json"), "bad\n");
+
+  const keepFiles: Array<[string, string]> = [
+    [join(deskDir, "settings.json"), "{\"cards\":true}\n"],
+    [join(deskDir, "rockyd.log"), "started\n"],
+    [join(deskDir, "notified.json"), "[]\n"],
+    [join(historyDir, "2026-11-14.jsonl"), "{\"v\":1}\n"],
+    [join(deskDir, "cards-off"), ""],
+    [join(deskDir, "tool-text-off"), ""],
+    [join(spoolDir, "1700000000000-1.json.tmp"), "partial"],
+    [join(f.rh, "memory.jsonl"), "{\"kind\":\"note\"}\n"],
+    [join(listeningDir, "repo-consents.json"), "{}\n"],
+  ];
+  for (const [path, body] of keepFiles) writeFileSync(path, body);
+
+  const res = await run(f, ["remove", "--json"]);
+
+  assert.equal(res.code, 0);
+  assert.deepEqual(res.json.notes, []);
+  assert.equal(existsSync(cardsDir), false);
+  assert.equal(existsSync(join(spoolDir, "1700000000000-1.json")), false);
+  assert.equal(existsSync(badDir), false);
+  for (const [path, body] of keepFiles) {
+    assert.equal(existsSync(path), true, `${path} must remain`);
+    assert.equal(readFileSync(path, "utf8"), body);
+  }
+});
+
+test("auto command: remove reports card data it could not delete", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.home, ".claude"));
+  const approved = await run(f, ["consent", "approve", "--json"]);
+  assert.equal(approved.code, 0);
+  assert.equal(hasOwnedAgentHooks(JSON.parse(readFileSync(claudeSettings(f), "utf8"))), true);
+
+  const cardsDir = join(f.rh, "desk", "cards");
+  const spoolDir = join(f.rh, "desk", "spool");
+  const badDir = join(spoolDir, "bad");
+  const dirEntry = join(spoolDir, "blocked.json");
+  mkdirSync(cardsDir, { recursive: true });
+  mkdirSync(badDir, { recursive: true });
+  mkdirSync(dirEntry, { recursive: true });
+  writeFileSync(join(cardsDir, "repo.jsonl"), "{\"v\":1}\n");
+  writeFileSync(join(spoolDir, "1700000000000-1.json"), "{}\n");
+  writeFileSync(join(badDir, "bad.json"), "bad\n");
+  writeFileSync(join(dirEntry, "keep.txt"), "non-empty");
+
+  const res = await run(f, ["remove", "--json"]);
+
+  assert.equal(res.code, 0);
+  assert.equal(res.json.consent, "removed");
+  assert.equal(hasOwnedAgentHooks(JSON.parse(readFileSync(claudeSettings(f), "utf8"))), false);
+  assert.equal(existsSync(cardsDir), false);
+  assert.equal(existsSync(join(spoolDir, "1700000000000-1.json")), false);
+  assert.equal(existsSync(badDir), false);
+  assert.equal(existsSync(dirEntry), true);
+  assert.ok(
+    (res.json.notes ?? []).some((note) => note.includes("1") && /card data/i.test(note)),
+    JSON.stringify(res.json.notes),
+  );
+});

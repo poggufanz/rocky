@@ -158,11 +158,13 @@ mod tests {
                 let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
                 assert!(!handle.is_null(), "cannot create the instance mutex");
                 ready_tx.send(()).unwrap();
-                let _ = release_rx.recv();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
                 // SAFETY: the handle came from CreateMutexW and is closed once.
                 unsafe { CloseHandle(handle) };
             });
-            ready_rx.recv().expect("holder thread starts");
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("holder thread starts");
             Held {
                 release,
                 thread: Some(thread),

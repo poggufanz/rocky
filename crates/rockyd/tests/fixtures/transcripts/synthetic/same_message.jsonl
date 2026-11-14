@@ -1,0 +1,6 @@
+{"type":"user","timestamp":"2026-11-13T10:00:00Z","message":{"role":"user","content":"Old turn prompt"}}
+{"type":"assistant","timestamp":"2026-11-13T10:00:01Z","message":{"id":"msg_00","role":"assistant","content":[{"type":"text","text":"Old turn explanation that should not bleed."}]}}
+{"type":"user","timestamp":"2026-11-13T10:01:00Z","message":{"role":"user","content":"Update foo.rs to fix the bug."}}
+{"type":"assistant","timestamp":"2026-11-13T10:01:02Z","message":{"id":"msg_01","role":"assistant","content":[{"type":"text","text":"First note about foo.rs."},{"type":"text","text":"I will update foo.rs to handle empty inputs."},{"type":"tool_use","id":"toolu_01","name":"Edit","input":{"file_path":"foo.rs"}},{"type":"text","text":"After tool text in same message."}]}}
+{"type":"user","timestamp":"2026-11-13T10:01:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-11-13T10:01:04Z","message":{"id":"msg_02","role":"assistant","content":[{"type":"text","text":"All done with foo.rs."}]}}

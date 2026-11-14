@@ -7,6 +7,7 @@ mod guard_loop;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,9 +18,14 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, settings_path, spool_dir};
 use rocky_proto::pipe::{
-    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, ServerMsg, SetupHealth, StatusOp,
+    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, RepoInfo, ServerMsg, SetupAction,
+    SetupHealth, StatusOp,
 };
 use rocky_proto::settings::Settings;
+use rockyd::cards::query::CardQueryLoop;
+use rockyd::cards::storage::CardStore;
+use rockyd::cards::transcript::claude_config_dirs;
+use rockyd::cards::{Engine, EngineCtx};
 use rockyd::gaps::Gaps;
 use rockyd::guard::records::startup_setup;
 use rockyd::history::{HISTORY_CAP_BYTES, History, replay};
@@ -60,6 +66,10 @@ struct Shared {
     repo_pending: Vec<PendingRepo>,
     /// Per-repo capture state. `take_health` carries it into the broadcast health.
     capture: Vec<CaptureHealth>,
+    /// Change card log store.
+    cards: CardStore,
+    /// Latched when a full Remove Rocky request starts; stays set for this process.
+    cards_removed: bool,
 }
 
 impl Shared {
@@ -111,17 +121,7 @@ fn main() {
     let log = Arc::new(RotatingLog::new(&log_path(&home)));
 
     // Panic hook: log, then abort. Counts/lifecycle only.
-    let panic_log = Arc::clone(&log);
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_hook(info);
-        let at = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown location".into());
-        panic_log.line(&format!("panic, aborting: {at}"));
-        std::process::abort();
-    }));
+    rockyd::log::install_panic_hook(Arc::clone(&log));
 
     let spool = spool_dir(&home);
     if let Err(e) = std::fs::create_dir_all(&spool) {
@@ -150,6 +150,8 @@ fn main() {
         setup,
         repo_pending: Vec::new(),
         capture: Vec::new(),
+        cards: CardStore::new(home.clone()),
+        cards_removed: false,
     }));
 
     let hub = Arc::new(Hub::new());
@@ -250,10 +252,25 @@ fn main() {
     // 5. Initial ingest through the same path as rescans. Discovery queues config
     // dirs only under approved consent, so the guard checks before the ingest and
     // again after it.
+    let workers = thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let mut cards = Engine::new(home.clone(), workers);
+    cards.set_enabled(settings.cards);
+    let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+
     let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
     guards.check(&shared, &hub, &log);
-    rescan(&spool, &shared, &hub, &log, &mut ingest, &mut guards);
+    rescan(
+        &spool,
+        &shared,
+        &hub,
+        &log,
+        &mut ingest,
+        &mut guards,
+        &mut cards,
+        None,
+    );
     guards.check(&shared, &hub, &log);
+    let mut config_dirs = claude_config_dirs(&home);
     let mut captures = CaptureLoop::new(home.clone(), &log);
     captures.check(&guards.allowed_roots());
 
@@ -293,64 +310,49 @@ fn main() {
     loop {
         // Drain every pending control request so shutdown stays prompt and a
         // burst of sets/timelines never waits for the next rescan.
-        loop {
-            match control_rx.try_recv() {
-                Ok(Control::Stop {
-                    id,
-                    reply,
-                    flushed,
-                    quit,
-                }) => {
-                    // Wait for the client thread to flush the ack before
-                    // exiting: without this, `process::exit` can race the
-                    // writer thread and the client never sees the ack. Only
-                    // when the ack was accepted — otherwise the client is
-                    // already gone, so exit immediately. Bounded so a dead
-                    // client can't wedge shutdown; the pipe dies either way.
-                    if reply
-                        .send(ServerMsg::Ack {
-                            id,
-                            ok: true,
-                            error: None,
-                        })
-                        .is_ok()
-                    {
-                        let _ = flushed.recv_timeout(Duration::from_secs(5));
-                    }
-                    log.line(if quit {
-                        "quit requested, exiting"
-                    } else {
-                        "stop requested, exiting"
-                    });
-                    // `process::exit` runs no destructors, so the capture child is stopped here.
-                    captures.shutdown(&log);
-                    std::process::exit(0);
+        while let Ok(ctrl) = control_rx.try_recv() {
+            let owned_roots = captures.owned_roots();
+            if let LoopAction::Stop {
+                id,
+                reply,
+                flushed,
+                quit,
+            } = handle_control(
+                ctrl,
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &owned_roots,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            ) {
+                // Wait for the client thread to flush the ack before
+                // exiting: without this, `process::exit` can race the
+                // writer thread and the client never sees the ack. Only
+                // when the ack was accepted — otherwise the client is
+                // already gone, so exit immediately. Bounded so a dead
+                // client can't wedge shutdown; the pipe dies either way.
+                if reply
+                    .send(ServerMsg::Ack {
+                        id,
+                        ok: true,
+                        error: None,
+                        cleanup_errors: 0,
+                    })
+                    .is_ok()
+                {
+                    let _ = flushed.recv_timeout(Duration::from_secs(5));
                 }
-                Ok(Control::Set {
-                    id,
-                    name,
-                    value,
-                    reply,
-                }) => {
-                    let msg = handle_set(id, &name, &value, &shared, &hub, &log, &home);
-                    let _ = reply.send(msg);
-                }
-                Ok(Control::Timeline { id, key, reply }) => {
-                    let entries = shared.lock().unwrap().state.timeline(&key);
-                    let _ = reply.send(ServerMsg::Timeline { id, key, entries });
-                }
-                Ok(Control::Setup { id, action, reply }) => {
-                    guards.setup_request(id, action, reply, &shared, &hub, &log);
-                }
-                Ok(Control::RepoDecision {
-                    id,
-                    root,
-                    allow,
-                    reply,
-                }) => {
-                    guards.repo_request(id, root, allow, reply);
-                }
-                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                log.line(if quit {
+                    "quit requested, exiting"
+                } else {
+                    "stop requested, exiting"
+                });
+                // `process::exit` runs no destructors, so the capture child is stopped here.
+                captures.shutdown(&log);
+                std::process::exit(0);
             }
         }
 
@@ -365,7 +367,17 @@ fn main() {
             last_rescan = now;
         }
         if triggered {
-            rescan(&spool, &shared, &hub, &log, &mut ingest, &mut guards);
+            rescan(
+                &spool,
+                &shared,
+                &hub,
+                &log,
+                &mut ingest,
+                &mut guards,
+                &mut cards,
+                Some(&mut captures),
+            );
+            config_dirs = claude_config_dirs(&home);
         }
 
         let now = Instant::now();
@@ -374,11 +386,22 @@ fn main() {
             tick_once(&shared, &hub, &log);
             guards.check(&shared, &hub, &log);
             captures.check(&guards.allowed_roots());
+            config_dirs = claude_config_dirs(&home);
         }
 
         guards.service(&shared, &hub, &log);
         // ponytail: rebuilt every 25 ms; cache it on the guard if the set grows large.
-        captures.service(&guards.allowed_roots(), &shared, &hub, &log);
+        let capture_results = captures.service(&guards.allowed_roots(), &shared, &hub, &log);
+        cards.on_capture(&capture_results);
+        service_cards(
+            &mut cards,
+            &captures.owned_roots(),
+            &config_dirs,
+            &shared,
+            &hub,
+            &log,
+        );
+        service_queries(&mut queries, &log);
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -409,6 +432,7 @@ fn push_removal(s: &mut Shared, msgs: &mut Vec<ServerMsg>, key: &AgentKey) {
 /// Ingest the spool once, then broadcast one Status per changed key, one
 /// Remove per dropped key, and a Health message when health moved. Lock
 /// discipline: collect messages under the state lock, release it, broadcast.
+#[allow(clippy::too_many_arguments)]
 fn rescan(
     spool: &Path,
     shared: &Arc<Mutex<Shared>>,
@@ -416,20 +440,63 @@ fn rescan(
     log: &RotatingLog,
     ingest: &mut Ingestor,
     guards: &mut GuardLoop,
+    cards: &mut Engine,
+    captures: Option<&mut CaptureLoop>,
 ) {
     let mut repo_of = resolve_repo;
-    let (msgs, health, upserts, health_changed, history_errors) = {
+    rescan_with(
+        spool,
+        shared,
+        hub,
+        log,
+        ingest,
+        guards,
+        cards,
+        captures,
+        &mut repo_of,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rescan_with(
+    spool: &Path,
+    shared: &Arc<Mutex<Shared>>,
+    hub: &Hub,
+    log: &RotatingLog,
+    ingest: &mut Ingestor,
+    guards: &mut GuardLoop,
+    cards: &mut Engine,
+    captures: Option<&mut CaptureLoop>,
+    resolve: &mut dyn FnMut(&str) -> RepoInfo,
+) {
+    let now = now_ms();
+    let mut seen_cwds: HashMap<String, RepoInfo> = HashMap::new();
+    let mut cached_resolve = |cwd: &str| {
+        if let Some(info) = seen_cwds.get(cwd) {
+            return info.clone();
+        }
+        let info = resolve(cwd);
+        seen_cwds.insert(cwd.to_string(), info.clone());
+        info
+    };
+    let (msgs, health, upserts, health_changed, out, cards_enabled) = {
         let mut guard = shared.lock().unwrap();
         let s = &mut *guard;
-        let out = ingest.ingest_once(spool, &mut s.state, &mut repo_of, &mut s.history, now_ms());
-        let changes = out.changes;
+        let out = ingest.ingest_once(
+            spool,
+            &mut s.state,
+            &mut cached_resolve,
+            &mut s.history,
+            now,
+        );
         for gap in &out.gaps {
             s.gaps.push(*gap);
             s.state.record_gap(gap);
         }
         guards.rescanned(&out.config_locations, &s.state.session_roots());
-        let mut msgs = Vec::with_capacity(changes.upserted.len() + changes.removed.len() + 1);
-        for key in &changes.upserted {
+        let mut msgs =
+            Vec::with_capacity(out.changes.upserted.len() + out.changes.removed.len() + 1);
+        for key in &out.changes.upserted {
             if let Some(agent) = s.state.get(key) {
                 s.last_known.insert(key.clone(), agent.clone());
                 msgs.push(ServerMsg::Status {
@@ -438,7 +505,7 @@ fn rescan(
                 });
             }
         }
-        for key in &changes.removed {
+        for key in &out.changes.removed {
             push_removal(s, &mut msgs, key);
         }
         s.counters = ingest.health.clone();
@@ -448,25 +515,114 @@ fn rescan(
                 health: health.clone(),
             });
         }
-        (
-            msgs,
-            health,
-            changes.upserted.len(),
-            health_changed,
-            out.history_errors,
-        )
+        let upserts = out.changes.upserted.len();
+        let cards_enabled = s.settings.cards && !s.cards_removed;
+        if cards_enabled {
+            let sessions_starting: HashSet<&str> = out
+                .events
+                .iter()
+                .filter(|(ev, _)| {
+                    ev.hook_event_name == "SessionStart"
+                        && ev.cwd.as_deref().is_some_and(|c| !c.trim().is_empty())
+                })
+                .map(|(ev, _)| ev.session_id.as_str())
+                .collect();
+            for (ev, _) in &out.events {
+                if !sessions_starting.contains(ev.session_id.as_str())
+                    && let Some(repo) = s.state.session_repo(&ev.session_id)
+                {
+                    cards.seed_session_repo_if_absent(&ev.session_id, repo);
+                }
+            }
+        }
+        (msgs, health, upserts, health_changed, out, cards_enabled)
     };
     for m in &msgs {
         hub.broadcast(m);
     }
-    if history_errors > 0 {
-        log.line(&format!("history: {history_errors} lines not written"));
+    if cards_enabled {
+        let flushes = cards.on_ingest(&out, &mut cached_resolve, now);
+        if let Some(cap) = captures {
+            for req in flushes {
+                cap.flush(&req.root, now);
+            }
+        }
+    }
+    if out.history_errors > 0 {
+        log.line(&format!(
+            "history: {} lines not written",
+            out.history_errors
+        ));
     }
     if upserts > 0 || health_changed {
         log.line(&format!(
             "ingest: {upserts} agents updated, {} files pending",
             health.spool_pending
         ));
+    }
+}
+
+fn service_cards(
+    cards: &mut Engine,
+    owned_roots: &std::collections::BTreeSet<String>,
+    config_dirs: &[std::path::PathBuf],
+    shared: &Arc<Mutex<Shared>>,
+    hub: &Hub,
+    log: &RotatingLog,
+) {
+    let ctx = {
+        let s = shared.lock().unwrap();
+        EngineCtx {
+            cards: s.settings.cards && !s.cards_removed,
+            owned_roots: owned_roots.clone(),
+            capture: s.capture.clone(),
+            gaps: s.gaps.to_vec(),
+            config_dirs: config_dirs.to_vec(),
+        }
+    };
+    let built = cards.poll(now_ms(), &ctx);
+    let panics = cards.take_worker_panics();
+    if panics > 0 {
+        log.line(&format!("cards: {panics} worker panics"));
+    }
+    if !built.is_empty() {
+        let mut errs = 0u64;
+        let mut appended = Vec::with_capacity(built.len());
+        {
+            let mut s = shared.lock().unwrap();
+            for card in built {
+                if s.cards.append(&card).is_err() {
+                    errs += 1;
+                } else {
+                    appended.push(card);
+                }
+            }
+        }
+        if errs > 0 {
+            log.line(&format!("cards: {errs} append errors"));
+        }
+        broadcast_appended_cards(appended, hub, log);
+    }
+}
+
+fn broadcast_appended_cards(appended: Vec<rocky_proto::cards::Card>, hub: &Hub, log: &RotatingLog) {
+    let mut skipped = 0u64;
+    for card in appended {
+        match rockyd::cards::detail::build_card_broadcast(card) {
+            Some(msg) => hub.broadcast(&msg),
+            None => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        log.line(&format!("cards: {skipped} broadcasts too large"));
+    }
+}
+
+fn service_queries(queries: &mut CardQueryLoop, log: &RotatingLog) {
+    queries.service();
+    let panics = queries.take_worker_panics();
+    if panics > 0 {
+        log.line(&format!("cards: {panics} query worker panics"));
     }
 }
 
@@ -529,6 +685,7 @@ fn handle_set(
                 id,
                 ok: false,
                 error: Some(e.to_string()),
+                cleanup_errors: 0,
             },
             Ok(next) => match settings::save(&settings_path(home), &next) {
                 Err(e) => {
@@ -537,6 +694,7 @@ fn handle_set(
                         id,
                         ok: false,
                         error: Some("save failed".into()),
+                        cleanup_errors: 0,
                     }
                 }
                 Ok(()) => {
@@ -574,6 +732,7 @@ fn handle_set(
                         id,
                         ok: true,
                         error: None,
+                        cleanup_errors: 0,
                     }
                 }
             },
@@ -583,4 +742,900 @@ fn handle_set(
         hub.broadcast(m);
     }
     ack
+}
+
+enum LoopAction {
+    Continue,
+    Stop {
+        id: u64,
+        reply: SyncSender<ServerMsg>,
+        flushed: mpsc::Receiver<()>,
+        quit: bool,
+    },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_control(
+    ctrl: Control,
+    shared: &Arc<Mutex<Shared>>,
+    hub: &Hub,
+    log: &RotatingLog,
+    home: &Path,
+    owned_roots: &std::collections::BTreeSet<String>,
+    cards: &mut Engine,
+    queries: &mut CardQueryLoop,
+    guards: &mut GuardLoop,
+) -> LoopAction {
+    match ctrl {
+        Control::Stop {
+            id,
+            reply,
+            flushed,
+            quit,
+        } => LoopAction::Stop {
+            id,
+            reply,
+            flushed,
+            quit,
+        },
+        Control::Set {
+            id,
+            name,
+            value,
+            reply,
+        } => {
+            let msg = handle_set(id, &name, &value, shared, hub, log, home);
+            let (cards_on, removed) = {
+                let s = shared.lock().unwrap();
+                (s.settings.cards, s.cards_removed)
+            };
+            cards.set_enabled(cards_on && !removed);
+            let _ = reply.send(msg);
+            LoopAction::Continue
+        }
+        Control::Timeline { id, key, reply } => {
+            let entries = shared.lock().unwrap().state.timeline(&key);
+            let _ = reply.send(ServerMsg::Timeline { id, key, entries });
+            LoopAction::Continue
+        }
+        Control::Setup { id, action, reply } => {
+            if matches!(action, SetupAction::Remove) {
+                {
+                    let mut s = shared.lock().unwrap();
+                    s.cards_removed = true;
+                    s.cards.set_removed();
+                }
+                cards.set_removed();
+            }
+            guards.setup_request(id, action, reply, shared, hub, log);
+            LoopAction::Continue
+        }
+        Control::RepoDecision {
+            id,
+            root,
+            allow,
+            reply,
+        } => {
+            guards.repo_request(id, root, allow, reply);
+            LoopAction::Continue
+        }
+        Control::Cards {
+            id,
+            query,
+            before,
+            limit,
+            reply,
+        } => {
+            queries.cards(id, query, before, limit, reply);
+            LoopAction::Continue
+        }
+        Control::CardDetail { id, card_id, reply } => {
+            queries.card_detail(id, card_id, owned_roots.clone(), reply);
+            LoopAction::Continue
+        }
+        Control::BlockDiff {
+            id,
+            card_id,
+            seq,
+            page,
+            reply,
+        } => {
+            queries.block_diff(id, card_id, seq, page, owned_roots.clone(), reply);
+            LoopAction::Continue
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocky_proto::cards::{
+        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageState,
+        Importance, SymbolKind,
+    };
+    use rockyd::cards::store::ObjectRead;
+
+    fn make_test_shared(home: &Path) -> Arc<Mutex<Shared>> {
+        Arc::new(Mutex::new(Shared {
+            state: StatusState::new(),
+            last_known: HashMap::new(),
+            counters: Health::default(),
+            health: Health::default(),
+            settings: Settings::default(),
+            settings_unreadable: false,
+            gaps: Gaps::new(),
+            history: History::open(&history_dir(home), HISTORY_CAP_BYTES, false),
+            setup: SetupHealth::default(),
+            repo_pending: Vec::new(),
+            capture: Vec::new(),
+            cards: CardStore::new(home.to_path_buf()),
+            cards_removed: false,
+        }))
+    }
+
+    fn make_test_card(home: &Path, card_id: &str) -> Card {
+        Card {
+            v: CARD_VERSION,
+            card_id: card_id.to_string(),
+            rev: 1,
+            repo_id: "r1".to_string(),
+            root: home.to_string_lossy().into_owned(),
+            main_root: None,
+            branch: Some("main".to_string()),
+            session_id: "s-seed".to_string(),
+            agent_id: String::new(),
+            agent_type: "claude".to_string(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "fix".to_string(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: vec![Block {
+                seq: 1,
+                path: "src/lib.rs".to_string(),
+                symbol: Some(BlockSymbol {
+                    kind: SymbolKind::Function,
+                    name: "f".to_string(),
+                    container: None,
+                    exported: true,
+                    nth: 0,
+                }),
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec!["tu-1".to_string()],
+                bash: None,
+                before: Some("1".repeat(64)),
+                after: Some("2".repeat(64)),
+                recorded: true,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(1),
+                quote: None,
+            }],
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn stalled_cards_query_reader_does_not_stall_hook_ingest() {
+        struct UnblockOnPanic(mpsc::Sender<()>);
+        impl Drop for UnblockOnPanic {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    for _ in 0..8 {
+                        let _ = self.0.send(());
+                    }
+                }
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        std::fs::create_dir_all(&spool).unwrap();
+        let log = Arc::new(RotatingLog::new(&log_path(&home)));
+        let shared = make_test_shared(&home);
+        let hub = Arc::new(Hub::new());
+
+        let card = make_test_card(&home, "card-stalled");
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let entered_tx = Mutex::new(entered_tx);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let (ingest_done_tx, ingest_done_rx) = mpsc::channel::<()>();
+        let (detail_tx, detail_rx) = mpsc::sync_channel::<ServerMsg>(1);
+
+        let shared_bg = Arc::clone(&shared);
+        let hub_bg = Arc::clone(&hub);
+        let log_bg = Arc::clone(&log);
+        let home_bg = home.clone();
+        let spool_bg = spool.clone();
+        let release_worker = release_tx.clone();
+
+        let worker = thread::spawn(move || {
+            let mut ingest = Ingestor::new();
+            let mut guards = GuardLoop::new(home_bg.clone(), &log_bg, now_ms());
+            let mut cards = Engine::new(home_bg.clone(), 1);
+            let mut queries = CardQueryLoop::new_with_object_reader(
+                home_bg.clone(),
+                cards.worker_count(),
+                Arc::new(move |sha: &str| {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    let _ = release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10));
+                    if sha.starts_with('1') {
+                        ObjectRead::Text("fn f() {\n    1\n}\n".to_string())
+                    } else {
+                        ObjectRead::Text("fn f() {\n    2\n}\n".to_string())
+                    }
+                }),
+            );
+            let _unblock_worker = UnblockOnPanic(release_worker);
+            let mut owned = std::collections::BTreeSet::new();
+            owned.insert(home_bg.to_string_lossy().into_owned());
+            let _ = handle_control(
+                Control::CardDetail {
+                    id: 99,
+                    card_id: "card-stalled".to_string(),
+                    reply: detail_tx,
+                },
+                &shared_bg,
+                &hub_bg,
+                &log_bg,
+                &home_bg,
+                &owned,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("query reader should have started");
+            std::fs::write(
+                spool_bg.join("0000000001000-1-0.json"),
+                r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"live-after-query","cwd":"C:\\repo"}}"#,
+            )
+            .unwrap();
+            rescan(
+                &spool_bg,
+                &shared_bg,
+                &hub_bg,
+                &log_bg,
+                &mut ingest,
+                &mut guards,
+                &mut cards,
+                None,
+            );
+            let _ = ingest_done_tx.send(());
+            queries
+        });
+
+        let ingested = ingest_done_rx.recv_timeout(Duration::from_millis(800));
+        if ingested.is_err() {
+            let _ = release_tx.send(());
+            let _ = release_tx.send(());
+            let _ = worker.join();
+            panic!("hook ingest stalled behind blocked card query reader");
+        }
+
+        let mut queries = worker.join().unwrap();
+        let _unblock_test = UnblockOnPanic(release_tx.clone());
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .state
+                .agents()
+                .iter()
+                .any(|a| a.key.session_id == "live-after-query"),
+            "hook event should be ingested while query reader is stalled"
+        );
+        queries.service();
+        assert!(
+            detail_rx.try_recv().is_err(),
+            "stalled query should not have replied yet"
+        );
+
+        let _ = release_tx.send(());
+        let _ = release_tx.send(());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let reply = loop {
+            queries.service();
+            if let Ok(msg) = detail_rx.try_recv() {
+                break msg;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for unblocked card detail reply"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(matches!(reply, ServerMsg::CardDetail { id: 99, .. }));
+    }
+
+    #[test]
+    fn service_cards_skips_oversized_broadcast_and_logs_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let log = RotatingLog::new(&log_path(&home));
+        let hub = Hub::new();
+        let mut card = make_test_card(&home, "card-oversized");
+        card.branch = Some("b".repeat(80_000));
+
+        broadcast_appended_cards(vec![card], &hub, &log);
+
+        let contents = std::fs::read_to_string(log_path(&home)).unwrap();
+        assert!(
+            contents.contains("cards: 1 broadcasts too large"),
+            "expected broadcast skip count in log, got: {contents}"
+        );
+    }
+
+    #[test]
+    fn cards_query_worker_panic_is_contained_and_daemon_keeps_serving() {
+        if std::env::var_os("ROCKY_QUERY_PANIC_HOOK_TEST").is_some() {
+            let home = std::path::PathBuf::from(
+                std::env::var_os("ROCKY_QUERY_PANIC_HOME").expect("home dir env"),
+            );
+            let spool = spool_dir(&home);
+            std::fs::create_dir_all(&spool).unwrap();
+            let log = Arc::new(RotatingLog::new(&log_path(&home)));
+            rockyd::log::install_panic_hook(Arc::clone(&log));
+
+            let shared = make_test_shared(&home);
+            let hub = Arc::new(Hub::new());
+            let mut card_panic = make_test_card(&home, "card-panic");
+            card_panic.blocks[0].before = Some("a".repeat(64));
+            card_panic.blocks[0].after = Some("b".repeat(64));
+            let card_ok = make_test_card(&home, "card-ok");
+            {
+                let mut s = shared.lock().unwrap();
+                s.cards.append(&card_panic).unwrap();
+                s.cards.append(&card_ok).unwrap();
+            }
+
+            let mut ingest = Ingestor::new();
+            let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+            let mut cards = Engine::new(home.clone(), 2);
+            assert_eq!(cards.worker_count(), 2);
+            let observed_thread = Arc::new(Mutex::new(None::<String>));
+            let observed_thread_ref = Arc::clone(&observed_thread);
+            let mut queries = CardQueryLoop::new_with_object_reader(
+                home.clone(),
+                cards.worker_count(),
+                Arc::new(move |sha: &str| {
+                    *observed_thread_ref.lock().unwrap() =
+                        std::thread::current().name().map(str::to_owned);
+                    if sha.starts_with('a') {
+                        panic!("SECRET_QUERY_LEAK_TOKEN");
+                    }
+                    if sha.starts_with('1') {
+                        ObjectRead::Text("fn f() {\n    1\n}\n".to_string())
+                    } else {
+                        ObjectRead::Text("fn f() {\n    2\n}\n".to_string())
+                    }
+                }),
+            );
+
+            let (tx1, rx1) = mpsc::sync_channel(1);
+            let (tx2, rx2) = mpsc::sync_channel(1);
+            let mut owned = std::collections::BTreeSet::new();
+            owned.insert(home.to_string_lossy().into_owned());
+            let _ = handle_control(
+                Control::CardDetail {
+                    id: 10,
+                    card_id: "card-panic".to_string(),
+                    reply: tx1,
+                },
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &owned,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+            let _ = handle_control(
+                Control::CardDetail {
+                    id: 11,
+                    card_id: "card-ok".to_string(),
+                    reply: tx2,
+                },
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &owned,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+
+            let mut reply1 = None;
+            let mut reply2 = None;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline && (reply1.is_none() || reply2.is_none()) {
+                service_queries(&mut queries, &log);
+                if reply1.is_none()
+                    && let Ok(msg) = rx1.try_recv()
+                {
+                    reply1 = Some(msg);
+                }
+                if reply2.is_none()
+                    && let Ok(msg) = rx2.try_recv()
+                {
+                    reply2 = Some(msg);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(queries.worker_panics(), 0);
+            assert_eq!(
+                reply1,
+                Some(ServerMsg::Ack {
+                    id: 10,
+                    ok: false,
+                    error: Some("internal".to_string()),
+                    cleanup_errors: 0,
+                })
+            );
+            assert!(matches!(reply2, Some(ServerMsg::CardDetail { id: 11, .. })));
+
+            let (tx3, rx3) = mpsc::sync_channel(1);
+            let _ = handle_control(
+                Control::Cards {
+                    id: 12,
+                    query: None,
+                    before: None,
+                    limit: 20,
+                    reply: tx3,
+                },
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &owned,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let reply3 = loop {
+                service_queries(&mut queries, &log);
+                if let Ok(msg) = rx3.try_recv() {
+                    break msg;
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for cards");
+                thread::sleep(Duration::from_millis(5));
+            };
+            let ServerMsg::Cards { id: 12, items, .. } = reply3 else {
+                panic!("expected ServerMsg::Cards after query panic");
+            };
+            assert_eq!(items.len(), 2);
+
+            std::fs::write(
+                spool.join("0000000001000-1-0.json"),
+                r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"live-after-query-panic","cwd":"C:\\repo"}}"#,
+            )
+            .unwrap();
+            rescan(
+                &spool,
+                &shared,
+                &hub,
+                &log,
+                &mut ingest,
+                &mut guards,
+                &mut cards,
+                None,
+            );
+            assert!(
+                shared
+                    .lock()
+                    .unwrap()
+                    .state
+                    .agents()
+                    .iter()
+                    .any(|a| a.key.session_id == "live-after-query-panic"),
+                "hook event should ingest after query worker panic"
+            );
+            assert_eq!(
+                observed_thread.lock().unwrap().as_deref(),
+                Some("rocky-card-worker-2")
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().expect("current test exe");
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args([
+            "--exact",
+            "tests::cards_query_worker_panic_is_contained_and_daemon_keeps_serving",
+            "--nocapture",
+        ])
+        .env("ROCKY_QUERY_PANIC_HOOK_TEST", "1")
+        .env("ROCKY_QUERY_PANIC_HOME", tmp.path());
+        let out = run_command_with_timeout(&mut cmd, Duration::from_secs(15));
+        assert!(
+            out.status.success(),
+            "query panic child aborted or failed: status={:?}, stdout={}, stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let log_text = std::fs::read_to_string(log_path(tmp.path())).expect("read rockyd.log");
+        assert!(
+            log_text.contains("cards: 1 worker panic"),
+            "expected panic-hook count line, got: {log_text:?}"
+        );
+        assert!(
+            log_text.contains("cards: 1 query worker panics"),
+            "expected service_queries count line, got: {log_text:?}"
+        );
+        assert!(!log_text.contains("SECRET_QUERY_LEAK_TOKEN"));
+        assert!(!log_text.contains("panic, aborting"));
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("SECRET_QUERY_LEAK_TOKEN"));
+    }
+
+    #[test]
+    fn remove_latches_cards_while_build_is_in_flight_and_keeps_settings_and_markers() {
+        use rocky_proto::paths::{cards_dir, cards_off_marker};
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        let repo = home.join("repo");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let settings = Settings::default();
+        assert!(settings.cards);
+        settings::save(&settings_path(&home), &settings).unwrap();
+        let saved_before = std::fs::read(settings_path(&home)).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let hook_once = AtomicBool::new(false);
+
+        let log = RotatingLog::new(&log_path(&home));
+        let hub = Hub::new();
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings = settings;
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut cards = Engine::new_with_build_hook(
+            home.clone(),
+            1,
+            Arc::new(move |_| {
+                if !hook_once.swap(true, Ordering::SeqCst) {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    let _ = release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10));
+                }
+            }),
+        );
+        struct DropRelease(mpsc::SyncSender<()>);
+        impl Drop for DropRelease {
+            fn drop(&mut self) {
+                let _ = self.0.try_send(());
+            }
+        }
+        let _unblock = DropRelease(release_tx.clone());
+        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+
+        let cwd = repo.to_string_lossy().into_owned();
+        let target = repo.join("src").join("a.rs").to_string_lossy().into_owned();
+        let write_turn = |seq: u64, sess: &str, ts_base: u64| {
+            let events = [
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base,
+                    "kind": "event",
+                    "event": { "hook_event_name": "SessionStart", "session_id": sess, "cwd": cwd }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 1,
+                    "kind": "event",
+                    "event": { "hook_event_name": "UserPromptSubmit", "session_id": sess, "cwd": cwd, "prompt": "edit file" }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 2,
+                    "kind": "event",
+                    "event": { "hook_event_name": "PreToolUse", "session_id": sess, "cwd": cwd, "tool_name": "Edit", "tool_use_id": format!("tu-{seq}"), "target_path": target }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 3,
+                    "kind": "event",
+                    "event": { "hook_event_name": "PostToolUse", "session_id": sess, "cwd": cwd, "tool_name": "Edit", "tool_use_id": format!("tu-{seq}"), "target_path": target }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 4,
+                    "kind": "event",
+                    "event": { "hook_event_name": "Stop", "session_id": sess, "cwd": cwd }
+                }),
+            ];
+            for (idx, ev) in events.iter().enumerate() {
+                let name = format!("{:013}-{seq}-{idx}.json", ts_base + idx as u64);
+                std::fs::write(spool.join(name), serde_json::to_vec(ev).unwrap()).unwrap();
+            }
+        };
+
+        write_turn(1, "sess-before-remove", 1_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        let owned = BTreeSet::new();
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("first turn card build should start in worker");
+
+        let (reply_tx, _reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Setup {
+                id: 77,
+                action: SetupAction::Remove,
+                reply: reply_tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+        assert!(
+            !cards_dir(&home).exists(),
+            "cards dir should still be absent at cleanup time"
+        );
+
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        write_turn(2, "sess-after-remove", 10_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+
+        assert!(
+            !cards_dir(&home).exists(),
+            "desk/cards must stay absent after Remove"
+        );
+        let (set_tx, set_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Set {
+                id: 78,
+                name: "cards".to_string(),
+                value: Value::Bool(true),
+                reply: set_tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+        assert!(matches!(
+            set_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(ServerMsg::Ack {
+                id: 78,
+                ok: true,
+                ..
+            })
+        ));
+        write_turn(3, "sess-after-set", 20_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        assert!(!cards_dir(&home).exists());
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .cards
+                .append(&make_test_card(&home, "after-remove"))
+                .is_err(),
+            "CardStore::append must refuse after Remove"
+        );
+        assert!(!cards_dir(&home).exists());
+        assert!(shared.lock().unwrap().settings.cards);
+        assert_eq!(std::fs::read(settings_path(&home)).unwrap(), saved_before);
+        assert!(!cards_off_marker(&home).exists());
+    }
+
+    #[test]
+    fn rescan_reuses_state_repo_without_duplicate_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        std::fs::create_dir_all(&spool).unwrap();
+        let log = RotatingLog::new(&log_path(&home));
+        let shared = make_test_shared(&home);
+        let hub = Hub::new();
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut cards = Engine::new(home.clone(), 1);
+
+        let resolve_calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut resolver = |cwd: &str| {
+            resolve_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            RepoInfo {
+                root: None,
+                main_root: None,
+                name: Path::new(cwd)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                branch: None,
+            }
+        };
+
+        std::fs::write(
+            spool.join("0000000001000-1-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"sess-dup","cwd":"/tmp/plain-home"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spool.join("0000000001010-2-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1010,"kind":"event","event":{"hook_event_name":"PreToolUse","session_id":"sess-dup","cwd":"/tmp/plain-home"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // Existing session already in StatusState (e.g., from replay or cards disabled):
+        // turning cards on and receiving a non-SessionStart event reuses StatusState's repo.
+        shared.lock().unwrap().settings.cards = false;
+        std::fs::write(
+            spool.join("0000000002000-3-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":2000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"sess-prior","cwd":"/tmp/prior-dir"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        shared.lock().unwrap().settings.cards = true;
+        std::fs::write(
+            spool.join("0000000002100-4-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":2100,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"sess-prior","cwd":"/tmp/prior-dir","prompt":"hi"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    fn run_command_with_timeout(
+        cmd: &mut std::process::Command,
+        timeout: Duration,
+    ) -> std::process::Output {
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn child");
+        let stdout_pipe = child.stdout.take().expect("piped stdout");
+        let stderr_pipe = child.stderr.take().expect("piped stderr");
+        let out_t = thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stdout_pipe;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let err_t = thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stderr_pipe;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait child") {
+                break status;
+            }
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = out_t.join().unwrap_or_default();
+                let stderr = err_t.join().unwrap_or_default();
+                panic!(
+                    "child timed out after {timeout:?}; stdout={}, stderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let stdout = out_t.join().unwrap_or_default();
+        let stderr = err_t.join().unwrap_or_default();
+        std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }
+    }
 }

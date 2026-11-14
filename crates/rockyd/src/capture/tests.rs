@@ -32,11 +32,22 @@ fn roots(list: &[(&str, bool)]) -> CaptureLine {
 }
 
 fn result(root: &str, coverage: Coverage, reason: Option<&str>, at_ms: u64) -> CaptureLine {
+    result_started(root, coverage, reason, 0, at_ms)
+}
+
+fn result_started(
+    root: &str,
+    coverage: Coverage,
+    reason: Option<&str>,
+    started_ms: u64,
+    at_ms: u64,
+) -> CaptureLine {
     CaptureLine::Result(Report {
         root: root.to_owned(),
         coverage,
         gaps: 0,
         reason: reason.map(str::to_owned),
+        started_ms,
         at_ms,
     })
 }
@@ -475,18 +486,20 @@ fn parse_line_accepts_the_two_wire_shapes() {
             coverage: Coverage::Complete,
             gaps: 0,
             reason: None,
+            started_ms: 0,
             at_ms: 1_731_300_000_000,
         }))
     );
     assert_eq!(
         parse_line(
-            r#"{"v":1,"kind":"result","root":"C:/r","coverage":"unknown","gaps":2,"reason":"git-unreadable","at_ms":5}"#
+            r#"{"v":1,"kind":"result","root":"C:/r","coverage":"unknown","gaps":2,"reason":"git-unreadable","started_ms":4,"at_ms":5}"#
         ),
         Some(CaptureLine::Result(Report {
             root: "C:/r".into(),
             coverage: Coverage::Unknown,
             gaps: 2,
             reason: Some("git-unreadable".into()),
+            started_ms: 4,
             at_ms: 5,
         }))
     );
@@ -545,4 +558,126 @@ fn parse_line_rejects_a_result_with_any_field_missing() {
         broken.as_object_mut().unwrap().remove(key);
         assert_eq!(parse_line(&broken.to_string()), None, "missing {key}");
     }
+}
+
+#[test]
+fn flush_skips_send_gap_keeps_debounce() {
+    let mut cap = running(&["C:/r"], &[]);
+    cap.line(roots(&[("C:/r", true)]));
+
+    cap.fs_event("C:/r", 0);
+    assert_eq!(cap.next_action(300), Some(Action::Send("C:/r".into())));
+
+    // Flush at +500 ms skips the 2_000 ms send gap but keeps the 300 ms debounce.
+    cap.flush("C:/r", 800);
+    assert_eq!(cap.next_action(1_099), None);
+    assert_eq!(cap.next_action(1_100), Some(Action::Send("C:/r".into())));
+    assert_eq!(cap.next_action(1_100), None);
+}
+
+#[test]
+fn result_carries_collector_started_ms() {
+    let mut cap = running(&["C:/r"], &[]);
+    cap.line(roots(&[("C:/r", true)]));
+
+    let line = parse_line(
+        r#"{"v":1,"kind":"result","root":"C:/r","coverage":"complete","gaps":0,"reason":null,"started_ms":2250,"at_ms":2500}"#,
+    )
+    .expect("result with started_ms");
+    let first = cap.line(line).expect("first result");
+    assert_eq!(
+        first,
+        CaptureResult {
+            root: "C:/r".into(),
+            started_ms: 2_250,
+            at_ms: 2_500,
+            coverage: "complete".into(),
+        }
+    );
+
+    let second = cap
+        .line(result_started(
+            "C:/r",
+            Coverage::Partial,
+            None,
+            2_600,
+            2_800,
+        ))
+        .expect("second result");
+    assert_eq!(
+        second,
+        CaptureResult {
+            root: "C:/r".into(),
+            started_ms: 2_600,
+            at_ms: 2_800,
+            coverage: "partial".into(),
+        }
+    );
+}
+
+#[test]
+fn missing_started_ms_defaults_to_zero() {
+    let mut cap = running(&["C:/r"], &[]);
+    cap.line(roots(&[("C:/r", true)]));
+
+    let line = parse_line(
+        r#"{"v":1,"kind":"result","root":"C:/r","coverage":"complete","gaps":0,"reason":null,"at_ms":5}"#,
+    )
+    .expect("older collector result without started_ms");
+    assert_eq!(
+        line,
+        CaptureLine::Result(Report {
+            root: "C:/r".into(),
+            coverage: Coverage::Complete,
+            gaps: 0,
+            reason: None,
+            started_ms: 0,
+            at_ms: 5,
+        })
+    );
+
+    let out = cap.line(line).expect("capture result");
+    assert_eq!(
+        out,
+        CaptureResult {
+            root: "C:/r".into(),
+            started_ms: 0,
+            at_ms: 5,
+            coverage: "complete".into(),
+        }
+    );
+}
+
+#[test]
+fn in_flight_result_does_not_end_window() {
+    let mut cap = running(&["C:/r"], &[]);
+    cap.line(roots(&[("C:/r", true)]));
+
+    cap.fs_event("C:/r", 0);
+    assert_eq!(cap.next_action(300), Some(Action::Send("C:/r".into())));
+
+    let post_ms = 500;
+    cap.flush("C:/r", post_ms);
+
+    let in_flight = cap
+        .line(result_started("C:/r", Coverage::Complete, None, 300, 600))
+        .expect("in-flight result");
+    assert_eq!(in_flight.started_ms, 300);
+    assert!(in_flight.started_ms < post_ms);
+
+    assert_eq!(cap.next_action(800), Some(Action::Send("C:/r".into())));
+
+    // Unsolicited result arriving after the flush request was sent whose reconcile started
+    // before post_ms still carries started_ms < post_ms.
+    let unsolicited = cap
+        .line(result_started("C:/r", Coverage::Complete, None, 400, 850))
+        .expect("unsolicited result after flush send");
+    assert_eq!(unsolicited.started_ms, 400);
+    assert!(unsolicited.started_ms < post_ms);
+
+    let after = cap
+        .line(result_started("C:/r", Coverage::Complete, None, 810, 900))
+        .expect("post-flush result");
+    assert_eq!(after.started_ms, 810);
+    assert!(after.started_ms >= post_ms);
 }

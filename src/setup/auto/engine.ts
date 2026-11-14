@@ -4,7 +4,7 @@
  * every write goes through the per-target modules, and only a target whose
  * expected bytes were found after the write is reported as healthy.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, type Stats } from "node:fs";
 import { dirname, join } from "node:path";
 import { defaultAgentHooksTarget, hasOwnedGateGroup } from "../agent-hooks.js";
 import type { McpRegistration } from "../clients.js";
@@ -433,4 +433,127 @@ export function removeShellOnly(ctx: AutoContext): AutoTargetReport[] {
     history: expected.history,
   });
   return [report];
+}
+
+type LstatOutcome =
+  | { status: "missing" }
+  | { status: "error" }
+  | { status: "ok"; stats: Stats };
+
+function safeLstat(path: string): LstatOutcome {
+  try {
+    return { status: "ok", stats: lstatSync(path) };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { status: "missing" }
+      : { status: "error" };
+  }
+}
+
+function removeTree(target: string): { removed: number; errors: number } {
+  const entry = safeLstat(target);
+  if (entry.status === "missing") return { removed: 0, errors: 0 };
+  if (entry.status === "error") return { removed: 0, errors: 1 };
+
+  if (entry.stats.isSymbolicLink()) {
+    try {
+      // Unlink the link itself (including Windows junctions) without following into its target.
+      rmSync(target, { recursive: true, force: true });
+      return { removed: 1, errors: 0 };
+    } catch {
+      return { removed: 0, errors: 1 };
+    }
+  }
+  if (!entry.stats.isDirectory()) {
+    try {
+      unlinkSync(target);
+      return { removed: 1, errors: 0 };
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? { removed: 0, errors: 0 }
+        : { removed: 0, errors: 1 };
+    }
+  }
+
+  let names: string[];
+  try {
+    names = readdirSync(target);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { removed: 0, errors: 0 }
+      : { removed: 0, errors: 1 };
+  }
+  let removed = 0;
+  let errors = 0;
+  for (const name of names) {
+    const child = removeTree(join(target, name));
+    removed += child.removed;
+    errors += child.errors;
+  }
+  if (errors === 0) {
+    try {
+      rmdirSync(target);
+      removed += 1;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") errors += 1;
+    }
+  }
+  return { removed, errors };
+}
+
+function removeSpoolData(spoolDir: string): { removed: number; errors: number } {
+  const dir = safeLstat(spoolDir);
+  if (dir.status === "missing") return { removed: 0, errors: 0 };
+  if (dir.status === "error" || dir.stats.isSymbolicLink() || !dir.stats.isDirectory()) {
+    return { removed: 0, errors: 1 };
+  }
+  let names: string[];
+  try {
+    names = readdirSync(spoolDir);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { removed: 0, errors: 0 }
+      : { removed: 0, errors: 1 };
+  }
+
+  let removed = 0;
+  let errors = 0;
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const entryPath = join(spoolDir, name);
+    const entry = safeLstat(entryPath);
+    if (entry.status === "missing") continue;
+    if (entry.status === "error" || entry.stats.isDirectory()) {
+      errors += 1;
+      continue;
+    }
+    try {
+      unlinkSync(entryPath);
+      removed += 1;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") errors += 1;
+    }
+  }
+
+  const bad = removeTree(join(spoolDir, "bad"));
+  return { removed: removed + bad.removed, errors: errors + bad.errors };
+}
+
+/**
+ * Delete all change cards, top-level spool JSON files, and quarantined spool
+ * files under `desk/` while leaving settings, logs, history, and markers in place.
+ */
+export function removeCardData(rockyHome: string): { removed: number; errors: number } {
+  const deskDir = join(rockyHome, "desk");
+  const desk = safeLstat(deskDir);
+  if (desk.status === "missing") return { removed: 0, errors: 0 };
+  if (desk.status === "error" || desk.stats.isSymbolicLink() || !desk.stats.isDirectory()) {
+    return { removed: 0, errors: 1 };
+  }
+  const cards = removeTree(join(deskDir, "cards"));
+  const spool = removeSpoolData(join(deskDir, "spool"));
+  return {
+    removed: cards.removed + spool.removed,
+    errors: cards.errors + spool.errors,
+  };
 }

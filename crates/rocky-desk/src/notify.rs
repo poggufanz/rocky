@@ -274,6 +274,7 @@ mod tests {
             quiet_10m: false,
             repo: RepoInfo {
                 root: Some("C:/r".into()),
+                main_root: None,
                 name: "r".into(),
                 branch: Some("main".into()),
             },

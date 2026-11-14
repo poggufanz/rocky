@@ -341,6 +341,7 @@ pub struct SetupSettings {
     pending: Vec<PendingRepo>,
     errors: Vec<(Control, String)>,
     purge_ask: Option<String>,
+    removed_cleanup_errors: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -360,11 +361,17 @@ impl Default for SetupSettings {
             pending: Vec::new(),
             errors: Vec::new(),
             purge_ask: None,
+            removed_cleanup_errors: 0,
         }
     }
 }
 
 impl SetupSettings {
+    /// Non-target card cleanup error count carried by the completed Remove ack.
+    pub fn removed_cleanup_errors(&self) -> u32 {
+        self.removed_cleanup_errors
+    }
+
     pub fn targets(&self) -> &[SetupTarget] {
         self.plan.as_ref().map_or(&[], |p| &p.targets)
     }
@@ -489,6 +496,7 @@ impl SetupSettings {
             return None;
         }
         let error = disable().err();
+        self.removed_cleanup_errors = 0;
         self.remove = RemoveFlow::Removing;
         Some(error)
     }
@@ -505,6 +513,7 @@ impl SetupSettings {
             Outcome::Expired => Outcome::Done {
                 ok: false,
                 error: Some(expired.to_string()),
+                cleanup_errors: 0,
             },
             other => other,
         };
@@ -527,15 +536,24 @@ impl SetupSettings {
                 });
             }
             (RequestKind::RepoList, Outcome::Repos(repos)) => self.repos = repos,
-            (RequestKind::Remove, Outcome::Done { ok, error }) => {
+            (
+                RequestKind::Remove,
+                Outcome::Done {
+                    ok,
+                    error,
+                    cleanup_errors,
+                },
+            ) => {
                 if ok {
                     self.remove = RemoveFlow::Idle;
+                    self.removed_cleanup_errors = cleanup_errors;
                     step.show_removed = true;
                 } else {
+                    self.removed_cleanup_errors = 0;
                     self.remove = RemoveFlow::Failed(error.unwrap_or_default());
                 }
             }
-            (kind, Outcome::Done { ok, error }) => {
+            (kind, Outcome::Done { ok, error, .. }) => {
                 let Some(control) = control_of(&kind) else {
                     return step;
                 };

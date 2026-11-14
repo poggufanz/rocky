@@ -4,7 +4,7 @@ use serde::Serialize;
 use similar::{Algorithm, DiffOp, capture_diff_slices};
 
 use crate::lang::lang_for_path;
-use crate::model::{Lang, MAX_DIFF_ITEMS, Side, Symbol, SymbolKind};
+use crate::model::{FileInput, Lang, MAX_DIFF_ITEMS, Side, Symbol, SymbolKind};
 use crate::syntax;
 use crate::text::{cut, normalize};
 
@@ -43,27 +43,37 @@ fn slice_region<'a>(all_lines: &'a [&'a str], lines: (u32, u32)) -> (&'a [&'a st
     }
 }
 
-fn resolve_region<'a>(
+fn resolve_regions<'a>(
     lang: Lang,
-    norm_text: Option<&'a str>,
+    norm_text: Option<&str>,
     all_lines: &'a [&'a str],
-    symbol: Option<&Symbol>,
+    symbols: &[Option<&Symbol>],
     collect_heads: bool,
-) -> (&'a [&'a str], u32, BTreeSet<u32>) {
+) -> Vec<(&'a [&'a str], u32, BTreeSet<u32>)> {
     let Some(text) = norm_text else {
-        return (&[], 1, BTreeSet::new());
-    };
-    let Some(sym) = symbol else {
-        return (all_lines, 1, BTreeSet::new());
+        return vec![(&[], 1, BTreeSet::new()); symbols.len()];
     };
     if !is_grammar_lang(lang) {
-        return (all_lines, 1, BTreeSet::new());
+        return symbols
+            .iter()
+            .map(|_| (all_lines, 1, BTreeSet::new()))
+            .collect();
     }
-    let Some(region) = syntax::parse_symbol_region(lang, text, sym, collect_heads) else {
-        return (&[], 1, BTreeSet::new());
-    };
-    let (sliced, start_line) = slice_region(all_lines, region.lines);
-    (sliced, start_line, region.head_lines)
+    let regions = syntax::parse_symbol_regions(lang, text, symbols, collect_heads);
+    symbols
+        .iter()
+        .zip(regions)
+        .map(|(symbol, maybe_region)| {
+            if symbol.is_none() {
+                return (all_lines, 1, BTreeSet::new());
+            }
+            let Some(region) = maybe_region else {
+                return (&[][..], 1, BTreeSet::new());
+            };
+            let (sliced, start_line) = slice_region(all_lines, region.lines);
+            (sliced, start_line, region.head_lines)
+        })
+        .collect()
 }
 
 fn push_fold(entries: &mut Vec<SnippetLine>, count: u32) {
@@ -147,39 +157,14 @@ fn push_changed_run(
     }
 }
 
-/// Builds a trimmed, skeleton-aware code snippet for one file change or symbol.
-pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLine> {
-    let lang = lang_for_path(input.path);
-    let before_norm = match input.before {
-        Side::Text(s) => Some(normalize(s)),
-        Side::Absent | Side::Unknown => None,
-    };
-    let after_norm = match input.after {
-        Side::Text(s) => Some(normalize(s)),
-        Side::Absent | Side::Unknown => None,
-    };
-
-    let before_lines: Vec<&str> = before_norm
-        .as_deref()
-        .map(|s| s.lines().collect())
-        .unwrap_or_default();
-    let after_lines: Vec<&str> = after_norm
-        .as_deref()
-        .map(|s| s.lines().collect())
-        .unwrap_or_default();
-
-    let (before_region, _, _) =
-        resolve_region(lang, before_norm.as_deref(), &before_lines, symbol, false);
-    let collect_after_heads = !matches!(input.before, Side::Absent)
-        && !matches!(input.after, Side::Absent | Side::Unknown);
-    let (after_region, after_start_line, head_lines) = resolve_region(
-        lang,
-        after_norm.as_deref(),
-        &after_lines,
-        symbol,
-        collect_after_heads,
-    );
-
+fn build_snippet(
+    before_side: Side<'_>,
+    after_side: Side<'_>,
+    before_region: &[&str],
+    after_region: &[&str],
+    after_start_line: u32,
+    head_lines: &BTreeSet<u32>,
+) -> Vec<SnippetLine> {
     if before_region.len() > MAX_DIFF_ITEMS || after_region.len() > MAX_DIFF_ITEMS {
         let omitted = if after_region.is_empty() {
             before_region.len()
@@ -191,16 +176,16 @@ pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLin
         }];
     }
 
-    if matches!(input.after, Side::Absent) {
+    if matches!(after_side, Side::Absent) {
         return single_side_entries(before_region, |text| SnippetLine::Removed { text });
     }
-    if matches!(input.before, Side::Absent) {
+    if matches!(before_side, Side::Absent) {
         return single_side_entries(after_region, |text| SnippetLine::Added { text });
     }
-    if matches!(input.after, Side::Unknown) {
+    if matches!(after_side, Side::Unknown) {
         return Vec::new();
     }
-    if matches!(input.before, Side::Unknown) {
+    if matches!(before_side, Side::Unknown) {
         let mut entries = Vec::new();
         push_equal_run(
             &mut entries,
@@ -208,7 +193,7 @@ pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLin
             after_start_line,
             0,
             after_region.len(),
-            &head_lines,
+            head_lines,
         );
         return cap_entries(entries);
     }
@@ -224,7 +209,7 @@ pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLin
                     after_start_line,
                     new_index,
                     len,
-                    &head_lines,
+                    head_lines,
                 );
             }
             DiffOp::Delete {
@@ -267,7 +252,68 @@ pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLin
     cap_entries(entries)
 }
 
-use crate::model::FileInput;
+/// Builds trimmed, skeleton-aware code snippets for many changes in one file, parsing each side at most once.
+pub fn snippets(input: &FileInput<'_>, symbols: &[Option<&Symbol>]) -> Vec<Vec<SnippetLine>> {
+    if symbols.is_empty() {
+        return Vec::new();
+    }
+
+    let lang = lang_for_path(input.path);
+    let before_norm = match input.before {
+        Side::Text(s) => Some(normalize(s)),
+        Side::Absent | Side::Unknown => None,
+    };
+    let after_norm = match input.after {
+        Side::Text(s) => Some(normalize(s)),
+        Side::Absent | Side::Unknown => None,
+    };
+
+    let before_lines: Vec<&str> = before_norm
+        .as_deref()
+        .map(|s| s.lines().collect())
+        .unwrap_or_default();
+    let after_lines: Vec<&str> = after_norm
+        .as_deref()
+        .map(|s| s.lines().collect())
+        .unwrap_or_default();
+
+    let before_regions =
+        resolve_regions(lang, before_norm.as_deref(), &before_lines, symbols, false);
+    let collect_after_heads = !matches!(input.before, Side::Absent)
+        && !matches!(input.after, Side::Absent | Side::Unknown);
+    let after_regions = resolve_regions(
+        lang,
+        after_norm.as_deref(),
+        &after_lines,
+        symbols,
+        collect_after_heads,
+    );
+
+    before_regions
+        .into_iter()
+        .zip(after_regions)
+        .map(
+            |((before_region, _, _), (after_region, after_start_line, head_lines))| {
+                build_snippet(
+                    input.before,
+                    input.after,
+                    before_region,
+                    after_region,
+                    after_start_line,
+                    &head_lines,
+                )
+            },
+        )
+        .collect()
+}
+
+/// Builds a trimmed, skeleton-aware code snippet for one file change or symbol.
+pub fn snippet(input: &FileInput<'_>, symbol: Option<&Symbol>) -> Vec<SnippetLine> {
+    snippets(input, &[symbol])
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
 
 fn kind_name(kind: SymbolKind) -> &'static str {
     match kind {
@@ -873,5 +919,159 @@ impl S {
             "## method Cart::apply\n    apply() {\n+     if (true) return 0;\n      return 1;\n    }"
         );
         assert!(!rendered.contains('\r'));
+    }
+
+    #[test]
+    fn snippets_parse_once() {
+        let before = "\
+function f1(a: number) {
+  return a + 1;
+}
+function f2(a: number) {
+  return a + 2;
+}
+function f3(a: number) {
+  return a + 3;
+}
+function f4(a: number) {
+  return a + 4;
+}
+function f5(a: number) {
+  return a + 5;
+}
+";
+        let after = "\
+function f1(a: number) {
+  return a + 10;
+}
+function f2(a: number) {
+  return a + 20;
+}
+function f3(a: number) {
+  return a + 30;
+}
+function f4(a: number) {
+  return a + 40;
+}
+function f5(a: number) {
+  return a + 50;
+}
+";
+        let input = FileInput {
+            path: "src/five.ts",
+            before: Side::Text(before),
+            after: Side::Text(after),
+        };
+        let facts = analyze(&input);
+        let symbols: Vec<Option<&Symbol>> =
+            facts.changes.iter().map(|c| c.symbol.as_ref()).collect();
+        assert_eq!(symbols.len(), 5);
+        assert!(symbols.iter().all(Option::is_some));
+
+        syntax::reset_parse_count();
+        let batched = snippets(&input, &symbols);
+        assert_eq!(syntax::parse_count(), 2);
+
+        let expected: Vec<Vec<SnippetLine>> =
+            symbols.iter().map(|&sym| snippet(&input, sym)).collect();
+        assert_eq!(batched, expected);
+    }
+
+    #[test]
+    fn snippets_edge_cases_and_order() {
+        let ts_before = "\
+import { x } from './x';
+export function alpha(a: number) {
+  return a + x;
+}
+export function beta(b: number) {
+  return b + 1;
+}
+";
+        let ts_after = "\
+import { y } from './y';
+export function alpha(a: number) {
+  if (a < 0) return 0;
+  return a + y;
+}
+export function beta(b: number) {
+  return b + 2;
+}
+";
+        let input = FileInput {
+            path: "src/mix.ts",
+            before: Side::Text(ts_before),
+            after: Side::Text(ts_after),
+        };
+        let facts = analyze(&input);
+        assert_eq!(facts.changes.len(), 3);
+
+        syntax::reset_parse_count();
+        assert!(snippets(&input, &[]).is_empty());
+        assert_eq!(syntax::parse_count(), 0);
+
+        syntax::reset_parse_count();
+        let file_only = snippets(&input, &[None]);
+        assert_eq!(syntax::parse_count(), 0);
+        assert_eq!(file_only, vec![snippet(&input, None)]);
+
+        let missing = Symbol {
+            kind: SymbolKind::Function,
+            name: "missing".to_string(),
+            container: None,
+            exported: false,
+            nth: 0,
+        };
+        let requested = vec![
+            facts.changes[1].symbol.as_ref(),
+            None,
+            Some(&missing),
+            facts.changes[2].symbol.as_ref(),
+            facts.changes[1].symbol.as_ref(),
+        ];
+
+        syntax::reset_parse_count();
+        let batched = snippets(&input, &requested);
+        assert_eq!(syntax::parse_count(), 2);
+        let expected: Vec<Vec<SnippetLine>> =
+            requested.iter().map(|&sym| snippet(&input, sym)).collect();
+        assert_eq!(batched, expected);
+
+        let single_side_input = FileInput {
+            path: "src/new.ts",
+            before: Side::Absent,
+            after: Side::Text(ts_after),
+        };
+        let two_syms = vec![
+            facts.changes[1].symbol.as_ref(),
+            facts.changes[2].symbol.as_ref(),
+        ];
+        syntax::reset_parse_count();
+        let single_side_batched = snippets(&single_side_input, &two_syms);
+        assert_eq!(syntax::parse_count(), 1);
+        let single_side_expected: Vec<Vec<SnippetLine>> = two_syms
+            .iter()
+            .map(|&sym| snippet(&single_side_input, sym))
+            .collect();
+        assert_eq!(single_side_batched, single_side_expected);
+
+        let rs_src_before =
+            "struct S;\nimpl S {\n    fn w(&self) -> i32 { 1 }\n    fn w(&self) -> i32 { 2 }\n}\n";
+        let rs_src_after = "struct S;\nimpl S {\n    fn w(&self) -> i32 { 10 }\n    fn w(&self) -> i32 { 20 }\n}\n";
+        let rs_input = FileInput {
+            path: "src/lib.rs",
+            before: Side::Text(rs_src_before),
+            after: Side::Text(rs_src_after),
+        };
+        let rs_facts = analyze(&rs_input);
+        let rs_syms: Vec<Option<&Symbol>> =
+            rs_facts.changes.iter().map(|c| c.symbol.as_ref()).collect();
+        assert_eq!(rs_syms.len(), 2);
+        syntax::reset_parse_count();
+        let rs_batched = snippets(&rs_input, &rs_syms);
+        assert_eq!(syntax::parse_count(), 2);
+        let rs_expected: Vec<Vec<SnippetLine>> =
+            rs_syms.iter().map(|&sym| snippet(&rs_input, sym)).collect();
+        assert_eq!(rs_batched, rs_expected);
     }
 }

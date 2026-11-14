@@ -19,6 +19,7 @@ const HOUR: u64 = 3_600_000;
 fn repo(_cwd: &str) -> RepoInfo {
     RepoInfo {
         root: None,
+        main_root: None,
         name: "r".into(),
         branch: None,
     }

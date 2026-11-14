@@ -24,6 +24,7 @@ fn ev(name: &str, sid: &str, aid: Option<&str>) -> HookEvent {
 fn repo(_: &str) -> RepoInfo {
     RepoInfo {
         root: Some("C:/r".into()),
+        main_root: None,
         name: "r".into(),
         branch: Some("main".into()),
     }
@@ -710,6 +711,7 @@ fn unknown_key_has_empty_timeline() {
 fn repo_at(cwd: &str) -> RepoInfo {
     RepoInfo {
         root: Some(cwd.into()),
+        main_root: None,
         name: cwd.into(),
         branch: None,
     }

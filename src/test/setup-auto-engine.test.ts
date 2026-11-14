@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { inspectAll, removeAll, type AutoContext } from "../setup/auto/engine.js";
+import { inspectAll, removeAll, removeCardData, type AutoContext } from "../setup/auto/engine.js";
 import { mcpTargets } from "../setup/auto/mcp.js";
 import type { ShellHookPort } from "../setup/auto/shell.js";
 import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
@@ -218,4 +218,81 @@ test("the harness gets its target once its config folder appears", (t) => {
   const gemini = inspectAll(f.ctx, undefined).filter((report) => report.harness === "gemini-cli");
 
   assert.deepEqual(gemini.map((report) => [report.path, report.state]), [[geminiPath, "missing"]]);
+});
+
+test("removeCardData returns zero counts when desk is absent", (t) => {
+  const f = fixture(t);
+  assert.deepEqual(removeCardData(f.ctx.rockyHome), { removed: 0, errors: 0 });
+});
+
+test("removeCardData deletes cards and spool data while keeping other desk files", (t) => {
+  const f = fixture(t);
+  const desk = join(f.ctx.rockyHome, "desk");
+  const cards = join(desk, "cards");
+  const spool = join(desk, "spool");
+  const bad = join(spool, "bad");
+  mkdirSync(cards, { recursive: true });
+  mkdirSync(bad, { recursive: true });
+  writeFileSync(join(cards, "repo.jsonl"), "{}\n");
+  writeFileSync(join(spool, "event.json"), "{}\n");
+  writeFileSync(join(bad, "bad.json"), "bad");
+  writeFileSync(join(desk, "settings.json"), "{}\n");
+
+  const outcome = removeCardData(f.ctx.rockyHome);
+
+  assert.equal(outcome.errors, 0);
+  assert.ok(outcome.removed >= 3);
+  assert.equal(existsSync(cards), false);
+  assert.equal(existsSync(join(spool, "event.json")), false);
+  assert.equal(existsSync(bad), false);
+  assert.equal(existsSync(join(desk, "settings.json")), true);
+});
+
+test("removeCardData unlinks directory links without deleting their targets", (t) => {
+  const f = fixture(t);
+  const cards = join(f.ctx.rockyHome, "desk", "cards");
+  const outside = join(f.root, "outside-target");
+  mkdirSync(cards, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "keep.txt"), "keep");
+  try {
+    symlinkSync(outside, join(cards, "linked"), process.platform === "win32" ? "junction" : "dir");
+  } catch {
+    t.skip("the platform cannot create a directory link");
+    return;
+  }
+
+  const outcome = removeCardData(f.ctx.rockyHome);
+
+  assert.equal(outcome.errors, 0);
+  assert.equal(existsSync(cards), false);
+  assert.equal(existsSync(join(outside, "keep.txt")), true);
+});
+
+test("removeCardData counts errors on unremovable entries without stopping deletion", (t) => {
+  const f = fixture(t);
+  const desk = join(f.ctx.rockyHome, "desk");
+  const cards = join(desk, "cards");
+  const spool = join(desk, "spool");
+  const bad = join(spool, "bad");
+  const dirOne = join(spool, "one.json");
+  const dirTwo = join(spool, "two.json");
+  mkdirSync(cards, { recursive: true });
+  mkdirSync(bad, { recursive: true });
+  mkdirSync(dirOne, { recursive: true });
+  mkdirSync(dirTwo, { recursive: true });
+  writeFileSync(join(dirOne, "keep"), "1");
+  writeFileSync(join(cards, "repo.jsonl"), "{}\n");
+  writeFileSync(join(spool, "removable.json"), "{}\n");
+  writeFileSync(join(bad, "bad.json"), "bad");
+
+  const outcome = removeCardData(f.ctx.rockyHome);
+
+  assert.equal(outcome.errors, 2);
+  assert.ok(outcome.removed >= 3);
+  assert.equal(existsSync(cards), false);
+  assert.equal(existsSync(join(spool, "removable.json")), false);
+  assert.equal(existsSync(bad), false);
+  assert.equal(existsSync(dirOne), true);
+  assert.equal(existsSync(dirTwo), true);
 });

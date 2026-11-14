@@ -16,6 +16,7 @@ use rocky_proto::spool::{
     SHELL_ENV_VARS, SPOOL_VERSION, SpoolBody, SpoolRecord, peek_spool_version,
 };
 
+use crate::cards::windows::PromptIn;
 use crate::history::History;
 use crate::state::{ApplyOutcome, Changes, StatusState};
 
@@ -97,13 +98,15 @@ pub fn spool_name_ms(name: &str) -> Option<u64> {
 }
 
 /// What one ingest pass produced beyond the status machine.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct IngestOutput {
     pub changes: Changes,
     pub gaps: Vec<Gap>,
     pub history_errors: u64,
     /// `(harness, location)` pairs from shell records and claude-code events, in file-name order.
     pub config_locations: Vec<(String, String)>,
+    pub prompts: Vec<PromptIn>,
+    pub events: Vec<(HookEvent, u64)>,
 }
 
 #[derive(Debug, Default)]
@@ -143,6 +146,8 @@ impl Ingestor {
         let mut seen_upserted = HashSet::new();
         let mut seen_removed = HashSet::new();
         let mut config_locations = Vec::new();
+        let mut prompts = Vec::new();
+        let mut events = Vec::new();
         for path in json_files(spool) {
             if self.applied.contains(&path) {
                 // Applied earlier, history line already written; only re-try
@@ -162,7 +167,7 @@ impl Ingestor {
             match serde_json::from_slice::<SpoolRecord>(&bytes) {
                 Ok(rec) if rec.v == SPOOL_VERSION => {
                     match rec.body {
-                        SpoolBody::Event { event } => {
+                        SpoolBody::Event { mut event } => {
                             let config_dir = rec
                                 .config_dir
                                 .as_deref()
@@ -170,11 +175,25 @@ impl Ingestor {
                             if let Some(dir) = config_dir {
                                 config_locations.push(("claude-code".to_string(), dir.to_string()));
                             }
+                            let prompt_text = if event.hook_event_name == "UserPromptSubmit" {
+                                event.prompt.take()
+                            } else {
+                                None
+                            };
+                            let prompt_truncated = event.truncated;
                             let event = HookEvent {
                                 prompt: None,
                                 ..event
                             };
                             let ev = state.prepare(event);
+                            if let Some(text) = prompt_text {
+                                prompts.push(PromptIn {
+                                    session_id: ev.session_id.clone(),
+                                    text,
+                                    truncated: prompt_truncated,
+                                    recv_ms: rec.recv_ms,
+                                });
+                            }
                             if let ApplyOutcome::Changed(c) = state.apply(&ev, rec.recv_ms, repo_of)
                             {
                                 for key in c.upserted {
@@ -190,6 +209,7 @@ impl Ingestor {
                             } else {
                                 self.health.late_events += 1;
                             }
+                            events.push((ev.clone(), rec.recv_ms));
                             let line = HistoryLine {
                                 v: HISTORY_VERSION,
                                 body: HistoryBody::Event {
@@ -265,6 +285,8 @@ impl Ingestor {
             gaps,
             history_errors,
             config_locations,
+            prompts,
+            events,
         }
     }
 
@@ -399,6 +421,7 @@ mod tests {
             &mut state,
             &mut |_: &str| RepoInfo {
                 root: None,
+                main_root: None,
                 name: "repo".into(),
                 branch: None,
             },
@@ -435,6 +458,7 @@ mod tests {
             &mut state,
             &mut |_: &str| RepoInfo {
                 root: None,
+                main_root: None,
                 name: "repo".into(),
                 branch: None,
             },
@@ -493,6 +517,7 @@ mod tests {
             &mut state,
             &mut |_: &str| RepoInfo {
                 root: None,
+                main_root: None,
                 name: "repo".into(),
                 branch: None,
             },
@@ -507,5 +532,54 @@ mod tests {
         assert_eq!(out.history_errors, 0);
         assert_eq!(ingestor.health.bad_files, 0);
         assert_eq!(state.agents().len(), 1);
+    }
+
+    #[test]
+    fn prompt_routes_to_ingest_output_not_history() {
+        let spool = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(history_dir.path(), HISTORY_CAP_BYTES, true);
+        let mut state = StatusState::new();
+        let mut ingestor = Ingestor::new();
+        let record = r#"{"v":1,"harness":"claude-code","recv_ms":42,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"S1","prompt":"SECRET_PROMPT_TEXT"}}"#;
+        fs::write(spool.path().join("0000000000042-1.json"), record).unwrap();
+
+        let out = ingestor.ingest_once(
+            spool.path(),
+            &mut state,
+            &mut |_: &str| RepoInfo {
+                root: None,
+                main_root: None,
+                name: "repo".into(),
+                branch: None,
+            },
+            &mut history,
+            1_700_000_000_000,
+        );
+
+        assert_eq!(
+            out.prompts,
+            vec![crate::cards::windows::PromptIn {
+                session_id: "S1".into(),
+                text: "SECRET_PROMPT_TEXT".into(),
+                truncated: false,
+                recv_ms: 42,
+            }]
+        );
+        assert_eq!(out.events.len(), 1);
+        assert_eq!(out.events[0].0.hook_event_name, "UserPromptSubmit");
+        assert_eq!(out.events[0].0.prompt, None);
+        assert_eq!(out.events[0].1, 42);
+
+        let mut history_bytes = Vec::new();
+        for entry in fs::read_dir(history_dir.path()).unwrap().flatten() {
+            history_bytes.extend(fs::read(entry.path()).unwrap());
+        }
+        let history_text = String::from_utf8_lossy(&history_bytes);
+        assert!(
+            !history_text.contains("SECRET_PROMPT_TEXT"),
+            "{history_text}"
+        );
+        assert!(!history_text.contains(r#""prompt""#), "{history_text}");
     }
 }

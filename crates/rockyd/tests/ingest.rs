@@ -18,6 +18,7 @@ const NOW: u64 = 1_700_000_000_000;
 fn stub_repo(_cwd: &str) -> RepoInfo {
     RepoInfo {
         root: None,
+        main_root: None,
         name: "repo".into(),
         branch: None,
     }
