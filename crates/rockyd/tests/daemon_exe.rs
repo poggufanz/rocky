@@ -243,7 +243,7 @@ fn run_hook(home: &Path, payload: &str) {
         .unwrap()
         .write_all(payload.as_bytes())
         .unwrap();
-    let status = child.0.wait().unwrap();
+    let status = wait_exit(&mut child, "hook");
     assert!(status.success(), "hook failed: {status}");
 }
 

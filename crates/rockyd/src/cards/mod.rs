@@ -12,9 +12,10 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use rocky_proto::cards::Card;
 use rocky_proto::hook::HookEvent;
@@ -194,6 +195,86 @@ struct BuildDone {
     panicked: bool,
 }
 
+pub(crate) const WORKER_DROP_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub(crate) struct WorkerExitGuard {
+    state: Arc<(Mutex<usize>, Condvar)>,
+    finished: Arc<AtomicBool>,
+}
+
+impl WorkerExitGuard {
+    pub(crate) fn finished_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.finished)
+    }
+}
+
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Release);
+        let (lock, cvar) = &*self.state;
+        let mut active = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *active = active.saturating_sub(1);
+        cvar.notify_all();
+    }
+}
+
+pub(crate) struct BoundedWorkers {
+    state: Arc<(Mutex<usize>, Condvar)>,
+    handles: Vec<(JoinHandle<()>, Arc<AtomicBool>)>,
+}
+
+impl BoundedWorkers {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new((Mutex::new(0), Condvar::new())),
+            handles: Vec::new(),
+        }
+    }
+
+    pub(crate) fn prepare_spawn(&self) -> WorkerExitGuard {
+        let (lock, _) = &*self.state;
+        let mut active = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *active += 1;
+        WorkerExitGuard {
+            state: Arc::clone(&self.state),
+            finished: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn push(&mut self, handle: JoinHandle<()>, finished: Arc<AtomicBool>) {
+        self.handles.push((handle, finished));
+    }
+
+    pub(crate) fn join_bounded(&mut self, timeout: Duration) {
+        if self.handles.is_empty() {
+            return;
+        }
+        let (lock, cvar) = &*self.state;
+        let deadline = Instant::now() + timeout;
+        let mut active = lock.lock().unwrap_or_else(|p| p.into_inner());
+        while *active > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let (next, res) = cvar
+                .wait_timeout(active, left)
+                .unwrap_or_else(|p| p.into_inner());
+            active = next;
+            if res.timed_out() {
+                break;
+            }
+        }
+        drop(active);
+
+        for (handle, finished) in self.handles.drain(..) {
+            if finished.load(Ordering::Acquire) {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 struct WorkerPool {
     workers: usize,
     job_tx: Option<mpsc::Sender<BuildJob>>,
@@ -202,7 +283,7 @@ struct WorkerPool {
     res_rx: mpsc::Receiver<BuildDone>,
     stores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<CachedStore>>>>>,
     hook: Option<BuildHook>,
-    handles: Vec<JoinHandle<()>>,
+    pool_workers: BoundedWorkers,
     panics: Arc<AtomicU64>,
 }
 
@@ -219,7 +300,7 @@ impl WorkerPool {
             res_rx,
             stores: Arc::new(Mutex::new(HashMap::new())),
             hook,
-            handles: Vec::new(),
+            pool_workers: BoundedWorkers::new(),
             panics: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -234,14 +315,17 @@ impl WorkerPool {
             let stores_ref = Arc::clone(&self.stores);
             let panics_ref = Arc::clone(&self.panics);
             let hook_ref = self.hook.clone();
+            let exit_guard = self.pool_workers.prepare_spawn();
+            let finished = exit_guard.finished_flag();
             let name = format!("{CARD_WORKER_THREAD_PREFIX}{idx}");
             let handle = thread::Builder::new()
                 .name(name)
                 .spawn(move || {
+                    let _exit_guard = exit_guard;
                     worker_loop(rx, tx, stores_ref, panics_ref, hook_ref);
                 })
                 .expect("spawn card worker thread");
-            self.handles.push(handle);
+            self.pool_workers.push(handle, finished);
         }
     }
 
@@ -261,9 +345,7 @@ impl Drop for WorkerPool {
     fn drop(&mut self) {
         self.job_tx.take();
         self.res_tx.take();
-        for handle in self.handles.drain(..) {
-            let _ = handle.join();
-        }
+        self.pool_workers.join_bounded(WORKER_DROP_TIMEOUT);
     }
 }
 
@@ -1308,6 +1390,87 @@ mod tests {
                 .iter()
                 .map(|v| (&v.file_rel, v.ts))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn worker_pool_drop_returns_within_deadline_when_worker_stalls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let hook: BuildHook = Arc::new(move |_| {
+            let _ = entered_tx.lock().unwrap().send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(8));
+        });
+
+        let mut pool = WorkerPool::new(1, Some(hook));
+        let agent = AgentKey {
+            session_id: "sess-drop".to_string(),
+            agent_id: String::new(),
+        };
+        let job = BuildJob {
+            turn_id: (agent.clone(), 1_000),
+            turn: Turn {
+                agent,
+                agent_type: "claude".to_string(),
+                parent: None,
+                cwd: None,
+                repo: empty_repo_info(),
+                prompt: None,
+                started_ms: 1_000,
+                ended_ms: Some(2_000),
+                status: crate::cards::windows::TurnEnd::Done,
+                transcript_path: None,
+                windows: Vec::new(),
+            },
+            card_id: "card-drop-test".to_string(),
+            rev: 1,
+            session_root: None,
+            recorded: false,
+            store_dir: None,
+            results: Vec::new(),
+            other_bash: Vec::new(),
+            other_edits: Vec::new(),
+            gaps: Vec::new(),
+            capture_state: None,
+            home_dir: dir.path().to_path_buf(),
+            config_dirs: Vec::new(),
+            parent_card_id: None,
+            versions_through_ms: 2_000,
+            retain_versions_from_ms: 0,
+        };
+        pool.submit(job);
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("worker entered build hook");
+
+        struct Unblock(mpsc::SyncSender<()>, Option<JoinHandle<()>>);
+        impl Drop for Unblock {
+            fn drop(&mut self) {
+                let _ = self.0.try_send(());
+                if let Some(h) = self.1.take() {
+                    let _ = h.join();
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = mpsc::channel::<()>();
+        let helper = thread::spawn(move || {
+            drop(pool);
+            let _ = dropped_tx.send(());
+        });
+        let _guard = Unblock(release_tx, Some(helper));
+
+        assert!(
+            dropped_rx
+                .recv_timeout(std::time::Duration::from_secs(4))
+                .is_ok(),
+            "WorkerPool::drop must return within deadline even if a worker stalls"
         );
     }
 }

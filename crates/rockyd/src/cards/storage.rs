@@ -536,8 +536,7 @@ fn rotate_file(path: &Path) -> io::Result<()> {
             match groups.get_mut(&card.card_id) {
                 Some(group) => {
                     let is_newer = card.rev > group.latest_rev
-                        || (card.rev == group.latest_rev
-                            && card.ended_ms >= group.latest_ended_ms);
+                        || (card.rev == group.latest_rev && card.ended_ms >= group.latest_ended_ms);
                     if is_newer {
                         group.latest_rev = card.rev;
                         group.latest_ended_ms = card.ended_ms;
@@ -1462,11 +1461,25 @@ mod tests {
         let mut store = CardStore::new(dir.path().to_path_buf());
         let repo_multi = "61616161616161616161616161616161";
 
-        let mut older = make_card("multi-rev", 1, repo_multi, Some("/work/m"), Some(1_000), &["a.rs"]);
+        let mut older = make_card(
+            "multi-rev",
+            1,
+            repo_multi,
+            Some("/work/m"),
+            Some(1_000),
+            &["a.rs"],
+        );
         older.prompt = "a".repeat(4_500_000);
         store.append(&older).unwrap();
 
-        let mut latest = make_card("multi-rev", 2, repo_multi, Some("/work/m"), Some(2_000), &["a.rs"]);
+        let mut latest = make_card(
+            "multi-rev",
+            2,
+            repo_multi,
+            Some("/work/m"),
+            Some(2_000),
+            &["a.rs"],
+        );
         latest.prompt = "b".repeat(4_500_000);
         store.append(&latest).unwrap();
 
@@ -1485,7 +1498,14 @@ mod tests {
         assert_eq!(revs, vec![2]);
 
         let repo_huge = "62626262626262626262626262626262";
-        let old_small = make_card("old-small", 1, repo_huge, Some("/work/h"), Some(100), &["a.rs"]);
+        let old_small = make_card(
+            "old-small",
+            1,
+            repo_huge,
+            Some("/work/h"),
+            Some(100),
+            &["a.rs"],
+        );
         store.append(&old_small).unwrap();
 
         let mut huge_newest = make_card(
@@ -1550,14 +1570,13 @@ mod tests {
         fs::create_dir_all(desk_dir(dir.path())).unwrap();
 
         let cdir = cards_dir(dir.path());
-        let output = std::process::Command::new("cmd")
-            .arg("/C")
+        let mut cmd1 = std::process::Command::new("cmd");
+        cmd1.arg("/C")
             .arg("mklink")
             .arg("/J")
             .arg(&cdir)
-            .arg(&target_dir)
-            .output()
-            .unwrap();
+            .arg(&target_dir);
+        let output = run_command_with_timeout(&mut cmd1, std::time::Duration::from_secs(10));
         if !output.status.success() {
             eprintln!(
                 "skipping reparse point assertion: mklink /J failed: {}",
@@ -1596,14 +1615,13 @@ mod tests {
         let desk_target = dir2.path().join("outside-desk-target");
         fs::create_dir_all(&desk_target).unwrap();
         let ddir = desk_dir(dir2.path());
-        let out2 = std::process::Command::new("cmd")
-            .arg("/C")
+        let mut cmd2 = std::process::Command::new("cmd");
+        cmd2.arg("/C")
             .arg("mklink")
             .arg("/J")
             .arg(&ddir)
-            .arg(&desk_target)
-            .output()
-            .unwrap();
+            .arg(&desk_target);
+        let out2 = run_command_with_timeout(&mut cmd2, std::time::Duration::from_secs(10));
         assert!(out2.status.success());
         assert!(store2.append(&card).is_err());
         assert_eq!(fs::read_dir(&desk_target).unwrap().count(), 0);
@@ -1630,5 +1648,59 @@ mod tests {
         fs::create_dir_all(desk_dir(dir.path())).unwrap();
         assert!(store.append(&card).is_err());
         assert!(!cards_dir(dir.path()).exists());
+    }
+
+    #[cfg(windows)]
+    fn run_command_with_timeout(
+        cmd: &mut std::process::Command,
+        timeout: std::time::Duration,
+    ) -> std::process::Output {
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn child");
+        let stdout_pipe = child.stdout.take().expect("piped stdout");
+        let stderr_pipe = child.stderr.take().expect("piped stderr");
+        let out_t = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stdout_pipe;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let err_t = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stderr_pipe;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let start = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait child") {
+                break status;
+            }
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = out_t.join().unwrap_or_default();
+                let stderr = err_t.join().unwrap_or_default();
+                panic!(
+                    "child timed out after {timeout:?}; stdout={}, stderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let stdout = out_t.join().unwrap_or_default();
+        let stderr = err_t.join().unwrap_or_default();
+        std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }
     }
 }

@@ -6,17 +6,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use rocky_proto::pipe::ServerMsg;
 
-use crate::cards::CARD_WORKER_THREAD_PREFIX;
 use crate::cards::detail::{
     build_block_diff, build_block_diff_with, build_card_detail, build_card_detail_unowned,
     build_card_detail_with, build_cards_reply, is_card_root_owned, missing_diff,
 };
 use crate::cards::storage::CardStore;
 use crate::cards::store::ObjectRead;
+use crate::cards::{BoundedWorkers, CARD_WORKER_THREAD_PREFIX, WORKER_DROP_TIMEOUT};
 
 /// Custom object reader injected by tests into [`CardQueryLoop::new_with_object_reader`].
 pub type QueryObjectReader = Arc<dyn Fn(&str) -> ObjectRead + Send + Sync>;
@@ -74,7 +74,7 @@ pub struct CardQueryLoop {
     job_rx: Option<mpsc::Receiver<QueryJob>>,
     res_tx: Option<mpsc::Sender<QueryDone>>,
     res_rx: mpsc::Receiver<QueryDone>,
-    worker: Option<JoinHandle<()>>,
+    workers: BoundedWorkers,
     panics: Arc<AtomicU64>,
 }
 
@@ -112,7 +112,7 @@ impl CardQueryLoop {
             job_rx: Some(job_rx),
             res_tx: Some(res_tx),
             res_rx,
-            worker: None,
+            workers: BoundedWorkers::new(),
             panics: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -203,12 +203,17 @@ impl CardQueryLoop {
         let home = self.home.clone();
         let reader = self.object_reader.clone();
         let panics = Arc::clone(&self.panics);
+        let exit_guard = self.workers.prepare_spawn();
+        let finished = exit_guard.finished_flag();
         let name = format!("{CARD_WORKER_THREAD_PREFIX}{}", self.worker_index);
         let handle = thread::Builder::new()
             .name(name)
-            .spawn(move || query_worker_loop(home, job_rx, res_tx, panics, reader))
+            .spawn(move || {
+                let _exit_guard = exit_guard;
+                query_worker_loop(home, job_rx, res_tx, panics, reader);
+            })
             .expect("spawn card query worker thread");
-        self.worker = Some(handle);
+        self.workers.push(handle, finished);
     }
 
     fn submit(&mut self, kind: QueryKind, reply: SyncSender<ServerMsg>) {
@@ -236,9 +241,7 @@ impl Drop for CardQueryLoop {
     fn drop(&mut self) {
         self.job_tx.take();
         self.res_tx.take();
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
+        self.workers.join_bounded(WORKER_DROP_TIMEOUT);
     }
 }
 
@@ -748,5 +751,110 @@ mod tests {
             }
         );
         assert_eq!(read_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn card_query_loop_drop_returns_within_deadline_when_worker_stalls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let canon = canonical_path(&repo.to_string_lossy(), cfg!(windows));
+        let rid = repo_id(&canon, cfg!(windows));
+
+        let card = Card {
+            v: CARD_VERSION,
+            card_id: "card-q-drop".to_string(),
+            rev: 1,
+            repo_id: rid,
+            root: canon.clone(),
+            main_root: None,
+            branch: Some("main".to_string()),
+            session_id: "s-drop".to_string(),
+            agent_id: String::new(),
+            agent_type: "claude".to_string(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "demo".to_string(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: vec![Block {
+                seq: 1,
+                path: "src/lib.rs".to_string(),
+                symbol: None,
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec!["tu-1".to_string()],
+                bash: None,
+                before: Some("a".repeat(64)),
+                after: Some("b".repeat(64)),
+                recorded: true,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+                quote: None,
+            }],
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        };
+        let mut writer = CardStore::new(home.clone());
+        writer.append(&card).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+        let entered_tx = std::sync::Mutex::new(entered_tx);
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let once = std::sync::atomic::AtomicBool::new(false);
+
+        let mut queries = CardQueryLoop::new_with_object_reader(
+            home,
+            1,
+            Arc::new(move |_| {
+                if !once.swap(true, Ordering::SeqCst) {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    let _ = release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(8));
+                }
+                ObjectRead::Missing
+            }),
+        );
+        let (tx, _rx) = mpsc::sync_channel(1);
+        queries.card_detail(1, "card-q-drop".to_string(), BTreeSet::from([canon]), tx);
+        entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("query worker entered object reader");
+
+        struct Unblock(mpsc::SyncSender<()>, Option<thread::JoinHandle<()>>);
+        impl Drop for Unblock {
+            fn drop(&mut self) {
+                let _ = self.0.try_send(());
+                if let Some(h) = self.1.take() {
+                    let _ = h.join();
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = mpsc::channel::<()>();
+        let helper = thread::spawn(move || {
+            drop(queries);
+            let _ = dropped_tx.send(());
+        });
+        let _guard = Unblock(release_tx, Some(helper));
+
+        assert!(
+            dropped_rx.recv_timeout(Duration::from_secs(4)).is_ok(),
+            "CardQueryLoop::drop must return within deadline even if worker stalls"
+        );
     }
 }

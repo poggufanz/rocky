@@ -973,7 +973,10 @@ mod tests {
                 cards.worker_count(),
                 Arc::new(move |sha: &str| {
                     let _ = entered_tx.lock().unwrap().send(());
-                    let _ = release_rx.lock().unwrap().recv();
+                    let _ = release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10));
                     if sha.starts_with('1') {
                         ObjectRead::Text("fn f() {\n    1\n}\n".to_string())
                     } else {
@@ -1258,16 +1261,15 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let exe = std::env::current_exe().expect("current test exe");
-        let out = std::process::Command::new(&exe)
-            .args([
-                "--exact",
-                "tests::cards_query_worker_panic_is_contained_and_daemon_keeps_serving",
-                "--nocapture",
-            ])
-            .env("ROCKY_QUERY_PANIC_HOOK_TEST", "1")
-            .env("ROCKY_QUERY_PANIC_HOME", tmp.path())
-            .output()
-            .expect("run query panic child");
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args([
+            "--exact",
+            "tests::cards_query_worker_panic_is_contained_and_daemon_keeps_serving",
+            "--nocapture",
+        ])
+        .env("ROCKY_QUERY_PANIC_HOOK_TEST", "1")
+        .env("ROCKY_QUERY_PANIC_HOME", tmp.path());
+        let out = run_command_with_timeout(&mut cmd, Duration::from_secs(15));
         assert!(
             out.status.success(),
             "query panic child aborted or failed: status={:?}, stdout={}, stderr={}",
@@ -1325,7 +1327,10 @@ mod tests {
             Arc::new(move |_| {
                 if !hook_once.swap(true, Ordering::SeqCst) {
                     let _ = entered_tx.lock().unwrap().send(());
-                    let _ = release_rx.lock().unwrap().recv();
+                    let _ = release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10));
                 }
             }),
         );
@@ -1579,5 +1584,58 @@ mod tests {
             &mut resolver,
         );
         assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    fn run_command_with_timeout(
+        cmd: &mut std::process::Command,
+        timeout: Duration,
+    ) -> std::process::Output {
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn child");
+        let stdout_pipe = child.stdout.take().expect("piped stdout");
+        let stderr_pipe = child.stderr.take().expect("piped stderr");
+        let out_t = thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stdout_pipe;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let err_t = thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stderr_pipe;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait child") {
+                break status;
+            }
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = out_t.join().unwrap_or_default();
+                let stderr = err_t.join().unwrap_or_default();
+                panic!(
+                    "child timed out after {timeout:?}; stdout={}, stderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let stdout = out_t.join().unwrap_or_default();
+        let stderr = err_t.join().unwrap_or_default();
+        std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }
     }
 }

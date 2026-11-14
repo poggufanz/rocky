@@ -1488,16 +1488,16 @@ fn daemon_panic_hook_contains_worker_and_aborts_others() {
     let exe = std::env::current_exe().expect("current test exe");
 
     let worker_dir = tempfile::tempdir().expect("worker log dir");
-    let worker_out = Command::new(&exe)
+    let mut worker_cmd = Command::new(&exe);
+    worker_cmd
         .args([
             "--exact",
             "daemon_panic_hook_contains_worker_and_aborts_others",
             "--nocapture",
         ])
         .env("ROCKY_PANIC_HOOK_TEST", "worker")
-        .env("ROCKY_PANIC_LOG_DIR", worker_dir.path())
-        .output()
-        .expect("run worker panic child");
+        .env("ROCKY_PANIC_LOG_DIR", worker_dir.path());
+    let worker_out = run_command_with_timeout(&mut worker_cmd, Duration::from_secs(15));
     assert!(
         worker_out.status.success(),
         "worker panic child aborted or failed: status={:?}, stdout={}, stderr={}",
@@ -1516,16 +1516,16 @@ fn daemon_panic_hook_contains_worker_and_aborts_others() {
     assert!(!String::from_utf8_lossy(&worker_out.stderr).contains("SECRET_LEAK_TOKEN"));
 
     let other_dir = tempfile::tempdir().expect("other log dir");
-    let other_out = Command::new(&exe)
+    let mut other_cmd = Command::new(&exe);
+    other_cmd
         .args([
             "--exact",
             "daemon_panic_hook_contains_worker_and_aborts_others",
             "--nocapture",
         ])
         .env("ROCKY_PANIC_HOOK_TEST", "other")
-        .env("ROCKY_PANIC_LOG_DIR", other_dir.path())
-        .output()
-        .expect("run non-worker panic child");
+        .env("ROCKY_PANIC_LOG_DIR", other_dir.path());
+    let other_out = run_command_with_timeout(&mut other_cmd, Duration::from_secs(15));
     assert!(
         !other_out.status.success(),
         "non-worker panic child unexpectedly succeeded"
@@ -2750,7 +2750,10 @@ fn set_removed_drops_pending_discards_in_flight_and_ignores_reenable() {
         Arc::new(move |_| {
             if !hook_once.swap(true, Ordering::SeqCst) {
                 let _ = entered_tx.lock().unwrap().send(());
-                let _ = release_rx.lock().unwrap().recv();
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
             }
         }),
     );
@@ -3197,4 +3200,54 @@ fn store_log_shrink_during_turn_does_not_duplicate_outside_count() {
     let rev2 = poll_until_cards(&mut engine, 5_400, &ctx, 1);
     assert_eq!(rev2[0].rev, 2);
     assert_eq!(rev2[0].outside_count, 1);
+}
+
+fn run_command_with_timeout(cmd: &mut Command, timeout: Duration) -> std::process::Output {
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+    let stdout_pipe = child.stdout.take().expect("piped stdout");
+    let stderr_pipe = child.stderr.take().expect("piped stderr");
+    let out_t = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut r = stdout_pipe;
+        let _ = r.read_to_end(&mut buf);
+        buf
+    });
+    let err_t = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut r = stderr_pipe;
+        let _ = r.read_to_end(&mut buf);
+        buf
+    });
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait child") {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = out_t.join().unwrap_or_default();
+            let stderr = err_t.join().unwrap_or_default();
+            panic!(
+                "child timed out after {timeout:?}; stdout={}, stderr={}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = out_t.join().unwrap_or_default();
+    let stderr = err_t.join().unwrap_or_default();
+    std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }
 }
