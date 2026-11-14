@@ -18,6 +18,7 @@ import {
   inspectAll,
   refusalReports,
   removeAll,
+  removeCardData,
   removeHarness,
   removeShellOnly,
   type AutoContext,
@@ -194,14 +195,23 @@ function executeAction(
         ? applyAll(ctx, record)
         : refusalReports(inspectAll(ctx, record));
       break;
-    case "remove":
+    case "remove": {
       // Record the decision first: a daemon re-applies while consent reads
       // approved, so a slow removal must not run under that state. Removal
       // itself is safe in any consent state.
       writeConsentRecord(ctx.rockyHome, consentRecord(record, "removed", ctx.now()));
       result.consent = "removed";
       result.targets = removeAll(ctx, record);
+      const cardData = removeCardData(ctx.rockyHome);
+      if (cardData.errors > 0) {
+        result.notes.push(
+          cardData.errors === 1
+            ? "1 card data entry could not be removed"
+            : `${cardData.errors} card data entries could not be removed`,
+        );
+      }
       break;
+    }
     case "consent":
       if (parsed.decision === "approve") {
         const next = consentRecord(record, "approved", ctx.now());
