@@ -6,8 +6,10 @@
 use rocky_proto::pipe::{GapReason, Outcome, Status, TimelineKind};
 use rocky_proto::settings::Lang;
 
+mod cards;
 mod setup;
 
+pub use cards::{CardMsg, card_samples, card_text, label_chip, label_full, reason_text};
 #[cfg(test)]
 use setup::setup_samples;
 pub use setup::{SetupMsg, setup_en, setup_id};
