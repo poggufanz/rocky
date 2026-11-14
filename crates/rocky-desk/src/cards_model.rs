@@ -92,22 +92,16 @@ impl CardsModel {
     }
 
     /// True while a page request is awaiting its matching reply.
-    // Used by the card list view to show the loading state.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn loading(&self) -> bool {
         self.loading
     }
 
     /// True when the daemon reported another page cursor after the loaded items.
-    // Used by the card list view to show the "Load more" button.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn has_more(&self) -> bool {
         self.next.is_some()
     }
 
     /// Current search query string.
-    // Used by the card list view and search wiring.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn query(&self) -> &str {
         &self.query
     }

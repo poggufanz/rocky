@@ -17,6 +17,7 @@ use rocky_proto::pipe::{ClientMsg, CmdName, Status};
 
 use super::{Controller, DeskView, OpenRocky, QuitDesk, StopRecording, daemon_exe};
 use crate::autostart::RunOptions;
+use crate::cards_model::CardsModel;
 use crate::conn::{ConnState, ConnectOutcome};
 use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
 use crate::consent_view::ConsentModel;
@@ -27,6 +28,7 @@ use crate::notified::NotifiedStore;
 use crate::notify::Notifier;
 use crate::os_notice::OsNotices;
 use crate::requests::Requests;
+use crate::search_input::{Debounce, SearchInput};
 use crate::settings_view::View;
 use crate::setup_settings::SetupSettings;
 #[cfg(windows)]
@@ -205,7 +207,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                 &"notified.json is unreadable; starting empty",
             );
         }
-        let view: Entity<DeskView> = cx.new(|_cx| DeskView {
+        let view: Entity<DeskView> = cx.new(|cx| DeskView {
             ctl,
             window: None,
             tray: None,
@@ -220,6 +222,12 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             requests: Requests::default(),
             consent: ConsentModel::default(),
             setup: SetupSettings::default(),
+            cards: CardsModel::new(),
+            card_detail: None,
+            block_diff: None,
+            search: SearchInput::default(),
+            search_debounce: Debounce::default(),
+            search_focus: cx.focus_handle(),
             removed_quit_at: None,
             menu_stale: false,
             #[cfg(not(windows))]
@@ -386,6 +394,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                             let mut show = false;
                             v.update(cx, |v, cx| {
                                 v.on_inbox(cx, active);
+                                v.poll_search_debounce(cx);
                                 v.on_clicks();
                                 v.refresh_tray(cx);
                                 menu_stale = std::mem::take(&mut v.menu_stale);

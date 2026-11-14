@@ -6,6 +6,8 @@ use gpui::Context;
 use rocky_proto::pipe::ServerMsg;
 
 use super::{DeskView, now_ms};
+use crate::cards_nav;
+use crate::i18n::resolve_lang;
 use crate::settings_view::View;
 
 impl DeskView {
@@ -13,6 +15,7 @@ impl DeskView {
         self.drain_notice_errors();
         let mut changed = self.ctl.on_worker();
         let mut requests = Vec::new();
+        let mut card_requests = Vec::new();
         let mut outcomes = Vec::new();
         let mut open_consent = false;
         let mut health_seen = false;
@@ -45,6 +48,31 @@ impl DeskView {
                         }
                         let for_notify = msg.clone();
                         self.setup.on_server_msg(&for_notify);
+                        if matches!(&for_notify, ServerMsg::Snapshot { .. }) {
+                            let mut cmd_id = self.ctl.cmd_id;
+                            let reconnect_msgs = cards_nav::on_reconnect(
+                                &mut self.cards,
+                                self.card_detail.as_mut(),
+                                self.block_diff.as_mut(),
+                                || {
+                                    cmd_id += 1;
+                                    cmd_id
+                                },
+                            );
+                            self.ctl.cmd_id = cmd_id;
+                            card_requests.extend(reconnect_msgs);
+                        }
+                        let card_lang = pending_lang
+                            .map(|setting| resolve_lang(setting, self.ctl.detected))
+                            .unwrap_or(self.ctl.ui_lang);
+                        cards_nav::route_card_msg(
+                            &for_notify,
+                            &mut self.ctl.view,
+                            &mut self.cards,
+                            &mut self.card_detail,
+                            &mut self.block_diff,
+                            card_lang,
+                        );
                         requests.extend(self.ctl.model.apply(msg));
                         if settings_msg {
                             self.register_notices();
@@ -110,6 +138,9 @@ impl DeskView {
         }
         for key in requests {
             self.ctl.request_timeline(key);
+        }
+        for msg in card_requests {
+            self.send_card_msg(msg);
         }
         if changed {
             cx.notify();

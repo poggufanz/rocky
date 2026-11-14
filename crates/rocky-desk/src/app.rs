@@ -11,11 +11,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{Context, WindowHandle};
+use gpui::{Context, FocusHandle, WindowHandle};
 use gpui_tray::Tray;
 use rocky_proto::pipe::{AgentKey, ClientMsg, ServerMsg, Status};
 use rocky_proto::settings::Lang;
 
+use crate::card_detail_model::{DetailModel, DiffModel};
+use crate::cards_model::CardsModel;
 use crate::client::Outbox;
 use crate::conn::{Action, ConnState, ConnectOutcome};
 use crate::connect::{CONNECT_BUDGET, ConnectDone, connect_attempt};
@@ -26,12 +28,14 @@ use crate::notified::NotifiedStore;
 use crate::notify::Notifier;
 use crate::os_notice::OsNotices;
 use crate::requests::Requests;
+use crate::search_input::{Debounce, SearchInput};
 use crate::settings_view::{SettingId, View, set_bool, set_lang};
 use crate::setup_settings::SetupSettings;
 use crate::spawn::daemon_exe_name;
 use crate::view::{Conn, Model};
 
 mod autostart_wiring;
+mod cards_wiring;
 mod consent_wiring;
 mod inbox;
 mod notifications;
@@ -177,6 +181,18 @@ struct DeskView {
     consent: ConsentModel,
     /// Settings setup sections: switches, repos and Remove Rocky.
     setup: SetupSettings,
+    /// Paginated, searchable change cards list state.
+    cards: CardsModel,
+    /// Open change card detail view-model, when viewing a card.
+    card_detail: Option<DetailModel>,
+    /// Open paged unified diff view-model, when viewing a block diff.
+    block_diff: Option<DiffModel>,
+    /// Current query text inside the change cards search box.
+    search: SearchInput,
+    /// 300 ms debounce state driving card search requests.
+    search_debounce: Debounce,
+    /// Keyboard focus handle for the cards search input.
+    search_focus: FocusHandle,
     /// When the final screen gives up waiting for the daemon's quit broadcast.
     removed_quit_at: Option<u64>,
     /// The tray menu must be rebuilt for the new language. Done by the pump
@@ -227,7 +243,11 @@ impl DeskView {
 
     fn toggle_view(&mut self, cx: &mut Context<Self>) {
         self.ctl.view = match self.ctl.view {
-            View::Agents => View::Settings,
+            View::Agents | View::CardDetail | View::BlockDiff => {
+                self.card_detail = None;
+                self.block_diff = None;
+                View::Settings
+            }
             View::Settings | View::Consent => View::Agents,
             View::Removed => View::Removed,
         };

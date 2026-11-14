@@ -346,7 +346,13 @@ fn remove_failure_keeps_settings_with_retry() {
 #[test]
 fn removed_view_quits_on_close() {
     assert_eq!(close_action(View::Removed), CloseAction::Quit);
-    for view in [View::Agents, View::Settings, View::Consent] {
+    for view in [
+        View::Agents,
+        View::Settings,
+        View::Consent,
+        View::CardDetail,
+        View::BlockDiff,
+    ] {
         assert_eq!(close_action(view), CloseAction::Hide);
     }
 }

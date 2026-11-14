@@ -145,7 +145,9 @@ pub enum CloseAction {
 pub fn close_action(view: View) -> CloseAction {
     match view {
         View::Removed => CloseAction::Quit,
-        View::Agents | View::Settings | View::Consent => CloseAction::Hide,
+        View::Agents | View::Settings | View::Consent | View::CardDetail | View::BlockDiff => {
+            CloseAction::Hide
+        }
     }
 }
 

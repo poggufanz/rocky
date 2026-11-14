@@ -26,6 +26,7 @@ pub enum DetailState {
 pub struct DetailModel {
     card_id: String,
     pending_id: Option<u64>,
+    reopened: bool,
     state: DetailState,
     error_count: u64,
 }
@@ -40,10 +41,31 @@ impl DetailModel {
         let model = Self {
             card_id,
             pending_id: Some(id),
+            reopened: false,
             state: DetailState::Loading,
             error_count: 0,
         };
         (model, msg)
+    }
+
+    /// Re-requests the currently open card after reconnect and marks `NotFound` to close the view.
+    pub fn reopen(&mut self, id: u64) -> ClientMsg {
+        self.pending_id = Some(id);
+        self.reopened = true;
+        ClientMsg::CardDetail {
+            id,
+            card_id: self.card_id.clone(),
+        }
+    }
+
+    /// Pending request id awaiting a `CardDetail` or `Ack` reply.
+    pub fn pending_id(&self) -> Option<u64> {
+        self.pending_id
+    }
+
+    /// True if a reconnect re-open ended with `DetailState::NotFound`.
+    pub fn reopened_not_found(&self) -> bool {
+        self.reopened && self.state == DetailState::NotFound
     }
 
     /// Applies a `ServerMsg::CardDetail` reply if `id` matches the active pending request.
@@ -52,6 +74,7 @@ impl DetailModel {
             return;
         }
         self.pending_id = None;
+        self.reopened = false;
         self.state = DetailState::Ready(build_detail_view(&card, &snippets, lang));
     }
 
@@ -63,15 +86,11 @@ impl DetailModel {
     }
 
     /// Current detail load state.
-    // Used by the card detail view to render loading, ready, or not-found states.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> &DetailState {
         &self.state
     }
 
     /// Identifier of the card requested by this detail model.
-    // Used by reconnect wiring in the card detail view to re-request the open card.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn card_id(&self) -> &str {
         &self.card_id
     }
@@ -105,8 +124,6 @@ pub struct QuoteGroup {
 
 impl QuoteGroup {
     /// Returns `(text, is_dim)` for rendering this group's quote line in `lang`.
-    // Used by the card detail view to show missing quotes with dim placeholder copy.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn quote_line(&self, lang: UiLang) -> (String, bool) {
         match &self.quote {
             Some(text) => (text.clone(), false),
@@ -165,6 +182,7 @@ pub struct DiffModel {
     page: u32,
     known_pages: Option<u32>,
     pending_id: Option<u64>,
+    reopened: bool,
     state: DiffState,
     error_count: u64,
 }
@@ -184,10 +202,33 @@ impl DiffModel {
             page: 0,
             known_pages: None,
             pending_id: Some(id),
+            reopened: false,
             state: DiffState::Loading,
             error_count: 0,
         };
         (model, msg)
+    }
+
+    /// Re-requests the current `seq` and `page` after reconnect and marks `NotFound` to close views.
+    pub fn reopen(&mut self, id: u64) -> ClientMsg {
+        self.pending_id = Some(id);
+        self.reopened = true;
+        ClientMsg::BlockDiff {
+            id,
+            card_id: self.card_id.clone(),
+            seq: self.seq,
+            page: self.page,
+        }
+    }
+
+    /// Pending request id awaiting a `BlockDiff` or `Ack` reply.
+    pub fn pending_id(&self) -> Option<u64> {
+        self.pending_id
+    }
+
+    /// True if a reconnect re-open ended with `DiffState::NotFound`.
+    pub fn reopened_not_found(&self) -> bool {
+        self.reopened && self.state == DiffState::NotFound
     }
 
     /// Requests another `page` when total pages are known and `page < pages`.
@@ -198,6 +239,7 @@ impl DiffModel {
         }
         self.page = page;
         self.pending_id = Some(id);
+        self.reopened = false;
         self.state = DiffState::Loading;
         Some(ClientMsg::BlockDiff {
             id,
@@ -213,6 +255,7 @@ impl DiffModel {
             return;
         }
         self.pending_id = None;
+        self.reopened = false;
         if missing {
             self.known_pages = None;
             self.state = DiffState::Missing;
@@ -232,8 +275,6 @@ impl DiffModel {
     }
 
     /// Current diff load state.
-    // Used by the block diff view to render lines, pagination, or missing/not-found copy.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> &DiffState {
         &self.state
     }
@@ -246,8 +287,6 @@ impl DiffModel {
     }
 
     /// Block sequence number targeted by this diff model.
-    // Used by the block diff view header and reconnect logic.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn seq(&self) -> u32 {
         self.seq
     }

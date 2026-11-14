@@ -111,6 +111,8 @@ pub enum View {
     Consent,
     /// Shown after Remove Rocky finished; closing it quits the desk.
     Removed,
+    CardDetail,
+    BlockDiff,
 }
 
 /// The sign-in question shows on a window start until it has been answered.

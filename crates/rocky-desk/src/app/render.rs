@@ -1,18 +1,21 @@
 //! Main GPUI render tree for `DeskView`.
 
 use gpui::prelude::*;
-use gpui::{Context, Div, IntoElement, Render, SharedString, Window, div, rgb};
+use gpui::{Context, Div, FontWeight, IntoElement, Render, SharedString, Window, div, rgb};
 use rocky_proto::pipe::{Outcome, Status};
 
 use super::{DeskView, now_ms};
 use crate::clock;
-use crate::i18n::{Msg, UiLang, tr};
+use crate::i18n::{CardMsg, Msg, UiLang, card_text, tr};
 use crate::settings_view::View;
+use crate::ui::block_diff::block_diff_view;
+use crate::ui::card_detail::card_detail_view;
+use crate::ui::cards_view::cards_section;
 use crate::ui::consent::consent_screen;
 use crate::ui::setup_settings::removed_screen;
 
 impl Render for DeskView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let warnings = self.ctl.model.warnings(&clock::local_hhmm);
         let lang = self.ctl.ui_lang;
         if self.ctl.view == View::Consent {
@@ -53,7 +56,9 @@ impl Render for DeskView {
             root = root.child(banner);
         }
         let other = match self.ctl.view {
-            View::Agents | View::Consent | View::Removed => Msg::ViewSettings,
+            View::Agents | View::Consent | View::Removed | View::CardDetail | View::BlockDiff => {
+                Msg::ViewSettings
+            }
             View::Settings => Msg::ViewAgents,
         };
         root = root.child(
@@ -89,11 +94,43 @@ impl Render for DeskView {
                 )
                 .into_any_element();
         }
+        if self.ctl.view == View::CardDetail {
+            return root
+                .id(SharedString::from("card-detail"))
+                .overflow_y_scroll()
+                .child(card_detail_view(
+                    lang,
+                    self.card_detail.as_ref(),
+                    cx,
+                    Self::on_card_action,
+                ))
+                .into_any_element();
+        }
+        if self.ctl.view == View::BlockDiff {
+            return root
+                .id(SharedString::from("block-diff"))
+                .overflow_y_scroll()
+                .child(block_diff_view(
+                    lang,
+                    self.card_detail.as_ref(),
+                    self.block_diff.as_ref(),
+                    cx,
+                    Self::on_card_action,
+                ))
+                .into_any_element();
+        }
         let groups = self.ctl.model.groups(now_ms());
         let (top_banners, group_banners) = self.repo_banners(&groups, cx);
         for banner in top_banners {
             root = root.child(banner);
         }
+        root = root.child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(0x6B6B6B))
+                .child(card_text(lang, &CardMsg::SectionNow)),
+        );
         if groups.is_empty() {
             root = root.child(div().text_sm().child(tr(lang, &Msg::NoAgents)));
         }
@@ -184,7 +221,19 @@ impl Render for DeskView {
             }
             root = root.child(gdiv);
         }
-        root.into_any_element()
+        root = root.child(cards_section(
+            lang,
+            &self.cards,
+            &self.search,
+            &self.search_focus,
+            window,
+            cx,
+            Self::on_card_action,
+            Self::on_search_key,
+        ));
+        root.id(SharedString::from("agents"))
+            .overflow_y_scroll()
+            .into_any_element()
     }
 }
 
