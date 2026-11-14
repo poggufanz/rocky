@@ -234,9 +234,7 @@ where
     if shrink_card_msg(&mut msg) {
         msg
     } else {
-        ServerMsg::Error {
-            code: "too_large".to_string(),
-        }
+        error_ack(id, "too_large")
     }
 }
 
@@ -310,11 +308,18 @@ where
         missing: false,
     };
     if encode(&msg).len() > LINE_CAP {
-        return ServerMsg::Error {
-            code: "too_large".to_string(),
-        };
+        return error_ack(id, "too_large");
     }
     msg
+}
+
+fn error_ack(id: u64, code: &str) -> ServerMsg {
+    ServerMsg::Ack {
+        id,
+        ok: false,
+        error: Some(code.to_string()),
+        cleanup_errors: 0,
+    }
 }
 
 fn missing_diff(id: u64) -> ServerMsg {
@@ -1170,8 +1175,11 @@ mod tests {
         let msg = build_card_detail_with(62, &card, |_| ObjectRead::Missing);
         assert_eq!(
             msg,
-            ServerMsg::Error {
-                code: "too_large".to_string(),
+            ServerMsg::Ack {
+                id: 62,
+                ok: false,
+                error: Some("too_large".to_string()),
+                cleanup_errors: 0,
             }
         );
     }

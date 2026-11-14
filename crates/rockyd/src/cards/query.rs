@@ -237,6 +237,7 @@ fn query_worker_loop(
     while let Ok(job) = job_rx.recv() {
         let token = job.token;
         let kind = job.kind;
+        let req_id = kind.id();
         let reply = match panic::catch_unwind(AssertUnwindSafe(|| {
             run_query(&mut store, &home, kind, object_reader.as_deref())
         })) {
@@ -245,8 +246,11 @@ fn query_worker_loop(
                 // Reset the read cache on unwind so a partially refreshed map is never reused.
                 store = CardStore::new(home.clone());
                 panics.fetch_add(1, Ordering::Relaxed);
-                ServerMsg::Error {
-                    code: "internal".to_string(),
+                ServerMsg::Ack {
+                    id: req_id,
+                    ok: false,
+                    error: Some("internal".to_string()),
+                    cleanup_errors: 0,
                 }
             }
         };
@@ -280,7 +284,7 @@ fn run_query(
             None => ServerMsg::Ack {
                 id,
                 ok: false,
-                error: Some("card not found".to_string()),
+                error: Some("not_found".to_string()),
                 cleanup_errors: 0,
             },
         },
@@ -437,7 +441,7 @@ mod tests {
             ServerMsg::Ack {
                 id: 4,
                 ok: false,
-                error: Some("card not found".to_string()),
+                error: Some("not_found".to_string()),
                 cleanup_errors: 0,
             }
         );
@@ -547,8 +551,11 @@ mod tests {
 
         assert_eq!(
             wait_reply(&rx1, &mut queries),
-            ServerMsg::Error {
-                code: "internal".to_string(),
+            ServerMsg::Ack {
+                id: 1,
+                ok: false,
+                error: Some("internal".to_string()),
+                cleanup_errors: 0,
             }
         );
         assert_eq!(queries.worker_panics(), 1);
@@ -561,8 +568,11 @@ mod tests {
         queries.block_diff(3, "card-panic".to_string(), 1, 0, tx3);
         assert_eq!(
             wait_reply(&rx3, &mut queries),
-            ServerMsg::Error {
-                code: "internal".to_string(),
+            ServerMsg::Ack {
+                id: 3,
+                ok: false,
+                error: Some("internal".to_string()),
+                cleanup_errors: 0,
             }
         );
         assert_eq!(queries.take_worker_panics(), 2);

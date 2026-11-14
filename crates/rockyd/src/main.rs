@@ -1113,8 +1113,11 @@ mod tests {
             assert_eq!(queries.worker_panics(), 0);
             assert_eq!(
                 reply1,
-                Some(ServerMsg::Error {
-                    code: "internal".to_string(),
+                Some(ServerMsg::Ack {
+                    id: 10,
+                    ok: false,
+                    error: Some("internal".to_string()),
+                    cleanup_errors: 0,
                 })
             );
             assert!(matches!(reply2, Some(ServerMsg::CardDetail { id: 11, .. })));
