@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use rocky_proto::paths::{listening_dir, repo_consents_path};
+use rocky_proto::paths::{canonical_path, listening_dir, repo_consents_path};
 use rocky_proto::pipe::{CaptureHealth, ServerMsg};
 use rockyd::capture::child::{CHILD_STOP_GRACE, CaptureChild};
 use rockyd::capture::{Action, Capture, CaptureConsts, CaptureLine, CaptureResult, RESTARTS};
@@ -170,6 +170,24 @@ impl CaptureLoop {
         self.note_restart_refusal(&health, log);
         self.publish(health, shared, hub);
         results
+    }
+
+    /// Returns the repository roots currently owned by this capture child.
+    pub(crate) fn owned_roots(&self) -> BTreeSet<String> {
+        self.capture.watch_roots()
+    }
+
+    /// Triggers a capture reconcile flush when `root` matches an owned capture root.
+    pub(crate) fn flush(&mut self, root: &str, now_ms: u64) {
+        let target = canonical_path(root, cfg!(windows));
+        if let Some(owned) = self
+            .capture
+            .watch_roots()
+            .into_iter()
+            .find(|r| canonical_path(r, cfg!(windows)) == target)
+        {
+            self.capture.flush(&owned, now_ms);
+        }
     }
 
     /// Stops the child before the daemon exits: closes its input, waits for it, and kills it only

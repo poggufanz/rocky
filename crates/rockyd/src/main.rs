@@ -20,6 +20,9 @@ use rocky_proto::pipe::{
     AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, ServerMsg, SetupHealth, StatusOp,
 };
 use rocky_proto::settings::Settings;
+use rockyd::cards::storage::CardStore;
+use rockyd::cards::transcript::claude_config_dirs;
+use rockyd::cards::{Engine, EngineCtx};
 use rockyd::gaps::Gaps;
 use rockyd::guard::records::startup_setup;
 use rockyd::history::{HISTORY_CAP_BYTES, History, replay};
@@ -60,6 +63,8 @@ struct Shared {
     repo_pending: Vec<PendingRepo>,
     /// Per-repo capture state. `take_health` carries it into the broadcast health.
     capture: Vec<CaptureHealth>,
+    /// Change card log store.
+    cards: CardStore,
 }
 
 impl Shared {
@@ -150,6 +155,7 @@ fn main() {
         setup,
         repo_pending: Vec::new(),
         capture: Vec::new(),
+        cards: CardStore::new(home.clone()),
     }));
 
     let hub = Arc::new(Hub::new());
@@ -250,10 +256,24 @@ fn main() {
     // 5. Initial ingest through the same path as rescans. Discovery queues config
     // dirs only under approved consent, so the guard checks before the ingest and
     // again after it.
+    let workers = thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let mut cards = Engine::new(home.clone(), workers);
+    cards.set_enabled(settings.cards);
+
     let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
     guards.check(&shared, &hub, &log);
-    rescan(&spool, &shared, &hub, &log, &mut ingest, &mut guards);
+    rescan(
+        &spool,
+        &shared,
+        &hub,
+        &log,
+        &mut ingest,
+        &mut guards,
+        &mut cards,
+        None,
+    );
     guards.check(&shared, &hub, &log);
+    let mut config_dirs = claude_config_dirs(&home);
     let mut captures = CaptureLoop::new(home.clone(), &log);
     captures.check(&guards.allowed_roots());
 
@@ -333,6 +353,8 @@ fn main() {
                     reply,
                 }) => {
                     let msg = handle_set(id, &name, &value, &shared, &hub, &log, &home);
+                    let cards_on = shared.lock().unwrap().settings.cards;
+                    cards.set_enabled(cards_on);
                     let _ = reply.send(msg);
                 }
                 Ok(Control::Timeline { id, key, reply }) => {
@@ -365,7 +387,17 @@ fn main() {
             last_rescan = now;
         }
         if triggered {
-            rescan(&spool, &shared, &hub, &log, &mut ingest, &mut guards);
+            rescan(
+                &spool,
+                &shared,
+                &hub,
+                &log,
+                &mut ingest,
+                &mut guards,
+                &mut cards,
+                Some(&mut captures),
+            );
+            config_dirs = claude_config_dirs(&home);
         }
 
         let now = Instant::now();
@@ -374,11 +406,20 @@ fn main() {
             tick_once(&shared, &hub, &log);
             guards.check(&shared, &hub, &log);
             captures.check(&guards.allowed_roots());
+            config_dirs = claude_config_dirs(&home);
         }
 
         guards.service(&shared, &hub, &log);
         // ponytail: rebuilt every 25 ms; cache it on the guard if the set grows large.
-        let _ = captures.service(&guards.allowed_roots(), &shared, &hub, &log);
+        let capture_results = captures.service(&guards.allowed_roots(), &shared, &hub, &log);
+        cards.on_capture(&capture_results);
+        service_cards(
+            &mut cards,
+            &captures.owned_roots(),
+            &config_dirs,
+            &shared,
+            &log,
+        );
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -409,6 +450,7 @@ fn push_removal(s: &mut Shared, msgs: &mut Vec<ServerMsg>, key: &AgentKey) {
 /// Ingest the spool once, then broadcast one Status per changed key, one
 /// Remove per dropped key, and a Health message when health moved. Lock
 /// discipline: collect messages under the state lock, release it, broadcast.
+#[allow(clippy::too_many_arguments)]
 fn rescan(
     spool: &Path,
     shared: &Arc<Mutex<Shared>>,
@@ -416,20 +458,23 @@ fn rescan(
     log: &RotatingLog,
     ingest: &mut Ingestor,
     guards: &mut GuardLoop,
+    cards: &mut Engine,
+    captures: Option<&mut CaptureLoop>,
 ) {
     let mut repo_of = resolve_repo;
-    let (msgs, health, upserts, health_changed, history_errors) = {
+    let now = now_ms();
+    let (msgs, health, upserts, health_changed, out, cards_enabled) = {
         let mut guard = shared.lock().unwrap();
         let s = &mut *guard;
-        let out = ingest.ingest_once(spool, &mut s.state, &mut repo_of, &mut s.history, now_ms());
-        let changes = out.changes;
+        let out = ingest.ingest_once(spool, &mut s.state, &mut repo_of, &mut s.history, now);
         for gap in &out.gaps {
             s.gaps.push(*gap);
             s.state.record_gap(gap);
         }
         guards.rescanned(&out.config_locations, &s.state.session_roots());
-        let mut msgs = Vec::with_capacity(changes.upserted.len() + changes.removed.len() + 1);
-        for key in &changes.upserted {
+        let mut msgs =
+            Vec::with_capacity(out.changes.upserted.len() + out.changes.removed.len() + 1);
+        for key in &out.changes.upserted {
             if let Some(agent) = s.state.get(key) {
                 s.last_known.insert(key.clone(), agent.clone());
                 msgs.push(ServerMsg::Status {
@@ -438,7 +483,7 @@ fn rescan(
                 });
             }
         }
-        for key in &changes.removed {
+        for key in &out.changes.removed {
             push_removal(s, &mut msgs, key);
         }
         s.counters = ingest.health.clone();
@@ -448,25 +493,70 @@ fn rescan(
                 health: health.clone(),
             });
         }
-        (
-            msgs,
-            health,
-            changes.upserted.len(),
-            health_changed,
-            out.history_errors,
-        )
+        let upserts = out.changes.upserted.len();
+        let cards_enabled = s.settings.cards;
+        (msgs, health, upserts, health_changed, out, cards_enabled)
     };
     for m in &msgs {
         hub.broadcast(m);
     }
-    if history_errors > 0 {
-        log.line(&format!("history: {history_errors} lines not written"));
+    if cards_enabled {
+        let flushes = cards.on_ingest(&out, &mut repo_of, now);
+        if let Some(cap) = captures {
+            for req in flushes {
+                cap.flush(&req.root, now);
+            }
+        }
+    }
+    if out.history_errors > 0 {
+        log.line(&format!(
+            "history: {} lines not written",
+            out.history_errors
+        ));
     }
     if upserts > 0 || health_changed {
         log.line(&format!(
             "ingest: {upserts} agents updated, {} files pending",
             health.spool_pending
         ));
+    }
+}
+
+fn service_cards(
+    cards: &mut Engine,
+    owned_roots: &std::collections::BTreeSet<String>,
+    config_dirs: &[std::path::PathBuf],
+    shared: &Arc<Mutex<Shared>>,
+    log: &RotatingLog,
+) {
+    let ctx = {
+        let s = shared.lock().unwrap();
+        EngineCtx {
+            cards: s.settings.cards,
+            owned_roots: owned_roots.clone(),
+            capture: s.capture.clone(),
+            gaps: s.gaps.to_vec(),
+            config_dirs: config_dirs.to_vec(),
+        }
+    };
+    let built = cards.poll(now_ms(), &ctx);
+    let panics = cards.take_worker_panics();
+    if panics > 0 {
+        log.line(&format!("cards: {panics} worker panics"));
+    }
+    if !built.is_empty() {
+        let mut errs = 0u64;
+        {
+            let mut s = shared.lock().unwrap();
+            for card in &built {
+                if s.cards.append(card).is_err() {
+                    errs += 1;
+                }
+            }
+        }
+        if errs > 0 {
+            log.line(&format!("cards: {errs} append errors"));
+        }
     }
 }
 
