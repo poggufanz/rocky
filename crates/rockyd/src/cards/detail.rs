@@ -1,13 +1,15 @@
 //! Card detail assembly, list capping, and paged unified block diffing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use rocky_facts::{
     FileInput, Side, SnippetLine as FactSnippetLine, Symbol as FactSymbol,
     SymbolKind as FactSymbolKind, snippets,
 };
-use rocky_proto::cards::{Block, BlockSymbol, Card, Label, SymbolKind as ProtoSymbolKind};
+use rocky_proto::cards::{
+    Block, BlockSymbol, Card, CoverageReason, CoverageState, Label, SymbolKind as ProtoSymbolKind,
+};
 use rocky_proto::paths::{listening_store_dir, repo_id};
 use rocky_proto::pipe::{
     BlockSnippet, DiffLine, DiffLineKind, LINE_CAP, ServerMsg, SnippetLine, encode,
@@ -28,7 +30,7 @@ pub const MAX_DETAIL_CODE_BLOCKS: usize = 20;
 /// Maximum serialized JSON bytes of `DiffLine` entries per `BlockDiff` page.
 pub const DIFF_PAGE_BYTES: usize = 48 * 1024;
 
-/// Maximum UTF-8 bytes kept in a single emitted `DiffLine` before wrapping onto the next line.
+/// Maximum serialized JSON bytes kept in a single emitted `DiffLine` before wrapping onto the next line.
 const MAX_SINGLE_LINE_BYTES: usize = 16 * 1024;
 
 /// Formats the opaque pagination cursor `<key_ms>:<card_id>` for `card`.
@@ -75,24 +77,12 @@ pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>
     msg
 }
 
-/// Builds a live `ServerMsg::Card` broadcast message that fits within `LINE_CAP`.
-pub fn build_card_broadcast(mut item: Card) -> ServerMsg {
+/// Builds a live `ServerMsg::Card` broadcast message that fits within `LINE_CAP`,
+/// or `None` when the remaining metadata still exceeds `LINE_CAP`.
+pub fn build_card_broadcast(mut item: Card) -> Option<ServerMsg> {
     prepare_list_card(&mut item);
     let mut msg = ServerMsg::Card { item };
-    if encode(&msg).len() <= LINE_CAP {
-        return msg;
-    }
-
-    let ServerMsg::Card { ref mut item } = msg else {
-        unreachable!();
-    };
-    while encode(&ServerMsg::Card { item: item.clone() }).len() > LINE_CAP {
-        if item.blocks.pop().is_none() {
-            truncate_chars_in_place(&mut item.prompt, LIST_QUOTE_MAX_CHARS);
-            break;
-        }
-    }
-    msg
+    shrink_card_msg(&mut msg).then_some(msg)
 }
 
 /// Builds a `ServerMsg::CardDetail` reply reading Listening objects from `home`.
@@ -129,13 +119,54 @@ where
         }
     }
 
-    // Group selected blocks by (path, before, after) so `rocky_facts::snippets` runs once per file version pair.
-    type GroupKey<'a> = (&'a str, Option<&'a str>, Option<&'a str>);
+    // Group valid selected blocks by (path, before, after, absent flags) so `rocky_facts::snippets`
+    // runs once per distinct file version pair while failed reads suppress snippets and update coverage.
+    type GroupKey<'a> = (&'a str, Option<&'a str>, Option<&'a str>, bool, bool);
     let mut group_order: Vec<(GroupKey<'_>, Vec<usize>)> = Vec::new();
     let mut group_index: HashMap<GroupKey<'_>, usize> = HashMap::new();
+    let mut extra_reasons: BTreeSet<CoverageReason> = BTreeSet::new();
+
     for &idx in &selected {
         let b = &card.blocks[idx];
-        let key: GroupKey<'_> = (b.path.as_str(), b.before.as_deref(), b.after.as_deref());
+        let is_new = b.labels.iter().any(|l| matches!(l, Label::FileNew {}));
+        let is_deleted = b.labels.iter().any(|l| matches!(l, Label::FileDeleted {}));
+        let before_res = resolve_checked_side(b.before.as_deref(), is_new, &objects);
+        let after_res = resolve_checked_side(b.after.as_deref(), is_deleted, &objects);
+
+        let mut failed = false;
+        for res in [&before_res, &after_res] {
+            match res {
+                SideResolution::Side(_) => {}
+                SideResolution::MissingOrInvalid => {
+                    extra_reasons.insert(CoverageReason::CaptureOff);
+                    failed = true;
+                }
+                SideResolution::TooLarge => {
+                    extra_reasons.insert(CoverageReason::TooLarge);
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            continue;
+        }
+
+        let (SideResolution::Side(before_side), SideResolution::Side(after_side)) =
+            (before_res, after_res)
+        else {
+            unreachable!();
+        };
+        if !matches!(before_side, Side::Text(_)) && !matches!(after_side, Side::Text(_)) {
+            continue;
+        }
+
+        let key: GroupKey<'_> = (
+            b.path.as_str(),
+            b.before.as_deref(),
+            b.after.as_deref(),
+            b.before.is_none() && is_new,
+            b.after.is_none() && is_deleted,
+        );
         if let Some(&pos) = group_index.get(&key) {
             group_order[pos].1.push(idx);
         } else {
@@ -146,25 +177,17 @@ where
     }
 
     let mut per_block: Vec<Option<BlockSnippet>> = vec![None; card.blocks.len()];
-    for ((path, before_sha, after_sha), block_indices) in group_order {
-        let is_new = block_indices.iter().any(|&i| {
-            card.blocks[i]
-                .labels
-                .iter()
-                .any(|l| matches!(l, Label::FileNew {}))
-        });
-        let is_deleted = block_indices.iter().any(|&i| {
-            card.blocks[i]
-                .labels
-                .iter()
-                .any(|l| matches!(l, Label::FileDeleted {}))
-        });
-
-        let before_side = resolve_side(before_sha, is_new, &objects);
-        let after_side = resolve_side(after_sha, is_deleted, &objects);
-        if !matches!(before_side, Side::Text(_)) && !matches!(after_side, Side::Text(_)) {
-            continue;
-        }
+    for ((path, before_sha, after_sha, before_absent, after_absent), block_indices) in group_order {
+        let SideResolution::Side(before_side) =
+            resolve_checked_side(before_sha, before_absent, &objects)
+        else {
+            unreachable!();
+        };
+        let SideResolution::Side(after_side) =
+            resolve_checked_side(after_sha, after_absent, &objects)
+        else {
+            unreachable!();
+        };
 
         let converted_syms: Vec<Option<FactSymbol>> = block_indices
             .iter()
@@ -193,31 +216,28 @@ where
         }
     }
 
+    let mut reply_card = card.clone();
+    if !extra_reasons.is_empty() {
+        let mut all_reasons: BTreeSet<CoverageReason> =
+            reply_card.coverage.reasons.iter().copied().collect();
+        all_reasons.extend(extra_reasons);
+        reply_card.coverage.reasons = all_reasons.into_iter().collect();
+        reply_card.coverage.state = CoverageState::Partial;
+    }
+
     let snippets: Vec<BlockSnippet> = per_block.into_iter().flatten().collect();
     let mut msg = ServerMsg::CardDetail {
         id,
-        card: card.clone(),
+        card: reply_card,
         snippets,
     };
-    while encode(&msg).len() > LINE_CAP {
-        let ServerMsg::CardDetail {
-            ref mut card,
-            ref mut snippets,
-            ..
-        } = msg
-        else {
-            unreachable!();
-        };
-        if snippets.pop().is_some() {
-            continue;
+    if shrink_card_msg(&mut msg) {
+        msg
+    } else {
+        ServerMsg::Error {
+            code: "too_large".to_string(),
         }
-        if card.blocks.pop().is_some() {
-            continue;
-        }
-        truncate_chars_in_place(&mut card.prompt, LIST_QUOTE_MAX_CHARS);
-        break;
     }
-    msg
 }
 
 /// Builds a paged `ServerMsg::BlockDiff` reply reading Listening objects from `home`.
@@ -279,16 +299,22 @@ where
     }
 
     let pages_vec = paginate_diff_lines(all_lines);
-    let total_pages = pages_vec.len() as u32;
+    let total_pages = u32::try_from(pages_vec.len()).unwrap_or(u32::MAX);
     let lines = pages_vec.into_iter().nth(page as usize).unwrap_or_default();
 
-    ServerMsg::BlockDiff {
+    let msg = ServerMsg::BlockDiff {
         id,
         lines,
         page,
         pages: total_pages,
         missing: false,
+    };
+    if encode(&msg).len() > LINE_CAP {
+        return ServerMsg::Error {
+            code: "too_large".to_string(),
+        };
     }
+    msg
 }
 
 fn missing_diff(id: u64) -> ServerMsg {
@@ -313,21 +339,107 @@ fn block_is_codable(block: &Block) -> bool {
     block.recorded && (block.before.is_some() || block.after.is_some())
 }
 
-fn resolve_side<'a>(
+fn msg_card_mut(msg: &mut ServerMsg) -> &mut Card {
+    match msg {
+        ServerMsg::Card { item } => item,
+        ServerMsg::CardDetail { card, .. } => card,
+        _ => unreachable!(),
+    }
+}
+
+fn shrink_card_msg(msg: &mut ServerMsg) -> bool {
+    if encode(msg).len() <= LINE_CAP {
+        return true;
+    }
+
+    if matches!(msg, ServerMsg::CardDetail { .. }) {
+        loop {
+            let popped = {
+                let ServerMsg::CardDetail { snippets, .. } = msg else {
+                    unreachable!();
+                };
+                snippets.pop()
+            };
+            if popped.is_none() {
+                break;
+            }
+            if encode(msg).len() <= LINE_CAP {
+                return true;
+            }
+        }
+    }
+
+    while msg_card_mut(msg).blocks.pop().is_some() {
+        if encode(msg).len() <= LINE_CAP {
+            return true;
+        }
+    }
+
+    {
+        let card = msg_card_mut(msg);
+        if truncate_chars_in_place(&mut card.prompt, LIST_QUOTE_MAX_CHARS) {
+            card.prompt_truncated = true;
+        }
+    }
+    if encode(msg).len() <= LINE_CAP {
+        return true;
+    }
+
+    let mut saved_flow = std::mem::take(&mut msg_card_mut(msg).flow);
+    let base_len = encode(msg).len();
+    if base_len > LINE_CAP {
+        return false;
+    }
+    if !saved_flow.is_empty() {
+        let mut cur_len = base_len;
+        let mut keep = 0usize;
+        for (idx, step) in saved_flow.iter().enumerate() {
+            let step_len = serde_json::to_string(step)
+                .map(|s| s.len())
+                .unwrap_or(LINE_CAP + 1);
+            let added = step_len + usize::from(idx > 0);
+            if cur_len + added > LINE_CAP {
+                break;
+            }
+            cur_len += added;
+            keep = idx + 1;
+        }
+        saved_flow.truncate(keep);
+        msg_card_mut(msg).flow = saved_flow;
+        while encode(msg).len() > LINE_CAP {
+            if msg_card_mut(msg).flow.pop().is_none() {
+                return false;
+            }
+        }
+    }
+
+    encode(msg).len() <= LINE_CAP
+}
+
+enum SideResolution<'a> {
+    Side(Side<'a>),
+    MissingOrInvalid,
+    TooLarge,
+}
+
+fn resolve_checked_side<'a>(
     sha: Option<&str>,
     absent_allowed: bool,
     objects: &'a HashMap<String, ObjectRead>,
-) -> Side<'a> {
+) -> SideResolution<'a> {
     match sha {
         Some(hash) => match objects.get(hash) {
-            Some(ObjectRead::Text(text)) => Side::Text(text.as_str()),
-            _ => Side::Unknown,
+            Some(ObjectRead::Text(text)) => SideResolution::Side(Side::Text(text.as_str())),
+            Some(ObjectRead::TooLarge) => SideResolution::TooLarge,
+            Some(ObjectRead::Missing | ObjectRead::Invalid) | None => {
+                SideResolution::MissingOrInvalid
+            }
         },
         None => {
             if absent_allowed {
-                Side::Absent
+                SideResolution::Side(Side::Absent)
             } else {
-                Side::Unknown
+                SideResolution::Side(Side::Unknown)
             }
         }
     }
@@ -378,33 +490,99 @@ fn to_wire_snippet_line(line: FactSnippetLine) -> SnippetLine {
     }
 }
 
-fn truncate_chars_in_place(text: &mut String, max_chars: usize) {
+fn truncate_chars_in_place(text: &mut String, max_chars: usize) -> bool {
     if let Some((byte_idx, _)) = text.char_indices().nth(max_chars) {
         text.truncate(byte_idx);
+        true
+    } else {
+        false
     }
 }
 
-fn push_chunked_diff_lines(out: &mut Vec<DiffLine>, kind: DiffLineKind, mut text: &str) {
-    if text.len() <= MAX_SINGLE_LINE_BYTES {
-        out.push(DiffLine {
+fn json_escaped_char_len(ch: char) -> usize {
+    match ch {
+        '"' | '\\' | '\x08' | '\x0c' | '\n' | '\r' | '\t' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+fn diff_line_wrapper_bytes(kind: DiffLineKind) -> usize {
+    match kind {
+        DiffLineKind::Context => r#"{"kind":"context","text":""}"#.len(),
+        DiffLineKind::Added => r#"{"kind":"added","text":""}"#.len(),
+        DiffLineKind::Removed => r#"{"kind":"removed","text":""}"#.len(),
+    }
+}
+
+fn push_chunked_diff_lines(out: &mut Vec<DiffLine>, kind: DiffLineKind, text: &str) {
+    let limit = MAX_SINGLE_LINE_BYTES.min(DIFF_PAGE_BYTES - 2);
+    push_chunked_diff_lines_with_limit(out, kind, text, limit);
+}
+
+fn push_chunked_diff_lines_with_limit(
+    out: &mut Vec<DiffLine>,
+    kind: DiffLineKind,
+    mut text: &str,
+    max_elem_bytes: usize,
+) {
+    let wrapper = diff_line_wrapper_bytes(kind);
+    let est_total = wrapper + text.chars().map(json_escaped_char_len).sum::<usize>();
+    if est_total <= max_elem_bytes {
+        let candidate = DiffLine {
             kind,
             text: text.to_string(),
-        });
-        return;
+        };
+        let exact = serde_json::to_string(&candidate)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
+        if exact <= max_elem_bytes {
+            out.push(candidate);
+            return;
+        }
     }
+
     while !text.is_empty() {
-        let split_at = text
-            .char_indices()
-            .take_while(|&(idx, ch)| idx + ch.len_utf8() <= MAX_SINGLE_LINE_BYTES)
-            .last()
-            .map(|(idx, ch)| idx + ch.len_utf8())
-            .unwrap_or_else(|| text.chars().next().map(char::len_utf8).unwrap_or(0));
-        let (head, tail) = text.split_at(split_at);
-        out.push(DiffLine {
-            kind,
-            text: head.to_string(),
-        });
-        text = tail;
+        let mut acc = wrapper;
+        let mut split_at = 0usize;
+        for (idx, ch) in text.char_indices() {
+            let next = acc + json_escaped_char_len(ch);
+            if next > max_elem_bytes && split_at > 0 {
+                break;
+            }
+            acc = next;
+            split_at = idx + ch.len_utf8();
+        }
+        if split_at == 0 {
+            split_at = text.chars().next().map(char::len_utf8).unwrap_or(0);
+        }
+
+        let mut end = split_at;
+        loop {
+            let candidate = DiffLine {
+                kind,
+                text: text[..end].to_string(),
+            };
+            let exact = serde_json::to_string(&candidate)
+                .map(|s| s.len())
+                .unwrap_or(usize::MAX);
+            if exact <= max_elem_bytes {
+                out.push(candidate);
+                text = &text[end..];
+                break;
+            }
+            let Some((prev_idx, _)) = text[..end].char_indices().next_back() else {
+                out.push(candidate);
+                text = &text[end..];
+                break;
+            };
+            if prev_idx == 0 {
+                out.push(candidate);
+                text = &text[end..];
+                break;
+            }
+            end = prev_idx;
+        }
     }
 }
 
@@ -412,11 +590,24 @@ fn paginate_diff_lines(all_lines: Vec<DiffLine>) -> Vec<Vec<DiffLine>> {
     if all_lines.is_empty() {
         return vec![Vec::new()];
     }
+    let max_elem_bytes = DIFF_PAGE_BYTES - 2;
+    let mut bounded = Vec::with_capacity(all_lines.len());
+    for line in all_lines {
+        let elem_bytes = serde_json::to_string(&line)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
+        if elem_bytes <= max_elem_bytes {
+            bounded.push(line);
+        } else {
+            push_chunked_diff_lines_with_limit(&mut bounded, line.kind, &line.text, max_elem_bytes);
+        }
+    }
+
     let mut pages = Vec::new();
     let mut cur: Vec<DiffLine> = Vec::new();
     let mut cur_bytes = 2usize; // JSON array `[` + `]`
 
-    for line in all_lines {
+    for line in bounded {
         let elem_bytes = serde_json::to_string(&line).map(|s| s.len()).unwrap_or(0);
         let sep = usize::from(!cur.is_empty());
         if !cur.is_empty() && cur_bytes + sep + elem_bytes > DIFF_PAGE_BYTES {
@@ -439,8 +630,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use rocky_proto::cards::{
-        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageState,
-        Importance, Label, Quote, SymbolKind,
+        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageReason,
+        CoverageState, FlowKind, FlowStep, Importance, Label, Quote, SymbolKind,
     };
     use rocky_proto::pipe::{LINE_CAP, ServerMsg, encode};
 
@@ -808,5 +999,341 @@ mod tests {
                 missing: true,
             }
         );
+    }
+
+    fn flow_steps(count: usize) -> Vec<FlowStep> {
+        (0..count)
+            .map(|_| FlowStep {
+                kind: FlowKind::Cmd,
+                text: "cargo test".to_string(),
+                ok: true,
+                dur_ms: 10,
+                seqs: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn block_diff_splits_escape_heavy_first_line_within_limits() {
+        let escaped_line: String = "\u{0001}".repeat(16_384);
+        let after = format!("{escaped_line}\n");
+        let card = test_card(
+            "c-esc",
+            vec![test_block(
+                1,
+                "src/ctrl.txt",
+                None,
+                Some("sha-before"),
+                Some("sha-after"),
+                true,
+            )],
+        );
+
+        let read = |sha: &str| match sha {
+            "sha-before" => ObjectRead::Text("ok\n".to_string()),
+            "sha-after" => ObjectRead::Text(after.clone()),
+            _ => ObjectRead::Missing,
+        };
+
+        let first = build_block_diff_with(51, &card, 1, 0, read);
+        let ServerMsg::BlockDiff { pages, missing, .. } = first else {
+            panic!("expected BlockDiff");
+        };
+        assert!(!missing);
+        assert!(pages > 1, "expected multi-page diff, got {pages}");
+
+        let mut reassembled = String::new();
+        for p in 0..pages {
+            let reply = build_block_diff_with(51, &card, 1, p, read);
+            let wire = encode(&reply);
+            assert!(
+                wire.len() <= LINE_CAP,
+                "page {p} frame exceeded LINE_CAP: {}",
+                wire.len()
+            );
+            let ServerMsg::BlockDiff {
+                lines,
+                page: got_page,
+                pages: got_pages,
+                missing,
+                ..
+            } = reply
+            else {
+                panic!("expected BlockDiff");
+            };
+            assert!(!missing);
+            assert_eq!(got_page, p);
+            assert_eq!(got_pages, pages);
+            assert!(!lines.is_empty());
+            let page_bytes = serde_json::to_vec(&lines).unwrap().len();
+            assert!(
+                page_bytes <= DIFF_PAGE_BYTES,
+                "page {p} serialized bytes exceeded DIFF_PAGE_BYTES: {page_bytes}"
+            );
+            for line in lines {
+                if line.kind == DiffLineKind::Added {
+                    reassembled.push_str(&line.text);
+                }
+            }
+        }
+        assert_eq!(reassembled, escaped_line);
+    }
+
+    #[test]
+    fn card_broadcast_drops_flow_steps_to_fit_line_cap() {
+        let mut card = test_card(
+            "c-flow-bcast",
+            vec![quoted_block(
+                test_block(
+                    1,
+                    "src/lib.rs",
+                    Some("work"),
+                    Some("sha-a"),
+                    Some("sha-b"),
+                    true,
+                ),
+                &"q".repeat(300),
+            )],
+        );
+        card.prompt = "p".repeat(900);
+        card.flow = flow_steps(1_000);
+
+        let msg = build_card_broadcast(card).expect("trimmed broadcast should fit LINE_CAP");
+        let wire = encode(&msg);
+        assert!(
+            wire.len() <= LINE_CAP,
+            "broadcast exceeded LINE_CAP: {}",
+            wire.len()
+        );
+        let ServerMsg::Card { item } = msg else {
+            panic!("expected ServerMsg::Card");
+        };
+        assert!(item.blocks.is_empty());
+        assert!(item.prompt.chars().count() <= LIST_QUOTE_MAX_CHARS);
+        assert!(item.flow.len() < 1_000);
+    }
+
+    #[test]
+    fn card_broadcast_returns_none_when_metadata_exceeds_line_cap() {
+        let mut card = test_card("c-huge-bcast", Vec::new());
+        card.root = "r".repeat(LINE_CAP + 1024);
+        assert!(build_card_broadcast(card).is_none());
+    }
+
+    #[test]
+    fn card_detail_drops_flow_steps_to_fit_line_cap() {
+        let mut card = test_card(
+            "c-flow-detail",
+            vec![test_block(
+                1,
+                "src/lib.rs",
+                Some("work"),
+                Some("sha-before"),
+                Some("sha-after"),
+                true,
+            )],
+        );
+        card.prompt = "p".repeat(900);
+        card.flow = flow_steps(1_000);
+
+        let msg = build_card_detail_with(61, &card, |sha| match sha {
+            "sha-before" => ObjectRead::Text("fn work() {\n    1\n}\n".to_string()),
+            "sha-after" => ObjectRead::Text("fn work() {\n    2\n}\n".to_string()),
+            _ => ObjectRead::Missing,
+        });
+        let wire = encode(&msg);
+        assert!(
+            wire.len() <= LINE_CAP,
+            "card_detail exceeded LINE_CAP: {}",
+            wire.len()
+        );
+        let ServerMsg::CardDetail {
+            id,
+            card: out_card,
+            snippets,
+        } = msg
+        else {
+            panic!("expected ServerMsg::CardDetail");
+        };
+        assert_eq!(id, 61);
+        assert!(snippets.is_empty());
+        assert!(out_card.blocks.is_empty());
+        assert!(out_card.prompt.chars().count() <= LIST_QUOTE_MAX_CHARS);
+        assert!(out_card.flow.len() < 1_000);
+    }
+
+    #[test]
+    fn card_detail_returns_too_large_when_metadata_exceeds_line_cap() {
+        let mut card = test_card("c-huge-meta", Vec::new());
+        card.root = "r".repeat(LINE_CAP + 1024);
+
+        let msg = build_card_detail_with(62, &card, |_| ObjectRead::Missing);
+        assert_eq!(
+            msg,
+            ServerMsg::Error {
+                code: "too_large".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn card_detail_missing_before_produces_no_snippet_and_capture_off() {
+        let card = test_card(
+            "c-miss-before",
+            vec![test_block(
+                1,
+                "src/lib.rs",
+                Some("work"),
+                Some("sha-missing"),
+                Some("sha-after"),
+                true,
+            )],
+        );
+        let original = card.clone();
+
+        let msg = build_card_detail_with(71, &card, |sha| match sha {
+            "sha-after" => ObjectRead::Text("fn work() {\n    2\n}\n".to_string()),
+            _ => ObjectRead::Missing,
+        });
+        let ServerMsg::CardDetail {
+            card: out_card,
+            snippets,
+            ..
+        } = msg
+        else {
+            panic!("expected CardDetail");
+        };
+        assert!(
+            snippets.is_empty(),
+            "expected no snippets, got {snippets:?}"
+        );
+        assert_eq!(out_card.coverage.state, CoverageState::Partial);
+        assert_eq!(out_card.coverage.reasons, vec![CoverageReason::CaptureOff]);
+        assert_eq!(card, original);
+    }
+
+    #[test]
+    fn card_detail_missing_after_produces_no_snippet_and_capture_off() {
+        let card = test_card(
+            "c-miss-after",
+            vec![test_block(
+                1,
+                "src/lib.rs",
+                Some("work"),
+                Some("sha-before"),
+                Some("sha-missing"),
+                true,
+            )],
+        );
+
+        let msg = build_card_detail_with(72, &card, |sha| match sha {
+            "sha-before" => ObjectRead::Text("fn work() {\n    1\n}\n".to_string()),
+            _ => ObjectRead::Missing,
+        });
+        let ServerMsg::CardDetail {
+            card: out_card,
+            snippets,
+            ..
+        } = msg
+        else {
+            panic!("expected CardDetail");
+        };
+        assert!(snippets.is_empty());
+        assert_eq!(out_card.coverage.state, CoverageState::Partial);
+        assert_eq!(out_card.coverage.reasons, vec![CoverageReason::CaptureOff]);
+    }
+
+    #[test]
+    fn card_detail_invalid_object_produces_no_snippet_and_capture_off() {
+        let card = test_card(
+            "c-invalid-obj",
+            vec![test_block(
+                1,
+                "src/lib.rs",
+                Some("work"),
+                Some("sha-invalid"),
+                Some("sha-after"),
+                true,
+            )],
+        );
+
+        let msg = build_card_detail_with(73, &card, |sha| match sha {
+            "sha-after" => ObjectRead::Text("fn work() {\n    2\n}\n".to_string()),
+            _ => ObjectRead::Invalid,
+        });
+        let ServerMsg::CardDetail {
+            card: out_card,
+            snippets,
+            ..
+        } = msg
+        else {
+            panic!("expected CardDetail");
+        };
+        assert!(snippets.is_empty());
+        assert_eq!(out_card.coverage.state, CoverageState::Partial);
+        assert_eq!(out_card.coverage.reasons, vec![CoverageReason::CaptureOff]);
+    }
+
+    #[test]
+    fn card_detail_too_large_object_produces_no_snippet_and_too_large() {
+        let card = test_card(
+            "c-too-large-obj",
+            vec![test_block(
+                1,
+                "src/lib.rs",
+                Some("work"),
+                Some("sha-big"),
+                Some("sha-after"),
+                true,
+            )],
+        );
+
+        let msg = build_card_detail_with(74, &card, |sha| match sha {
+            "sha-after" => ObjectRead::Text("fn work() {\n    2\n}\n".to_string()),
+            _ => ObjectRead::TooLarge,
+        });
+        let ServerMsg::CardDetail {
+            card: out_card,
+            snippets,
+            ..
+        } = msg
+        else {
+            panic!("expected CardDetail");
+        };
+        assert!(snippets.is_empty());
+        assert_eq!(out_card.coverage.state, CoverageState::Partial);
+        assert_eq!(out_card.coverage.reasons, vec![CoverageReason::TooLarge]);
+    }
+
+    #[test]
+    fn card_detail_preserves_originally_unknown_baseline_snippet() {
+        let card = test_card(
+            "c-orig-unknown",
+            vec![test_block(
+                1,
+                "src/lib.rs",
+                Some("work"),
+                None,
+                Some("sha-after"),
+                true,
+            )],
+        );
+
+        let msg = build_card_detail_with(75, &card, |sha| match sha {
+            "sha-after" => ObjectRead::Text("fn work() {\n    2\n}\n".to_string()),
+            _ => ObjectRead::Missing,
+        });
+        let ServerMsg::CardDetail {
+            card: out_card,
+            snippets,
+            ..
+        } = msg
+        else {
+            panic!("expected CardDetail");
+        };
+        assert_eq!(snippets.len(), 1);
+        assert!(!snippets[0].lines.is_empty());
+        assert_eq!(out_card.coverage.state, CoverageState::Full);
+        assert!(out_card.coverage.reasons.is_empty());
     }
 }

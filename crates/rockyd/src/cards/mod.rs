@@ -2,6 +2,7 @@
 
 pub mod attribute;
 pub mod detail;
+pub mod query;
 pub mod storage;
 pub mod store;
 pub mod transcript;

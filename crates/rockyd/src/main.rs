@@ -7,6 +7,7 @@ mod guard_loop;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -20,6 +21,7 @@ use rocky_proto::pipe::{
     AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, ServerMsg, SetupHealth, StatusOp,
 };
 use rocky_proto::settings::Settings;
+use rockyd::cards::query::CardQueryLoop;
 use rockyd::cards::storage::CardStore;
 use rockyd::cards::transcript::claude_config_dirs;
 use rockyd::cards::{Engine, EngineCtx};
@@ -249,6 +251,7 @@ fn main() {
     let workers = thread::available_parallelism().map_or(1, |n| n.get().min(4));
     let mut cards = Engine::new(home.clone(), workers);
     cards.set_enabled(settings.cards);
+    let mut queries = CardQueryLoop::new(home.clone());
 
     let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
     guards.check(&shared, &hub, &log);
@@ -303,114 +306,46 @@ fn main() {
     loop {
         // Drain every pending control request so shutdown stays prompt and a
         // burst of sets/timelines never waits for the next rescan.
-        loop {
-            match control_rx.try_recv() {
-                Ok(Control::Stop {
-                    id,
-                    reply,
-                    flushed,
-                    quit,
-                }) => {
-                    // Wait for the client thread to flush the ack before
-                    // exiting: without this, `process::exit` can race the
-                    // writer thread and the client never sees the ack. Only
-                    // when the ack was accepted — otherwise the client is
-                    // already gone, so exit immediately. Bounded so a dead
-                    // client can't wedge shutdown; the pipe dies either way.
-                    if reply
-                        .send(ServerMsg::Ack {
-                            id,
-                            ok: true,
-                            error: None,
-                        })
-                        .is_ok()
-                    {
-                        let _ = flushed.recv_timeout(Duration::from_secs(5));
-                    }
-                    log.line(if quit {
-                        "quit requested, exiting"
-                    } else {
-                        "stop requested, exiting"
-                    });
-                    // `process::exit` runs no destructors, so the capture child is stopped here.
-                    captures.shutdown(&log);
-                    std::process::exit(0);
+        while let Ok(ctrl) = control_rx.try_recv() {
+            if let LoopAction::Stop {
+                id,
+                reply,
+                flushed,
+                quit,
+            } = handle_control(
+                ctrl,
+                &shared,
+                &hub,
+                &log,
+                &home,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            ) {
+                // Wait for the client thread to flush the ack before
+                // exiting: without this, `process::exit` can race the
+                // writer thread and the client never sees the ack. Only
+                // when the ack was accepted — otherwise the client is
+                // already gone, so exit immediately. Bounded so a dead
+                // client can't wedge shutdown; the pipe dies either way.
+                if reply
+                    .send(ServerMsg::Ack {
+                        id,
+                        ok: true,
+                        error: None,
+                    })
+                    .is_ok()
+                {
+                    let _ = flushed.recv_timeout(Duration::from_secs(5));
                 }
-                Ok(Control::Set {
-                    id,
-                    name,
-                    value,
-                    reply,
-                }) => {
-                    let msg = handle_set(id, &name, &value, &shared, &hub, &log, &home);
-                    let cards_on = shared.lock().unwrap().settings.cards;
-                    cards.set_enabled(cards_on);
-                    let _ = reply.send(msg);
-                }
-                Ok(Control::Timeline { id, key, reply }) => {
-                    let entries = shared.lock().unwrap().state.timeline(&key);
-                    let _ = reply.send(ServerMsg::Timeline { id, key, entries });
-                }
-                Ok(Control::Setup { id, action, reply }) => {
-                    guards.setup_request(id, action, reply, &shared, &hub, &log);
-                }
-                Ok(Control::RepoDecision {
-                    id,
-                    root,
-                    allow,
-                    reply,
-                }) => {
-                    guards.repo_request(id, root, allow, reply);
-                }
-                Ok(Control::Cards {
-                    id,
-                    query,
-                    before,
-                    limit,
-                    reply,
-                }) => {
-                    let (items, next) = shared.lock().unwrap().cards.page(
-                        query.as_deref(),
-                        before.as_deref(),
-                        limit as usize,
-                    );
-                    let _ = reply.send(rockyd::cards::detail::build_cards_reply(id, items, next));
-                }
-                Ok(Control::CardDetail { id, card_id, reply }) => {
-                    let card = shared.lock().unwrap().cards.get(&card_id);
-                    let msg = match card {
-                        Some(card) => rockyd::cards::detail::build_card_detail(id, &card, &home),
-                        None => ServerMsg::Ack {
-                            id,
-                            ok: false,
-                            error: Some("card not found".to_string()),
-                        },
-                    };
-                    let _ = reply.send(msg);
-                }
-                Ok(Control::BlockDiff {
-                    id,
-                    card_id,
-                    seq,
-                    page,
-                    reply,
-                }) => {
-                    let card = shared.lock().unwrap().cards.get(&card_id);
-                    let msg = match card {
-                        Some(card) => {
-                            rockyd::cards::detail::build_block_diff(id, &card, seq, page, &home)
-                        }
-                        None => ServerMsg::BlockDiff {
-                            id,
-                            lines: Vec::new(),
-                            page: 0,
-                            pages: 0,
-                            missing: true,
-                        },
-                    };
-                    let _ = reply.send(msg);
-                }
-                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                log.line(if quit {
+                    "quit requested, exiting"
+                } else {
+                    "stop requested, exiting"
+                });
+                // `process::exit` runs no destructors, so the capture child is stopped here.
+                captures.shutdown(&log);
+                std::process::exit(0);
             }
         }
 
@@ -459,6 +394,7 @@ fn main() {
             &hub,
             &log,
         );
+        queries.service();
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -600,9 +536,20 @@ fn service_cards(
         if errs > 0 {
             log.line(&format!("cards: {errs} append errors"));
         }
-        for card in appended {
-            hub.broadcast(&rockyd::cards::detail::build_card_broadcast(card));
+        broadcast_appended_cards(appended, hub, log);
+    }
+}
+
+fn broadcast_appended_cards(appended: Vec<rocky_proto::cards::Card>, hub: &Hub, log: &RotatingLog) {
+    let mut skipped = 0u64;
+    for card in appended {
+        match rockyd::cards::detail::build_card_broadcast(card) {
+            Some(msg) => hub.broadcast(&msg),
+            None => skipped += 1,
         }
+    }
+    if skipped > 0 {
+        log.line(&format!("cards: {skipped} broadcasts too large"));
     }
 }
 
@@ -719,4 +666,324 @@ fn handle_set(
         hub.broadcast(m);
     }
     ack
+}
+
+enum LoopAction {
+    Continue,
+    Stop {
+        id: u64,
+        reply: SyncSender<ServerMsg>,
+        flushed: mpsc::Receiver<()>,
+        quit: bool,
+    },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_control(
+    ctrl: Control,
+    shared: &Arc<Mutex<Shared>>,
+    hub: &Hub,
+    log: &RotatingLog,
+    home: &Path,
+    cards: &mut Engine,
+    queries: &mut CardQueryLoop,
+    guards: &mut GuardLoop,
+) -> LoopAction {
+    match ctrl {
+        Control::Stop {
+            id,
+            reply,
+            flushed,
+            quit,
+        } => LoopAction::Stop {
+            id,
+            reply,
+            flushed,
+            quit,
+        },
+        Control::Set {
+            id,
+            name,
+            value,
+            reply,
+        } => {
+            let msg = handle_set(id, &name, &value, shared, hub, log, home);
+            let cards_on = shared.lock().unwrap().settings.cards;
+            cards.set_enabled(cards_on);
+            let _ = reply.send(msg);
+            LoopAction::Continue
+        }
+        Control::Timeline { id, key, reply } => {
+            let entries = shared.lock().unwrap().state.timeline(&key);
+            let _ = reply.send(ServerMsg::Timeline { id, key, entries });
+            LoopAction::Continue
+        }
+        Control::Setup { id, action, reply } => {
+            guards.setup_request(id, action, reply, shared, hub, log);
+            LoopAction::Continue
+        }
+        Control::RepoDecision {
+            id,
+            root,
+            allow,
+            reply,
+        } => {
+            guards.repo_request(id, root, allow, reply);
+            LoopAction::Continue
+        }
+        Control::Cards {
+            id,
+            query,
+            before,
+            limit,
+            reply,
+        } => {
+            queries.cards(id, query, before, limit, reply);
+            LoopAction::Continue
+        }
+        Control::CardDetail { id, card_id, reply } => {
+            queries.card_detail(id, card_id, reply);
+            LoopAction::Continue
+        }
+        Control::BlockDiff {
+            id,
+            card_id,
+            seq,
+            page,
+            reply,
+        } => {
+            queries.block_diff(id, card_id, seq, page, reply);
+            LoopAction::Continue
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocky_proto::cards::{
+        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageState,
+        Importance, SymbolKind,
+    };
+    use rockyd::cards::store::ObjectRead;
+
+    fn make_test_shared(home: &Path) -> Arc<Mutex<Shared>> {
+        Arc::new(Mutex::new(Shared {
+            state: StatusState::new(),
+            last_known: HashMap::new(),
+            counters: Health::default(),
+            health: Health::default(),
+            settings: Settings::default(),
+            settings_unreadable: false,
+            gaps: Gaps::new(),
+            history: History::open(&history_dir(home), HISTORY_CAP_BYTES, false),
+            setup: SetupHealth::default(),
+            repo_pending: Vec::new(),
+            capture: Vec::new(),
+            cards: CardStore::new(home.to_path_buf()),
+        }))
+    }
+
+    fn make_test_card(home: &Path, card_id: &str) -> Card {
+        Card {
+            v: CARD_VERSION,
+            card_id: card_id.to_string(),
+            rev: 1,
+            repo_id: "r1".to_string(),
+            root: home.to_string_lossy().into_owned(),
+            main_root: None,
+            branch: Some("main".to_string()),
+            session_id: "s-seed".to_string(),
+            agent_id: String::new(),
+            agent_type: "claude".to_string(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "fix".to_string(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: vec![Block {
+                seq: 1,
+                path: "src/lib.rs".to_string(),
+                symbol: Some(BlockSymbol {
+                    kind: SymbolKind::Function,
+                    name: "f".to_string(),
+                    container: None,
+                    exported: true,
+                    nth: 0,
+                }),
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec!["tu-1".to_string()],
+                bash: None,
+                before: Some("1".repeat(64)),
+                after: Some("2".repeat(64)),
+                recorded: true,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(1),
+                quote: None,
+            }],
+            flow: Vec::new(),
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn stalled_cards_query_reader_does_not_stall_hook_ingest() {
+        struct UnblockOnPanic(mpsc::Sender<()>);
+        impl Drop for UnblockOnPanic {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    for _ in 0..8 {
+                        let _ = self.0.send(());
+                    }
+                }
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        std::fs::create_dir_all(&spool).unwrap();
+        let log = Arc::new(RotatingLog::new(&log_path(&home)));
+        let shared = make_test_shared(&home);
+        let hub = Arc::new(Hub::new());
+
+        let card = make_test_card(&home, "card-stalled");
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let entered_tx = Mutex::new(entered_tx);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let (ingest_done_tx, ingest_done_rx) = mpsc::channel::<()>();
+        let (detail_tx, detail_rx) = mpsc::sync_channel::<ServerMsg>(1);
+
+        let shared_bg = Arc::clone(&shared);
+        let hub_bg = Arc::clone(&hub);
+        let log_bg = Arc::clone(&log);
+        let home_bg = home.clone();
+        let spool_bg = spool.clone();
+        let release_worker = release_tx.clone();
+
+        let worker = thread::spawn(move || {
+            let mut ingest = Ingestor::new();
+            let mut guards = GuardLoop::new(home_bg.clone(), &log_bg, now_ms());
+            let mut cards = Engine::new(home_bg.clone(), 1);
+            let mut queries = CardQueryLoop::new_with_object_reader(
+                home_bg.clone(),
+                Arc::new(move |sha: &str| {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    let _ = release_rx.lock().unwrap().recv();
+                    if sha.starts_with('1') {
+                        ObjectRead::Text("fn f() {\n    1\n}\n".to_string())
+                    } else {
+                        ObjectRead::Text("fn f() {\n    2\n}\n".to_string())
+                    }
+                }),
+            );
+            let _unblock_worker = UnblockOnPanic(release_worker);
+            let _ = handle_control(
+                Control::CardDetail {
+                    id: 99,
+                    card_id: "card-stalled".to_string(),
+                    reply: detail_tx,
+                },
+                &shared_bg,
+                &hub_bg,
+                &log_bg,
+                &home_bg,
+                &mut cards,
+                &mut queries,
+                &mut guards,
+            );
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("query reader should have started");
+            std::fs::write(
+                spool_bg.join("0000000001000-1-0.json"),
+                r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"live-after-query","cwd":"C:\\repo"}}"#,
+            )
+            .unwrap();
+            rescan(
+                &spool_bg,
+                &shared_bg,
+                &hub_bg,
+                &log_bg,
+                &mut ingest,
+                &mut guards,
+                &mut cards,
+                None,
+            );
+            let _ = ingest_done_tx.send(());
+            queries
+        });
+
+        let ingested = ingest_done_rx.recv_timeout(Duration::from_millis(800));
+        if ingested.is_err() {
+            let _ = release_tx.send(());
+            let _ = release_tx.send(());
+            let _ = worker.join();
+            panic!("hook ingest stalled behind blocked card query reader");
+        }
+
+        let mut queries = worker.join().unwrap();
+        let _unblock_test = UnblockOnPanic(release_tx.clone());
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .state
+                .agents()
+                .iter()
+                .any(|a| a.key.session_id == "live-after-query"),
+            "hook event should be ingested while query reader is stalled"
+        );
+        queries.service();
+        assert!(
+            detail_rx.try_recv().is_err(),
+            "stalled query should not have replied yet"
+        );
+
+        let _ = release_tx.send(());
+        let _ = release_tx.send(());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let reply = loop {
+            queries.service();
+            if let Ok(msg) = detail_rx.try_recv() {
+                break msg;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for unblocked card detail reply"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(matches!(reply, ServerMsg::CardDetail { id: 99, .. }));
+    }
+
+    #[test]
+    fn service_cards_skips_oversized_broadcast_and_logs_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let log = RotatingLog::new(&log_path(&home));
+        let hub = Hub::new();
+        let mut card = make_test_card(&home, "card-oversized");
+        card.branch = Some("b".repeat(80_000));
+
+        broadcast_appended_cards(vec![card], &hub, &log);
+
+        let contents = std::fs::read_to_string(log_path(&home)).unwrap();
+        assert!(
+            contents.contains("cards: 1 broadcasts too large"),
+            "expected broadcast skip count in log, got: {contents}"
+        );
+    }
 }

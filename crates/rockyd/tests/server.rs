@@ -772,7 +772,7 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
     assert!(matches!(snap, ServerMsg::Snapshot { .. }));
 
     // Broadcast live card notification to subscribed client.
-    hub.broadcast(&build_card_broadcast(card.clone()));
+    hub.broadcast(&build_card_broadcast(card.clone()).expect("sample card fits LINE_CAP"));
     let pushed: ServerMsg = decode(&sub.read_line().unwrap()).unwrap();
     assert!(matches!(pushed, ServerMsg::Card { .. }));
 
