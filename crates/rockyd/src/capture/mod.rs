@@ -50,6 +50,16 @@ pub enum Coverage {
     Unknown,
 }
 
+impl Coverage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// One root the child lists, and whether this child is the one capturing it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RootOwner {
@@ -64,7 +74,21 @@ pub struct Report {
     pub coverage: Coverage,
     pub gaps: u64,
     pub reason: Option<String>,
+    pub started_ms: u64,
     pub at_ms: u64,
+}
+
+/// Capture child result carrying the collector's reconcile start timestamp.
+///
+/// Window rule downstream: a window ends at the `at_ms` of the first result for that root
+/// with `started_ms >= post_ms`, capped at `post_ms + 30_000`. `started_ms == 0` never ends
+/// a window early.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureResult {
+    pub root: String,
+    pub started_ms: u64,
+    pub at_ms: u64,
+    pub coverage: String,
 }
 
 /// A line the capture child writes to stdout.
@@ -101,6 +125,8 @@ enum Wire {
         gaps: u64,
         #[serde(deserialize_with = "Option::deserialize")]
         reason: Option<String>,
+        #[serde(default)]
+        started_ms: u64,
         at_ms: u64,
     },
 }
@@ -119,12 +145,14 @@ pub fn parse_line(line: &str) -> Option<CaptureLine> {
             coverage,
             gaps,
             reason,
+            started_ms,
             at_ms,
         } => Some(CaptureLine::Result(Report {
             root,
             coverage,
             gaps,
             reason,
+            started_ms,
             at_ms,
         })),
         _ => None,
@@ -217,13 +245,24 @@ impl Capture {
         self.running = false;
     }
 
-    pub fn line(&mut self, line: CaptureLine) {
+    pub fn line(&mut self, line: CaptureLine) -> Option<CaptureResult> {
         match line {
-            CaptureLine::Roots(roots) => self.replace_roots(roots),
+            CaptureLine::Roots(roots) => {
+                self.replace_roots(roots);
+                None
+            }
             CaptureLine::Result(report) => {
-                if self.is_row(&report.root) {
-                    self.run.results.insert(report.root.clone(), report);
+                if !self.is_row(&report.root) {
+                    return None;
                 }
+                let out = CaptureResult {
+                    root: report.root.clone(),
+                    started_ms: report.started_ms,
+                    at_ms: report.at_ms,
+                    coverage: report.coverage.as_str().to_owned(),
+                };
+                self.run.results.insert(report.root.clone(), report);
+                Some(out)
             }
         }
     }
@@ -231,6 +270,14 @@ impl Capture {
     /// A file under `root` changed. Only roots this child owns are tracked.
     pub fn fs_event(&mut self, root: &str, now_ms: u64) {
         if self.owned().any(|owned| owned == root) {
+            self.run.pending.entry(root.to_owned()).or_insert(now_ms);
+        }
+    }
+
+    /// Requests a debounce-only capture for an owned root, bypassing any active send gap.
+    pub fn flush(&mut self, root: &str, now_ms: u64) {
+        if self.owned().any(|owned| owned == root) {
+            self.run.last_send.remove(root);
             self.run.pending.entry(root.to_owned()).or_insert(now_ms);
         }
     }

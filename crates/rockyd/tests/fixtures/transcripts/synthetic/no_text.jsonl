@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-11-13T10:03:00Z","message":{"role":"user","content":"Earlier turn"}}
+{"type":"assistant","timestamp":"2026-11-13T10:03:01Z","message":{"id":"msg_19","role":"assistant","content":[{"type":"text","text":"Previous turn text must not be used."}]}}
+{"type":"user","timestamp":"2026-11-13T10:04:00Z","message":{"role":"user","content":"Edit silently without talking."}}
+{"type":"assistant","timestamp":"2026-11-13T10:04:01Z","message":{"id":"msg_20","role":"assistant","content":[{"type":"thinking","thinking":"Only internal thinking here."},{"type":"tool_use","id":"toolu_04","name":"Edit","input":{"file_path":"silent.rs"}}]}}

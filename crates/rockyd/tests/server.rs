@@ -237,6 +237,32 @@ fn version_mismatch_gets_error_and_close() {
 }
 
 #[test]
+fn version_mismatch_v3_client_refused() {
+    let home = home();
+    let hub = Arc::new(Hub::new());
+    let (control_tx, _control_rx) = mpsc::channel();
+    let _handle = serve(
+        home.path(),
+        Arc::clone(&hub),
+        Arc::new(snapshot_msg),
+        control_tx,
+    )
+    .unwrap();
+
+    let pipe = pipe_name(home.path());
+    let mut client = connect(&pipe);
+    client.send("{\"v\":3,\"type\":\"hello\",\"client\":\"x\",\"version\":\"y\"}\n");
+    let err: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert_eq!(
+        err,
+        ServerMsg::Error {
+            code: "version".into()
+        }
+    );
+    assert!(client.read_line().is_none(), "expected EOF after error");
+}
+
+#[test]
 fn second_bind_is_taken() {
     let home = home();
     let hub = Arc::new(Hub::new());
@@ -275,7 +301,7 @@ fn long_line_disconnects_client() {
     // No hello: one over-long line must be dropped without reading it all.
     let big = "x".repeat(LINE_CAP + 100);
     client.send(&format!(
-        "{{\"v\":3,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
+        "{{\"v\":4,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
     ));
     assert!(client.read_line().is_none(), "expected EOF");
 }
@@ -376,6 +402,7 @@ fn stop_cmd_reaches_control_and_acks() {
             id: 7,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         })
         .unwrap();
     flushed.recv_timeout(GUARD).unwrap();
@@ -385,7 +412,8 @@ fn stop_cmd_reaches_control_and_acks() {
         ServerMsg::Ack {
             id: 7,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 }
@@ -436,6 +464,7 @@ fn quit_broadcasts_to_every_subscriber_then_acks() {
             id: 5,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         })
         .unwrap();
     flushed.recv_timeout(GUARD).unwrap();
@@ -446,7 +475,8 @@ fn quit_broadcasts_to_every_subscriber_then_acks() {
         ServerMsg::Ack {
             id: 5,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 }
@@ -535,7 +565,8 @@ fn cmd_show_reaches_other_clients_and_acks_sender() {
         ServerMsg::Ack {
             id: 5,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 }
@@ -586,6 +617,7 @@ fn set_and_timeline_route_through_control_to_sender_only() {
             id: 1,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         })
         .unwrap();
     let ack: ServerMsg = decode(&sender.read_line().unwrap()).unwrap();
@@ -594,7 +626,8 @@ fn set_and_timeline_route_through_control_to_sender_only() {
         ServerMsg::Ack {
             id: 1,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 
@@ -636,4 +669,211 @@ fn set_and_timeline_route_through_control_to_sender_only() {
     hub.broadcast(&marker);
     let got: ServerMsg = decode(&bystander.read_line().unwrap()).unwrap();
     assert_eq!(got, marker);
+}
+
+#[test]
+fn cards_detail_diff_and_broadcast_over_pipe() {
+    use rocky_proto::cards::{
+        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageState,
+        Importance, SymbolKind,
+    };
+    use rocky_proto::paths::{canonical_path, listening_store_dir, repo_id};
+    use rockyd::cards::detail::{
+        build_block_diff, build_card_broadcast, build_card_detail, build_cards_reply,
+    };
+    use rockyd::cards::storage::CardStore;
+
+    let home = home();
+    let repo_dir = home.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let canon = canonical_path(&repo_dir.to_string_lossy(), cfg!(windows));
+    let rid = repo_id(&canon, cfg!(windows));
+    let objects_dir = listening_store_dir(home.path(), &rid).join("objects");
+    std::fs::create_dir_all(&objects_dir).unwrap();
+
+    let before_sha = "1".repeat(64);
+    let after_sha = "2".repeat(64);
+    std::fs::write(
+        objects_dir.join(&before_sha),
+        "fn calc(x: i32) -> i32 {\n    x + 1\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        objects_dir.join(&after_sha),
+        "fn calc(x: i32) -> i32 {\n    x + 2\n}\n",
+    )
+    .unwrap();
+
+    let card = Card {
+        v: CARD_VERSION,
+        card_id: "card-pipe-1".to_string(),
+        rev: 1,
+        repo_id: rid.clone(),
+        root: canon,
+        main_root: None,
+        branch: Some("main".to_string()),
+        session_id: "s1".to_string(),
+        agent_id: "a1".to_string(),
+        agent_type: "claude".to_string(),
+        parent_card_id: None,
+        started_ms: 1_000,
+        ended_ms: Some(2_000),
+        status: CardStatus::Done,
+        prompt: "update calc".to_string(),
+        prompt_truncated: false,
+        importance: Importance::Medium,
+        blocks: vec![Block {
+            seq: 1,
+            path: "src/lib.rs".to_string(),
+            symbol: Some(BlockSymbol {
+                kind: SymbolKind::Function,
+                name: "calc".to_string(),
+                container: None,
+                exported: true,
+                nth: 0,
+            }),
+            labels: Vec::new(),
+            importance: Importance::Medium,
+            via: BlockVia::Edit,
+            tool_use_ids: vec!["tu-1".to_string()],
+            bash: None,
+            before: Some(before_sha),
+            after: Some(after_sha),
+            recorded: true,
+            line: Some(1),
+            added: Some(1),
+            removed: Some(1),
+            quote: None,
+        }],
+        more_count: 0,
+        flow: Vec::new(),
+        flow_more: 0,
+        outside_count: 0,
+        coverage: Coverage {
+            state: CoverageState::Full,
+            reasons: Vec::new(),
+        },
+    };
+
+    let mut store = CardStore::new(home.path().to_path_buf());
+    store.append(&card).unwrap();
+
+    let hub = Arc::new(Hub::new());
+    let (control_tx, control_rx) = mpsc::channel();
+    let _handle = serve(
+        home.path(),
+        Arc::clone(&hub),
+        Arc::new(snapshot_msg),
+        control_tx,
+    )
+    .unwrap();
+
+    let pipe = pipe_name(home.path());
+    let mut sub = connect(&pipe);
+    sub.send(&encode(&ClientMsg::Hello {
+        client: "desk".into(),
+        version: "0.1.0".into(),
+    }));
+    let hello: ServerMsg = decode(&sub.read_line().unwrap()).unwrap();
+    assert!(matches!(hello, ServerMsg::Hello { .. }), "got {hello:?}");
+    sub.send(&encode(&ClientMsg::Subscribe));
+    let snap: ServerMsg = decode(&sub.read_line().unwrap()).unwrap();
+    assert!(matches!(snap, ServerMsg::Snapshot { .. }));
+
+    // Broadcast live card notification to subscribed client.
+    hub.broadcast(&build_card_broadcast(card.clone()).expect("sample card fits LINE_CAP"));
+    let pushed: ServerMsg = decode(&sub.read_line().unwrap()).unwrap();
+    assert!(matches!(pushed, ServerMsg::Card { .. }));
+
+    // 1. ClientMsg::Cards
+    sub.send(&encode(&ClientMsg::Cards {
+        id: 10,
+        query: None,
+        before: None,
+        limit: 20,
+    }));
+    let Control::Cards {
+        id,
+        query,
+        before,
+        limit,
+        reply,
+    } = next_control(&control_rx)
+    else {
+        panic!("expected Control::Cards");
+    };
+    let (items, next) = store.page(query.as_deref(), before.as_deref(), limit as usize);
+    reply.send(build_cards_reply(id, items, next)).unwrap();
+    let cards_msg: ServerMsg = decode(&sub.read_line().unwrap()).unwrap();
+    let ServerMsg::Cards {
+        id: 10,
+        items,
+        next,
+    } = cards_msg
+    else {
+        panic!("expected ServerMsg::Cards");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].card_id, "card-pipe-1");
+    assert!(next.is_none());
+
+    // 2. ClientMsg::CardDetail
+    sub.send(&encode(&ClientMsg::CardDetail {
+        id: 11,
+        card_id: "card-pipe-1".into(),
+    }));
+    let Control::CardDetail { id, card_id, reply } = next_control(&control_rx) else {
+        panic!("expected Control::CardDetail");
+    };
+    let found = store.get(&card_id).unwrap();
+    reply
+        .send(build_card_detail(id, &found, home.path()))
+        .unwrap();
+    let detail_msg: ServerMsg = decode(&sub.read_line().unwrap()).unwrap();
+    let ServerMsg::CardDetail {
+        id: 11,
+        card: detail_card,
+        snippets,
+    } = detail_msg
+    else {
+        panic!("expected ServerMsg::CardDetail");
+    };
+    assert_eq!(detail_card.card_id, "card-pipe-1");
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].seq, 1);
+    assert!(!snippets[0].lines.is_empty());
+
+    // 3. ClientMsg::BlockDiff
+    sub.send(&encode(&ClientMsg::BlockDiff {
+        id: 12,
+        card_id: "card-pipe-1".into(),
+        seq: 1,
+        page: 0,
+    }));
+    let Control::BlockDiff {
+        id,
+        card_id,
+        seq,
+        page,
+        reply,
+    } = next_control(&control_rx)
+    else {
+        panic!("expected Control::BlockDiff");
+    };
+    let found = store.get(&card_id).unwrap();
+    reply
+        .send(build_block_diff(id, &found, seq, page, home.path()))
+        .unwrap();
+    let diff_msg: ServerMsg = decode(&sub.read_line().unwrap()).unwrap();
+    let ServerMsg::BlockDiff {
+        id: 12,
+        lines,
+        page: 0,
+        pages: 1,
+        missing: false,
+    } = diff_msg
+    else {
+        panic!("expected ServerMsg::BlockDiff");
+    };
+    assert!(!lines.is_empty());
 }

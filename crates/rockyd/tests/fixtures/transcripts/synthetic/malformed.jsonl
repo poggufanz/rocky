@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-11-13T10:06:00Z","message":{"role":"user","content":"Handle malformed input."}}
+{not valid json at all
+{"type":"assistant","timestamp":"2026-11-13T10:06:01Z","message":{"id":"msg_40","role":"assistant","content":[null,[],{"type":"image","source":{"type":"base64"}},{"type":"text","text":"   \t\n  "},{"type":"text","text":"Applying parser fix safely."},{"type":"tool_use","id":"toolu_07","name":"Edit","input":{"file_path":"parser.rs"}}]}}
+{"type":"assistant","message":{"id":"truncated

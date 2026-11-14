@@ -1,4 +1,4 @@
-//! Desk client server (protocol v3): a single-instance user-only connection
+//! Desk client server (protocol v4): a single-instance user-only connection
 //! endpoint (a named pipe on Windows, a unix socket elsewhere), per-client
 //! threads, and a non-blocking broadcast hub.
 
@@ -74,6 +74,28 @@ pub enum Control {
         id: u64,
         root: String,
         allow: bool,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A `cards` page request; the daemon replies with `ServerMsg::Cards`.
+    Cards {
+        id: u64,
+        query: Option<String>,
+        before: Option<String>,
+        limit: u32,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A `card_detail` request; the daemon replies with `ServerMsg::CardDetail` or an ack error.
+    CardDetail {
+        id: u64,
+        card_id: String,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A `block_diff` page request; the daemon replies with `ServerMsg::BlockDiff`.
+    BlockDiff {
+        id: u64,
+        card_id: String,
+        seq: u32,
+        page: u32,
         reply: SyncSender<ServerMsg>,
     },
 }
@@ -364,6 +386,7 @@ fn handle_client<S>(
                             id,
                             ok: true,
                             error: None,
+                            cleanup_errors: 0,
                         },
                     ) {
                         break;
@@ -407,6 +430,47 @@ fn handle_client<S>(
                         break;
                     }
                 }
+                Ok(ClientMsg::Cards {
+                    id,
+                    query,
+                    before,
+                    limit,
+                }) => {
+                    if !relay(control, hub, client_id, id, |reply| Control::Cards {
+                        id,
+                        query,
+                        before,
+                        limit,
+                        reply,
+                    }) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::CardDetail { id, card_id }) => {
+                    if !relay(control, hub, client_id, id, |reply| Control::CardDetail {
+                        id,
+                        card_id,
+                        reply,
+                    }) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::BlockDiff {
+                    id,
+                    card_id,
+                    seq,
+                    page,
+                }) => {
+                    if !relay(control, hub, client_id, id, |reply| Control::BlockDiff {
+                        id,
+                        card_id,
+                        seq,
+                        page,
+                        reply,
+                    }) {
+                        break;
+                    }
+                }
                 Ok(ClientMsg::Cmd { name, id })
                     if matches!(name, CmdName::Stop | CmdName::Quit) =>
                 {
@@ -434,6 +498,7 @@ fn handle_client<S>(
                             id,
                             ok: false,
                             error: Some("daemon stopping".into()),
+                            cleanup_errors: 0,
                         });
                         if write_line(&stream, ack.as_bytes()).is_err() {
                             break;
@@ -451,6 +516,7 @@ fn handle_client<S>(
                                 id,
                                 ok: false,
                                 error: Some("daemon stopping".into()),
+                                cleanup_errors: 0,
                             });
                             if write_line(&stream, ack.as_bytes()).is_err() {
                                 break;
@@ -483,6 +549,7 @@ fn daemon_stopping(id: u64) -> ServerMsg {
         id,
         ok: false,
         error: Some("daemon stopping".into()),
+        cleanup_errors: 0,
     }
 }
 

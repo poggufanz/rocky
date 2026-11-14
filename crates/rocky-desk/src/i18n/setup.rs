@@ -142,6 +142,7 @@ pub enum SetupMsg {
     RemovedKeptData {
         path: String,
     },
+    RemovedCardCleanupFailed,
     RemovedUninstall,
     RemovedClose,
 }
@@ -275,6 +276,7 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         SetupMsg::RemovedKeptData {
             path: "C:/Users/me/.rocky".into(),
         },
+        SetupMsg::RemovedCardCleanupFailed,
         SetupMsg::RemovedUninstall,
         SetupMsg::RemovedClose,
     ]
@@ -391,6 +393,9 @@ pub fn setup_en(m: &SetupMsg) -> String {
         }
         SetupMsg::RemovedHeading => "Rocky is removed from your tools.".to_string(),
         SetupMsg::RemovedKeptData { path } => format!("Your data stays in {path}."),
+        SetupMsg::RemovedCardCleanupFailed => {
+            "Some change card files could not be deleted.".to_string()
+        }
         SetupMsg::RemovedUninstall => "To remove the command line, run:".to_string(),
         SetupMsg::RemovedClose => "Close".to_string(),
     }
@@ -510,6 +515,9 @@ pub fn setup_id(m: &SetupMsg) -> String {
         }
         SetupMsg::RemovedHeading => "Rocky sudah dihapus dari alat Anda.".to_string(),
         SetupMsg::RemovedKeptData { path } => format!("Data Anda tetap ada di {path}."),
+        SetupMsg::RemovedCardCleanupFailed => {
+            "Sebagian file change card tidak dapat dihapus.".to_string()
+        }
         SetupMsg::RemovedUninstall => "Untuk menghapus command line, jalankan:".to_string(),
         SetupMsg::RemovedClose => "Tutup".to_string(),
     }

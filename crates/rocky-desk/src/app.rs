@@ -797,7 +797,14 @@ impl Render for DeskView {
         }
         if self.ctl.view == View::Removed {
             let home = self.ctl.rocky_home.display().to_string();
-            return removed_screen(lang, &home, Self::finish_removed, cx).into_any_element();
+            return removed_screen(
+                lang,
+                &home,
+                self.setup.removed_cleanup_errors(),
+                Self::finish_removed,
+                cx,
+            )
+            .into_any_element();
         }
         // Opaque background: without one, gpui on Windows shows the desktop through.
         let mut root = div()

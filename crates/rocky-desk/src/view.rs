@@ -129,7 +129,7 @@ impl Model {
                 self.set_error = None;
                 self.open.iter().cloned().collect()
             }
-            ServerMsg::Ack { id, ok, error } => {
+            ServerMsg::Ack { id, ok, error, .. } => {
                 if self.sent.remove(&id) && !ok {
                     self.set_error = Some(error.unwrap_or_default());
                 }
@@ -165,6 +165,10 @@ impl Model {
                 self.conn = Conn::VersionMismatch;
                 Vec::new()
             }
+            ServerMsg::Cards { .. }
+            | ServerMsg::Card { .. }
+            | ServerMsg::CardDetail { .. }
+            | ServerMsg::BlockDiff { .. } => Vec::new(),
             _ => Vec::new(),
         }
     }
@@ -543,6 +547,7 @@ mod tests {
             quiet_10m: false,
             repo: RepoInfo {
                 root: Some("C:/r".into()),
+                main_root: None,
                 name: "r".into(),
                 branch: Some("main".into()),
             },
@@ -1214,5 +1219,84 @@ mod tests {
         assert_eq!(en(&Msg::Outcome(Outcome::Ok)), "ok");
         assert_eq!(id(&Msg::Outcome(Outcome::Failed)), "gagal");
         assert_eq!(id(&Msg::Outcome(Outcome::Pending)), "tertunda");
+    }
+
+    #[test]
+    fn desk_ignores_card_messages() {
+        use rocky_proto::cards::{
+            CARD_VERSION, Card, CardStatus, Coverage, CoverageState, Importance,
+        };
+        use rocky_proto::pipe::{BlockSnippet, DiffLine, DiffLineKind, SnippetLine};
+
+        let sample_card = Card {
+            v: CARD_VERSION,
+            card_id: "c1".into(),
+            rev: 1,
+            repo_id: "r1".into(),
+            root: String::new(),
+            main_root: None,
+            branch: Some("main".into()),
+            session_id: "s1".into(),
+            agent_id: "a1".into(),
+            agent_type: "claude".into(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "fix bug".into(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: Vec::new(),
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        };
+
+        let mut m = Model::new();
+        assert!(
+            m.apply(ServerMsg::Cards {
+                id: 1,
+                items: vec![sample_card.clone()],
+                next: Some("1000:c1".into()),
+            })
+            .is_empty()
+        );
+        assert!(
+            m.apply(ServerMsg::Card {
+                item: sample_card.clone(),
+            })
+            .is_empty()
+        );
+        assert!(
+            m.apply(ServerMsg::CardDetail {
+                id: 2,
+                card: sample_card,
+                snippets: vec![BlockSnippet {
+                    seq: 1,
+                    lines: vec![SnippetLine::Context {
+                        text: "fn main() {}".into(),
+                    }],
+                }],
+            })
+            .is_empty()
+        );
+        assert!(
+            m.apply(ServerMsg::BlockDiff {
+                id: 3,
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "let x = 1;".into(),
+                }],
+                page: 0,
+                pages: 1,
+                missing: false,
+            })
+            .is_empty()
+        );
     }
 }

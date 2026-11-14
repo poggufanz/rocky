@@ -35,6 +35,7 @@ pub enum Outcome {
     Done {
         ok: bool,
         error: Option<String>,
+        cleanup_errors: u32,
     },
     Expired,
 }
@@ -119,11 +120,17 @@ impl Requests {
                 },
             ),
             ServerMsg::RepoList { id, repos } => (*id, Outcome::Repos(repos.clone())),
-            ServerMsg::Ack { id, ok, error } => (
+            ServerMsg::Ack {
+                id,
+                ok,
+                error,
+                cleanup_errors,
+            } => (
                 *id,
                 Outcome::Done {
                     ok: *ok,
                     error: error.clone(),
+                    cleanup_errors: *cleanup_errors,
                 },
             ),
             _ => return None,
@@ -198,12 +205,14 @@ mod tests {
             id: 99,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         };
         assert!(r.on_message(&unknown).is_none());
         let ack = ServerMsg::Ack {
             id: 1,
             ok: false,
             error: Some("no".into()),
+            cleanup_errors: 2,
         };
         assert_eq!(
             r.on_message(&ack),
@@ -211,7 +220,8 @@ mod tests {
                 RequestKind::Apply,
                 Outcome::Done {
                     ok: false,
-                    error: Some("no".into())
+                    error: Some("no".into()),
+                    cleanup_errors: 2,
                 }
             ))
         );
@@ -262,6 +272,7 @@ mod tests {
             id: 1,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         };
         assert!(r.on_message(&late).is_none());
         assert!(r.start(RequestKind::Apply, 3, 200_000));

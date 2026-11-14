@@ -3,7 +3,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const ROTATE_AT: u64 = 1024 * 1024;
 
@@ -64,6 +64,31 @@ impl RotatingLog {
     }
 }
 
+/// Returns true iff `name` matches a card-engine worker thread (`rocky-card-worker-<digits>`).
+pub fn is_card_worker_thread_name(name: Option<&str>) -> bool {
+    name.and_then(|n| n.strip_prefix(crate::cards::CARD_WORKER_THREAD_PREFIX))
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Installs the daemon process panic hook: contains card worker panics and aborts all others.
+pub fn install_panic_hook(log: Arc<RotatingLog>) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let current = std::thread::current();
+        if is_card_worker_thread_name(current.name()) {
+            log.line("cards: 1 worker panic");
+            return;
+        }
+        default_hook(info);
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".into());
+        log.line(&format!("panic, aborting: {at}"));
+        std::process::abort();
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +134,17 @@ mod tests {
         fs::remove_dir(&path).unwrap();
         log.line("recovered");
         assert_eq!(fs::read_to_string(&path).unwrap(), "recovered\n");
+    }
+
+    #[test]
+    fn worker_thread_name_matcher_only_matches_card_workers() {
+        assert!(is_card_worker_thread_name(Some("rocky-card-worker-0")));
+        assert!(is_card_worker_thread_name(Some("rocky-card-worker-12")));
+        assert!(!is_card_worker_thread_name(None));
+        assert!(!is_card_worker_thread_name(Some("")));
+        assert!(!is_card_worker_thread_name(Some("rocky-card-worker-")));
+        assert!(!is_card_worker_thread_name(Some("rocky-card-worker-a")));
+        assert!(!is_card_worker_thread_name(Some("rockyd-cards-0")));
+        assert!(!is_card_worker_thread_name(Some("main")));
     }
 }

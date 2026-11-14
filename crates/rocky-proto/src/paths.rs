@@ -1,7 +1,12 @@
 //! Rocky home paths, desk layout, and pipe/mutex names.
 
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use regex_lite::Regex;
+use sha2::{Digest, Sha256};
 
 pub fn rocky_home_from(env_value: Option<&OsStr>, home: &Path) -> PathBuf {
     match env_value {
@@ -82,8 +87,136 @@ pub fn listening_dir(rocky_home: &Path) -> PathBuf {
     rocky_home.join("listening")
 }
 
+pub fn listening_store_dir(rocky_home: &Path, repo_id: &str) -> PathBuf {
+    listening_dir(rocky_home).join("repos").join(repo_id)
+}
+
 pub fn repo_consents_path(rocky_home: &Path) -> PathBuf {
     listening_dir(rocky_home).join("repo-consents.json")
+}
+
+pub fn cards_dir(rocky_home: &Path) -> PathBuf {
+    desk_dir(rocky_home).join("cards")
+}
+
+pub fn cards_file(rocky_home: &Path, repo_id: &str) -> PathBuf {
+    cards_dir(rocky_home).join(format!("{repo_id}.jsonl"))
+}
+
+pub fn cards_none_file(rocky_home: &Path) -> PathBuf {
+    cards_dir(rocky_home).join("_none.jsonl")
+}
+
+fn ansi_or_osc_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?:\u{001B}\][^\u{0007}]*(?:\u{0007}|\u{001B}\\)|\u{001B}\[[0-?]*[ -/]*[@-~]|\u{009D}[^\u{009C}]*(?:\u{009C}|\z)|\u{009B}[0-?]*[ -/]*[@-~])",
+        )
+        .expect("ANSI/OSC pattern is valid")
+    })
+}
+
+fn is_path_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0000}'..='\u{001F}'
+            | '\u{007F}'..='\u{009F}'
+            | '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
+}
+
+fn collapse_slashes(source: &str) -> String {
+    let mut normalized = String::with_capacity(source.len());
+    let mut prev_slash = false;
+    for ch in source.chars() {
+        if ch == '/' {
+            if !prev_slash {
+                normalized.push('/');
+                prev_slash = true;
+            }
+        } else {
+            normalized.push(ch);
+            prev_slash = false;
+        }
+    }
+    normalized
+}
+
+/// Canonicalize an absolute path (or single relative spelling) using the same rules as Node `canonicalPath`.
+pub fn canonical_path(value: &str, win32: bool) -> String {
+    let no_ansi = ansi_or_osc_regex().replace_all(value, " ");
+    let cleaned: String = no_ansi.chars().filter(|&c| !is_path_control(c)).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let source = trimmed.replace('\\', "/");
+    let had_unc_prefix = win32 && source.starts_with("//") && !source.starts_with("///");
+    let normalized = collapse_slashes(&source);
+
+    let bytes = normalized.as_bytes();
+    let has_drive =
+        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
+    let drive_absolute = has_drive && bytes.get(2) == Some(&b'/');
+    let drive_relative = has_drive && !drive_absolute;
+    let posix_absolute = normalized.starts_with('/') && !had_unc_prefix;
+
+    let (prefix, rest) = if had_unc_prefix && normalized.len() > 1 {
+        ("//", &normalized[1..])
+    } else if had_unc_prefix {
+        ("/", "")
+    } else if drive_absolute {
+        (&normalized[..3], &normalized[3..])
+    } else if drive_relative {
+        (&normalized[..2], &normalized[2..])
+    } else if posix_absolute {
+        ("/", &normalized[1..])
+    } else {
+        ("", normalized.as_str())
+    };
+
+    let segments: Vec<&str> = rest
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+
+    let mut result = if segments.is_empty() && prefix.ends_with('/') {
+        prefix.to_string()
+    } else {
+        let mut joined = String::with_capacity(prefix.len() + rest.len());
+        joined.push_str(prefix);
+        for (idx, seg) in segments.iter().enumerate() {
+            if idx > 0 {
+                joined.push('/');
+            }
+            joined.push_str(seg);
+        }
+        joined
+    };
+
+    if prefix.is_empty() && result.is_empty() {
+        return String::new();
+    }
+
+    if win32 {
+        result = result.to_lowercase();
+    }
+    result
+}
+
+/// Stable 32-character hex repository id matching Node `repoSlug`.
+pub fn repo_id(root: &str, win32: bool) -> String {
+    let canonical = canonical_path(root, win32);
+    let digest = Sha256::digest(canonical.as_bytes());
+    let mut hex = String::with_capacity(32);
+    for byte in &digest[..16] {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 pub fn home_hash(rocky_home: &Path) -> String {
@@ -170,10 +303,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        absolutize, bad_dir, bin_dir, binaries_record_path, cards_off_marker, cli_record_path,
-        consent_path, desk_mutex_name, expected_path, history_dir, home_hash, listening_dir,
-        log_path, pipe_name, repo_consents_path, rocky_home_from, settings_path, setup_dir,
-        spool_dir, tool_text_off_marker,
+        absolutize, bad_dir, bin_dir, binaries_record_path, cards_dir, cards_file, cards_none_file,
+        cards_off_marker, cli_record_path, consent_path, desk_mutex_name, expected_path,
+        history_dir, home_hash, listening_dir, listening_store_dir, log_path, pipe_name,
+        repo_consents_path, rocky_home_from, settings_path, setup_dir, spool_dir,
+        tool_text_off_marker,
     };
 
     #[test]
@@ -257,6 +391,31 @@ mod tests {
             repo_consents_path(p),
             p.join("listening").join("repo-consents.json")
         );
+        assert_eq!(
+            listening_store_dir(p, "0123456789abcdef0123456789abcdef"),
+            p.join("listening")
+                .join("repos")
+                .join("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn card_paths_live_under_desk_cards() {
+        let p = Path::new(r"C:\h");
+        let cards = p.join("desk").join("cards");
+        assert_eq!(cards_dir(p), cards);
+        assert_eq!(
+            cards_file(p, "abcdef0123456789abcdef0123456789"),
+            cards.join("abcdef0123456789abcdef0123456789.jsonl")
+        );
+        assert_eq!(cards_none_file(p), cards.join("_none.jsonl"));
+    }
+
+    #[test]
+    fn canonical_path_preserves_degenerate_unc_dot_like_node() {
+        assert_eq!(super::canonical_path("//", true), "/");
+        assert_eq!(super::canonical_path("//.", true), "//");
+        assert_eq!(super::canonical_path("///", true), "/");
     }
 }
 

@@ -243,7 +243,7 @@ fn run_hook(home: &Path, payload: &str) {
         .unwrap()
         .write_all(payload.as_bytes())
         .unwrap();
-    let status = child.0.wait().unwrap();
+    let status = wait_exit(&mut child, "hook");
     assert!(status.success(), "hook failed: {status}");
 }
 
@@ -419,7 +419,8 @@ fn stop_cmd_exits_zero_and_hook_keeps_spooling() {
         ServerMsg::Ack {
             id: 9,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 
@@ -471,7 +472,8 @@ fn quit_exits_the_daemon_process() {
         ServerMsg::Ack {
             id: 9,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 
@@ -763,7 +765,9 @@ fn set_persists_broadcasts_and_syncs_marker() {
                 assert!(!settings.tool_text, "{settings:?}");
                 settings_seen = true;
             }
-            ServerMsg::Ack { id: 2, ok, error } => {
+            ServerMsg::Ack {
+                id: 2, ok, error, ..
+            } => {
                 assert!(ok, "{error:?}");
                 ack_seen = true;
             }
@@ -1037,7 +1041,9 @@ fn cards_setting_syncs_marker_at_start_and_on_set() {
                 assert!(settings.tool_text, "{settings:?}");
                 settings_seen = true;
             }
-            ServerMsg::Ack { id: 2, ok, error } => {
+            ServerMsg::Ack {
+                id: 2, ok, error, ..
+            } => {
                 assert!(ok, "{error:?}");
                 ack_seen = true;
             }

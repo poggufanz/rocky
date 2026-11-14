@@ -7,6 +7,7 @@ import { basename, join } from "node:path";
 import { setRepoCapture } from "../listening/consent.js";
 import {
   COLLECTOR_TICK_MS,
+  buildReconcileReport,
   startCollectorLoop,
   type CollectorLoop,
   type ReconcileReport,
@@ -196,6 +197,7 @@ test("full reconcile waits for fullEveryMs but request runs now", { skip: noGit 
   });
   setRepoCapture(repo, true, CONSENT, home);
   const reports: ReconcileReport[] = [];
+  const beforeStart = Date.now();
   loop = startCollectorLoop({
     proc: "daemon",
     home,
@@ -204,14 +206,20 @@ test("full reconcile waits for fullEveryMs but request runs now", { skip: noGit 
     onResult: (report) => reports.push(report),
   });
   assert.ok(await until(() => reports.length === 1), "the first tick reconciles a root never posted");
+  assert.equal(typeof reports[0].startedMs, "number");
+  assert.ok(reports[0].startedMs >= beforeStart && reports[0].startedMs <= reports[0].atMs);
   const versions = (): number => capturedFiles(repo, home).filter((rel) => rel === "kept.txt").length;
   const before = versions();
   writeFileSync(join(repo, "kept.txt"), "changed\n");
   assert.ok(await untilLeaseRenewed(repo, home, 2), "loop must keep ticking");
   assert.equal(reports.length, 1, "no full reconcile before fullEveryMs");
   assert.equal(versions(), before, "the edit stays unseen until a reconcile runs");
+  const postedAt = Date.now();
   loop.request(repo);
   assert.ok(await until(() => reports.length === 2), "request reconciles now");
+  assert.equal(typeof reports[1].startedMs, "number");
+  assert.ok(reports[1].startedMs >= postedAt, "startedMs must be >= post time");
+  assert.ok(reports[1].startedMs <= reports[1].atMs, "startedMs must be <= atMs");
   assert.ok(versions() > before, "the edit is captured as a new version");
 });
 
@@ -235,9 +243,12 @@ test("request during a reconcile runs one more reconcile", { skip: noGit }, asyn
   });
   assert.ok(await until(() => reports.length === 1), "wait for the first tick's report");
   // back to back: the first request posts, the second finds it in flight and marks it dirty
+  const postedAt = Date.now();
   loop.request(repo);
   loop.request(repo);
   assert.ok(await until(() => reports.length === 3), "two requests give two more reports");
+  assert.ok(reports[1].startedMs >= postedAt && reports[1].startedMs <= reports[1].atMs);
+  assert.ok(reports[2].startedMs >= reports[1].atMs && reports[2].startedMs <= reports[2].atMs);
   assert.ok(await untilLeaseRenewed(repo, home, 2), "loop must keep ticking");
   assert.equal(reports.length, 3, "no third request-driven report");
   assert.ok(reports.every((report) => report.root === key));
@@ -451,4 +462,15 @@ test("gui picker lists consented repos as id and label and resolves picks withou
   assert.equal(allowed.body.ok, true);
   assert.equal(allowed.body.root, undefined);
   assert.equal((await call("/api/listening/context")).body.launchConsented, true);
+});
+
+test("buildReconcileReport falls back to zero when startedAt misses the root", () => {
+  const startedAt = new Map<string, number>([["/present", 1_500]]);
+  const present = buildReconcileReport({ root: "/present", coverage: "complete", gaps: 0, atMs: 2_000 }, startedAt);
+  assert.equal(present.startedMs, 1_500);
+  assert.equal(startedAt.has("/present"), false);
+
+  const missing = buildReconcileReport({ root: "/missing", coverage: "complete", gaps: 0, atMs: 2_000 }, startedAt);
+  assert.equal(missing.startedMs, 0);
+  assert.equal(missing.atMs, 2_000);
 });

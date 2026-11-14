@@ -407,15 +407,32 @@ pub fn setup_sections<T: 'static>(
     out.child(remove_section(&c, cx))
 }
 
+/// Body lines rendered on the removal-complete screen between the heading and Close button.
+pub fn removed_lines(lang: UiLang, home: &str, cleanup_errors: u32) -> Vec<String> {
+    let mut lines = vec![text(
+        lang,
+        SetupMsg::RemovedKeptData {
+            path: home.to_string(),
+        },
+    )];
+    if cleanup_errors > 0 {
+        lines.push(text(lang, SetupMsg::RemovedCardCleanupFailed));
+    }
+    lines.push(text(lang, SetupMsg::RemovedUninstall));
+    lines.push(UNINSTALL_COMMAND.to_string());
+    lines
+}
+
 /// The final screen after Remove Rocky: where the data stays and how to
 /// remove the command line. Its button quits the desk.
 pub fn removed_screen<T: 'static>(
     lang: UiLang,
     home: &str,
+    cleanup_errors: u32,
     on_close: fn(&mut T, &mut Context<T>),
     cx: &mut Context<T>,
 ) -> impl IntoElement {
-    div()
+    let mut out = div()
         .id(SharedString::from("removed"))
         .flex()
         .flex_col()
@@ -425,29 +442,47 @@ pub fn removed_screen<T: 'static>(
         .overflow_y_scroll()
         .bg(rgb(0xF5F5F4))
         .text_color(rgb(0x1C1C1C))
-        .child(heading(lang, SetupMsg::RemovedHeading))
-        .child(div().text_sm().child(text(
-            lang,
-            SetupMsg::RemovedKeptData {
-                path: home.to_string(),
-            },
-        )))
-        .child(
-            div()
-                .text_sm()
-                .child(text(lang, SetupMsg::RemovedUninstall)),
-        )
-        .child(div().text_sm().child(UNINSTALL_COMMAND))
-        .child(
-            div()
-                .id(SharedString::from("removed-close"))
-                .px_3()
-                .py_1()
-                .rounded_sm()
-                .text_sm()
-                .bg(rgb(0xD4D4D4))
-                .cursor_pointer()
-                .child(text(lang, SetupMsg::RemovedClose))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_close(this, cx))),
-        )
+        .child(heading(lang, SetupMsg::RemovedHeading));
+    for line in removed_lines(lang, home, cleanup_errors) {
+        out = out.child(div().text_sm().child(line));
+    }
+    out.child(
+        div()
+            .id(SharedString::from("removed-close"))
+            .px_3()
+            .py_1()
+            .rounded_sm()
+            .text_sm()
+            .bg(rgb(0xD4D4D4))
+            .cursor_pointer()
+            .child(text(lang, SetupMsg::RemovedClose))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_close(this, cx))),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOTICE_EN: &str = "Some change card files could not be deleted.";
+    const NOTICE_ID: &str = "Sebagian file change card tidak dapat dihapus.";
+
+    #[test]
+    fn removed_lines_show_card_cleanup_notice_only_when_nonzero() {
+        let zero_en = removed_lines(UiLang::En, "C:/Users/me/.rocky", 0);
+        assert!(
+            !zero_en.iter().any(|line| line == NOTICE_EN),
+            "unexpected cleanup notice for 0 errors: {zero_en:?}"
+        );
+        let one_en = removed_lines(UiLang::En, "C:/Users/me/.rocky", 1);
+        assert!(
+            one_en.iter().any(|line| line == NOTICE_EN),
+            "missing cleanup notice for 1 error: {one_en:?}"
+        );
+
+        let zero_id = removed_lines(UiLang::Id, "C:/Users/me/.rocky", 0);
+        assert!(!zero_id.iter().any(|line| line == NOTICE_ID), "{zero_id:?}");
+        let two_id = removed_lines(UiLang::Id, "C:/Users/me/.rocky", 2);
+        assert!(two_id.iter().any(|line| line == NOTICE_ID), "{two_id:?}");
+    }
 }
