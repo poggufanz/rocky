@@ -41,6 +41,7 @@ pub struct BuildInput {
     pub gaps: Vec<(u64, u64)>,
     pub capture_state: Option<CaptureState>,
     pub home_dir: PathBuf,
+    pub parent_card_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -378,10 +379,16 @@ pub fn build_card(
         TurnEnd::Failed | TurnEnd::Unclosed => CardStatus::Failed,
     };
 
-    let agent_type = if is_main_agent(&input.turn) {
+    let is_main = is_main_agent(&input.turn);
+    let agent_type = if is_main {
         String::new()
     } else {
         input.turn.agent_type.clone()
+    };
+    let parent_card_id = if is_main {
+        None
+    } else {
+        input.parent_card_id.clone()
     };
 
     Card {
@@ -395,7 +402,7 @@ pub fn build_card(
         session_id: input.turn.agent.session_id.clone(),
         agent_id: input.turn.agent.agent_id.clone(),
         agent_type,
-        parent_card_id: None,
+        parent_card_id,
         started_ms: input.turn.started_ms,
         ended_ms: input.turn.ended_ms,
         status,
@@ -711,31 +718,24 @@ fn build_bash_group_block(
     items: &[(usize, u32)],
     read: &dyn Fn(&str) -> ObjectRead,
 ) -> Option<Block> {
-    let mut by_file: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut max_candidates = 1u32;
+    let mut version_results: Vec<(String, VersionAnalysis)> = Vec::with_capacity(items.len());
     for &(v_idx, cand) in items {
         max_candidates = max_candidates.max(cand);
-        let key = normalize_rel_key(&input.versions[v_idx].file_rel);
-        by_file.entry(key).or_default().push(v_idx);
-    }
-
-    let mut file_results: Vec<(String, VersionAnalysis)> = Vec::with_capacity(by_file.len());
-    for v_indices in by_file.values() {
-        let first_v = &input.versions[v_indices[0]];
-        let last_v = &input.versions[*v_indices.last()?];
+        let ver = &input.versions[v_idx];
         let analysis = analyze_version_pair(
-            &last_v.file_rel,
-            first_v.before(),
-            last_v.deleted,
-            last_v.sha.as_deref(),
+            &ver.file_rel,
+            ver.before(),
+            ver.deleted,
+            ver.sha.as_deref(),
             read,
         );
         if !analysis.changes.is_empty() {
-            file_results.push((last_v.file_rel.clone(), analysis));
+            version_results.push((ver.file_rel.clone(), analysis));
         }
     }
 
-    if file_results.is_empty() {
+    if version_results.is_empty() {
         return None;
     }
 
@@ -754,8 +754,8 @@ fn build_bash_group_block(
         candidates: max_candidates,
     });
 
-    if file_results.len() == 1 && file_results[0].1.changes.len() == 1 {
-        let (path, analysis) = file_results.into_iter().next()?;
+    if version_results.len() == 1 && version_results[0].1.changes.len() == 1 {
+        let (path, analysis) = version_results.into_iter().next()?;
         let change = &analysis.changes[0];
         let (added, removed) = analysis.line_counts[0];
         return Some(Block {
@@ -777,15 +777,15 @@ fn build_bash_group_block(
         });
     }
 
-    let primary_path = file_results[0].0.clone();
-    let single_file = file_results.len() == 1;
-    let before_sha = if single_file {
-        file_results[0].1.before_sha.clone()
+    let primary_path = version_results[0].0.clone();
+    let single_version = version_results.len() == 1;
+    let before_sha = if single_version {
+        version_results[0].1.before_sha.clone()
     } else {
         None
     };
-    let after_sha = if single_file {
-        file_results[0].1.after_sha.clone()
+    let after_sha = if single_version {
+        version_results[0].1.after_sha.clone()
     } else {
         None
     };
@@ -795,7 +795,7 @@ fn build_bash_group_block(
     let mut total_added = Some(0u32);
     let mut total_removed = Some(0u32);
 
-    for (_, analysis) in &file_results {
+    for (_, analysis) in &version_results {
         for (change, (added, removed)) in analysis.changes.iter().zip(&analysis.line_counts) {
             let imp = convert_importance(change.importance);
             if imp > max_importance {
@@ -1432,6 +1432,7 @@ mod tests {
             gaps: Vec::new(),
             capture_state: Some(CaptureState::Ok),
             home_dir: test_home(),
+            parent_card_id: None,
         }
     }
 
@@ -2431,5 +2432,178 @@ mod tests {
             bash_card.blocks[0].bash.as_ref().map(|b| b.candidates),
             Some(2)
         );
+    }
+
+    #[test]
+    fn bash_group_excludes_interleaved_direct_edit() {
+        let mut input = base_input(base_turn(vec![
+            bash_win(
+                "bash-1",
+                main_agent("sess-1"),
+                "npm run build",
+                2_000,
+                Some(6_000),
+                Some(true),
+            ),
+            edit_win(
+                "edit-1",
+                "sess-1",
+                repo_join("src/mod.ts"),
+                3_000,
+                Some(3_400),
+                Some(true),
+            ),
+        ]));
+        input.results = vec![
+            CaptureResult {
+                root: test_root().to_string(),
+                started_ms: 3_500,
+                at_ms: 3_600,
+                coverage: "ok".to_string(),
+            },
+            CaptureResult {
+                root: test_root().to_string(),
+                started_ms: 6_100,
+                at_ms: 6_300,
+                coverage: "ok".to_string(),
+            },
+        ];
+        input.versions = vec![
+            ver("src/mod.ts", 2_500, Some("sha-a"), Some("sha-b")),
+            ver("src/mod.ts", 3_200, Some("sha-b"), Some("sha-c")),
+            ver("src/mod.ts", 4_500, Some("sha-c"), Some("sha-d")),
+        ];
+
+        let read = |sha: &str| match sha {
+            "sha-a" => ObjectRead::Text(
+                "export function keep(x: number) { return x; }\n\
+                 export function helper() { return 1; }\n"
+                    .into(),
+            ),
+            "sha-b" => ObjectRead::Text(
+                "export function keep(x: number) { return x + 1; }\n\
+                 export function helper() { return 1; }\n"
+                    .into(),
+            ),
+            "sha-c" => {
+                ObjectRead::Text("export function keep(x: number) { return x + 1; }\n".into())
+            }
+            "sha-d" => ObjectRead::Text(
+                "export function keep(x: number) { return x + 1; }\n\
+                 export function addedByBash() { return 2; }\n"
+                    .into(),
+            ),
+            _ => ObjectRead::Missing,
+        };
+
+        let card = build_card(&input, &read, &no_stat);
+        assert_eq!(card.blocks.len(), 2);
+
+        let bash_blk = card
+            .blocks
+            .iter()
+            .find(|b| b.via == BlockVia::Bash)
+            .expect("bash block");
+        assert!(!bash_blk.labels.contains(&Label::SymbolRemoved {}));
+        assert!(bash_blk.labels.contains(&Label::SymbolAdded {}));
+        assert!(bash_blk.labels.contains(&Label::ReturnChanged {}));
+        assert_eq!(bash_blk.importance, Importance::Medium);
+        assert!(bash_blk.before.is_none());
+        assert!(bash_blk.after.is_none());
+
+        let direct_blk = card
+            .blocks
+            .iter()
+            .find(|b| b.via == BlockVia::Edit)
+            .expect("direct edit block");
+        assert_eq!(direct_blk.tool_use_ids, vec!["edit-1".to_string()]);
+        assert_eq!(direct_blk.labels, vec![Label::SymbolRemoved {}]);
+        assert_eq!(
+            direct_blk.symbol.as_ref().map(|s| s.name.as_str()),
+            Some("helper")
+        );
+        assert_eq!(direct_blk.before.as_deref(), Some("sha-b"));
+        assert_eq!(direct_blk.after.as_deref(), Some("sha-c"));
+    }
+
+    #[test]
+    fn bash_group_preserves_reverted_changes() {
+        let mut input = base_input(base_turn(vec![bash_win(
+            "bash-1",
+            main_agent("sess-1"),
+            "scripts/toggle.sh",
+            2_000,
+            Some(6_000),
+            Some(true),
+        )]));
+        input.results = vec![CaptureResult {
+            root: test_root().to_string(),
+            started_ms: 6_100,
+            at_ms: 6_300,
+            coverage: "ok".to_string(),
+        }];
+        input.versions = vec![
+            ver("src/mod.ts", 3_000, Some("sha-a"), Some("sha-b")),
+            ver("src/mod.ts", 4_000, Some("sha-b"), Some("sha-a")),
+        ];
+
+        let read = |sha: &str| match sha {
+            "sha-a" => ObjectRead::Text("export function base() { return 1; }\n".into()),
+            "sha-b" => ObjectRead::Text(
+                "export function base() { return 1; }\n\
+                 export function temp() { return 2; }\n"
+                    .into(),
+            ),
+            _ => ObjectRead::Missing,
+        };
+
+        let card = build_card(&input, &read, &no_stat);
+        assert_eq!(card.blocks.len(), 1);
+        let blk = &card.blocks[0];
+        assert_eq!(blk.via, BlockVia::Bash);
+        assert_eq!(
+            blk.bash,
+            Some(rocky_proto::cards::BashInfo {
+                cmd: "scripts/toggle.sh".to_string(),
+                candidates: 1,
+            })
+        );
+        assert!(blk.labels.contains(&Label::SymbolAdded {}));
+        assert!(blk.labels.contains(&Label::SymbolRemoved {}));
+        assert!(blk.before.is_none());
+        assert!(blk.after.is_none());
+    }
+
+    #[test]
+    fn subagent_keeps_parent_card_id_and_main_stays_none() {
+        let mut main_1_turn = base_turn(Vec::new());
+        main_1_turn.started_ms = 1_000;
+        main_1_turn.ended_ms = Some(5_000);
+        let mut main_1_in = base_input(main_1_turn);
+        main_1_in.card_id = "card-main-1".to_string();
+        main_1_in.parent_card_id = Some("ignored-parent".to_string());
+        let main_1_card = build_card(&main_1_in, &no_read, &no_stat);
+        assert_eq!(main_1_card.parent_card_id, None);
+
+        let mut main_2_turn = base_turn(Vec::new());
+        main_2_turn.started_ms = 6_000;
+        main_2_turn.ended_ms = Some(10_000);
+        let mut main_2_in = base_input(main_2_turn);
+        main_2_in.card_id = "card-main-2".to_string();
+        let main_2_card = build_card(&main_2_in, &no_read, &no_stat);
+        assert_eq!(main_2_card.parent_card_id, None);
+
+        let mut sub_turn = base_turn(Vec::new());
+        sub_turn.agent = sub_agent("sess-1", "worker-1");
+        sub_turn.agent_type = "Explore".to_string();
+        sub_turn.parent = Some(main_agent("sess-1"));
+        sub_turn.started_ms = 7_000;
+        sub_turn.ended_ms = Some(9_000);
+        let mut sub_in = base_input(sub_turn);
+        sub_in.card_id = "card-sub-1".to_string();
+        sub_in.parent_card_id = Some(main_2_card.card_id.clone());
+        let sub_card = build_card(&sub_in, &no_read, &no_stat);
+        assert_eq!(sub_card.parent_card_id.as_deref(), Some("card-main-2"));
+        assert_eq!(sub_card.agent_type, "Explore");
     }
 }
