@@ -313,12 +313,7 @@ fn run_query(
                     build_card_detail_unowned(id, &card)
                 }
             }
-            None => ServerMsg::Ack {
-                id,
-                ok: false,
-                error: Some("not_found".to_string()),
-                cleanup_errors: 0,
-            },
+            None => not_found_ack(id),
         },
         QueryKind::BlockDiff {
             id,
@@ -328,7 +323,9 @@ fn run_query(
             owned_roots,
         } => match store.get(&card_id) {
             Some(card) => {
-                if !is_card_root_owned(&card, &owned_roots) {
+                if !card.blocks.iter().any(|b| b.seq == seq) {
+                    not_found_ack(id)
+                } else if !is_card_root_owned(&card, &owned_roots) {
                     missing_diff(id)
                 } else {
                     match object_reader {
@@ -339,14 +336,17 @@ fn run_query(
                     }
                 }
             }
-            None => ServerMsg::BlockDiff {
-                id,
-                lines: Vec::new(),
-                page: 0,
-                pages: 0,
-                missing: true,
-            },
+            None => not_found_ack(id),
         },
+    }
+}
+
+fn not_found_ack(id: u64) -> ServerMsg {
+    ServerMsg::Ack {
+        id,
+        ok: false,
+        error: Some("not_found".to_string()),
+        cleanup_errors: 0,
     }
 }
 
@@ -494,12 +494,11 @@ mod tests {
         queries.block_diff(5, "missing-card".to_string(), 1, 0, owned, tx);
         assert_eq!(
             wait_reply(&rx, &mut queries),
-            ServerMsg::BlockDiff {
+            ServerMsg::Ack {
                 id: 5,
-                lines: Vec::new(),
-                page: 0,
-                pages: 0,
-                missing: true,
+                ok: false,
+                error: Some("not_found".to_string()),
+                cleanup_errors: 0,
             }
         );
     }
@@ -855,6 +854,115 @@ mod tests {
         assert!(
             dropped_rx.recv_timeout(Duration::from_secs(4)).is_ok(),
             "CardQueryLoop::drop must return within deadline even if worker stalls"
+        );
+    }
+
+    #[test]
+    fn block_diff_unknown_card_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let canon = canonical_path(&repo.to_string_lossy(), cfg!(windows));
+        let owned = BTreeSet::from([canon]);
+
+        let mut queries = CardQueryLoop::new(home, 1);
+        let (tx, rx) = mpsc::sync_channel(1);
+        queries.block_diff(21, "unknown-card".to_string(), 1, 0, owned, tx);
+        assert_eq!(
+            wait_reply(&rx, &mut queries),
+            ServerMsg::Ack {
+                id: 21,
+                ok: false,
+                error: Some("not_found".to_string()),
+                cleanup_errors: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn block_diff_unknown_seq_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let canon = canonical_path(&repo.to_string_lossy(), cfg!(windows));
+        let rid = repo_id(&canon, cfg!(windows));
+
+        let card = Card {
+            v: CARD_VERSION,
+            card_id: "card-known".to_string(),
+            rev: 1,
+            repo_id: rid,
+            root: canon.clone(),
+            main_root: None,
+            branch: Some("main".to_string()),
+            session_id: "s-seq".to_string(),
+            agent_id: String::new(),
+            agent_type: "claude".to_string(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "demo".to_string(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: vec![Block {
+                seq: 1,
+                path: "src/lib.rs".to_string(),
+                symbol: None,
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec!["tu-1".to_string()],
+                bash: None,
+                before: Some("1".repeat(64)),
+                after: Some("2".repeat(64)),
+                recorded: true,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+                quote: None,
+            }],
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        };
+        let mut writer = CardStore::new(home.clone());
+        writer.append(&card).unwrap();
+
+        let mut queries =
+            CardQueryLoop::new_with_object_reader(home, 1, Arc::new(|_| ObjectRead::Missing));
+        let owned = BTreeSet::from([canon]);
+
+        let (tx1, rx1) = mpsc::sync_channel(1);
+        queries.block_diff(31, "card-known".to_string(), 99, 0, owned.clone(), tx1);
+        assert_eq!(
+            wait_reply(&rx1, &mut queries),
+            ServerMsg::Ack {
+                id: 31,
+                ok: false,
+                error: Some("not_found".to_string()),
+                cleanup_errors: 0,
+            }
+        );
+
+        let (tx2, rx2) = mpsc::sync_channel(1);
+        queries.block_diff(32, "card-known".to_string(), 1, 0, owned, tx2);
+        assert_eq!(
+            wait_reply(&rx2, &mut queries),
+            ServerMsg::BlockDiff {
+                id: 32,
+                lines: Vec::new(),
+                page: 0,
+                pages: 0,
+                missing: true,
+            }
         );
     }
 }
