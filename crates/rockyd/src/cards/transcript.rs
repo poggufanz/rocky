@@ -1964,6 +1964,54 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn short_name_spelling_is_rejected_on_windows() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let (_temp, cfg, valid) = setup_projects_tree();
+        let valid_str = valid.to_str().expect("valid str");
+        assert_eq!(
+            validate_transcript_path(valid_str, std::slice::from_ref(&cfg)),
+            Some(valid.clone())
+        );
+
+        let mut long_wide: Vec<u16> = valid.as_os_str().encode_wide().collect();
+        long_wide.push(0);
+
+        let needed = unsafe { GetShortPathNameW(long_wide.as_ptr(), std::ptr::null_mut(), 0) };
+        assert_ne!(
+            needed,
+            0,
+            "GetShortPathNameW length query failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let mut short_buf = vec![0u16; needed as usize];
+        let written =
+            unsafe { GetShortPathNameW(long_wide.as_ptr(), short_buf.as_mut_ptr(), needed) };
+        assert!(
+            written > 0 && written < needed,
+            "GetShortPathNameW failed: written={written}, needed={needed}, err={}",
+            std::io::Error::last_os_error()
+        );
+
+        let short_path =
+            String::from_utf16(&short_buf[..written as usize]).expect("utf-16 short path");
+        if short_path.to_lowercase() == valid_str.to_lowercase() {
+            eprintln!("skipping 8.3 short-name assertion: volume has 8.3 names disabled");
+            return;
+        }
+
+        assert_eq!(
+            validate_transcript_path(&short_path, std::slice::from_ref(&cfg)),
+            None,
+            "expected 8.3 alias {short_path:?} to be rejected"
+        );
+        assert_eq!(validate_transcript_path(valid_str, &[cfg]), Some(valid));
+    }
+
     #[test]
     fn claude_config_dirs_includes_home_and_consent_dirs() {
         let temp = TempDir::new().expect("tempdir");

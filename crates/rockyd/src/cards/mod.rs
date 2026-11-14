@@ -1577,16 +1577,27 @@ mod tests {
         );
     }
 
+    fn canonical_temp_root(path: &std::path::Path) -> PathBuf {
+        let canon = fs::canonicalize(path).expect("canonicalize tempdir");
+        #[cfg(windows)]
+        if let Some(stripped) = canon.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            return PathBuf::from(stripped);
+        }
+        canon
+    }
+
     #[test]
     fn dispatch_clones_only_overlapping_edit_windows() {
+        use rocky_proto::cards::CoverageState;
         use rocky_proto::pipe::CaptureHealth;
         use serde_json::json;
 
         let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        let repo_root = dir.path().join("repo-main");
-        let other_root = dir.path().join("repo-other");
-        let config_dir = dir.path().join("claude");
+        let root = canonical_temp_root(dir.path());
+        let home = root.join("home");
+        let repo_root = root.join("repo-main");
+        let other_root = root.join("repo-other");
+        let config_dir = root.join("claude");
         let projects_dir = config_dir.join("projects").join("proj-a");
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(repo_root.join("src")).unwrap();
@@ -1933,6 +1944,19 @@ mod tests {
             &expected_input,
             &|sha| read_object(&store_dir, sha),
             &|path| safe_stat_file(path),
+        );
+        assert_eq!(
+            target_card.coverage.state,
+            CoverageState::Full,
+            "coverage reasons: {:?}",
+            target_card.coverage.reasons
+        );
+        assert_eq!(
+            target_card.blocks[0]
+                .quote
+                .as_ref()
+                .map(|q| q.text.as_str()),
+            Some("Running cargo check.")
         );
         assert_eq!(target_card, expected_card);
 

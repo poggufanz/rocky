@@ -31,12 +31,22 @@ struct Fixture {
     transcript_path: std::path::PathBuf,
 }
 
+fn canonical_temp_root(path: &Path) -> PathBuf {
+    let canon = fs::canonicalize(path).expect("canonicalize tempdir");
+    #[cfg(windows)]
+    if let Some(stripped) = canon.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        return PathBuf::from(stripped);
+    }
+    canon
+}
+
 impl Fixture {
     fn new(session_id: &str) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let home = tmp.path().join("home");
-        let repo_root = tmp.path().join("repo");
-        let config_dir = tmp.path().join("claude");
+        let root = canonical_temp_root(tmp.path());
+        let home = root.join("home");
+        let repo_root = root.join("repo");
+        let config_dir = root.join("claude");
         let projects_dir = config_dir.join("projects").join("proj-a");
         fs::create_dir_all(&home).expect("create home");
         fs::create_dir_all(repo_root.join("src")).expect("create repo src");
@@ -408,7 +418,12 @@ fn card_after_stop_within_budget() {
     assert_eq!(card.rev, 1);
     assert_eq!(card.card_id, "4e5e1a6d22cea72d7a8b3985c9c27fcf");
     assert_eq!(card.status, CardStatus::Done);
-    assert_eq!(card.coverage.state, CoverageState::Full);
+    assert_eq!(
+        card.coverage.state,
+        CoverageState::Full,
+        "coverage reasons: {:?}",
+        card.coverage.reasons
+    );
     assert!(!card.blocks.is_empty());
     assert_eq!(card.blocks[0].via, BlockVia::Edit);
     assert_eq!(card.blocks[0].path, "src/a.ts");
@@ -1657,7 +1672,12 @@ fn late_edit_waits_for_capture_then_includes_change() {
     let rev2 = poll_until_cards(&mut engine, 5_300, &ctx, 1);
     assert_eq!(rev2[0].rev, 2);
     assert_eq!(rev2[0].card_id, rev1[0].card_id);
-    assert_eq!(rev2[0].coverage.state, CoverageState::Full);
+    assert_eq!(
+        rev2[0].coverage.state,
+        CoverageState::Full,
+        "coverage reasons: {:?}",
+        rev2[0].coverage.reasons
+    );
     assert_eq!(rev2[0].blocks.len(), 2);
     assert_eq!(rev2[0].blocks[0].path, "src/c.ts");
     assert_eq!(rev2[0].blocks[0].after.as_deref(), Some(s1.as_str()));
@@ -2577,7 +2597,12 @@ fn store_error_after_cache_prime_suppresses_code_and_marks_capture_off() {
     }]);
     let rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
     assert_eq!(rev1[0].blocks[0].after.as_deref(), Some(s1.as_str()));
-    assert_eq!(rev1[0].coverage.state, CoverageState::Full);
+    assert_eq!(
+        rev1[0].coverage.state,
+        CoverageState::Full,
+        "coverage reasons: {:?}",
+        rev1[0].coverage.reasons
+    );
 
     // Replace events.jsonl with a directory so StoreReader::versions_since returns an error.
     let events_path = fx.store_dir.join("events.jsonl");
@@ -2622,7 +2647,12 @@ fn store_error_after_cache_prime_suppresses_code_and_marks_capture_off() {
         assert!(blk.removed.is_none());
         assert_eq!(blk.labels, vec![Label::NotCaptured {}]);
     }
-    assert_eq!(rev2[0].coverage.state, CoverageState::Partial);
+    assert_eq!(
+        rev2[0].coverage.state,
+        CoverageState::Partial,
+        "coverage reasons: {:?}",
+        rev2[0].coverage.reasons
+    );
     assert!(
         rev2[0]
             .coverage
@@ -2711,7 +2741,12 @@ fn store_tail_cut_marks_capture_late() {
     let cards = poll_until_cards(&mut engine, 2_100, &ctx, 1);
     assert_eq!(cards[0].blocks.len(), 1);
     assert_eq!(cards[0].blocks[0].after.as_deref(), Some(s1.as_str()));
-    assert_eq!(cards[0].coverage.state, CoverageState::Partial);
+    assert_eq!(
+        cards[0].coverage.state,
+        CoverageState::Partial,
+        "coverage reasons: {:?}",
+        cards[0].coverage.reasons
+    );
     assert!(
         cards[0]
             .coverage
