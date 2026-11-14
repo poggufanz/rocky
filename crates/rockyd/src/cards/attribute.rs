@@ -679,13 +679,7 @@ fn build_recorded_blocks(
                             let ow_end = if ow.post_ms.is_none() {
                                 input.versions_through_ms
                             } else {
-                                compute_window_end(
-                                    ow,
-                                    None,
-                                    root_cmp.as_deref(),
-                                    &input.results,
-                                )
-                                .0
+                                compute_window_end(ow, None, root_cmp.as_deref(), &input.results).0
                             };
                             ow.kind == ToolKind::Bash
                                 && ow.agent != input.turn.agent
@@ -1064,8 +1058,7 @@ fn build_flow(
         .filter(|(_, w)| matches!(w.kind, ToolKind::Bash | ToolKind::Edit))
         .collect();
     indexed.sort_by_key(|(idx, w)| (w.pre_ms, *idx));
-    let flow_more =
-        u32::try_from(indexed.len().saturating_sub(MAX_FLOW_STEPS)).unwrap_or(u32::MAX);
+    let flow_more = u32::try_from(indexed.len().saturating_sub(MAX_FLOW_STEPS)).unwrap_or(u32::MAX);
 
     let flow = indexed
         .into_iter()
@@ -1976,7 +1969,16 @@ mod tests {
     #[test]
     fn flow_capped_at_100_records_flow_more() {
         let windows: Vec<ToolWindow> = (0..120u64)
-            .map(|i| bash_win(&format!("b-{i}"), main_agent("sess-1"), &format!("echo {i}"), 1_000 + i * 10, Some(1_005 + i * 10), Some(true)))
+            .map(|i| {
+                bash_win(
+                    &format!("b-{i}"),
+                    main_agent("sess-1"),
+                    &format!("echo {i}"),
+                    1_000 + i * 10,
+                    Some(1_005 + i * 10),
+                    Some(true),
+                )
+            })
             .collect();
         let input = base_input(base_turn(windows));
         let card = build_card(&input, &no_read, &no_stat);
@@ -2765,7 +2767,11 @@ mod tests {
         };
 
         let card = build_card(&input, &read, &no_stat);
-        assert!(card.blocks.is_empty(), "expected no blocks, got {:?}", card.blocks);
+        assert!(
+            card.blocks.is_empty(),
+            "expected no blocks, got {:?}",
+            card.blocks
+        );
         assert_eq!(card.outside_count, 0);
     }
 
