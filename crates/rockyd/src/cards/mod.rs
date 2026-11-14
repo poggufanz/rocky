@@ -92,23 +92,44 @@ impl CachedStore {
         }
     }
 
+    fn extend_versions_deduped(&mut self, newly_read: Vec<crate::cards::store::Version>) {
+        if newly_read.is_empty() {
+            return;
+        }
+        let mut seen: HashSet<(u64, String, Option<String>, bool)> = self
+            .versions
+            .iter()
+            .map(|v| (v.ts, v.file_rel.clone(), v.sha.clone(), v.deleted))
+            .collect();
+        for v in newly_read {
+            let key = (v.ts, v.file_rel.clone(), v.sha.clone(), v.deleted);
+            if seen.insert(key) {
+                self.versions.push(v);
+            }
+        }
+    }
+
     fn versions_in_range(
         &mut self,
         from_ms: u64,
         through_ms: u64,
         retain_from_ms: u64,
     ) -> VersionsRead {
-        let reader_tail_cut = match self.reader.versions_since(0) {
-            Ok((newly_read, reader_tail_cut)) => {
-                if reader_tail_cut {
-                    let cut_frontier = newly_read.iter().map(|v| v.ts).max().unwrap_or(from_ms);
+        let reader_tail_cut = match self.reader.versions_since_with_restart(0) {
+            Ok(batch) => {
+                if batch.restarted {
+                    self.versions.clear();
+                    self.tail_cut_through_ms = None;
+                }
+                if batch.tail_cut {
+                    let cut_frontier = batch.versions.iter().map(|v| v.ts).max().unwrap_or(from_ms);
                     self.tail_cut_through_ms = Some(
                         self.tail_cut_through_ms
                             .map_or(cut_frontier, |prev| prev.max(cut_frontier)),
                     );
                 }
-                self.versions.extend(newly_read);
-                reader_tail_cut
+                self.extend_versions_deduped(batch.versions);
+                batch.tail_cut
             }
             Err(_) => {
                 return VersionsRead {
@@ -1245,5 +1266,48 @@ mod tests {
         };
         let _ = engine.on_ingest(&refresh, &mut repo_of, 2_000);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn cached_store_clears_versions_on_shrink_and_dedupes_overlapping_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        let sha1 = "1".repeat(64);
+        let sha2 = "2".repeat(64);
+        let sha3 = "3".repeat(64);
+        let pad = "p".repeat(600);
+
+        let initial = format!(
+            "{{\"v\":1,\"node\":\"file_version\",\"ts\":50,\"refs\":{{\"fileRel\":\"old_pad.ts\",\"version\":\"{sha1}\"}},\"pad\":\"{pad}\"}}\n\
+             {{\"v\":1,\"node\":\"file_version\",\"ts\":200,\"refs\":{{\"fileRel\":\"kept.ts\",\"version\":\"{sha2}\"}}}}\n\
+             {{\"v\":1,\"node\":\"file_version\",\"ts\":300,\"refs\":{{\"fileRel\":\"kept2.ts\",\"version\":\"{sha3}\"}}}}\n"
+        );
+        fs::write(&events, initial.as_bytes()).unwrap();
+
+        let mut cache = CachedStore::new(dir.path().to_path_buf());
+        let first = cache.versions_in_range(150, 500, 150);
+        assert_eq!(first.versions.len(), 2);
+
+        // Shrink events.jsonl (removing old_pad.ts) while retaining kept.ts and kept2.ts
+        // plus one new event.
+        let compacted = format!(
+            "{{\"v\":1,\"node\":\"file_version\",\"ts\":200,\"refs\":{{\"fileRel\":\"kept.ts\",\"version\":\"{sha2}\"}}}}\n\
+             {{\"v\":1,\"node\":\"file_version\",\"ts\":300,\"refs\":{{\"fileRel\":\"kept2.ts\",\"version\":\"{sha3}\"}}}}\n\
+             {{\"v\":1,\"node\":\"file_version\",\"ts\":400,\"refs\":{{\"fileRel\":\"new.ts\",\"version\":\"{sha1}\"}}}}\n"
+        );
+        assert!(compacted.len() < initial.len());
+        fs::write(&events, compacted.as_bytes()).unwrap();
+
+        let second = cache.versions_in_range(150, 500, 150);
+        assert_eq!(
+            second.versions.len(),
+            3,
+            "shrink/restart must not duplicate cached versions; got {:?}",
+            second
+                .versions
+                .iter()
+                .map(|v| (&v.file_rel, v.ts))
+                .collect::<Vec<_>>()
+        );
     }
 }

@@ -2962,13 +2962,24 @@ fn parallel_subagent_edit_and_open_bash_attribution() {
     let ctx = fx.ctx(true);
 
     let _ = engine.on_ingest(
-        &user_prompt_out("sess-par", &fx.repo_canon, &fx.transcript_path, "run tests", 1_000),
+        &user_prompt_out(
+            "sess-par",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "run tests",
+            1_000,
+        ),
         &mut repo_of,
         1_000,
     );
 
     let sub_target = fx.repo_root.join("src/sub_file.ts");
-    let mut sub_start = base_event("SubagentStart", "sess-par", &fx.repo_canon, Some(&fx.transcript_path));
+    let mut sub_start = base_event(
+        "SubagentStart",
+        "sess-par",
+        &fx.repo_canon,
+        Some(&fx.transcript_path),
+    );
     sub_start.agent_id = Some("sub-1".to_string());
     sub_start.agent_type = Some("Worker".to_string());
 
@@ -3006,7 +3017,12 @@ fn parallel_subagent_edit_and_open_bash_attribution() {
         "tu-main-bash",
         "cargo test",
     );
-    let main_bash_post = bash_post_event("sess-par", &fx.repo_canon, &fx.transcript_path, "tu-main-bash");
+    let main_bash_post = bash_post_event(
+        "sess-par",
+        &fx.repo_canon,
+        &fx.transcript_path,
+        "tu-main-bash",
+    );
 
     let _ = engine.on_ingest(
         &IngestOutput {
@@ -3018,7 +3034,12 @@ fn parallel_subagent_edit_and_open_bash_attribution() {
                 (sub_edit_post, 41_000),
                 (main_bash_post, 50_000),
                 (
-                    base_event("Stop", "sess-par", &fx.repo_canon, Some(&fx.transcript_path)),
+                    base_event(
+                        "Stop",
+                        "sess-par",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
                     50_500,
                 ),
             ],
@@ -3045,4 +3066,135 @@ fn parallel_subagent_edit_and_open_bash_attribution() {
     assert_eq!(main_card.blocks[0].path, "src/bash_file.ts");
     assert_eq!(main_card.blocks[0].via, BlockVia::Bash);
     assert_eq!(main_card.blocks[0].bash.as_ref().unwrap().candidates, 2);
+}
+
+#[test]
+fn store_log_shrink_during_turn_does_not_duplicate_outside_count() {
+    let fx = Fixture::new("sess-shrink");
+    let s0 = fx.put_object(1, "const z = 1;\n");
+    let s1 = fx.put_object(2, "const z = 2;\n");
+    let s2 = fx.put_object(3, "const z = 3;\n");
+    let out_sha = fx.put_object(4, "const outside = true;\n");
+
+    let events_path = fx.store_dir.join("events.jsonl");
+    let pad = "x".repeat(700);
+    let pad_line = format!(
+        "{{\"v\":1,\"node\":\"file_version\",\"ts\":500,\"file_rel\":\"src/pad.ts\",\"sha\":\"{s0}\",\"pad\":\"{pad}\"}}\n"
+    );
+    fs::write(&events_path, pad_line.as_bytes()).expect("write pad line");
+    fx.append_version("src/out.ts", 1_200, &out_sha, None, true);
+    fx.append_version("src/z.ts", 1_550, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Change z", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let target = fx.file_abs("src/z.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-shrink",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Change z",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-shrink",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &target,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-shrink",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &target,
+                    ),
+                    1_500,
+                ),
+                (
+                    edit_pre_event(
+                        "sess-shrink",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-2",
+                        &target,
+                    ),
+                    1_800,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-shrink",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+
+    let rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(rev1[0].rev, 1);
+    assert_eq!(rev1[0].outside_count, 1);
+
+    // Compact events.jsonl (remove padded line so length shrinks) while preserving
+    // src/out.ts + src/z.ts and appending another event for the late edit.
+    let before_compact_len = fs::metadata(&events_path).unwrap().len();
+    fs::write(&events_path, b"").expect("clear events.jsonl for compaction");
+    fx.append_version("src/out.ts", 1_200, &out_sha, None, true);
+    fx.append_version("src/z.ts", 1_550, &s1, Some(&s0), false);
+    fx.append_version("src/z.ts", 5_100, &s2, Some(&s1), false);
+    assert!(fs::metadata(&events_path).unwrap().len() < before_compact_len);
+
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                edit_post_event(
+                    "sess-shrink",
+                    &fx.repo_canon,
+                    &fx.transcript_path,
+                    "tu-2",
+                    &target,
+                ),
+                5_000,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        5_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 5_200,
+        at_ms: 5_300,
+        coverage: "complete".to_string(),
+    }]);
+
+    let rev2 = poll_until_cards(&mut engine, 5_400, &ctx, 1);
+    assert_eq!(rev2[0].rev, 2);
+    assert_eq!(rev2[0].outside_count, 1);
 }

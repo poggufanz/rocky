@@ -9,6 +9,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+const HEAD_HASH_BYTES: usize = 4096;
 
 /// Maximum bytes of `events.jsonl` read per call (2 MiB).
 pub const MAX_TAIL_BYTES: u64 = 2 * 1024 * 1024;
@@ -64,11 +67,53 @@ pub enum ObjectRead {
     Invalid,
 }
 
+/// One read batch returned by [`StoreReader::versions_since_with_restart`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreBatch {
+    pub versions: Vec<Version>,
+    pub tail_cut: bool,
+    pub restarted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeadFingerprint {
+    len: usize,
+    hash: [u8; 32],
+}
+
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = ();
+
+fn read_file_identity(file: &File) -> io::Result<FileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata()?;
+        Ok((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(())
+    }
+}
+
+fn read_head_hash(file: &mut File, len: usize) -> io::Result<[u8; 32]> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = vec![0u8; len];
+    file.read_exact(&mut buf)?;
+    Ok(Sha256::digest(&buf).into())
+}
+
 /// Incremental, read-only reader over one repository's `events.jsonl` log.
 #[derive(Debug)]
 pub struct StoreReader {
     store_dir: PathBuf,
     offset: u64,
+    file_id: Option<FileIdentity>,
+    head: Option<HeadFingerprint>,
 }
 
 impl StoreReader {
@@ -77,6 +122,39 @@ impl StoreReader {
         StoreReader {
             store_dir,
             offset: 0,
+            file_id: None,
+            head: None,
+        }
+    }
+
+    fn reset_state(&mut self) {
+        self.offset = 0;
+        self.file_id = None;
+        self.head = None;
+    }
+
+    fn refresh_identity(
+        &mut self,
+        file: &mut File,
+        opened_id: Option<FileIdentity>,
+        restarted: bool,
+    ) {
+        if self.offset == 0 {
+            self.file_id = None;
+            self.head = None;
+            return;
+        }
+        self.file_id = opened_id;
+        let target_len = self.offset.min(HEAD_HASH_BYTES as u64) as usize;
+        if restarted || self.head.as_ref().is_none_or(|h| h.len < target_len) {
+            if let Ok(hash) = read_head_hash(file, target_len) {
+                self.head = Some(HeadFingerprint {
+                    len: target_len,
+                    hash,
+                });
+            } else {
+                self.head = None;
+            }
         }
     }
 
@@ -84,12 +162,24 @@ impl StoreReader {
     /// bounded to at most 2 MiB from the tail. Returns `(versions, tail_cut)`,
     /// where `tail_cut` is `true` when unread bytes remain before the read window.
     pub fn versions_since(&mut self, from_ms: u64) -> io::Result<(Vec<Version>, bool)> {
+        let batch = self.versions_since_with_restart(from_ms)?;
+        Ok((batch.versions, batch.tail_cut))
+    }
+
+    /// Reads newly appended `file_version` events with `ts >= from_ms` and
+    /// reports whether the reader restarted from a shrunk or replaced log.
+    pub fn versions_since_with_restart(&mut self, from_ms: u64) -> io::Result<StoreBatch> {
         let events_path = self.store_dir.join(EVENTS_FILE);
         let meta = match fs::symlink_metadata(&events_path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.offset = 0;
-                return Ok((Vec::new(), false));
+                let had_state = self.offset > 0 || self.head.is_some() || self.file_id.is_some();
+                self.reset_state();
+                return Ok(StoreBatch {
+                    versions: Vec::new(),
+                    tail_cut: false,
+                    restarted: had_state,
+                });
             }
             Err(e) => return Err(e),
         };
@@ -103,28 +193,68 @@ impl StoreReader {
         let mut file = match open_nofollow_readonly(&events_path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.offset = 0;
-                return Ok((Vec::new(), false));
+                let had_state = self.offset > 0 || self.head.is_some() || self.file_id.is_some();
+                self.reset_state();
+                return Ok(StoreBatch {
+                    versions: Vec::new(),
+                    tail_cut: false,
+                    restarted: had_state,
+                });
             }
             Err(e) => return Err(e),
         };
 
         let len = file.metadata()?.len();
-        // If the log shrank (eviction/compaction), restart from the tail of the new file.
-        let base = if len < self.offset { 0 } else { self.offset };
+        let opened_id = read_file_identity(&file).ok();
+        let mut restarted = self.offset > 0 && len < self.offset;
+        #[cfg(unix)]
+        if !restarted
+            && let (Some(prev_id), Some(cur_id)) = (self.file_id, opened_id)
+            && prev_id != cur_id
+        {
+            restarted = true;
+        }
+        if !restarted
+            && let Some(prev_head) = &self.head
+            && prev_head.len > 0
+        {
+            let head_matches = len >= prev_head.len as u64
+                && read_head_hash(&mut file, prev_head.len)
+                    .is_ok_and(|hash| hash == prev_head.hash);
+            if !head_matches {
+                restarted = true;
+            }
+        }
+
+        // If the log shrank or was replaced, restart from the tail of the new file.
+        let base = if restarted { 0 } else { self.offset };
         let start = base.max(len.saturating_sub(MAX_TAIL_BYTES));
         let tail_cut = start > base;
         if start >= len {
             self.offset = len;
-            return Ok((Vec::new(), false));
+            if self.offset == 0 {
+                self.reset_state();
+            } else {
+                self.refresh_identity(&mut file, opened_id, restarted);
+            }
+            return Ok(StoreBatch {
+                versions: Vec::new(),
+                tail_cut: false,
+                restarted,
+            });
         }
 
         let mid_line = if tail_cut {
             file.seek(SeekFrom::Start(start - 1))?;
             let mut prev = [0u8; 1];
             if file.read(&mut prev)? == 0 {
-                self.offset = 0;
-                return Ok((Vec::new(), false));
+                let had_state = self.offset > 0 || self.head.is_some() || self.file_id.is_some();
+                self.reset_state();
+                return Ok(StoreBatch {
+                    versions: Vec::new(),
+                    tail_cut: false,
+                    restarted: restarted || had_state,
+                });
             }
             prev[0] != b'\n'
         } else {
@@ -136,12 +266,23 @@ impl StoreReader {
         let mut buf = Vec::with_capacity(to_read as usize);
         file.by_ref().take(to_read).read_to_end(&mut buf)?;
         if buf.is_empty() {
-            self.offset = file
-                .metadata()
-                .ok()
-                .filter(|m| m.len() >= base)
-                .map_or(0, |_| base);
-            return Ok((Vec::new(), false));
+            let keep_base = file.metadata().ok().is_some_and(|m| m.len() >= base);
+            if keep_base && base > 0 {
+                self.offset = base;
+                self.refresh_identity(&mut file, opened_id, restarted);
+                return Ok(StoreBatch {
+                    versions: Vec::new(),
+                    tail_cut: false,
+                    restarted,
+                });
+            }
+            let had_state = self.offset > 0 || self.head.is_some() || self.file_id.is_some();
+            self.reset_state();
+            return Ok(StoreBatch {
+                versions: Vec::new(),
+                tail_cut: false,
+                restarted: restarted || had_state,
+            });
         }
 
         let parse_start = if mid_line {
@@ -149,7 +290,16 @@ impl StoreReader {
                 Some(pos) => pos + 1,
                 None => {
                     self.offset = base;
-                    return Ok((Vec::new(), tail_cut));
+                    if self.offset == 0 {
+                        self.reset_state();
+                    } else {
+                        self.refresh_identity(&mut file, opened_id, restarted);
+                    }
+                    return Ok(StoreBatch {
+                        versions: Vec::new(),
+                        tail_cut,
+                        restarted,
+                    });
                 }
             }
         } else {
@@ -164,7 +314,16 @@ impl StoreReader {
             } else {
                 base
             };
-            return Ok((Vec::new(), tail_cut));
+            if self.offset == 0 {
+                self.reset_state();
+            } else {
+                self.refresh_identity(&mut file, opened_id, restarted);
+            }
+            return Ok(StoreBatch {
+                versions: Vec::new(),
+                tail_cut,
+                restarted,
+            });
         };
         let parse_end = parse_start + last_nl;
 
@@ -177,7 +336,12 @@ impl StoreReader {
             }
         }
         self.offset = start + parse_end as u64 + 1;
-        Ok((versions, tail_cut))
+        self.refresh_identity(&mut file, opened_id, restarted);
+        Ok(StoreBatch {
+            versions,
+            tail_cut,
+            restarted,
+        })
     }
 }
 
@@ -1260,5 +1424,122 @@ mod tests {
         assert!(!tail_cut);
         assert_eq!(cut_partial_done.len(), 1);
         assert_eq!(cut_partial_done[0].file_rel, "after_cut_partial.ts");
+    }
+
+    #[test]
+    fn replaced_log_that_grows_past_old_offset_restarts_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        let sha1 = sha_char('1');
+        let sha2 = sha_char('2');
+        let sha3 = sha_char('3');
+
+        let initial = format!(
+            "{}\n{}\n",
+            file_version_json(Some("old_a.ts"), 10, Some(&sha1), None, None, None, None),
+            file_version_json(
+                Some("old_b.ts"),
+                20,
+                Some(&sha2),
+                Some(&sha1),
+                None,
+                None,
+                None
+            ),
+        );
+        fs::write(&events, initial.as_bytes()).unwrap();
+
+        let mut reader = StoreReader::new(dir.path().to_path_buf());
+        let (first, tail_cut) = reader.versions_since(0).unwrap();
+        assert!(!tail_cut);
+        assert_eq!(first.len(), 2);
+
+        // Replace events.jsonl with different content whose total size exceeds
+        // the previous byte offset.
+        let replaced = format!(
+            "{}\n{}\n{}\n",
+            file_version_json(
+                Some("restarted_head.ts"),
+                30,
+                Some(&sha2),
+                None,
+                Some(true),
+                None,
+                None
+            ),
+            file_version_json(
+                Some("restarted_mid.ts"),
+                40,
+                Some(&sha3),
+                Some(&sha2),
+                None,
+                None,
+                None
+            ),
+            file_version_json(
+                Some("restarted_tail.ts"),
+                50,
+                Some(&sha1),
+                Some(&sha3),
+                None,
+                None,
+                None
+            ),
+        );
+        assert!(replaced.len() > initial.len());
+        fs::write(&events, replaced.as_bytes()).unwrap();
+
+        let second_batch = reader.versions_since_with_restart(0).unwrap();
+        assert!(second_batch.restarted);
+        assert!(!second_batch.tail_cut);
+        assert!(
+            second_batch
+                .versions
+                .iter()
+                .any(|v| v.file_rel == "restarted_head.ts"),
+            "replaced log must restart and read head entry; got {:?}",
+            second_batch
+                .versions
+                .iter()
+                .map(|v| &v.file_rel)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(second_batch.versions.len(), 3);
+
+        // Appending across the head-hash boundary must not trigger a spurious restart.
+        let mut grow = String::new();
+        for i in 0..30 {
+            grow.push_str(&file_version_json(
+                Some(&format!("grow_{i}.ts")),
+                60 + i,
+                Some(&sha2),
+                Some(&sha1),
+                None,
+                None,
+                None,
+            ));
+            grow.push('\n');
+        }
+        append_bytes(&events, grow.as_bytes());
+        let grown = reader.versions_since_with_restart(0).unwrap();
+        assert!(!grown.restarted);
+        assert_eq!(grown.versions.len(), 30);
+
+        let one_more = format!(
+            "{}\n",
+            file_version_json(
+                Some("grow_more.ts"),
+                100,
+                Some(&sha3),
+                Some(&sha2),
+                None,
+                None,
+                None
+            )
+        );
+        append_bytes(&events, one_more.as_bytes());
+        let after_head_cap = reader.versions_since_with_restart(0).unwrap();
+        assert!(!after_head_cap.restarted);
+        assert_eq!(after_head_cap.versions.len(), 1);
     }
 }
