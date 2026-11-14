@@ -48,10 +48,11 @@ impl DetailModel {
         (model, msg)
     }
 
-    /// Re-requests the currently open card after reconnect and marks `NotFound` to close the view.
+    /// Resets to `Loading`, re-requests the open card after reconnect, and marks `NotFound` to close the view.
     pub fn reopen(&mut self, id: u64) -> ClientMsg {
         self.pending_id = Some(id);
         self.reopened = true;
+        self.state = DetailState::Loading;
         ClientMsg::CardDetail {
             id,
             card_id: self.card_id.clone(),
@@ -209,10 +210,11 @@ impl DiffModel {
         (model, msg)
     }
 
-    /// Re-requests the current `seq` and `page` after reconnect and marks `NotFound` to close views.
+    /// Resets to `Loading`, re-requests `seq` and `page` after reconnect, and marks `NotFound` to close views.
     pub fn reopen(&mut self, id: u64) -> ClientMsg {
         self.pending_id = Some(id);
         self.reopened = true;
+        self.state = DiffState::Loading;
         ClientMsg::BlockDiff {
             id,
             card_id: self.card_id.clone(),

@@ -180,3 +180,132 @@ fn diff_zero_pages_blocks_navigation() {
     );
     assert!(diff.go(0, 2).is_none());
 }
+
+#[test]
+fn reopen_resets_detail_and_diff_to_loading_until_reply() {
+    let (mut detail, _) = DetailModel::open("c1".to_string(), 1);
+    detail.on_detail(
+        1,
+        sample_card("c1", 1_000, Some(2_000)),
+        Vec::new(),
+        UiLang::Id,
+    );
+    assert!(matches!(detail.state(), DetailState::Ready(_)));
+
+    let req = detail.reopen(2);
+    assert_eq!(
+        req,
+        ClientMsg::CardDetail {
+            id: 2,
+            card_id: "c1".to_string(),
+        }
+    );
+    assert_eq!(detail.state(), &DetailState::Loading);
+    assert_eq!(detail.pending_id(), Some(2));
+    assert!(!detail.reopened_not_found());
+
+    // Stale reply leaves detail in Loading until the matching reply arrives.
+    detail.on_detail(
+        1,
+        sample_card("c1", 1_000, Some(3_000)),
+        Vec::new(),
+        UiLang::Id,
+    );
+    assert_eq!(detail.state(), &DetailState::Loading);
+
+    let mut refreshed = sample_card("c1", 1_000, Some(4_000));
+    refreshed.prompt = "Updated prompt".to_string();
+    detail.on_detail(2, refreshed, Vec::new(), UiLang::Id);
+    let DetailState::Ready(view) = detail.state() else {
+        panic!("expected Ready state after reopen reply");
+    };
+    assert_eq!(view.prompt, "Updated prompt");
+    assert_eq!(detail.pending_id(), None);
+
+    // Reopen followed by NotFound Ack transitions Loading -> NotFound with reopened_not_found set.
+    let _ = detail.reopen(3);
+    assert_eq!(detail.state(), &DetailState::Loading);
+    detail.on_ack(3, false, Some("not_found"));
+    assert_eq!(detail.state(), &DetailState::NotFound);
+    assert!(detail.reopened_not_found());
+
+    let (mut diff, _) = DiffModel::open("c1".to_string(), 5, 10);
+    diff.on_diff(
+        10,
+        vec![DiffLine {
+            kind: DiffLineKind::Context,
+            text: "page 0".to_string(),
+        }],
+        0,
+        3,
+        false,
+    );
+    let _ = diff.go(1, 11);
+    diff.on_diff(
+        11,
+        vec![DiffLine {
+            kind: DiffLineKind::Added,
+            text: "+page 1".to_string(),
+        }],
+        1,
+        3,
+        false,
+    );
+    assert!(matches!(
+        diff.state(),
+        DiffState::Page {
+            page: 1,
+            pages: 3,
+            ..
+        }
+    ));
+
+    let diff_req = diff.reopen(12);
+    assert_eq!(
+        diff_req,
+        ClientMsg::BlockDiff {
+            id: 12,
+            card_id: "c1".to_string(),
+            seq: 5,
+            page: 1,
+        }
+    );
+    assert_eq!(diff.state(), &DiffState::Loading);
+    assert_eq!(diff.pending_id(), Some(12));
+    assert!(!diff.reopened_not_found());
+
+    // Stale reply leaves diff in Loading until the matching reply arrives.
+    diff.on_diff(
+        11,
+        vec![DiffLine {
+            kind: DiffLineKind::Context,
+            text: "stale".to_string(),
+        }],
+        1,
+        3,
+        false,
+    );
+    assert_eq!(diff.state(), &DiffState::Loading);
+
+    let refreshed_lines = vec![DiffLine {
+        kind: DiffLineKind::Added,
+        text: "+refreshed page 1".to_string(),
+    }];
+    diff.on_diff(12, refreshed_lines.clone(), 1, 3, false);
+    assert_eq!(
+        diff.state(),
+        &DiffState::Page {
+            lines: refreshed_lines,
+            page: 1,
+            pages: 3,
+        }
+    );
+    assert_eq!(diff.pending_id(), None);
+
+    // Reopen followed by NotFound Ack transitions Loading -> NotFound with reopened_not_found set.
+    let _ = diff.reopen(13);
+    assert_eq!(diff.state(), &DiffState::Loading);
+    diff.on_ack(13, false, Some("not_found"));
+    assert_eq!(diff.state(), &DiffState::NotFound);
+    assert!(diff.reopened_not_found());
+}

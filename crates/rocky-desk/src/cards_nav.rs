@@ -267,6 +267,9 @@ mod tests {
 
         // Detail + diff open at page 2: requests page 1 + detail + same seq/page diff.
         let (mut detail, _) = DetailModel::open("c1".to_string(), alloc());
+        detail.on_detail(13, sample_card("c1"), Vec::new(), UiLang::En);
+        assert!(matches!(detail.state(), DetailState::Ready(_)));
+
         let (mut diff, _) = DiffModel::open("c1".to_string(), 7, alloc());
         diff.on_diff(
             14,
@@ -279,6 +282,17 @@ mod tests {
             false,
         );
         let _ = diff.go(2, alloc());
+        diff.on_diff(
+            15,
+            vec![DiffLine {
+                kind: DiffLineKind::Added,
+                text: "+p2".to_string(),
+            }],
+            2,
+            3,
+            false,
+        );
+        assert!(matches!(diff.state(), DiffState::Page { page: 2, .. }));
 
         let msgs = on_reconnect(&mut cards, Some(&mut detail), Some(&mut diff), &mut alloc);
         assert_eq!(
@@ -304,6 +318,53 @@ mod tests {
         );
         assert_eq!(detail.pending_id(), Some(17));
         assert_eq!(diff.pending_id(), Some(18));
+        assert_eq!(detail.state(), &DetailState::Loading);
+        assert_eq!(diff.state(), &DiffState::Loading);
+
+        let mut view = View::BlockDiff;
+        let mut opt_detail = Some(detail);
+        let mut opt_diff = Some(diff);
+        assert!(route_card_msg(
+            &ServerMsg::CardDetail {
+                id: 17,
+                card: sample_card("c1"),
+                snippets: Vec::new(),
+            },
+            &mut view,
+            &mut cards,
+            &mut opt_detail,
+            &mut opt_diff,
+            UiLang::En,
+        ));
+        assert!(matches!(
+            opt_detail.as_ref().unwrap().state(),
+            DetailState::Ready(_)
+        ));
+        assert!(route_card_msg(
+            &ServerMsg::BlockDiff {
+                id: 18,
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "+refreshed".to_string(),
+                }],
+                page: 2,
+                pages: 3,
+                missing: false,
+            },
+            &mut view,
+            &mut cards,
+            &mut opt_detail,
+            &mut opt_diff,
+            UiLang::En,
+        ));
+        assert!(matches!(
+            opt_diff.as_ref().unwrap().state(),
+            DiffState::Page {
+                page: 2,
+                pages: 3,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -421,6 +482,8 @@ mod tests {
         });
         assert_eq!(detail.as_ref().unwrap().pending_id(), Some(5));
         assert_eq!(diff.as_ref().unwrap().pending_id(), Some(6));
+        assert_eq!(detail.as_ref().unwrap().state(), &DetailState::Loading);
+        assert_eq!(diff.as_ref().unwrap().state(), &DiffState::Loading);
 
         let changed = route_card_msg(
             &ServerMsg::Ack {
