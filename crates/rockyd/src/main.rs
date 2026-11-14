@@ -116,17 +116,7 @@ fn main() {
     let log = Arc::new(RotatingLog::new(&log_path(&home)));
 
     // Panic hook: log, then abort. Counts/lifecycle only.
-    let panic_log = Arc::clone(&log);
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_hook(info);
-        let at = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown location".into());
-        panic_log.line(&format!("panic, aborting: {at}"));
-        std::process::abort();
-    }));
+    rockyd::log::install_panic_hook(Arc::clone(&log));
 
     let spool = spool_dir(&home);
     if let Err(e) = std::fs::create_dir_all(&spool) {

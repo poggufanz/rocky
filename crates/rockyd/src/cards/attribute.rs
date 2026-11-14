@@ -40,6 +40,8 @@ pub struct BuildInput {
     pub quotes: TranscriptRead,
     pub gaps: Vec<(u64, u64)>,
     pub capture_state: Option<CaptureState>,
+    pub store_error: bool,
+    pub tail_cut: bool,
     pub home_dir: PathBuf,
     pub parent_card_id: Option<String>,
 }
@@ -546,7 +548,7 @@ fn build_recorded_blocks(
     let mut bash_groups: BTreeMap<usize, Vec<(usize, u32)>> = BTreeMap::new();
     let root_cmp = session_root_raw.map(|r| canonical_path(r, cfg!(windows)));
 
-    if session_root_raw.is_some() {
+    if session_root_raw.is_some() && !input.store_error {
         let mut version_order: Vec<usize> = (0..input.versions.len()).collect();
         version_order.sort_by_key(|&i| (input.versions[i].ts, i));
 
@@ -1083,14 +1085,16 @@ fn build_coverage(input: &BuildInput, blocks: &[Block], saw_capture_late: bool) 
         reasons.insert(CoverageReason::DaemonGap);
     }
 
-    if saw_capture_late {
+    if saw_capture_late || input.tail_cut {
         reasons.insert(CoverageReason::CaptureLate);
     }
 
-    if matches!(
-        input.capture_state,
-        Some(CaptureState::Failed | CaptureState::Polling)
-    ) {
+    if input.store_error
+        || matches!(
+            input.capture_state,
+            Some(CaptureState::Failed | CaptureState::Polling)
+        )
+    {
         reasons.insert(CoverageReason::CaptureOff);
     }
 
@@ -1431,6 +1435,8 @@ mod tests {
             },
             gaps: Vec::new(),
             capture_state: Some(CaptureState::Ok),
+            store_error: false,
+            tail_cut: false,
             home_dir: test_home(),
             parent_card_id: None,
         }
@@ -2605,5 +2611,51 @@ mod tests {
         let sub_card = build_card(&sub_in, &no_read, &no_stat);
         assert_eq!(sub_card.parent_card_id.as_deref(), Some("card-main-2"));
         assert_eq!(sub_card.agent_type, "Explore");
+    }
+
+    #[test]
+    fn store_error_suppresses_versions_and_tail_cut_marks_capture_late() {
+        let turn = base_turn(vec![edit_win(
+            "e-1",
+            "sess-1",
+            repo_join("src/a.ts"),
+            2_000,
+            Some(2_200),
+            Some(true),
+        )]);
+        let read = |sha: &str| match sha {
+            "b1" => ObjectRead::Text("export const a = 1;\n".into()),
+            "a1" => ObjectRead::Text("export const a = 2;\n".into()),
+            _ => ObjectRead::Missing,
+        };
+
+        let mut err_in = base_input(turn.clone());
+        err_in.versions = vec![ver("src/a.ts", 2_100, Some("b1"), Some("a1"))];
+        err_in.store_error = true;
+        let err_card = build_card(&err_in, &read, &no_stat);
+        assert_eq!(err_card.coverage.state, CoverageState::Partial);
+        assert!(
+            err_card
+                .coverage
+                .reasons
+                .contains(&CoverageReason::CaptureOff)
+        );
+        assert_eq!(err_card.blocks.len(), 1);
+        assert_eq!(err_card.blocks[0].labels, vec![Label::NotCaptured {}]);
+        assert_eq!(err_card.blocks[0].before, None);
+        assert_eq!(err_card.blocks[0].after, None);
+        assert_eq!(err_card.blocks[0].symbol, None);
+
+        let mut tail_in = base_input(turn);
+        tail_in.versions = vec![ver("src/a.ts", 2_100, Some("b1"), Some("a1"))];
+        tail_in.tail_cut = true;
+        let tail_card = build_card(&tail_in, &read, &no_stat);
+        assert_eq!(tail_card.coverage.state, CoverageState::Partial);
+        assert!(
+            tail_card
+                .coverage
+                .reasons
+                .contains(&CoverageReason::CaptureLate)
+        );
     }
 }

@@ -68,9 +68,17 @@ pub struct Turn {
 /// Signals emitted by [`Tracker::on_event`] for capture flushing and card builds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackerSignal {
-    EditDone { root: String, post_ms: u64 },
+    EditDone {
+        agent: AgentKey,
+        started_ms: u64,
+        root: String,
+        post_ms: u64,
+    },
     TurnClosed(AgentKey),
-    Late(AgentKey),
+    Late {
+        agent: AgentKey,
+        started_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +121,68 @@ impl Tracker {
             .get(key)
             .and_then(|by_start| by_start.values().next_back())
             .and_then(|id| self.turns.get(id))
+    }
+
+    /// Returns the open or retained closed turn for `(key, started_ms)`.
+    pub fn turn(&self, key: &AgentKey, started_ms: u64) -> Option<&Turn> {
+        self.open_turn(key)
+            .filter(|t| t.started_ms == started_ms)
+            .or_else(|| self.closed_turn_at(key, started_ms))
+    }
+
+    /// Returns the retained closed turn for `(key, started_ms)`.
+    pub fn closed_turn_at(&self, key: &AgentKey, started_ms: u64) -> Option<&Turn> {
+        self.closed_by_agent
+            .get(key)
+            .and_then(|by_start| {
+                by_start
+                    .range((started_ms, 0)..=(started_ms, u64::MAX))
+                    .next_back()
+            })
+            .and_then(|(_, id)| self.turns.get(id))
+    }
+
+    /// Returns `(agent, started_ms)` for every currently open turn in `session_id`.
+    pub fn open_session_turns(&self, session_id: &str) -> Vec<(AgentKey, u64)> {
+        let Some(agents) = self.open_by_session.get(session_id) else {
+            return Vec::new();
+        };
+        agents
+            .iter()
+            .filter_map(|agent| {
+                self.open_by_agent
+                    .get(agent)
+                    .and_then(|id| self.turns.get(id))
+                    .map(|turn| (agent.clone(), turn.started_ms))
+            })
+            .collect()
+    }
+
+    /// Returns the earliest `started_ms` across all open and retained closed turns.
+    pub fn min_retained_started_ms(&self) -> Option<u64> {
+        self.turns.values().map(|turn| turn.started_ms).min()
+    }
+
+    /// Returns the main turn active at `sub_started_ms` for parent card linking.
+    pub fn parent_turn_for(&self, main_key: &AgentKey, sub_started_ms: u64) -> Option<&Turn> {
+        if let Some(open) = self.open_turn(main_key)
+            && open.started_ms <= sub_started_ms
+        {
+            return Some(open);
+        }
+        if let Some(by_start) = self.closed_by_agent.get(main_key)
+            && let Some(found) = by_start
+                .range(..=(sub_started_ms, u64::MAX))
+                .rev()
+                .filter_map(|(_, id)| self.turns.get(id))
+                .find(|m| {
+                    m.started_ms <= sub_started_ms
+                        && m.ended_ms.is_none_or(|ended| sub_started_ms <= ended)
+                })
+        {
+            return Some(found);
+        }
+        self.open_turn(main_key)
     }
 
     /// Processes one hook event and returns signals for closed turns, late updates, and edits.
@@ -273,7 +343,10 @@ impl Tracker {
                             });
                     }
                     if is_late {
-                        signals.push(TrackerSignal::Late(key));
+                        signals.push(TrackerSignal::Late {
+                            agent: key,
+                            started_ms: turn.started_ms,
+                        });
                     }
                 }
             }
@@ -302,9 +375,13 @@ impl Tracker {
                     return signals;
                 };
                 let is_late = turn.status != TurnEnd::Open;
+                let started_ms = turn.started_ms;
                 let edit_signal = close_window_at(turn, wref.window_idx, recv_ms, ok, ev, repo);
                 if is_late {
-                    signals.push(TrackerSignal::Late(key));
+                    signals.push(TrackerSignal::Late {
+                        agent: key,
+                        started_ms,
+                    });
                 }
                 if let Some(sig) = edit_signal {
                     signals.push(sig);
@@ -469,7 +546,13 @@ impl Tracker {
             turn.ended_ms = Some(recv_ms);
             turn.status = status;
             self.expire_index.insert((recv_ms, closed_id));
-            (closed_id, TrackerSignal::Late(key))
+            (
+                closed_id,
+                TrackerSignal::Late {
+                    agent: key,
+                    started_ms: turn.started_ms,
+                },
+            )
         } else {
             return;
         };
@@ -540,6 +623,8 @@ fn close_window_at(
         match (root, target_path.as_deref()) {
             (Some(root), Some(target)) if path_under_root(target, root) => {
                 Some(TrackerSignal::EditDone {
+                    agent: turn.agent.clone(),
+                    started_ms: turn.started_ms,
                     root: root.to_string(),
                     post_ms: recv_ms,
                 })
@@ -863,6 +948,8 @@ mod tests {
         assert_eq!(
             edit_sigs,
             vec![TrackerSignal::EditDone {
+                agent: key("S1", ""),
+                started_ms: 1_000,
                 root: "C:/repo".into(),
                 post_ms: 1_600
             }]
@@ -900,6 +987,8 @@ mod tests {
             assert_eq!(
                 sigs,
                 vec![TrackerSignal::EditDone {
+                    agent: key("S1", ""),
+                    started_ms: 1_000,
                     root: "C:/repo".into(),
                     post_ms: ts + 50
                 }]
@@ -1026,8 +1115,13 @@ mod tests {
             late_ms,
             &r,
         );
-        assert!(sigs.contains(&TrackerSignal::Late(key("S1", ""))));
+        assert!(sigs.contains(&TrackerSignal::Late {
+            agent: key("S1", ""),
+            started_ms: 1_000,
+        }));
         assert!(sigs.contains(&TrackerSignal::EditDone {
+            agent: key("S1", ""),
+            started_ms: 1_000,
             root: "C:/repo".into(),
             post_ms: late_ms,
         }));
@@ -1242,7 +1336,13 @@ mod tests {
         let mut delayed_stop = ev("Stop", "S1", None);
         delayed_stop.transcript_path = Some("C:/cfg/projects/repo/S1.jsonl".into());
         let late_sigs = tracker.on_event(&delayed_stop, 2_000, &r);
-        assert_eq!(late_sigs, vec![TrackerSignal::Late(key("S1", ""))]);
+        assert_eq!(
+            late_sigs,
+            vec![TrackerSignal::Late {
+                agent: key("S1", ""),
+                started_ms: 1_000,
+            }]
+        );
 
         // Newer open turn remains open and untouched.
         let open = tracker
@@ -1310,7 +1410,13 @@ mod tests {
         let mut late_stop = ev("Stop", "S1", None);
         late_stop.transcript_path = Some("C:/cfg/projects/repo/S1.jsonl".into());
         let main_late = tracker.on_event(&late_stop, 3_500, &r);
-        assert_eq!(main_late, vec![TrackerSignal::Late(key("S1", ""))]);
+        assert_eq!(
+            main_late,
+            vec![TrackerSignal::Late {
+                agent: key("S1", ""),
+                started_ms: 1_000,
+            }]
+        );
 
         let main_closed = tracker.closed_turn(&key("S1", "")).unwrap();
         assert_eq!(main_closed.status, TurnEnd::Done);
@@ -1325,7 +1431,13 @@ mod tests {
         late_sub.agent_transcript_path =
             Some("C:/cfg/projects/repo/S1/subagents/agent-A1.jsonl".into());
         let sub_late = tracker.on_event(&late_sub, 2_500, &r);
-        assert_eq!(sub_late, vec![TrackerSignal::Late(key("S1", "A1"))]);
+        assert_eq!(
+            sub_late,
+            vec![TrackerSignal::Late {
+                agent: key("S1", "A1"),
+                started_ms: 1_500,
+            }]
+        );
 
         let sub_closed = tracker.closed_turn(&key("S1", "A1")).unwrap();
         assert_eq!(sub_closed.status, TurnEnd::Done);
@@ -1340,7 +1452,10 @@ mod tests {
         tracker.on_event(&ev("SessionEnd", "S2", None), 3_000, &r);
         assert_eq!(
             tracker.on_event(&ev("StopFailure", "S2", None), 3_200, &r),
-            vec![TrackerSignal::Late(key("S2", ""))]
+            vec![TrackerSignal::Late {
+                agent: key("S2", ""),
+                started_ms: 1_000,
+            }]
         );
         let failed = tracker.closed_turn(&key("S2", "")).unwrap();
         assert_eq!(failed.status, TurnEnd::Failed);
@@ -1478,7 +1593,13 @@ mod tests {
             3_200,
             &r,
         );
-        assert_eq!(late_pre, vec![TrackerSignal::Late(key("S1", ""))]);
+        assert_eq!(
+            late_pre,
+            vec![TrackerSignal::Late {
+                agent: key("S1", ""),
+                started_ms: 3_000,
+            }]
+        );
 
         // Out-of-order completions across Turn 2, Turn 1, and open Turn 3.
         assert_eq!(
@@ -1488,8 +1609,13 @@ mod tests {
                 &r
             ),
             vec![
-                TrackerSignal::Late(key("S1", "")),
+                TrackerSignal::Late {
+                    agent: key("S1", ""),
+                    started_ms: 3_000,
+                },
                 TrackerSignal::EditDone {
+                    agent: key("S1", ""),
+                    started_ms: 3_000,
                     root: "C:/repo".into(),
                     post_ms: 5_200,
                 },
@@ -1502,8 +1628,13 @@ mod tests {
                 &r
             ),
             vec![
-                TrackerSignal::Late(key("S1", "")),
+                TrackerSignal::Late {
+                    agent: key("S1", ""),
+                    started_ms: 3_000,
+                },
                 TrackerSignal::EditDone {
+                    agent: key("S1", ""),
+                    started_ms: 3_000,
                     root: "C:/repo".into(),
                     post_ms: 5_250,
                 },
@@ -1515,7 +1646,10 @@ mod tests {
                 5_300,
                 &r
             ),
-            vec![TrackerSignal::Late(key("S1", ""))]
+            vec![TrackerSignal::Late {
+                agent: key("S1", ""),
+                started_ms: 1_000,
+            }]
         );
         assert_eq!(
             tracker.on_event(
@@ -1524,8 +1658,13 @@ mod tests {
                 &r
             ),
             vec![
-                TrackerSignal::Late(key("S1", "")),
+                TrackerSignal::Late {
+                    agent: key("S1", ""),
+                    started_ms: 1_000,
+                },
                 TrackerSignal::EditDone {
+                    agent: key("S1", ""),
+                    started_ms: 1_000,
                     root: "C:/repo".into(),
                     post_ms: 5_400,
                 },
@@ -1591,6 +1730,55 @@ mod tests {
                     &r
                 )
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn turn_lookup_helpers_distinguish_multiple_closed_and_open_turns() {
+        let mut tracker = Tracker::new();
+        let r = repo(Some("C:/repo"));
+        assert_eq!(tracker.min_retained_started_ms(), None);
+
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 1_000, &r);
+        tracker.on_event(&ev("Stop", "S1", None), 2_000, &r);
+
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 3_000, &r);
+        let mut sub_start = ev("SubagentStart", "S1", Some("A1"));
+        sub_start.agent_type = Some("Explore".into());
+        tracker.on_event(&sub_start, 3_200, &r);
+        tracker.on_event(&ev("SubagentStop", "S1", Some("A1")), 3_800, &r);
+        tracker.on_event(&ev("Stop", "S1", None), 4_000, &r);
+
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 5_000, &r);
+
+        let k_main = key("S1", "");
+        assert_eq!(
+            tracker.turn(&k_main, 1_000).map(|t| t.ended_ms),
+            Some(Some(2_000))
+        );
+        assert_eq!(
+            tracker.closed_turn_at(&k_main, 1_000).map(|t| t.ended_ms),
+            Some(Some(2_000))
+        );
+        assert_eq!(
+            tracker.turn(&k_main, 3_000).map(|t| t.ended_ms),
+            Some(Some(4_000))
+        );
+        assert!(tracker.closed_turn_at(&k_main, 5_000).is_none());
+        assert_eq!(
+            tracker.turn(&k_main, 5_000).map(|t| t.status),
+            Some(TurnEnd::Open)
+        );
+        assert_eq!(
+            tracker.open_session_turns("S1"),
+            vec![(k_main.clone(), 5_000)]
+        );
+        assert_eq!(tracker.min_retained_started_ms(), Some(1_000));
+        assert_eq!(
+            tracker
+                .parent_turn_for(&k_main, 3_200)
+                .map(|t| t.started_ms),
+            Some(3_000)
         );
     }
 }

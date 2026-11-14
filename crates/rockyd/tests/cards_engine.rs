@@ -2,19 +2,21 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rocky_proto::cards::{BlockVia, Card, CardStatus, CoverageReason, CoverageState};
+use rocky_proto::cards::{BlockVia, Card, CardStatus, CoverageReason, CoverageState, Label};
 use rocky_proto::hook::HookEvent;
 use rocky_proto::paths::{canonical_path, listening_store_dir, repo_id};
 use rocky_proto::pipe::{CaptureHealth, CaptureState, RepoInfo};
 use rockyd::capture::CaptureResult;
 use rockyd::cards::windows::PromptIn;
-use rockyd::cards::{Engine, EngineCtx};
+use rockyd::cards::{Engine, EngineCtx, card_id};
+use rockyd::log::{RotatingLog, install_panic_hook};
 use rockyd::spool::IngestOutput;
 use serde_json::json;
 use tempfile::TempDir;
@@ -173,131 +175,25 @@ fn hex_sha_like(seed: u8, data: &[u8]) -> String {
     format!("{h1:016x}{h2:016x}{h3:016x}{h4:016x}")
 }
 
-fn sha256_hex_prefix32(session_id: &str, agent_id: &str, started_ms: u64) -> String {
-    // Minimal standalone SHA-256 over "{session_id}\0{agent_id}\0{started_ms}" for golden assertions.
-    const K: [u32; 64] = [
-        0x428a_2f98,
-        0x7137_4491,
-        0xb5c0_fbcf,
-        0xe9b5_dba5,
-        0x3956_c25b,
-        0x59f1_11f1,
-        0x923f_82a4,
-        0xab1c_5ed5,
-        0xd807_aa98,
-        0x1283_5b01,
-        0x2431_85be,
-        0x550c_7dc3,
-        0x72be_5d74,
-        0x80de_b1fe,
-        0x9bdc_06a7,
-        0xc19b_f174,
-        0xe49b_69c1,
-        0xefbe_4786,
-        0x0fc1_9dc6,
-        0x240c_a1cc,
-        0x2de9_2c6f,
-        0x4a74_84aa,
-        0x5cb0_a9dc,
-        0x76f9_88da,
-        0x983e_5152,
-        0xa831_c66d,
-        0xb003_27c8,
-        0xbf59_7fc7,
-        0xc6e0_0bf3,
-        0xd5a7_9147,
-        0x06ca_6351,
-        0x1429_2967,
-        0x27b7_0a85,
-        0x2e1b_2138,
-        0x4d2c_6dfc,
-        0x5338_0d13,
-        0x650a_7354,
-        0x766a_0abb,
-        0x81c2_c92e,
-        0x9272_2c85,
-        0xa2bf_e8a1,
-        0xa81a_664b,
-        0xc24b_8b70,
-        0xc76c_51a3,
-        0xd192_e819,
-        0xd699_0624,
-        0xf40e_3585,
-        0x106a_a070,
-        0x19a4_c116,
-        0x1e37_6c08,
-        0x2748_774c,
-        0x34b0_bcb5,
-        0x391c_0cb3,
-        0x4ed8_aa4a,
-        0x5b9c_ca4f,
-        0x682e_6ff3,
-        0x748f_82ee,
-        0x78a5_636f,
-        0x84c8_7814,
-        0x8cc7_0208,
-        0x90be_fffa,
-        0xa450_6ceb,
-        0xbef9_a3f7,
-        0xc671_78f2,
-    ];
-    let mut msg = format!("{session_id}\0{agent_id}\0{started_ms}").into_bytes();
-    let bit_len = (msg.len() as u64) * 8;
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-    let mut h: [u32; 8] = [
-        0x6a09_e667,
-        0xbb67_ae85,
-        0x3c6e_f372,
-        0xa54f_f53a,
-        0x510e_527f,
-        0x9b05_688c,
-        0x1f83_d9ab,
-        0x5be0_cd19,
-    ];
-    for chunk in msg.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let t1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (slot, delta) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
-            *slot = slot.wrapping_add(delta);
-        }
-    }
-    let hex: String = h.iter().map(|w| format!("{w:08x}")).collect();
-    hex[..32].to_string()
+fn bash_pre_event(
+    session_id: &str,
+    cwd: &str,
+    transcript: &Path,
+    tool_use_id: &str,
+    command: &str,
+) -> HookEvent {
+    let mut ev = base_event("PreToolUse", session_id, cwd, Some(transcript));
+    ev.tool_name = Some("Bash".to_string());
+    ev.tool_use_id = Some(tool_use_id.to_string());
+    ev.command = Some(command.to_string());
+    ev
+}
+
+fn bash_post_event(session_id: &str, cwd: &str, transcript: &Path, tool_use_id: &str) -> HookEvent {
+    let mut ev = base_event("PostToolUse", session_id, cwd, Some(transcript));
+    ev.tool_name = Some("Bash".to_string());
+    ev.tool_use_id = Some(tool_use_id.to_string());
+    ev
 }
 
 fn base_event(name: &str, session_id: &str, cwd: &str, transcript: Option<&Path>) -> HookEvent {
@@ -389,6 +285,19 @@ fn poll_until_cards(
         "timed out waiting for {expected_count} cards, got {}",
         collected.len()
     );
+}
+
+fn assert_no_cards_for(engine: &mut Engine, now_ms: u64, ctx: &EngineCtx, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        let cards = engine.poll(now_ms, ctx);
+        assert!(
+            cards.is_empty(),
+            "expected no cards at {now_ms} ms, got {:?}",
+            cards
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]
@@ -497,7 +406,7 @@ fn card_after_stop_within_budget() {
     let cards = poll_until_cards(&mut engine, 2_250, &ctx, 1);
     let card = &cards[0];
     assert_eq!(card.rev, 1);
-    assert_eq!(card.card_id, sha256_hex_prefix32("sess-1", "", 1_000));
+    assert_eq!(card.card_id, "4e5e1a6d22cea72d7a8b3985c9c27fcf");
     assert_eq!(card.status, CardStatus::Done);
     assert_eq!(card.coverage.state, CoverageState::Full);
     assert!(!card.blocks.is_empty());
@@ -555,10 +464,7 @@ fn card_after_stop_within_budget() {
 
     let timeout_cards = poll_until_cards(&mut engine, 15_000, &ctx, 1);
     assert_eq!(timeout_cards[0].rev, 1);
-    assert_eq!(
-        timeout_cards[0].card_id,
-        sha256_hex_prefix32("sess-1", "", 10_000)
-    );
+    assert_eq!(timeout_cards[0].card_id, "17b1b3f588f31f772403df672a986d52");
     assert!(
         timeout_cards[0]
             .coverage
@@ -650,7 +556,7 @@ fn subagent_card_has_parent() {
     assert_eq!(cards[0].agent_type, "Explore");
     assert_eq!(
         cards[0].parent_card_id.as_deref(),
-        Some(sha256_hex_prefix32("sess-parent", "", 1_000).as_str())
+        Some("ae5a08b0f67a3ad3417ce7b1b6dc76c8")
     );
 
     // Standalone subagent without a tracked main turn must have parent_card_id = None.
@@ -1386,5 +1292,1430 @@ fn typical_load_under_500ms() {
         elapsed <= Duration::from_millis(500),
         "single-worker build took {:?}, expected <= 500ms",
         elapsed
+    );
+}
+
+#[test]
+fn card_id_matches_fixed_vectors() {
+    assert_eq!(card_id("s", "a", 123), "085fd43e5e4c84caf8d98e99af9d6ff2");
+    assert_eq!(card_id("sa", "", 123), "a4a2a32beaaf4d9e15c7f0c649393eb4");
+    assert_eq!(card_id("s", "a1", 23), "bcb390a344d2e7e6b1f5bf2650a1dd60");
+    assert_eq!(
+        card_id("sess-1", "", 1_000),
+        "4e5e1a6d22cea72d7a8b3985c9c27fcf"
+    );
+    assert_eq!(
+        card_id("sess-1", "sub-1", 1_000),
+        "97394ac43381e6ac7a3b66cb264cd2b9"
+    );
+}
+
+#[test]
+fn daemon_panic_hook_contains_worker_and_aborts_others() {
+    if let Ok(mode) = std::env::var("ROCKY_PANIC_HOOK_TEST") {
+        let log_dir = PathBuf::from(std::env::var_os("ROCKY_PANIC_LOG_DIR").expect("log dir env"));
+        let log = Arc::new(RotatingLog::new(&log_dir.join("rockyd.log")));
+        install_panic_hook(Arc::clone(&log));
+
+        match mode.as_str() {
+            "worker" => {
+                let fx = Fixture::new("panic-child");
+                let s0 = fx.put_object(1, "export const v = 1;\n");
+                let s1 = fx.put_object(2, "export const v = 2;\n");
+                fx.append_version("src/p.ts", 1_550, &s1, Some(&s0), false);
+                fx.append_version("src/p.ts", 10_550, &s1, Some(&s0), false);
+                fx.write_transcript("1970-01-01T00:00:01.000Z", "Prompt", &[]);
+
+                let panicked_once = Arc::new(AtomicBool::new(false));
+                let flag = Arc::clone(&panicked_once);
+                let mut engine = Engine::new_with_build_hook(
+                    fx.home.clone(),
+                    1,
+                    Arc::new(move |input| {
+                        if input.turn.agent.session_id == "panic-child"
+                            && !flag.swap(true, Ordering::SeqCst)
+                        {
+                            panic!("SECRET_LEAK_TOKEN");
+                        }
+                    }),
+                );
+                let mut repo_of = |_: &str| fx.repo_info();
+                let ctx = fx.ctx(true);
+                let target = fx.file_abs("src/p.ts");
+
+                let _ = engine.on_ingest(
+                    &user_prompt_out(
+                        "panic-child",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "Prompt",
+                        1_000,
+                    ),
+                    &mut repo_of,
+                    1_000,
+                );
+                let _ = engine.on_ingest(
+                    &IngestOutput {
+                        events: vec![
+                            (
+                                edit_pre_event(
+                                    "panic-child",
+                                    &fx.repo_canon,
+                                    &fx.transcript_path,
+                                    "tu-1",
+                                    &target,
+                                ),
+                                1_100,
+                            ),
+                            (
+                                edit_post_event(
+                                    "panic-child",
+                                    &fx.repo_canon,
+                                    &fx.transcript_path,
+                                    "tu-1",
+                                    &target,
+                                ),
+                                1_500,
+                            ),
+                            (
+                                base_event(
+                                    "Stop",
+                                    "panic-child",
+                                    &fx.repo_canon,
+                                    Some(&fx.transcript_path),
+                                ),
+                                2_000,
+                            ),
+                        ],
+                        ..IngestOutput::default()
+                    },
+                    &mut repo_of,
+                    2_000,
+                );
+                engine.on_capture(&[CaptureResult {
+                    root: fx.repo_canon.clone(),
+                    started_ms: 1_600,
+                    at_ms: 1_700,
+                    coverage: "complete".to_string(),
+                }]);
+
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    assert!(engine.poll(2_100, &ctx).is_empty());
+                    if engine.worker_panics() >= 1 {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                assert_eq!(engine.take_worker_panics(), 1);
+
+                let _ = engine.on_ingest(
+                    &user_prompt_out(
+                        "ok-child",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "Next",
+                        10_000,
+                    ),
+                    &mut repo_of,
+                    10_000,
+                );
+                let _ = engine.on_ingest(
+                    &IngestOutput {
+                        events: vec![
+                            (
+                                edit_pre_event(
+                                    "ok-child",
+                                    &fx.repo_canon,
+                                    &fx.transcript_path,
+                                    "tu-2",
+                                    &target,
+                                ),
+                                10_100,
+                            ),
+                            (
+                                edit_post_event(
+                                    "ok-child",
+                                    &fx.repo_canon,
+                                    &fx.transcript_path,
+                                    "tu-2",
+                                    &target,
+                                ),
+                                10_500,
+                            ),
+                            (
+                                base_event(
+                                    "Stop",
+                                    "ok-child",
+                                    &fx.repo_canon,
+                                    Some(&fx.transcript_path),
+                                ),
+                                11_000,
+                            ),
+                        ],
+                        ..IngestOutput::default()
+                    },
+                    &mut repo_of,
+                    11_000,
+                );
+                engine.on_capture(&[CaptureResult {
+                    root: fx.repo_canon.clone(),
+                    started_ms: 10_600,
+                    at_ms: 10_700,
+                    coverage: "complete".to_string(),
+                }]);
+                let cards = poll_until_cards(&mut engine, 11_100, &ctx, 1);
+                assert_eq!(cards[0].session_id, "ok-child");
+            }
+            "other" => {
+                let handle = thread::Builder::new()
+                    .name("daemon-other".to_string())
+                    .spawn(|| {
+                        let _ = std::panic::catch_unwind(|| {
+                            panic!("non-worker panic must abort");
+                        });
+                    })
+                    .expect("spawn non-worker thread");
+                let _ = handle.join();
+            }
+            other => panic!("unexpected mode: {other}"),
+        }
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("current test exe");
+
+    let worker_dir = tempfile::tempdir().expect("worker log dir");
+    let worker_out = Command::new(&exe)
+        .args([
+            "--exact",
+            "daemon_panic_hook_contains_worker_and_aborts_others",
+            "--nocapture",
+        ])
+        .env("ROCKY_PANIC_HOOK_TEST", "worker")
+        .env("ROCKY_PANIC_LOG_DIR", worker_dir.path())
+        .output()
+        .expect("run worker panic child");
+    assert!(
+        worker_out.status.success(),
+        "worker panic child aborted or failed: status={:?}, stdout={}, stderr={}",
+        worker_out.status,
+        String::from_utf8_lossy(&worker_out.stdout),
+        String::from_utf8_lossy(&worker_out.stderr)
+    );
+    let worker_log =
+        fs::read_to_string(worker_dir.path().join("rockyd.log")).expect("read worker log");
+    assert!(
+        worker_log.contains("worker panic"),
+        "expected count-only worker panic log line, got: {worker_log:?}"
+    );
+    assert!(!worker_log.contains("SECRET_LEAK_TOKEN"));
+    assert!(!worker_log.contains("panic, aborting"));
+    assert!(!String::from_utf8_lossy(&worker_out.stderr).contains("SECRET_LEAK_TOKEN"));
+
+    let other_dir = tempfile::tempdir().expect("other log dir");
+    let other_out = Command::new(&exe)
+        .args([
+            "--exact",
+            "daemon_panic_hook_contains_worker_and_aborts_others",
+            "--nocapture",
+        ])
+        .env("ROCKY_PANIC_HOOK_TEST", "other")
+        .env("ROCKY_PANIC_LOG_DIR", other_dir.path())
+        .output()
+        .expect("run non-worker panic child");
+    assert!(
+        !other_out.status.success(),
+        "non-worker panic child unexpectedly succeeded"
+    );
+    let other_log =
+        fs::read_to_string(other_dir.path().join("rockyd.log")).expect("read other log");
+    assert!(
+        other_log.contains("panic, aborting:"),
+        "expected abort log line, got: {other_log:?}"
+    );
+}
+
+#[test]
+fn late_edit_waits_for_capture_then_includes_change() {
+    let fx = Fixture::new("sess-late-wait");
+    let s0 = fx.put_object(1, "export const a = 1;\n");
+    let s1 = fx.put_object(2, "export const a = 2;\n");
+    let s2 = fx.put_object(3, "export const b = 10;\n");
+    fx.append_version("src/c.ts", 1_550, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Late edit wait", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let c_abs = fx.file_abs("src/c.ts");
+    let d_abs = fx.file_abs("src/d.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-late-wait",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Late edit wait",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-late-wait",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &c_abs,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-late-wait",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &c_abs,
+                    ),
+                    1_500,
+                ),
+                (
+                    edit_pre_event(
+                        "sess-late-wait",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-2",
+                        &d_abs,
+                    ),
+                    1_800,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-late-wait",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+
+    let rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(rev1[0].rev, 1);
+    assert_eq!(rev1[0].blocks.len(), 2);
+
+    // Late edit completion arrives at 5_000 before capture >= 5_000.
+    let flushes = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                edit_post_event(
+                    "sess-late-wait",
+                    &fx.repo_canon,
+                    &fx.transcript_path,
+                    "tu-2",
+                    &d_abs,
+                ),
+                5_000,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        5_000,
+    );
+    assert_eq!(flushes.len(), 1);
+    assert_eq!(flushes[0].post_ms, 5_000);
+
+    // Must hold the revision until capture arrives or 4 s passes.
+    assert_no_cards_for(&mut engine, 5_200, &ctx, Duration::from_millis(120));
+
+    fx.append_version("src/d.ts", 5_100, &s2, None, true);
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 5_150,
+        at_ms: 5_250,
+        coverage: "complete".to_string(),
+    }]);
+    let rev2 = poll_until_cards(&mut engine, 5_300, &ctx, 1);
+    assert_eq!(rev2[0].rev, 2);
+    assert_eq!(rev2[0].card_id, rev1[0].card_id);
+    assert_eq!(rev2[0].coverage.state, CoverageState::Full);
+    assert_eq!(rev2[0].blocks.len(), 2);
+    assert_eq!(rev2[0].blocks[0].path, "src/c.ts");
+    assert_eq!(rev2[0].blocks[0].after.as_deref(), Some(s1.as_str()));
+    assert_eq!(rev2[0].blocks[1].path, "src/d.ts");
+    assert_eq!(rev2[0].blocks[1].after.as_deref(), Some(s2.as_str()));
+}
+
+#[test]
+fn late_event_routes_to_updated_turn_with_newer_closed_and_open_turns() {
+    let fx = Fixture::new("sess-multi");
+    let s0 = fx.put_object(1, "export const v = 0;\n");
+    let s_a1 = fx.put_object(2, "export const v = 1;\n");
+    let s_a2 = fx.put_object(3, "export const a2 = 2;\n");
+    let s0_b1 = fx.put_object(4, "export const b1 = 0;\n");
+    let s_b1 = fx.put_object(5, "export const b1 = 3;\n");
+    let s0_c1 = fx.put_object(6, "export const c1 = 0;\n");
+    let s_c1 = fx.put_object(7, "export const c1 = 4;\n");
+    fx.append_version("src/a1.ts", 1_550, &s_a1, Some(&s0), false);
+    fx.append_version("src/b1.ts", 3_550, &s_b1, Some(&s0_b1), false);
+    fx.append_version("src/c1.ts", 5_250, &s_c1, Some(&s0_c1), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Multi turns", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+
+    // Turn A (started 1_000, closed 2_000) with outstanding tu-a2.
+    let a1_abs = fx.file_abs("src/a1.ts");
+    let a2_abs = fx.file_abs("src/a2.ts");
+    let b1_abs = fx.file_abs("src/b1.ts");
+    let c1_abs = fx.file_abs("src/c1.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-multi",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Turn A",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-multi",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-a1",
+                        &a1_abs,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-multi",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-a1",
+                        &a1_abs,
+                    ),
+                    1_500,
+                ),
+                (
+                    edit_pre_event(
+                        "sess-multi",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-a2",
+                        &a2_abs,
+                    ),
+                    1_800,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-multi",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+    let card_a_rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    let turn_a_id = card_a_rev1[0].card_id.clone();
+
+    // Turn B (started 3_000, closed 4_000).
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-multi",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Turn B",
+            3_000,
+        ),
+        &mut repo_of,
+        3_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-multi",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                        &b1_abs,
+                    ),
+                    3_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-multi",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                        &b1_abs,
+                    ),
+                    3_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-multi",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    4_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        4_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 3_600,
+        at_ms: 3_700,
+        coverage: "complete".to_string(),
+    }]);
+    let card_b_rev1 = poll_until_cards(&mut engine, 4_100, &ctx, 1);
+    let turn_b_id = card_b_rev1[0].card_id.clone();
+    assert_ne!(turn_a_id, turn_b_id);
+
+    // Turn C (started 5_000, stays open while tu-a2 completes).
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-multi",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Turn C",
+            5_000,
+        ),
+        &mut repo_of,
+        5_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-multi",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-c1",
+                        &c1_abs,
+                    ),
+                    5_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-multi",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-c1",
+                        &c1_abs,
+                    ),
+                    5_200,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        5_200,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 5_300,
+        at_ms: 5_400,
+        coverage: "complete".to_string(),
+    }]);
+
+    // Late completion for Turn A's tu-a2 at 6_000 (while Turn B is closed and Turn C is open).
+    fx.append_version("src/a2.ts", 6_100, &s_a2, None, true);
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                edit_post_event(
+                    "sess-multi",
+                    &fx.repo_canon,
+                    &fx.transcript_path,
+                    "tu-a2",
+                    &a2_abs,
+                ),
+                6_000,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        6_000,
+    );
+
+    // Close Turn C at 6_500 before capture >= 6_000 arrives.
+    // Turn C's only edit finished at 5_200 (already captured at 5_300), so Turn C must build
+    // immediately without waiting on Turn A's 6_000 edit.
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                base_event(
+                    "Stop",
+                    "sess-multi",
+                    &fx.repo_canon,
+                    Some(&fx.transcript_path),
+                ),
+                6_500,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        6_500,
+    );
+
+    let turn_c_cards = poll_until_cards(&mut engine, 6_600, &ctx, 1);
+    assert_eq!(turn_c_cards.len(), 1);
+    assert_eq!(turn_c_cards[0].started_ms, 5_000);
+    assert_eq!(turn_c_cards[0].rev, 1);
+    assert_eq!(turn_c_cards[0].blocks.len(), 1);
+    assert_eq!(turn_c_cards[0].blocks[0].path, "src/c1.ts");
+
+    // Turn A must still be waiting for capture >= 6_000, and Turn B must not emit a rev 2.
+    assert_no_cards_for(&mut engine, 6_650, &ctx, Duration::from_millis(120));
+
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 6_150,
+        at_ms: 6_250,
+        coverage: "complete".to_string(),
+    }]);
+    let turn_a_rev2 = poll_until_cards(&mut engine, 6_700, &ctx, 1);
+    assert_eq!(turn_a_rev2.len(), 1);
+    assert_eq!(turn_a_rev2[0].card_id, turn_a_id);
+    assert_eq!(turn_a_rev2[0].rev, 2);
+    assert_eq!(turn_a_rev2[0].blocks.len(), 2);
+    assert_eq!(turn_a_rev2[0].blocks[0].path, "src/a1.ts");
+    assert_eq!(turn_a_rev2[0].blocks[1].path, "src/a2.ts");
+    assert_eq!(
+        turn_a_rev2[0].blocks[1].after.as_deref(),
+        Some(s_a2.as_str())
+    );
+
+    assert_no_cards_for(&mut engine, 6_800, &ctx, Duration::from_millis(120));
+}
+
+#[test]
+fn shared_cache_retains_versions_for_overlapping_open_session() {
+    let fx = Fixture::new("sess-a");
+    let s0_a = fx.put_object(1, "export const a = 0;\n");
+    let s_a = fx.put_object(2, "export const a = 1;\n");
+    let s0_b = fx.put_object(3, "export const b = 0;\n");
+    let s_b = fx.put_object(4, "export const b = 2;\n");
+    fx.append_version("src/a.ts", 1_550, &s_a, Some(&s0_a), false);
+    fx.append_version("src/b.ts", 3_550, &s_b, Some(&s0_b), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Session A", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let a_abs = fx.file_abs("src/a.ts");
+    let b_abs = fx.file_abs("src/b.ts");
+
+    // Session A opens and edits at 1_100..1_500, remaining open.
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-a",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Session A",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-a",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-a",
+                        &a_abs,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-a",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-a",
+                        &a_abs,
+                    ),
+                    1_500,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        1_500,
+    );
+
+    // Session B starts later, closes, and builds first.
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-b",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Session B",
+            3_000,
+        ),
+        &mut repo_of,
+        3_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-b",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b",
+                        &b_abs,
+                    ),
+                    3_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-b",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b",
+                        &b_abs,
+                    ),
+                    3_500,
+                ),
+                (
+                    base_event("Stop", "sess-b", &fx.repo_canon, Some(&fx.transcript_path)),
+                    4_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        4_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 3_600,
+        at_ms: 3_700,
+        coverage: "complete".to_string(),
+    }]);
+    let card_b = poll_until_cards(&mut engine, 4_100, &ctx, 1);
+    assert_eq!(card_b[0].blocks[0].after.as_deref(), Some(s_b.as_str()));
+
+    // Now Session A stops and builds; version at 1_550 must still be retained.
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                base_event("Stop", "sess-a", &fx.repo_canon, Some(&fx.transcript_path)),
+                5_000,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        5_000,
+    );
+    let card_a = poll_until_cards(&mut engine, 5_100, &ctx, 1);
+    assert_eq!(card_a[0].session_id, "sess-a");
+    assert_eq!(card_a[0].blocks.len(), 1);
+    assert_eq!(card_a[0].blocks[0].path, "src/a.ts");
+    assert_eq!(card_a[0].blocks[0].before.as_deref(), Some(s0_a.as_str()));
+    assert_eq!(card_a[0].blocks[0].after.as_deref(), Some(s_a.as_str()));
+}
+
+#[test]
+fn shared_cache_retains_versions_across_intervening_build_for_revision() {
+    let fx = Fixture::new("sess-c");
+    let s0_c1 = fx.put_object(1, "export const c1 = 0;\n");
+    let s_c1 = fx.put_object(2, "export const c1 = 1;\n");
+    let s_c2 = fx.put_object(3, "export const c2 = 2;\n");
+    let s0_d = fx.put_object(4, "export const d = 0;\n");
+    let s_d = fx.put_object(5, "export const d = 3;\n");
+    fx.append_version("src/c1.ts", 10_550, &s_c1, Some(&s0_c1), false);
+    fx.append_version("src/d.ts", 20_550, &s_d, Some(&s0_d), false);
+    fx.write_transcript("1970-01-01T00:00:10.000Z", "Session C", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let c1_abs = fx.file_abs("src/c1.ts");
+    let c2_abs = fx.file_abs("src/c2.ts");
+    let d_abs = fx.file_abs("src/d.ts");
+
+    // Session C builds rev 1 with src/c1.ts and unclosed tu-c2.
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-c",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Session C",
+            10_000,
+        ),
+        &mut repo_of,
+        10_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-c",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-c1",
+                        &c1_abs,
+                    ),
+                    10_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-c",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-c1",
+                        &c1_abs,
+                    ),
+                    10_500,
+                ),
+                (
+                    edit_pre_event(
+                        "sess-c",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-c2",
+                        &c2_abs,
+                    ),
+                    11_000,
+                ),
+                (
+                    base_event("Stop", "sess-c", &fx.repo_canon, Some(&fx.transcript_path)),
+                    12_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        12_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 10_600,
+        at_ms: 10_700,
+        coverage: "complete".to_string(),
+    }]);
+    let c_rev1 = poll_until_cards(&mut engine, 12_100, &ctx, 1);
+    assert_eq!(c_rev1[0].rev, 1);
+
+    // Session D runs and builds an intervening card in the same repo.
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-d",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Session D",
+            20_000,
+        ),
+        &mut repo_of,
+        20_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-d",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-d",
+                        &d_abs,
+                    ),
+                    20_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-d",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-d",
+                        &d_abs,
+                    ),
+                    20_500,
+                ),
+                (
+                    base_event("Stop", "sess-d", &fx.repo_canon, Some(&fx.transcript_path)),
+                    22_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        22_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 20_600,
+        at_ms: 20_700,
+        coverage: "complete".to_string(),
+    }]);
+    let card_d = poll_until_cards(&mut engine, 22_100, &ctx, 1);
+    assert_eq!(card_d[0].session_id, "sess-d");
+
+    // Late completion for Session C inside its 60 s revision window must retain c1's version.
+    fx.append_version("src/c2.ts", 25_100, &s_c2, None, true);
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                edit_post_event(
+                    "sess-c",
+                    &fx.repo_canon,
+                    &fx.transcript_path,
+                    "tu-c2",
+                    &c2_abs,
+                ),
+                25_000,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        25_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 25_150,
+        at_ms: 25_250,
+        coverage: "complete".to_string(),
+    }]);
+    let c_rev2 = poll_until_cards(&mut engine, 25_300, &ctx, 1);
+    assert_eq!(c_rev2[0].session_id, "sess-c");
+    assert_eq!(c_rev2[0].rev, 2);
+    assert_eq!(c_rev2[0].blocks.len(), 2);
+    assert_eq!(c_rev2[0].blocks[0].path, "src/c1.ts");
+    assert_eq!(c_rev2[0].blocks[0].before.as_deref(), Some(s0_c1.as_str()));
+    assert_eq!(c_rev2[0].blocks[0].after.as_deref(), Some(s_c1.as_str()));
+    assert_eq!(c_rev2[0].blocks[1].path, "src/c2.ts");
+    assert_eq!(c_rev2[0].blocks[1].after.as_deref(), Some(s_c2.as_str()));
+}
+
+#[test]
+fn bash_only_turn_waits_for_capture_while_unchanged_stays_empty() {
+    let fx = Fixture::new("sess-bash");
+    let s0 = fx.put_object(1, "export const b = 1;\n");
+    let s1 = fx.put_object(2, "export const b = 2;\n");
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Run bash script", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-bash",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Run bash script",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    bash_pre_event(
+                        "sess-bash",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                        "sed -i s/1/2/ src/bash.ts",
+                    ),
+                    1_100,
+                ),
+                (
+                    bash_post_event("sess-bash", &fx.repo_canon, &fx.transcript_path, "tu-b1"),
+                    1_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-bash",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+
+    // Before capture >= 1_500 arrives, turn must wait rather than dropping an empty card.
+    thread::sleep(Duration::from_millis(80));
+    assert!(
+        engine.poll(2_100, &ctx).is_empty(),
+        "completed Bash turn must wait for capture"
+    );
+
+    // Capture finishes and version arrives.
+    fx.append_version("src/bash.ts", 1_550, &s1, Some(&s0), false);
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+
+    let cards = poll_until_cards(&mut engine, 2_200, &ctx, 1);
+    assert_eq!(cards[0].blocks.len(), 1);
+    assert_eq!(cards[0].blocks[0].via, BlockVia::Bash);
+    assert_eq!(cards[0].blocks[0].path, "src/bash.ts");
+    assert_eq!(cards[0].blocks[0].after.as_deref(), Some(s1.as_str()));
+
+    // Truly unchanged Bash turn must still be suppressed after capture/timeout.
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-bash-noop",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Check git status",
+            10_000,
+        ),
+        &mut repo_of,
+        10_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    bash_pre_event(
+                        "sess-bash-noop",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b2",
+                        "git status",
+                    ),
+                    10_100,
+                ),
+                (
+                    bash_post_event(
+                        "sess-bash-noop",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b2",
+                    ),
+                    10_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-bash-noop",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    11_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        11_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 10_600,
+        at_ms: 10_700,
+        coverage: "complete".to_string(),
+    }]);
+    thread::sleep(Duration::from_millis(80));
+    assert!(engine.poll(11_200, &ctx).is_empty());
+    assert!(engine.poll(16_000, &ctx).is_empty());
+}
+
+#[test]
+fn late_bash_completion_waits_for_capture_and_revises_card() {
+    let fx = Fixture::new("sess-late-bash");
+    let s0 = fx.put_object(1, "export const e = 1;\n");
+    let s1 = fx.put_object(2, "export const e = 2;\n");
+    let s2 = fx.put_object(3, "export const gen = 1;\n");
+    fx.append_version("src/e.ts", 1_550, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Edit plus bash", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let e_abs = fx.file_abs("src/e.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-late-bash",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Edit plus bash",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-late-bash",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &e_abs,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-late-bash",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &e_abs,
+                    ),
+                    1_500,
+                ),
+                (
+                    bash_pre_event(
+                        "sess-late-bash",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b",
+                        "node gen.js",
+                    ),
+                    1_800,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-late-bash",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+    let rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(rev1[0].rev, 1);
+
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                bash_post_event(
+                    "sess-late-bash",
+                    &fx.repo_canon,
+                    &fx.transcript_path,
+                    "tu-b",
+                ),
+                5_000,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        5_000,
+    );
+
+    assert_no_cards_for(&mut engine, 5_200, &ctx, Duration::from_millis(120));
+
+    fx.append_version("src/gen.ts", 5_100, &s2, None, true);
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 5_150,
+        at_ms: 5_250,
+        coverage: "complete".to_string(),
+    }]);
+    let rev2 = poll_until_cards(&mut engine, 5_300, &ctx, 1);
+    assert_eq!(rev2[0].rev, 2);
+    assert_eq!(rev2[0].blocks.len(), 2);
+    assert_eq!(rev2[0].blocks[1].via, BlockVia::Bash);
+    assert_eq!(rev2[0].blocks[1].path, "src/gen.ts");
+    assert_eq!(rev2[0].blocks[1].after.as_deref(), Some(s2.as_str()));
+}
+
+#[test]
+fn store_error_after_cache_prime_suppresses_code_and_marks_capture_off() {
+    let fx = Fixture::new("sess-store-err");
+    let s0 = fx.put_object(1, "export const v = 0;\n");
+    let s1 = fx.put_object(2, "export const v = 1;\n");
+    fx.append_version("src/a.ts", 1_550, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Prime cache", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let a_abs = fx.file_abs("src/a.ts");
+    let b_abs = fx.file_abs("src/b.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-store-err",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Prime cache",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-store-err",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &a_abs,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-store-err",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &a_abs,
+                    ),
+                    1_500,
+                ),
+                (
+                    edit_pre_event(
+                        "sess-store-err",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-2",
+                        &b_abs,
+                    ),
+                    1_800,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-store-err",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 2_050,
+        at_ms: 2_100,
+        coverage: "complete".to_string(),
+    }]);
+    let rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(rev1[0].blocks[0].after.as_deref(), Some(s1.as_str()));
+    assert_eq!(rev1[0].coverage.state, CoverageState::Full);
+
+    // Replace events.jsonl with a directory so StoreReader::versions_since returns an error.
+    let events_path = fx.store_dir.join("events.jsonl");
+    fs::remove_file(&events_path).expect("remove events.jsonl");
+    fs::create_dir(&events_path).expect("create dir at events.jsonl");
+
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(
+                edit_post_event(
+                    "sess-store-err",
+                    &fx.repo_canon,
+                    &fx.transcript_path,
+                    "tu-2",
+                    &b_abs,
+                ),
+                5_000,
+            )],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        5_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 5_100,
+        at_ms: 5_200,
+        coverage: "complete".to_string(),
+    }]);
+
+    let rev2 = poll_until_cards(&mut engine, 5_300, &ctx, 1);
+    assert_eq!(rev2[0].rev, 2);
+    assert_eq!(rev2[0].blocks.len(), 2);
+    for blk in &rev2[0].blocks {
+        assert!(
+            blk.before.is_none(),
+            "expected no before sha on store error"
+        );
+        assert!(blk.after.is_none(), "expected no after sha on store error");
+        assert!(blk.symbol.is_none(), "expected no symbol on store error");
+        assert!(blk.added.is_none());
+        assert!(blk.removed.is_none());
+        assert_eq!(blk.labels, vec![Label::NotCaptured {}]);
+    }
+    assert_eq!(rev2[0].coverage.state, CoverageState::Partial);
+    assert!(
+        rev2[0]
+            .coverage
+            .reasons
+            .contains(&CoverageReason::CaptureOff),
+        "expected capture_off, got {:?}",
+        rev2[0].coverage.reasons
+    );
+}
+
+#[test]
+fn store_tail_cut_marks_capture_late() {
+    let fx = Fixture::new("sess-tail-cut");
+    let s0 = fx.put_object(1, "export const t = 0;\n");
+    let s1 = fx.put_object(2, "export const t = 1;\n");
+    let pad_line = "{\"v\":1,\"node\":\"ignore\",\"ts\":500}\n";
+    let mut padded = String::with_capacity(2 * 1024 * 1024 + 8192);
+    while padded.len() <= 2 * 1024 * 1024 + 4096 {
+        padded.push_str(pad_line);
+    }
+    fs::write(fx.store_dir.join("events.jsonl"), padded).expect("write padded events.jsonl");
+    fx.append_version("src/t.ts", 1_550, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Tail cut turn", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let t_abs = fx.file_abs("src/t.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-tail-cut",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Tail cut turn",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-tail-cut",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-t1",
+                        &t_abs,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-tail-cut",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-t1",
+                        &t_abs,
+                    ),
+                    1_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-tail-cut",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+
+    let cards = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(cards[0].blocks.len(), 1);
+    assert_eq!(cards[0].blocks[0].after.as_deref(), Some(s1.as_str()));
+    assert_eq!(cards[0].coverage.state, CoverageState::Partial);
+    assert!(
+        cards[0]
+            .coverage
+            .reasons
+            .contains(&CoverageReason::CaptureLate),
+        "expected capture_late on tail_cut, got {:?}",
+        cards[0].coverage.reasons
     );
 }

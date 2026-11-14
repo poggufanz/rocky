@@ -4559,6 +4559,7 @@ dependencies = [
  "rocky-proto",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "widestring",
  "windows-sys 0.61.2",
