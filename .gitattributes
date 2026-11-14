@@ -4,3 +4,4 @@
 *.ts text eol=lf
 *.rs text eol=lf
 fixtures/facts/** -text
+fixtures/transcripts/** -text

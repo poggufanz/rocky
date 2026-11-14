@@ -3237,6 +3237,190 @@ fn store_log_shrink_during_turn_does_not_duplicate_outside_count() {
     assert_eq!(rev2[0].outside_count, 1);
 }
 
+/// Builds 20 cards sequentially through one `Engine` and reports process resident memory.
+#[test]
+#[ignore]
+fn rss_after_twenty_cards() {
+    let fx = Fixture::new("sess-rss-init");
+    let mut engine = Engine::new(fx.home.clone(), 2);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let projects_dir = fx.config_dir.join("projects").join("proj-a");
+
+    let make_body = |turn: usize, file_idx: usize, variant: usize| -> String {
+        let mut s = String::with_capacity(8 * 1024);
+        for k in 0..100 {
+            s.push_str(&format!(
+                "pub fn fn_{turn}_{file_idx}_{k}(x: i64) -> i64 {{ x + {} }}\n",
+                k + variant
+            ));
+        }
+        s
+    };
+
+    let mut built = Vec::with_capacity(20);
+    for turn in 0..20usize {
+        let session_id = format!("sess-rss-{turn}");
+        let transcript_path = projects_dir.join(format!("{session_id}.jsonl"));
+        let base_ms = 1_000 + (turn as u64) * 10_000;
+        let total_secs = base_ms / 1_000;
+        let mins = (total_secs / 60) % 60;
+        let secs = total_secs % 60;
+        let millis = base_ms % 1_000;
+        let prompt_iso = format!("1970-01-01T00:{mins:02}:{secs:02}.{millis:03}Z");
+        let prompt = format!("Apply edit batch {turn}");
+
+        let mut events = Vec::new();
+        let mut assistant_blocks = Vec::new();
+        for f in 0..3usize {
+            let rel = format!("src/rss_{turn}_{f}.rs");
+            let abs = fx.file_abs(&rel);
+            let before_text = make_body(turn, f, 0);
+            let after_text = make_body(turn, f, 1);
+            let seed_base = ((turn * 3 + f) * 2) as u8;
+            let b_sha = fx.put_object(seed_base, &before_text);
+            let a_sha = fx.put_object(seed_base.wrapping_add(1), &after_text);
+
+            let pre_ms = base_ms + 100 + (f as u64) * 100;
+            let post_ms = pre_ms + 40;
+            let ver_ms = post_ms + 10;
+            fx.append_version(&rel, ver_ms, &a_sha, Some(&b_sha), false);
+
+            let tool_id = format!("tu-rss-{turn}-{f}");
+            assistant_blocks.push(
+                json!({ "type": "text", "text": format!("Updated file {f} in batch {turn}.") }),
+            );
+            assistant_blocks.push(json!({ "type": "tool_use", "id": tool_id }));
+
+            events.push((
+                edit_pre_event(
+                    &session_id,
+                    &fx.repo_canon,
+                    &transcript_path,
+                    &tool_id,
+                    &abs,
+                ),
+                pre_ms,
+            ));
+            events.push((
+                edit_post_event(
+                    &session_id,
+                    &fx.repo_canon,
+                    &transcript_path,
+                    &tool_id,
+                    &abs,
+                ),
+                post_ms,
+            ));
+        }
+
+        fs::write(&transcript_path, "").expect("init session transcript");
+        let user_line = json!({
+            "type": "user",
+            "timestamp": prompt_iso,
+            "message": { "content": prompt }
+        });
+        append_jsonl(&transcript_path, &user_line.to_string());
+        let assistant_line = json!({
+            "type": "assistant",
+            "timestamp": prompt_iso,
+            "message": {
+                "id": format!("msg-rss-{turn}"),
+                "content": assistant_blocks
+            }
+        });
+        append_jsonl(&transcript_path, &assistant_line.to_string());
+
+        let _ = engine.on_ingest(
+            &user_prompt_out(
+                &session_id,
+                &fx.repo_canon,
+                &transcript_path,
+                &prompt,
+                base_ms,
+            ),
+            &mut repo_of,
+            base_ms,
+        );
+        let _ = engine.on_ingest(
+            &IngestOutput {
+                events,
+                ..IngestOutput::default()
+            },
+            &mut repo_of,
+            base_ms + 500,
+        );
+        let _ = engine.on_ingest(
+            &IngestOutput {
+                events: vec![(
+                    base_event("Stop", &session_id, &fx.repo_canon, Some(&transcript_path)),
+                    base_ms + 900,
+                )],
+                ..IngestOutput::default()
+            },
+            &mut repo_of,
+            base_ms + 900,
+        );
+        engine.on_capture(&[CaptureResult {
+            root: fx.repo_canon.clone(),
+            started_ms: base_ms + 600,
+            at_ms: base_ms + 700,
+            coverage: "complete".to_string(),
+        }]);
+
+        let cards = poll_until_cards(&mut engine, base_ms + 910, &ctx, 1);
+        assert_eq!(cards.len(), 1, "turn {turn} card");
+        assert!(!cards[0].blocks.is_empty(), "turn {turn} blocks");
+        built.extend(cards);
+    }
+
+    // Sample resident set while both the engine state and built cards remain live.
+    let rss_bytes = read_rss_bytes();
+    let rss_mib = rss_bytes as f64 / (1024.0 * 1024.0);
+    println!("rss_after_twenty_cards: {rss_bytes} bytes ({rss_mib:.2} MiB)");
+    assert!(rss_bytes > 0, "expected positive RSS measurement");
+    assert_eq!(built.len(), 20);
+    drop(engine);
+}
+
+#[cfg(windows)]
+fn read_rss_bytes() -> usize {
+    use std::mem::{MaybeUninit, size_of};
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let mut pmc = MaybeUninit::<PROCESS_MEMORY_COUNTERS>::zeroed();
+    let cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    // SAFETY: `GetCurrentProcess` returns a valid pseudo-handle and `pmc` points to writable
+    // memory of `cb` bytes matching `PROCESS_MEMORY_COUNTERS`.
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), pmc.as_mut_ptr(), cb) };
+    assert!(ok != 0, "GetProcessMemoryInfo failed");
+    // SAFETY: `GetProcessMemoryInfo` succeeded and initialized `pmc`.
+    let pmc = unsafe { pmc.assume_init() };
+    pmc.WorkingSetSize
+}
+
+#[cfg(target_os = "linux")]
+fn read_rss_bytes() -> usize {
+    let status = fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
+    let kb: usize = status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmRSS:")
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|num| num.parse().ok())
+        })
+        .expect("VmRSS line in /proc/self/status");
+    kb * 1024
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn read_rss_bytes() -> usize {
+    0
+}
+
 fn run_command_with_timeout(cmd: &mut Command, timeout: Duration) -> std::process::Output {
     let mut child = cmd
         .stdin(std::process::Stdio::null())
