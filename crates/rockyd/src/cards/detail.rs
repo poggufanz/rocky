@@ -59,22 +59,176 @@ pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>
     }
 
     let mut msg = ServerMsg::Cards { id, items, next };
-    while encode(&msg).len() > LINE_CAP {
-        let ServerMsg::Cards {
-            items: ref mut list,
-            next: ref mut cursor,
-            ..
-        } = msg
-        else {
-            unreachable!();
-        };
-        if list.pop().is_none() {
-            *cursor = None;
+    if encode(&msg).len() <= LINE_CAP {
+        return msg;
+    }
+
+    // Step 1: Trim flow steps proportionally before touching blocks or dropping cards.
+    shrink_cards_vec_field(&mut msg, CardTrimField::Flow);
+    if encode(&msg).len() <= LINE_CAP {
+        return msg;
+    }
+
+    // Step 2: Trim blocks proportionally before dropping whole cards from the page.
+    shrink_cards_vec_field(&mut msg, CardTrimField::Blocks);
+    if encode(&msg).len() <= LINE_CAP {
+        return msg;
+    }
+
+    // Step 3: Truncate or clear prompts before dropping trailing cards.
+    if let ServerMsg::Cards { ref mut items, .. } = msg {
+        for card in items.iter_mut() {
+            if truncate_chars_in_place(&mut card.prompt, LIST_QUOTE_MAX_CHARS) {
+                card.prompt_truncated = true;
+            }
+        }
+    }
+    if encode(&msg).len() <= LINE_CAP {
+        return msg;
+    }
+    if let ServerMsg::Cards { ref mut items, .. } = msg {
+        for card in items.iter_mut() {
+            if !card.prompt.is_empty() {
+                card.prompt.clear();
+                card.prompt_truncated = true;
+            }
+        }
+    }
+    if encode(&msg).len() <= LINE_CAP {
+        return msg;
+    }
+
+    // Step 4: Drop trailing cards only while more than one card remains on the page.
+    while let ServerMsg::Cards {
+        items: ref mut list,
+        next: ref mut cursor,
+        ..
+    } = msg
+    {
+        if list.len() <= 1 || encode_len_cards(id, list, cursor.as_deref()) <= LINE_CAP {
             break;
         }
+        list.pop();
         *cursor = list.last().map(card_cursor);
     }
+    if encode(&msg).len() <= LINE_CAP {
+        return msg;
+    }
+
+    // Step 5: Never silently drop the last remaining card; collapse oversized metadata fields.
+    if let ServerMsg::Cards { ref mut items, .. } = msg
+        && let Some(card) = items.first_mut()
+    {
+        card.main_root = None;
+        card.branch = None;
+        card.parent_card_id = None;
+    }
+    if encode(&msg).len() > LINE_CAP
+        && let ServerMsg::Cards { ref mut items, .. } = msg
+        && let Some(card) = items.first_mut()
+    {
+        truncate_chars_in_place(&mut card.root, LIST_QUOTE_MAX_CHARS);
+        truncate_chars_in_place(&mut card.session_id, LIST_QUOTE_MAX_CHARS);
+        truncate_chars_in_place(&mut card.agent_id, LIST_QUOTE_MAX_CHARS);
+        truncate_chars_in_place(&mut card.agent_type, LIST_QUOTE_MAX_CHARS);
+    }
+    if encode(&msg).len() > LINE_CAP
+        && let ServerMsg::Cards { ref mut items, .. } = msg
+        && let Some(card) = items.first_mut()
+    {
+        card.root.clear();
+        card.coverage.reasons.clear();
+        truncate_chars_in_place(&mut card.card_id, LIST_QUOTE_MAX_CHARS);
+        truncate_chars_in_place(&mut card.repo_id, LIST_QUOTE_MAX_CHARS);
+    }
     msg
+}
+
+#[derive(Clone, Copy)]
+enum CardTrimField {
+    Flow,
+    Blocks,
+}
+
+fn encode_len_cards(id: u64, items: &[Card], next: Option<&str>) -> usize {
+    let probe = ServerMsg::Cards {
+        id,
+        items: items.to_vec(),
+        next: next.map(str::to_string),
+    };
+    encode(&probe).len()
+}
+
+fn shrink_cards_vec_field(msg: &mut ServerMsg, field: CardTrimField) {
+    let ServerMsg::Cards { id, items, next } = msg else {
+        unreachable!();
+    };
+    enum Saved {
+        Flow(Vec<Vec<rocky_proto::cards::FlowStep>>, Vec<u32>),
+        Blocks(Vec<Vec<Block>>, Vec<u32>),
+    }
+    let (max_len, saved) = match field {
+        CardTrimField::Flow => {
+            let max_len = items.iter().map(|c| c.flow.len()).max().unwrap_or(0);
+            if max_len == 0 {
+                return;
+            }
+            let flows: Vec<_> = items.iter_mut().map(|c| std::mem::take(&mut c.flow)).collect();
+            let base_more: Vec<u32> = items.iter().map(|c| c.flow_more).collect();
+            for (c, orig) in items.iter_mut().zip(&flows) {
+                c.flow_more = c.flow_more.saturating_add(u32::try_from(orig.len()).unwrap_or(u32::MAX));
+            }
+            (max_len, Saved::Flow(flows, base_more))
+        }
+        CardTrimField::Blocks => {
+            let max_len = items.iter().map(|c| c.blocks.len()).max().unwrap_or(0);
+            if max_len == 0 {
+                return;
+            }
+            let blks: Vec<_> = items.iter_mut().map(|c| std::mem::take(&mut c.blocks)).collect();
+            let base_more: Vec<u32> = items.iter().map(|c| c.more_count).collect();
+            for (c, orig) in items.iter_mut().zip(&blks) {
+                c.more_count = c.more_count.saturating_add(u32::try_from(orig.len()).unwrap_or(u32::MAX));
+            }
+            (max_len, Saved::Blocks(blks, base_more))
+        }
+    };
+
+    if encode_len_cards(*id, items, next.as_deref()) > LINE_CAP {
+        return;
+    }
+
+    let apply_cap = |cards: &mut [Card], saved: &Saved, cap: usize| match saved {
+        Saved::Flow(flows, base_more) => {
+            for ((card, orig), &base) in cards.iter_mut().zip(flows).zip(base_more) {
+                let keep = orig.len().min(cap);
+                card.flow = orig[..keep].to_vec();
+                card.flow_more =
+                    base.saturating_add(u32::try_from(orig.len() - keep).unwrap_or(u32::MAX));
+            }
+        }
+        Saved::Blocks(blks, base_more) => {
+            for ((card, orig), &base) in cards.iter_mut().zip(blks).zip(base_more) {
+                let keep = orig.len().min(cap);
+                card.blocks = orig[..keep].to_vec();
+                card.more_count =
+                    base.saturating_add(u32::try_from(orig.len() - keep).unwrap_or(u32::MAX));
+            }
+        }
+    };
+
+    let mut lo = 0usize;
+    let mut hi = max_len;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        apply_cap(items, &saved, mid);
+        if encode_len_cards(*id, items, next.as_deref()) <= LINE_CAP {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    apply_cap(items, &saved, lo);
 }
 
 /// Builds a live `ServerMsg::Card` broadcast message that fits within `LINE_CAP`,
@@ -357,6 +511,39 @@ fn shrink_card_msg(msg: &mut ServerMsg) -> bool {
         return true;
     }
 
+    // Step 1: Trim flow steps first (preserving blocks and code snippets when flow causes overflow).
+    let (saved_flow, base_flow_more) = {
+        let card = msg_card_mut(msg);
+        (std::mem::take(&mut card.flow), card.flow_more)
+    };
+    if !saved_flow.is_empty() {
+        let orig_len = saved_flow.len();
+        msg_card_mut(msg).flow_more =
+            base_flow_more.saturating_add(u32::try_from(orig_len).unwrap_or(u32::MAX));
+        if encode(msg).len() <= LINE_CAP {
+            let mut lo = 0usize;
+            let mut hi = orig_len;
+            while lo < hi {
+                let mid = lo + (hi - lo).div_ceil(2);
+                let card = msg_card_mut(msg);
+                card.flow = saved_flow[..mid].to_vec();
+                card.flow_more = base_flow_more
+                    .saturating_add(u32::try_from(orig_len - mid).unwrap_or(u32::MAX));
+                if encode(msg).len() <= LINE_CAP {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            let card = msg_card_mut(msg);
+            card.flow = saved_flow[..lo].to_vec();
+            card.flow_more = base_flow_more
+                .saturating_add(u32::try_from(orig_len - lo).unwrap_or(u32::MAX));
+            return true;
+        }
+    }
+
+    // Step 2: Trim detail snippets before dropping block summaries.
     if matches!(msg, ServerMsg::CardDetail { .. }) {
         loop {
             let popped = {
@@ -374,50 +561,26 @@ fn shrink_card_msg(msg: &mut ServerMsg) -> bool {
         }
     }
 
-    while msg_card_mut(msg).blocks.pop().is_some() {
+    // Step 3: Trim blocks, tracking dropped items in `more_count`.
+    loop {
+        let popped = msg_card_mut(msg).blocks.pop();
+        if popped.is_none() {
+            break;
+        }
+        let card = msg_card_mut(msg);
+        card.more_count = card.more_count.saturating_add(1);
         if encode(msg).len() <= LINE_CAP {
             return true;
         }
     }
 
+    // Step 4: Truncate prompt to list-quote bound as last resort.
     {
         let card = msg_card_mut(msg);
         if truncate_chars_in_place(&mut card.prompt, LIST_QUOTE_MAX_CHARS) {
             card.prompt_truncated = true;
         }
     }
-    if encode(msg).len() <= LINE_CAP {
-        return true;
-    }
-
-    let mut saved_flow = std::mem::take(&mut msg_card_mut(msg).flow);
-    let base_len = encode(msg).len();
-    if base_len > LINE_CAP {
-        return false;
-    }
-    if !saved_flow.is_empty() {
-        let mut cur_len = base_len;
-        let mut keep = 0usize;
-        for (idx, step) in saved_flow.iter().enumerate() {
-            let step_len = serde_json::to_string(step)
-                .map(|s| s.len())
-                .unwrap_or(LINE_CAP + 1);
-            let added = step_len + usize::from(idx > 0);
-            if cur_len + added > LINE_CAP {
-                break;
-            }
-            cur_len += added;
-            keep = idx + 1;
-        }
-        saved_flow.truncate(keep);
-        msg_card_mut(msg).flow = saved_flow;
-        while encode(msg).len() > LINE_CAP {
-            if msg_card_mut(msg).flow.pop().is_none() {
-                return false;
-            }
-        }
-    }
-
     encode(msg).len() <= LINE_CAP
 }
 
@@ -708,7 +871,9 @@ mod tests {
             prompt_truncated: false,
             importance: Importance::Medium,
             blocks,
+            more_count: 0,
             flow: Vec::new(),
+            flow_more: 0,
             outside_count: 0,
             coverage: Coverage {
                 state: CoverageState::Full,
@@ -758,11 +923,8 @@ mod tests {
             panic!("expected ServerMsg::Cards");
         };
         assert_eq!(id, 7);
-        assert!(!items.is_empty(), "expected at least one card to fit");
-        assert!(
-            items.len() < expected_items.len(),
-            "expected trimming from 20 large cards"
-        );
+        assert_eq!(items.len(), expected_items.len());
+        assert!(items.iter().all(|c| c.more_count > 0));
         for item in &items {
             for block in &item.blocks {
                 if let Some(q) = &block.quote {
@@ -774,8 +936,80 @@ mod tests {
                 }
             }
         }
-        let last = items.last().unwrap();
-        assert_eq!(next, Some(card_cursor(last)));
+        assert_eq!(next, Some("initial-next".into()));
+    }
+
+    #[test]
+    fn cards_reply_shrinks_single_oversized_card_to_metadata_instead_of_dropping() {
+        let mut card = test_card(
+            "card-huge",
+            vec![test_block(
+                1,
+                "src/lib.rs",
+                Some("work"),
+                Some("sha-a"),
+                Some("sha-b"),
+                true,
+            )],
+        );
+        card.root = "r".repeat(LINE_CAP + 2048);
+        card.prompt = "p".repeat(5_000);
+        card.flow = flow_steps(100);
+
+        let reply = build_cards_reply(8, vec![card], None);
+        let wire = encode(&reply);
+        assert!(wire.len() <= LINE_CAP, "reply exceeded LINE_CAP: {}", wire.len());
+        let ServerMsg::Cards { id, items, next } = reply else {
+            panic!("expected ServerMsg::Cards");
+        };
+        assert_eq!(id, 8);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].card_id, "card-huge");
+        assert!(items[0].blocks.is_empty());
+        assert!(items[0].flow.is_empty());
+        assert_eq!(items[0].more_count, 1);
+        assert_eq!(items[0].flow_more, 100);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn cards_reply_trims_flow_before_blocks() {
+        let mut c0 = test_card(
+            "c0",
+            vec![test_block(
+                1,
+                "src/a.rs",
+                Some("alpha"),
+                Some("sha-a"),
+                Some("sha-b"),
+                true,
+            )],
+        );
+        c0.flow = flow_steps(1_500);
+        let c1 = test_card(
+            "c1",
+            vec![test_block(
+                1,
+                "src/b.rs",
+                Some("beta"),
+                Some("sha-c"),
+                Some("sha-d"),
+                true,
+            )],
+        );
+
+        let reply = build_cards_reply(9, vec![c0, c1], None);
+        assert!(encode(&reply).len() <= LINE_CAP);
+        let ServerMsg::Cards { items, next, .. } = reply else {
+            panic!("expected ServerMsg::Cards");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].blocks.len(), 1);
+        assert_eq!(items[1].blocks.len(), 1);
+        assert_eq!(items[0].more_count, 0);
+        assert!(items[0].flow_more > 0);
+        assert_eq!(items[0].flow.len() + items[0].flow_more as usize, 1_500);
+        assert_eq!(next, None);
     }
 
     #[test]
@@ -1113,9 +1347,10 @@ mod tests {
         let ServerMsg::Card { item } = msg else {
             panic!("expected ServerMsg::Card");
         };
-        assert!(item.blocks.is_empty());
-        assert!(item.prompt.chars().count() <= LIST_QUOTE_MAX_CHARS);
+        assert_eq!(item.blocks.len(), 1);
         assert!(item.flow.len() < 1_000);
+        assert!(item.flow_more > 0);
+        assert_eq!(item.flow.len() + item.flow_more as usize, 1_000);
     }
 
     #[test]
@@ -1161,10 +1396,11 @@ mod tests {
             panic!("expected ServerMsg::CardDetail");
         };
         assert_eq!(id, 61);
-        assert!(snippets.is_empty());
-        assert!(out_card.blocks.is_empty());
-        assert!(out_card.prompt.chars().count() <= LIST_QUOTE_MAX_CHARS);
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(out_card.blocks.len(), 1);
         assert!(out_card.flow.len() < 1_000);
+        assert!(out_card.flow_more > 0);
+        assert_eq!(out_card.flow.len() + out_card.flow_more as usize, 1_000);
     }
 
     #[test]

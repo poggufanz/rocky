@@ -8,6 +8,9 @@ pub const CARD_VERSION: u32 = 1;
 /// Maximum number of change blocks included in a single card record.
 pub const MAX_BLOCKS: usize = 30;
 
+/// Maximum number of timeline flow steps included in a single card record.
+pub const MAX_FLOW_STEPS: usize = 100;
+
 /// Relative significance of a change block or card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -260,7 +263,11 @@ pub struct Card {
     pub prompt_truncated: bool,
     pub importance: Importance,
     pub blocks: Vec<Block>,
+    #[serde(default)]
+    pub more_count: u32,
     pub flow: Vec<FlowStep>,
+    #[serde(default)]
+    pub flow_more: u32,
     pub outside_count: u64,
     pub coverage: Coverage,
 }

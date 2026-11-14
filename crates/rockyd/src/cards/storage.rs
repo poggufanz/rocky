@@ -715,7 +715,9 @@ mod tests {
             prompt_truncated: false,
             importance: Importance::Medium,
             blocks,
+            more_count: 0,
             flow: Vec::new(),
+            flow_more: 0,
             outside_count: 0,
             coverage: Coverage {
                 state: CoverageState::Full,

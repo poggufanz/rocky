@@ -10,8 +10,8 @@ use rocky_facts::{
 };
 use rocky_proto::cards::{
     BashInfo, Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage,
-    CoverageReason, CoverageState, FlowKind, FlowStep, Importance, Label, MAX_BLOCKS, Quote,
-    SymbolKind,
+    CoverageReason, CoverageState, FlowKind, FlowStep, Importance, Label, MAX_BLOCKS,
+    MAX_FLOW_STEPS, Quote, SymbolKind,
 };
 use rocky_proto::paths::{canonical_path, repo_id};
 use rocky_proto::pipe::CaptureState;
@@ -348,31 +348,30 @@ pub fn build_card(
         (blocks, 0u64, false)
     };
 
+    let importance = blocks
+        .iter()
+        .map(|b| b.importance)
+        .max()
+        .unwrap_or(Importance::None);
+    let coverage = build_coverage(input, &blocks, saw_capture_late);
+
     let mut card_blocks = blocks;
-    let mut final_outside_count = outside_count;
+    let more_count =
+        u32::try_from(card_blocks.len().saturating_sub(MAX_BLOCKS)).unwrap_or(u32::MAX);
     if card_blocks.len() > MAX_BLOCKS {
-        final_outside_count =
-            final_outside_count.saturating_add((card_blocks.len() - MAX_BLOCKS) as u64);
         card_blocks.truncate(MAX_BLOCKS);
     }
     for (idx, blk) in card_blocks.iter_mut().enumerate() {
         blk.seq = (idx + 1) as u32;
     }
 
-    let importance = card_blocks
-        .iter()
-        .map(|b| b.importance)
-        .max()
-        .unwrap_or(Importance::None);
-
-    let flow = build_flow(
+    let (flow, flow_more) = build_flow(
         &input.turn.windows,
         &card_blocks,
         session_root_abs.as_ref(),
         home_abs.as_ref(),
         cwd,
     );
-    let coverage = build_coverage(input, &card_blocks, saw_capture_late);
     let (prompt, prompt_truncated) = select_prompt(input);
 
     let status = match input.turn.status {
@@ -412,8 +411,10 @@ pub fn build_card(
         prompt_truncated,
         importance,
         blocks: card_blocks,
+        more_count,
         flow,
-        outside_count: final_outside_count,
+        flow_more,
+        outside_count,
         coverage,
     }
 }
@@ -1006,16 +1007,19 @@ fn build_flow(
     session_root_abs: Option<&AbsPath>,
     home_abs: Option<&AbsPath>,
     cwd: Option<&str>,
-) -> Vec<FlowStep> {
+) -> (Vec<FlowStep>, u32) {
     let mut indexed: Vec<(usize, &ToolWindow)> = windows
         .iter()
         .enumerate()
         .filter(|(_, w)| matches!(w.kind, ToolKind::Bash | ToolKind::Edit))
         .collect();
     indexed.sort_by_key(|(idx, w)| (w.pre_ms, *idx));
+    let flow_more =
+        u32::try_from(indexed.len().saturating_sub(MAX_FLOW_STEPS)).unwrap_or(u32::MAX);
 
-    indexed
+    let flow = indexed
         .into_iter()
+        .take(MAX_FLOW_STEPS)
         .map(|(_, win)| {
             let dur_ms = win
                 .post_ms
@@ -1069,7 +1073,8 @@ fn build_flow(
                 ToolKind::Other => unreachable!(),
             }
         })
-        .collect()
+        .collect();
+    (flow, flow_more)
 }
 
 fn build_coverage(input: &BuildInput, blocks: &[Block], saw_capture_late: bool) -> Coverage {
@@ -1909,10 +1914,24 @@ mod tests {
 
         let card = build_card(&input, &read, &no_stat);
         assert_eq!(card.blocks.len(), 30);
-        assert_eq!(card.outside_count, 5);
+        assert_eq!(card.more_count, 5);
+        assert_eq!(card.outside_count, 0);
         assert_eq!(card.blocks[0].seq, 1);
         assert_eq!(card.blocks[29].seq, 30);
-        assert_eq!(card.importance, Importance::Medium);
+        assert_eq!(card.importance, Importance::High);
+    }
+
+    #[test]
+    fn flow_capped_at_100_records_flow_more() {
+        let windows: Vec<ToolWindow> = (0..120u64)
+            .map(|i| bash_win(&format!("b-{i}"), main_agent("sess-1"), &format!("echo {i}"), 1_000 + i * 10, Some(1_005 + i * 10), Some(true)))
+            .collect();
+        let input = base_input(base_turn(windows));
+        let card = build_card(&input, &no_read, &no_stat);
+        assert_eq!(card.flow.len(), 100);
+        assert_eq!(card.flow_more, 20);
+        assert_eq!(card.flow[0].text, "echo 0");
+        assert_eq!(card.flow[99].text, "echo 99");
     }
 
     #[test]
@@ -2245,13 +2264,15 @@ mod tests {
             "prompt_truncated",
             "importance",
             "blocks",
+            "more_count",
             "flow",
+            "flow_more",
             "outside_count",
             "coverage",
         ] {
             assert!(obj.contains_key(key), "missing top-level key {key}");
         }
-        assert_eq!(obj.len(), 21);
+        assert_eq!(obj.len(), 23);
         assert_eq!(obj["v"], 1);
         assert_eq!(obj["status"], "done");
         assert_eq!(obj["importance"], "medium");
