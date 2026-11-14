@@ -163,6 +163,11 @@ impl Tracker {
         self.turns.values().map(|turn| turn.started_ms).min()
     }
 
+    /// Iterates over all currently open and retained closed turns.
+    pub fn retained_turns(&self) -> impl Iterator<Item = &Turn> {
+        self.turns.values()
+    }
+
     /// Returns the main turn active at `sub_started_ms` for parent card linking.
     pub fn parent_turn_for(&self, main_key: &AgentKey, sub_started_ms: u64) -> Option<&Turn> {
         if let Some(open) = self.open_turn(main_key)

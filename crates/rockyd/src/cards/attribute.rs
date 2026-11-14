@@ -2,7 +2,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rocky_facts::{
     Change as FactChange, FileInput, Label as FactLabel, MAX_BYTES, MAX_LABELS_PER_CHANGE, Side,
@@ -37,6 +37,8 @@ pub struct BuildInput {
     pub versions: Vec<Version>,
     pub results: Vec<CaptureResult>,
     pub other_bash: Vec<ToolWindow>,
+    pub other_edits: Vec<(String, u64, u64)>,
+    pub versions_through_ms: u64,
     pub quotes: TranscriptRead,
     pub gaps: Vec<(u64, u64)>,
     pub capture_state: Option<CaptureState>,
@@ -481,6 +483,44 @@ fn collect_windows(
     (edits, bashes)
 }
 
+/// Extracts normalized `(repo_rel_key, pre_ms, end_ms)` edit windows from `turn` within `session_root_raw`.
+pub(crate) fn collect_edit_windows_for_turn(
+    turn: &Turn,
+    session_root_raw: Option<&str>,
+    home_dir: &Path,
+    results: &[CaptureResult],
+) -> Vec<(String, u64, u64)> {
+    let Some(root_raw) = session_root_raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let Some(session_root_abs) = AbsPath::parse_abs(root_raw) else {
+        return Vec::new();
+    };
+    let home_str = home_dir.to_string_lossy();
+    let home_abs = AbsPath::parse_abs(home_str.as_ref());
+    let root_cmp = canonical_path(root_raw, cfg!(windows));
+    let cwd = turn.cwd.as_deref();
+    let mut out = Vec::new();
+    for win in &turn.windows {
+        if win.kind != ToolKind::Edit {
+            continue;
+        }
+        let (_, repo_rel, _) = classify_target_path(
+            win.target_path.as_deref(),
+            &win.tool,
+            Some(&session_root_abs),
+            home_abs.as_ref(),
+            cwd,
+        );
+        if let Some(rel) = repo_rel {
+            let (end_ms, _) =
+                compute_window_end(win, turn.ended_ms, Some(root_cmp.as_str()), results);
+            out.push((normalize_rel_key(&rel), win.pre_ms, end_ms));
+        }
+    }
+    out
+}
+
 fn compute_window_end(
     win: &ToolWindow,
     turn_ended_ms: Option<u64>,
@@ -616,6 +656,12 @@ fn build_recorded_blocks(
                 continue;
             }
 
+            if input.other_edits.iter().any(|(path_key, pre_ms, end_ms)| {
+                *path_key == v_rel_key && ver.ts >= *pre_ms && ver.ts <= *end_ms
+            }) {
+                continue;
+            }
+
             let overlapping_bashes: Vec<usize> = bashes
                 .iter()
                 .enumerate()
@@ -630,17 +676,21 @@ fn build_recorded_blocks(
                     let other_overlap = other_bash
                         .iter()
                         .filter(|ow| {
+                            let ow_end = if ow.post_ms.is_none() {
+                                input.versions_through_ms
+                            } else {
+                                compute_window_end(
+                                    ow,
+                                    None,
+                                    root_cmp.as_deref(),
+                                    &input.results,
+                                )
+                                .0
+                            };
                             ow.kind == ToolKind::Bash
                                 && ow.agent != input.turn.agent
                                 && ver.ts >= ow.pre_ms
-                                && ver.ts
-                                    <= compute_window_end(
-                                        ow,
-                                        None,
-                                        root_cmp.as_deref(),
-                                        &input.results,
-                                    )
-                                    .0
+                                && ver.ts <= ow_end
                         })
                         .count() as u32;
                     let total_candidates = 1u32.saturating_add(other_overlap);
@@ -1433,6 +1483,8 @@ mod tests {
             versions: Vec::new(),
             results: Vec::new(),
             other_bash: Vec::new(),
+            other_edits: Vec::new(),
+            versions_through_ms: u64::MAX,
             quotes: TranscriptRead {
                 quotes: BTreeMap::new(),
                 first_user_text: None,
@@ -2678,5 +2730,82 @@ mod tests {
                 .reasons
                 .contains(&CoverageReason::CaptureLate)
         );
+    }
+
+    #[test]
+    fn other_agent_edit_excluded_from_via_bash_and_outside_count() {
+        let mut input = base_input(base_turn(vec![bash_win(
+            "b-1",
+            main_agent("sess-1"),
+            "npm test",
+            1_000,
+            Some(10_000),
+            Some(true),
+        )]));
+        input.turn.ended_ms = Some(15_000);
+        input.other_edits = vec![
+            ("src/sub_in_bash.ts".to_string(), 3_000, 5_000),
+            ("src/sub_outside.ts".to_string(), 11_000, 13_000),
+        ];
+        input.versions = vec![
+            ver("src/sub_in_bash.ts", 4_000, Some("b1"), Some("a1")),
+            ver("src/sub_outside.ts", 12_000, Some("b1"), Some("a1")),
+        ];
+        input.results = vec![CaptureResult {
+            root: test_root().to_string(),
+            started_ms: 15_100,
+            at_ms: 15_200,
+            coverage: "ok".to_string(),
+        }];
+
+        let read = |sha: &str| match sha {
+            "b1" => ObjectRead::Text("export const x = 1;\n".into()),
+            "a1" => ObjectRead::Text("export const x = 2;\n".into()),
+            _ => ObjectRead::Missing,
+        };
+
+        let card = build_card(&input, &read, &no_stat);
+        assert!(card.blocks.is_empty(), "expected no blocks, got {:?}", card.blocks);
+        assert_eq!(card.outside_count, 0);
+    }
+
+    #[test]
+    fn open_other_bash_without_post_ms_marks_candidates_uncertain() {
+        let mut input = base_input(base_turn(vec![bash_win(
+            "b-main",
+            main_agent("sess-1"),
+            "cargo test",
+            40_000,
+            Some(42_000),
+            Some(true),
+        )]));
+        input.turn.ended_ms = Some(43_000);
+        input.versions_through_ms = 50_000;
+        input.other_bash = vec![bash_win(
+            "b-other-open",
+            sub_agent("sess-1", "sub-1"),
+            "sleep 60",
+            1_000,
+            None,
+            None,
+        )];
+        input.versions = vec![ver("src/gen.ts", 41_000, Some("b1"), Some("a1"))];
+        input.results = vec![CaptureResult {
+            root: test_root().to_string(),
+            started_ms: 43_100,
+            at_ms: 43_200,
+            coverage: "ok".to_string(),
+        }];
+
+        let read = |sha: &str| match sha {
+            "b1" => ObjectRead::Text("export const x = 1;\n".into()),
+            "a1" => ObjectRead::Text("export const x = 2;\n".into()),
+            _ => ObjectRead::Missing,
+        };
+
+        let card = build_card(&input, &read, &no_stat);
+        assert_eq!(card.blocks.len(), 1);
+        assert_eq!(card.blocks[0].via, BlockVia::Bash);
+        assert_eq!(card.blocks[0].bash.as_ref().unwrap().candidates, 2);
     }
 }

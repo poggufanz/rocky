@@ -23,7 +23,7 @@ use rocky_proto::pipe::{AgentKey, CaptureHealth, CaptureState, Gap, RepoInfo};
 use sha2::{Digest, Sha256};
 
 use crate::capture::CaptureResult;
-use crate::cards::attribute::{BuildInput, build_card};
+use crate::cards::attribute::{BuildInput, build_card, collect_edit_windows_for_turn};
 use crate::cards::store::{ObjectRead, StoreReader, Version, read_object};
 use crate::cards::transcript::{TranscriptRead, read_quotes, validate_transcript_path};
 use crate::cards::windows::{PromptIn, ToolKind, ToolWindow, Tracker, TrackerSignal, Turn};
@@ -157,6 +157,7 @@ struct BuildJob {
     store_dir: Option<PathBuf>,
     results: Vec<CaptureResult>,
     other_bash: Vec<ToolWindow>,
+    other_edits: Vec<(String, u64, u64)>,
     gaps: Vec<(u64, u64)>,
     capture_state: Option<CaptureState>,
     home_dir: PathBuf,
@@ -840,6 +841,11 @@ impl Engine {
         let versions_through_ms =
             compute_versions_through_ms(&turn, &results, root_canon.as_deref());
         let other_bash = self.collect_other_bash(&turn, versions_through_ms);
+        let other_edits = if recorded {
+            self.collect_other_edits(&turn, session_root.as_deref(), &results, versions_through_ms)
+        } else {
+            Vec::new()
+        };
         let parent_card_id = if turn.agent.agent_id.is_empty() {
             None
         } else {
@@ -862,6 +868,7 @@ impl Engine {
             store_dir,
             results,
             other_bash,
+            other_edits,
             gaps,
             capture_state,
             home_dir: self.home.clone(),
@@ -879,12 +886,36 @@ impl Engine {
                 if win.agent == turn.agent || win.kind != ToolKind::Bash {
                     continue;
                 }
-                let win_end_upper = win
-                    .post_ms
-                    .unwrap_or(win.pre_ms)
-                    .saturating_add(WINDOW_CAP_MS);
+                let win_end_upper = match win.post_ms {
+                    Some(post) => post.saturating_add(WINDOW_CAP_MS),
+                    None => through_ms,
+                };
                 if win.pre_ms <= through_ms && win_end_upper >= turn.started_ms {
                     out.push(win.clone());
+                }
+            }
+        }
+        out
+    }
+
+    fn collect_other_edits(
+        &self,
+        turn: &Turn,
+        session_root: Option<&str>,
+        results: &[CaptureResult],
+        through_ms: u64,
+    ) -> Vec<(String, u64, u64)> {
+        if session_root.is_none() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for other in self.tracker.retained_turns() {
+            if other.agent == turn.agent {
+                continue;
+            }
+            for item in collect_edit_windows_for_turn(other, session_root, &self.home, results) {
+                if item.1 <= through_ms && item.2 >= turn.started_ms {
+                    out.push(item);
                 }
             }
         }
@@ -984,6 +1015,8 @@ fn run_job(
         versions: version_read.versions,
         results: job.results,
         other_bash: job.other_bash,
+        other_edits: job.other_edits,
+        versions_through_ms: job.versions_through_ms,
         quotes,
         gaps: job.gaps,
         capture_state: job.capture_state,

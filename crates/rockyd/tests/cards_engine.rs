@@ -2944,3 +2944,105 @@ fn set_removed_drops_pending_discards_in_flight_and_ignores_reenable() {
     // Even with ctx.cards == true, the completed in-flight card and pending turns are dropped.
     assert_no_cards_for(&mut engine, 20_000, &ctx, Duration::from_millis(200));
 }
+
+#[test]
+fn parallel_subagent_edit_and_open_bash_attribution() {
+    let fx = Fixture::new("sess-par");
+    let before = "export const v = 1;\n";
+    let after = "export const v = 2;\n";
+    let b_sha = fx.put_object(1, before);
+    let a_sha = fx.put_object(2, after);
+    fx.append_version("src/sub_file.ts", 40_500, &a_sha, Some(&b_sha), false);
+    fx.append_version("src/bash_file.ts", 45_000, &a_sha, Some(&b_sha), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "run tests", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1);
+    let info = fx.repo_info();
+    let mut repo_of = |_: &str| info.clone();
+    let ctx = fx.ctx(true);
+
+    let _ = engine.on_ingest(
+        &user_prompt_out("sess-par", &fx.repo_canon, &fx.transcript_path, "run tests", 1_000),
+        &mut repo_of,
+        1_000,
+    );
+
+    let sub_target = fx.repo_root.join("src/sub_file.ts");
+    let mut sub_start = base_event("SubagentStart", "sess-par", &fx.repo_canon, Some(&fx.transcript_path));
+    sub_start.agent_id = Some("sub-1".to_string());
+    sub_start.agent_type = Some("Worker".to_string());
+
+    let mut sub_bash_pre = bash_pre_event(
+        "sess-par",
+        &fx.repo_canon,
+        &fx.transcript_path,
+        "tu-sub-bash",
+        "npm run watch",
+    );
+    sub_bash_pre.agent_id = Some("sub-1".to_string());
+
+    let mut sub_edit_pre = edit_pre_event(
+        "sess-par",
+        &fx.repo_canon,
+        &fx.transcript_path,
+        "tu-sub-edit",
+        &sub_target.to_string_lossy(),
+    );
+    sub_edit_pre.agent_id = Some("sub-1".to_string());
+
+    let mut sub_edit_post = edit_post_event(
+        "sess-par",
+        &fx.repo_canon,
+        &fx.transcript_path,
+        "tu-sub-edit",
+        &sub_target.to_string_lossy(),
+    );
+    sub_edit_post.agent_id = Some("sub-1".to_string());
+
+    let main_bash_pre = bash_pre_event(
+        "sess-par",
+        &fx.repo_canon,
+        &fx.transcript_path,
+        "tu-main-bash",
+        "cargo test",
+    );
+    let main_bash_post = bash_post_event("sess-par", &fx.repo_canon, &fx.transcript_path, "tu-main-bash");
+
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (sub_start, 1_200),
+                (sub_bash_pre, 2_000),
+                (main_bash_pre, 39_000),
+                (sub_edit_pre, 40_000),
+                (sub_edit_post, 41_000),
+                (main_bash_post, 50_000),
+                (
+                    base_event("Stop", "sess-par", &fx.repo_canon, Some(&fx.transcript_path)),
+                    50_500,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        50_500,
+    );
+
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 50_600,
+        at_ms: 50_700,
+        coverage: "ok".to_string(),
+    }]);
+
+    let cards = poll_until_cards(&mut engine, 50_800, &ctx, 1);
+    let main_card = cards
+        .iter()
+        .find(|c| c.agent_id.is_empty())
+        .expect("expected main card");
+    assert_eq!(main_card.outside_count, 0);
+    assert_eq!(main_card.blocks.len(), 1);
+    assert_eq!(main_card.blocks[0].path, "src/bash_file.ts");
+    assert_eq!(main_card.blocks[0].via, BlockVia::Bash);
+    assert_eq!(main_card.blocks[0].bash.as_ref().unwrap().candidates, 2);
+}
