@@ -37,7 +37,14 @@ export interface ReconcileReport {
   atMs: number;
 }
 
-type WorkerReport = Omit<ReconcileReport, "startedMs">;
+export type WorkerReport = Omit<ReconcileReport, "startedMs">;
+
+/** Pairs a worker report with the host's recorded post timestamp, falling back to `0` when missing. */
+export function buildReconcileReport(msg: WorkerReport, startedAt: Map<string, number>): ReconcileReport {
+  const startedMs = startedAt.get(msg.root) ?? 0;
+  startedAt.delete(msg.root);
+  return { ...msg, startedMs };
+}
 
 export interface CollectorLoop {
   /** Run one tick soon, e.g. right after a consent change. */
@@ -211,9 +218,7 @@ export function startCollectorLoop(opts: {
   };
   worker.on("message", (msg: WorkerReport) => {
     pending.delete(msg.root);
-    const startedMs = startedAt.get(msg.root) ?? msg.atMs;
-    startedAt.delete(msg.root);
-    const report: ReconcileReport = { ...msg, startedMs };
+    const report = buildReconcileReport(msg, startedAt);
     try {
       opts.onResult?.(report);
     } catch {

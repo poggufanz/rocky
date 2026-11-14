@@ -7,6 +7,7 @@ import { basename, join } from "node:path";
 import { setRepoCapture } from "../listening/consent.js";
 import {
   COLLECTOR_TICK_MS,
+  buildReconcileReport,
   startCollectorLoop,
   type CollectorLoop,
   type ReconcileReport,
@@ -461,4 +462,15 @@ test("gui picker lists consented repos as id and label and resolves picks withou
   assert.equal(allowed.body.ok, true);
   assert.equal(allowed.body.root, undefined);
   assert.equal((await call("/api/listening/context")).body.launchConsented, true);
+});
+
+test("buildReconcileReport falls back to zero when startedAt misses the root", () => {
+  const startedAt = new Map<string, number>([["/present", 1_500]]);
+  const present = buildReconcileReport({ root: "/present", coverage: "complete", gaps: 0, atMs: 2_000 }, startedAt);
+  assert.equal(present.startedMs, 1_500);
+  assert.equal(startedAt.has("/present"), false);
+
+  const missing = buildReconcileReport({ root: "/missing", coverage: "complete", gaps: 0, atMs: 2_000 }, startedAt);
+  assert.equal(missing.startedMs, 0);
+  assert.equal(missing.atMs, 2_000);
 });
