@@ -7,7 +7,7 @@ use rocky_proto::pipe::ClientMsg;
 use super::*;
 use crate::i18n::UiLang;
 
-fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> Card {
+pub(super) fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> Card {
     Card {
         v: CARD_VERSION,
         card_id: id.to_string(),
@@ -38,7 +38,7 @@ fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> Card {
     }
 }
 
-fn sample_block(seq: u32, path: &str, labels: Vec<Label>) -> Block {
+pub(super) fn sample_block(seq: u32, path: &str, labels: Vec<Label>) -> Block {
     Block {
         seq,
         path: path.to_string(),
@@ -749,10 +749,10 @@ fn symbol_kinds_single_format_only_and_windows_paths() {
 
     let rows = model.rows(UiLang::En);
     assert_eq!(rows[0].meta, "MyApp \u{00b7} 4 edits");
-    assert_eq!(rows[0].edits[0].symbol.as_deref(), Some("save()"));
-    // A single format_only block does not collapse and keeps its file row + chip.
-    assert_eq!(rows[0].edits[0].file, "lib.rs");
-    assert_eq!(rows[0].edits[0].chip, "format only");
+    // A single format_only block collapses into the summary row.
+    assert_eq!(rows[0].edits[0].symbol, None);
+    assert_eq!(rows[0].edits[0].file, "");
+    assert_eq!(rows[0].edits[0].chip, "1 files changed formatting only");
     assert_eq!(rows[0].edits[1].symbol.as_deref(), Some("Config"));
     assert_eq!(rows[0].edits[1].chip, "body changed");
     assert_eq!(rows[0].edits[2].chip, "outside repo");
@@ -762,9 +762,20 @@ fn symbol_kinds_single_format_only_and_windows_paths() {
     let _ = model.request_first_page(2);
     assert!(model.loading());
     assert_eq!(model.rows(UiLang::En).len(), 1);
-    model.on_cards(2, vec![sample_card("c2", 3_000, Some(4_000))], None);
+    let mut c2 = sample_card("c2", 3_000, Some(4_000));
+    let mut method_only = sample_block(1, "src/repo.rs", vec![Label::BodyChanged {}]);
+    method_only.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Method,
+        name: "save".to_string(),
+        container: Some("Repo".to_string()),
+        exported: false,
+        nth: 0,
+    });
+    c2.blocks.push(method_only);
+    model.on_cards(2, vec![c2], None);
     assert!(!model.loading());
     let refreshed = model.rows(UiLang::En);
     assert_eq!(refreshed.len(), 1);
     assert_eq!(refreshed[0].card_id, "c2");
+    assert_eq!(refreshed[0].edits[0].symbol.as_deref(), Some("save()"));
 }
