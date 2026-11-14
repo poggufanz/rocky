@@ -262,6 +262,7 @@ impl ConsentModel {
             Outcome::Expired => Outcome::Done {
                 ok: false,
                 error: Some(expired.to_string()),
+                cleanup_errors: 0,
             },
             other => other,
         };
@@ -289,11 +290,11 @@ impl ConsentModel {
             (RequestKind::Plan, Outcome::Done { ok: false, .. }) => {
                 self.on_plan_failed(PlanFailure::CliMissing);
             }
-            (RequestKind::Approve, Outcome::Done { ok, error }) => {
+            (RequestKind::Approve, Outcome::Done { ok, error, .. }) => {
                 self.on_approve_done(ok, error);
                 step.send_plan = ok;
             }
-            (RequestKind::Later, Outcome::Done { ok, error }) => {
+            (RequestKind::Later, Outcome::Done { ok, error, .. }) => {
                 step.log = self.on_later_done(ok, error);
             }
             _ => {}
@@ -395,6 +396,7 @@ mod tests {
             Outcome::Done {
                 ok: true,
                 error: None,
+                cleanup_errors: 0,
             },
             "late",
         );
@@ -417,6 +419,7 @@ mod tests {
             Outcome::Done {
                 ok: false,
                 error: Some("boom".into()),
+                cleanup_errors: 0,
             },
             "late",
         );
@@ -437,6 +440,7 @@ mod tests {
             Outcome::Done {
                 ok: false,
                 error: Some("no cli".into()),
+                cleanup_errors: 0,
             },
             "late",
         );
@@ -450,6 +454,7 @@ mod tests {
             Outcome::Done {
                 ok: false,
                 error: Some("down".into()),
+                cleanup_errors: 0,
             },
             "late",
         );
@@ -471,6 +476,7 @@ mod tests {
             Outcome::Done {
                 ok: true,
                 error: None,
+                cleanup_errors: 0,
             },
             "late",
         );
@@ -534,6 +540,7 @@ mod tests {
             Outcome::Done {
                 ok: false,
                 error: None,
+                cleanup_errors: 0,
             },
             "late",
         );
@@ -603,6 +610,7 @@ mod tests {
             Outcome::Done {
                 ok: false,
                 error: Some("slow".into()),
+                cleanup_errors: 0,
             },
             "late",
         );

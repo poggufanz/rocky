@@ -2719,3 +2719,226 @@ fn store_tail_cut_marks_capture_late() {
         cards[0].coverage.reasons
     );
 }
+
+#[test]
+fn set_removed_drops_pending_discards_in_flight_and_ignores_reenable() {
+    use std::sync::{Mutex, mpsc};
+
+    let fx = Fixture::new("sess-rm-1");
+    let before = "export function a(): number { return 1; }\n";
+    let after = "export function a(): number { return 2; }\n";
+    let b_sha = fx.put_object(1, before);
+    let a_sha = fx.put_object(2, after);
+    fx.append_version("src/a.ts", 1_600, &a_sha, Some(&b_sha), false);
+    fx.write_transcript(
+        "1970-01-01T00:00:01.000Z",
+        "Update a",
+        &[("tu-1", "Updating a.")],
+    );
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+    let entered_tx = Mutex::new(entered_tx);
+    let release_rx = Mutex::new(release_rx);
+    let hook_once = AtomicBool::new(false);
+
+    let mut engine = Engine::new_with_build_hook(
+        fx.home.clone(),
+        1,
+        Arc::new(move |_| {
+            if !hook_once.swap(true, Ordering::SeqCst) {
+                let _ = entered_tx.lock().unwrap().send(());
+                let _ = release_rx.lock().unwrap().recv();
+            }
+        }),
+    );
+    struct DropRelease(mpsc::SyncSender<()>);
+    impl Drop for DropRelease {
+        fn drop(&mut self) {
+            let _ = self.0.try_send(());
+        }
+    }
+    let _unblock = DropRelease(release_tx.clone());
+
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let target = fx.file_abs("src/a.ts");
+
+    // Turn 1 enters the worker and waits on the build hook.
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-rm-1",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "p1",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-rm-1",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &target,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-rm-1",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-1",
+                        &target,
+                    ),
+                    1_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-rm-1",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    1_800,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        1_800,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_500,
+        at_ms: 1_600,
+        coverage: "complete".to_string(),
+    }]);
+    assert!(engine.poll(2_000, &ctx).is_empty());
+    entered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("turn 1 should enter build worker");
+
+    // Turn 2 stays pending awaiting capture.
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-rm-2",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "p2",
+            3_000,
+        ),
+        &mut repo_of,
+        3_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-rm-2",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-2",
+                        &target,
+                    ),
+                    3_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-rm-2",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-2",
+                        &target,
+                    ),
+                    3_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-rm-2",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    3_800,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        3_800,
+    );
+
+    engine.set_removed();
+    engine.set_enabled(true);
+    assert!(
+        engine
+            .on_ingest(
+                &user_prompt_out(
+                    "sess-rm-3",
+                    &fx.repo_canon,
+                    &fx.transcript_path,
+                    "p3",
+                    4_000
+                ),
+                &mut repo_of,
+                4_000,
+            )
+            .is_empty()
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-rm-3",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-3",
+                        &target,
+                    ),
+                    4_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-rm-3",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-3",
+                        &target,
+                    ),
+                    4_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-rm-3",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    4_800,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        4_800,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 5_000,
+        at_ms: 5_100,
+        coverage: "complete".to_string(),
+    }]);
+
+    release_tx.send(()).unwrap();
+    // Even with ctx.cards == true, the completed in-flight card and pending turns are dropped.
+    assert_no_cards_for(&mut engine, 20_000, &ctx, Duration::from_millis(200));
+}

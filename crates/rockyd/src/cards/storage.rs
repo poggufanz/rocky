@@ -31,6 +31,7 @@ struct CachedFile {
 pub struct CardStore {
     rocky_home: PathBuf,
     files: HashMap<PathBuf, CachedFile>,
+    removed: bool,
     #[cfg(test)]
     disk_reads: u64,
 }
@@ -41,14 +42,27 @@ impl CardStore {
         CardStore {
             rocky_home,
             files: HashMap::new(),
+            removed: false,
             #[cfg(test)]
             disk_reads: 0,
         }
     }
 
+    /// Permanently disables appends so removed card folders are never recreated.
+    pub fn set_removed(&mut self) {
+        self.removed = true;
+        self.files.clear();
+    }
+
     /// Appends one card revision line to its repo JSONL file (or `_none.jsonl`),
     /// rotating the file through `<file>.tmp` if it exceeds 8 MiB.
     pub fn append(&mut self, card: &Card) -> io::Result<()> {
+        if self.removed {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "change cards removed",
+            ));
+        }
         let path = card_file_path(&self.rocky_home, &card.repo_id)?;
         let mut line = serde_json::to_vec(card).map_err(io::Error::other)?;
         line.push(b'\n');
@@ -1538,5 +1552,28 @@ mod tests {
         assert!(out2.status.success());
         assert!(store2.append(&card).is_err());
         assert_eq!(fs::read_dir(&desk_target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn append_refuses_without_creating_directories_when_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        store.set_removed();
+
+        let card = make_card(
+            "c-removed",
+            1,
+            "r1",
+            Some("/work/r"),
+            Some(1_000),
+            &["a.rs"],
+        );
+        assert!(store.append(&card).is_err());
+        assert!(!cards_dir(dir.path()).exists());
+        assert!(!desk_dir(dir.path()).exists());
+
+        fs::create_dir_all(desk_dir(dir.path())).unwrap();
+        assert!(store.append(&card).is_err());
+        assert!(!cards_dir(dir.path()).exists());
     }
 }

@@ -18,7 +18,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, settings_path, spool_dir};
 use rocky_proto::pipe::{
-    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, ServerMsg, SetupHealth, StatusOp,
+    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, ServerMsg, SetupAction, SetupHealth,
+    StatusOp,
 };
 use rocky_proto::settings::Settings;
 use rockyd::cards::query::CardQueryLoop;
@@ -67,6 +68,8 @@ struct Shared {
     capture: Vec<CaptureHealth>,
     /// Change card log store.
     cards: CardStore,
+    /// Latched when a full Remove Rocky request starts; stays set for this process.
+    cards_removed: bool,
 }
 
 impl Shared {
@@ -148,6 +151,7 @@ fn main() {
         repo_pending: Vec::new(),
         capture: Vec::new(),
         cards: CardStore::new(home.clone()),
+        cards_removed: false,
     }));
 
     let hub = Arc::new(Hub::new());
@@ -333,6 +337,7 @@ fn main() {
                         id,
                         ok: true,
                         error: None,
+                        cleanup_errors: 0,
                     })
                     .is_ok()
                 {
@@ -469,7 +474,7 @@ fn rescan(
             });
         }
         let upserts = out.changes.upserted.len();
-        let cards_enabled = s.settings.cards;
+        let cards_enabled = s.settings.cards && !s.cards_removed;
         (msgs, health, upserts, health_changed, out, cards_enabled)
     };
     for m in &msgs {
@@ -508,7 +513,7 @@ fn service_cards(
     let ctx = {
         let s = shared.lock().unwrap();
         EngineCtx {
-            cards: s.settings.cards,
+            cards: s.settings.cards && !s.cards_removed,
             owned_roots: owned_roots.clone(),
             capture: s.capture.clone(),
             gaps: s.gaps.to_vec(),
@@ -620,6 +625,7 @@ fn handle_set(
                 id,
                 ok: false,
                 error: Some(e.to_string()),
+                cleanup_errors: 0,
             },
             Ok(next) => match settings::save(&settings_path(home), &next) {
                 Err(e) => {
@@ -628,6 +634,7 @@ fn handle_set(
                         id,
                         ok: false,
                         error: Some("save failed".into()),
+                        cleanup_errors: 0,
                     }
                 }
                 Ok(()) => {
@@ -665,6 +672,7 @@ fn handle_set(
                         id,
                         ok: true,
                         error: None,
+                        cleanup_errors: 0,
                     }
                 }
             },
@@ -716,8 +724,11 @@ fn handle_control(
             reply,
         } => {
             let msg = handle_set(id, &name, &value, shared, hub, log, home);
-            let cards_on = shared.lock().unwrap().settings.cards;
-            cards.set_enabled(cards_on);
+            let (cards_on, removed) = {
+                let s = shared.lock().unwrap();
+                (s.settings.cards, s.cards_removed)
+            };
+            cards.set_enabled(cards_on && !removed);
             let _ = reply.send(msg);
             LoopAction::Continue
         }
@@ -727,6 +738,14 @@ fn handle_control(
             LoopAction::Continue
         }
         Control::Setup { id, action, reply } => {
+            if matches!(action, SetupAction::Remove) {
+                {
+                    let mut s = shared.lock().unwrap();
+                    s.cards_removed = true;
+                    s.cards.set_removed();
+                }
+                cards.set_removed();
+            }
             guards.setup_request(id, action, reply, shared, hub, log);
             LoopAction::Continue
         }
@@ -789,6 +808,7 @@ mod tests {
             repo_pending: Vec::new(),
             capture: Vec::new(),
             cards: CardStore::new(home.to_path_buf()),
+            cards_removed: false,
         }))
     }
 
@@ -1193,5 +1213,203 @@ mod tests {
         assert!(!log_text.contains("SECRET_QUERY_LEAK_TOKEN"));
         assert!(!log_text.contains("panic, aborting"));
         assert!(!String::from_utf8_lossy(&out.stderr).contains("SECRET_QUERY_LEAK_TOKEN"));
+    }
+
+    #[test]
+    fn remove_latches_cards_while_build_is_in_flight_and_keeps_settings_and_markers() {
+        use rocky_proto::paths::{cards_dir, cards_off_marker};
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        let repo = home.join("repo");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let settings = Settings::default();
+        assert!(settings.cards);
+        settings::save(&settings_path(&home), &settings).unwrap();
+        let saved_before = std::fs::read(settings_path(&home)).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let hook_once = AtomicBool::new(false);
+
+        let log = RotatingLog::new(&log_path(&home));
+        let hub = Hub::new();
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings = settings;
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut cards = Engine::new_with_build_hook(
+            home.clone(),
+            1,
+            Arc::new(move |_| {
+                if !hook_once.swap(true, Ordering::SeqCst) {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    let _ = release_rx.lock().unwrap().recv();
+                }
+            }),
+        );
+        struct DropRelease(mpsc::SyncSender<()>);
+        impl Drop for DropRelease {
+            fn drop(&mut self) {
+                let _ = self.0.try_send(());
+            }
+        }
+        let _unblock = DropRelease(release_tx.clone());
+        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+
+        let cwd = repo.to_string_lossy().into_owned();
+        let target = repo.join("src").join("a.rs").to_string_lossy().into_owned();
+        let write_turn = |seq: u64, sess: &str, ts_base: u64| {
+            let events = [
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base,
+                    "kind": "event",
+                    "event": { "hook_event_name": "SessionStart", "session_id": sess, "cwd": cwd }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 1,
+                    "kind": "event",
+                    "event": { "hook_event_name": "UserPromptSubmit", "session_id": sess, "cwd": cwd, "prompt": "edit file" }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 2,
+                    "kind": "event",
+                    "event": { "hook_event_name": "PreToolUse", "session_id": sess, "cwd": cwd, "tool_name": "Edit", "tool_use_id": format!("tu-{seq}"), "target_path": target }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 3,
+                    "kind": "event",
+                    "event": { "hook_event_name": "PostToolUse", "session_id": sess, "cwd": cwd, "tool_name": "Edit", "tool_use_id": format!("tu-{seq}"), "target_path": target }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 4,
+                    "kind": "event",
+                    "event": { "hook_event_name": "Stop", "session_id": sess, "cwd": cwd }
+                }),
+            ];
+            for (idx, ev) in events.iter().enumerate() {
+                let name = format!("{:013}-{seq}-{idx}.json", ts_base + idx as u64);
+                std::fs::write(spool.join(name), serde_json::to_vec(ev).unwrap()).unwrap();
+            }
+        };
+
+        write_turn(1, "sess-before-remove", 1_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        let owned = BTreeSet::new();
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("first turn card build should start in worker");
+
+        let (reply_tx, _reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Setup {
+                id: 77,
+                action: SetupAction::Remove,
+                reply: reply_tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+        assert!(
+            !cards_dir(&home).exists(),
+            "cards dir should still be absent at cleanup time"
+        );
+
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        write_turn(2, "sess-after-remove", 10_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+
+        assert!(
+            !cards_dir(&home).exists(),
+            "desk/cards must stay absent after Remove"
+        );
+        let (set_tx, set_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Set {
+                id: 78,
+                name: "cards".to_string(),
+                value: Value::Bool(true),
+                reply: set_tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+        assert!(matches!(
+            set_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(ServerMsg::Ack {
+                id: 78,
+                ok: true,
+                ..
+            })
+        ));
+        write_turn(3, "sess-after-set", 20_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        assert!(!cards_dir(&home).exists());
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .cards
+                .append(&make_test_card(&home, "after-remove"))
+                .is_err(),
+            "CardStore::append must refuse after Remove"
+        );
+        assert!(!cards_dir(&home).exists());
+        assert!(shared.lock().unwrap().settings.cards);
+        assert_eq!(std::fs::read(settings_path(&home)).unwrap(), saved_before);
+        assert!(!cards_off_marker(&home).exists());
     }
 }

@@ -209,6 +209,7 @@ impl CardQueryLoop {
                 id,
                 ok: false,
                 error: Some("query worker unavailable".to_string()),
+                cleanup_errors: 0,
             });
         }
     }
@@ -280,6 +281,7 @@ fn run_query(
                 id,
                 ok: false,
                 error: Some("card not found".to_string()),
+                cleanup_errors: 0,
             },
         },
         QueryKind::BlockDiff {
@@ -436,6 +438,7 @@ mod tests {
                 id: 4,
                 ok: false,
                 error: Some("card not found".to_string()),
+                cleanup_errors: 0,
             }
         );
 

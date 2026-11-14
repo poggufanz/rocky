@@ -386,6 +386,7 @@ fn handle_client<S>(
                             id,
                             ok: true,
                             error: None,
+                            cleanup_errors: 0,
                         },
                     ) {
                         break;
@@ -497,6 +498,7 @@ fn handle_client<S>(
                             id,
                             ok: false,
                             error: Some("daemon stopping".into()),
+                            cleanup_errors: 0,
                         });
                         if write_line(&stream, ack.as_bytes()).is_err() {
                             break;
@@ -514,6 +516,7 @@ fn handle_client<S>(
                                 id,
                                 ok: false,
                                 error: Some("daemon stopping".into()),
+                                cleanup_errors: 0,
                             });
                             if write_line(&stream, ack.as_bytes()).is_err() {
                                 break;
@@ -546,6 +549,7 @@ fn daemon_stopping(id: u64) -> ServerMsg {
         id,
         ok: false,
         error: Some("daemon stopping".into()),
+        cleanup_errors: 0,
     }
 }
 

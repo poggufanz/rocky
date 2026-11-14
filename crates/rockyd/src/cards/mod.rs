@@ -249,6 +249,7 @@ impl Drop for WorkerPool {
 pub struct Engine {
     home: PathBuf,
     enabled: bool,
+    removed: bool,
     tracker: Tracker,
     repo_cache: HashMap<String, RepoInfo>,
     parent_card_ids: HashMap<TurnId, String>,
@@ -277,6 +278,7 @@ impl Engine {
         Self {
             home,
             enabled: true,
+            removed: false,
             tracker: Tracker::new(),
             repo_cache: HashMap::new(),
             parent_card_ids: HashMap::new(),
@@ -290,8 +292,21 @@ impl Engine {
         }
     }
 
+    /// Latches card tracking and building off permanently once Remove Rocky starts.
+    pub fn set_removed(&mut self) {
+        self.removed = true;
+        self.enabled = false;
+        self.reset_tracking();
+        self.captures_by_root.clear();
+        self.latest_valid_capture.clear();
+    }
+
     /// Updates whether change card tracking and building are active.
     pub fn set_enabled(&mut self, enabled: bool) {
+        if self.removed {
+            self.enabled = false;
+            return;
+        }
         if !enabled {
             self.reset_tracking();
         }
@@ -320,7 +335,7 @@ impl Engine {
         repo_of: &mut dyn FnMut(&str) -> RepoInfo,
         now_ms: u64,
     ) -> Vec<FlushRequest> {
-        if !self.enabled {
+        if self.removed || !self.enabled {
             return Vec::new();
         }
 
@@ -445,6 +460,9 @@ impl Engine {
 
     /// Records new reconcile results produced by the capture child.
     pub fn on_capture(&mut self, results: &[CaptureResult]) {
+        if self.removed {
+            return;
+        }
         for res in results {
             let canon = canonical_path(&res.root, cfg!(windows));
             if res.started_ms > 0 {
@@ -468,7 +486,8 @@ impl Engine {
         while let Some(done) = self.pool.try_recv() {
             if let Some(state) = self.turn_states.get_mut(&done.turn_id) {
                 state.in_flight = false;
-                if ctx.cards
+                if !self.removed
+                    && ctx.cards
                     && !done.panicked
                     && let Some(card) = done.card
                 {
@@ -478,6 +497,10 @@ impl Engine {
             }
         }
 
+        if self.removed {
+            self.reset_tracking();
+            return Vec::new();
+        }
         if !ctx.cards {
             self.set_enabled(false);
             return Vec::new();

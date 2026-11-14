@@ -385,6 +385,8 @@ pub enum ServerMsg {
         id: u64,
         ok: bool,
         error: Option<String>,
+        #[serde(default)]
+        cleanup_errors: u32,
     },
     ConsentPlan {
         id: u64,
@@ -713,11 +715,33 @@ mod tests {
                 id: 7,
                 ok: true,
                 error: None,
+                cleanup_errors: 0,
             },
         ];
         for m in msgs {
             assert_eq!(decode::<ServerMsg>(encode(&m).trim_end()).unwrap(), m);
         }
+        let legacy: ServerMsg =
+            decode(r#"{"v":4,"type":"ack","id":8,"ok":true,"error":null}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ServerMsg::Ack {
+                id: 8,
+                ok: true,
+                error: None,
+                cleanup_errors: 0,
+            }
+        );
+        let with_cleanup = ServerMsg::Ack {
+            id: 9,
+            ok: true,
+            error: None,
+            cleanup_errors: 2,
+        };
+        assert_eq!(
+            decode::<ServerMsg>(encode(&with_cleanup).trim_end()).unwrap(),
+            with_cleanup
+        );
     }
     #[test]
     fn quit_messages_round_trip_at_protocol_4() {

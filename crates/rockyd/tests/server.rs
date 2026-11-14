@@ -402,6 +402,7 @@ fn stop_cmd_reaches_control_and_acks() {
             id: 7,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         })
         .unwrap();
     flushed.recv_timeout(GUARD).unwrap();
@@ -411,7 +412,8 @@ fn stop_cmd_reaches_control_and_acks() {
         ServerMsg::Ack {
             id: 7,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 }
@@ -462,6 +464,7 @@ fn quit_broadcasts_to_every_subscriber_then_acks() {
             id: 5,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         })
         .unwrap();
     flushed.recv_timeout(GUARD).unwrap();
@@ -472,7 +475,8 @@ fn quit_broadcasts_to_every_subscriber_then_acks() {
         ServerMsg::Ack {
             id: 5,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 }
@@ -561,7 +565,8 @@ fn cmd_show_reaches_other_clients_and_acks_sender() {
         ServerMsg::Ack {
             id: 5,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 }
@@ -612,6 +617,7 @@ fn set_and_timeline_route_through_control_to_sender_only() {
             id: 1,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         })
         .unwrap();
     let ack: ServerMsg = decode(&sender.read_line().unwrap()).unwrap();
@@ -620,7 +626,8 @@ fn set_and_timeline_route_through_control_to_sender_only() {
         ServerMsg::Ack {
             id: 1,
             ok: true,
-            error: None
+            error: None,
+            cleanup_errors: 0,
         }
     );
 

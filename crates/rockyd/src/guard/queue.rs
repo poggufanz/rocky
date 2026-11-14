@@ -37,6 +37,7 @@ impl Guard {
                 id,
                 ok: false,
                 error,
+                cleanup_errors: 0,
             };
             return Some(Effect::Reply { token, msg });
         }
@@ -141,11 +142,20 @@ impl Guard {
             // A refused entry stays by design, so it does not count.
             SetupAction::Remove => {
                 let failed = count_state(&result.targets, TargetState::Error);
+                let cleanup_errors = u32::try_from(result.notes.len()).unwrap_or(u32::MAX);
                 self.targets = result.targets;
                 match failed {
-                    0 => ack(id, Ok(())),
-                    1 => ack(id, Err("1 entry was not removed.".to_string())),
-                    n => ack(id, Err(format!("{n} entries were not removed."))),
+                    0 => ack_with_cleanup(id, Ok(()), cleanup_errors),
+                    1 => ack_with_cleanup(
+                        id,
+                        Err("1 entry was not removed.".to_string()),
+                        cleanup_errors,
+                    ),
+                    n => ack_with_cleanup(
+                        id,
+                        Err(format!("{n} entries were not removed.")),
+                        cleanup_errors,
+                    ),
                 }
             }
             SetupAction::Apply | SetupAction::ConsentApprove | SetupAction::ConsentLater => {
@@ -192,6 +202,7 @@ impl Guard {
             id,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         };
         effects.push(Effect::Reply { token, msg });
         effects
@@ -287,16 +298,23 @@ fn unknown_harness(action: &SetupAction) -> Option<&str> {
 
 /// An ack for `id`: `Ok` succeeds, `Err` carries the failure text.
 fn ack(id: u64, outcome: Result<(), String>) -> ServerMsg {
+    ack_with_cleanup(id, outcome, 0)
+}
+
+/// An ack carrying any non-fatal cleanup note count reported alongside removal.
+fn ack_with_cleanup(id: u64, outcome: Result<(), String>, cleanup_errors: u32) -> ServerMsg {
     match outcome {
         Ok(()) => ServerMsg::Ack {
             id,
             ok: true,
             error: None,
+            cleanup_errors,
         },
         Err(error) => ServerMsg::Ack {
             id,
             ok: false,
             error: Some(error),
+            cleanup_errors,
         },
     }
 }
@@ -312,6 +330,7 @@ fn ack_error(token: u64, id: u64, err: &RunError) -> Effect {
         id,
         ok: false,
         error: Some(err.to_string()),
+        cleanup_errors: 0,
     };
     Effect::Reply { token, msg }
 }

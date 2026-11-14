@@ -107,6 +107,7 @@ fn switch_shows_pending_until_answered() {
             id: 1,
             ok: true,
             error: None,
+            cleanup_errors: 0,
         })
         .unwrap();
     let mut model = SetupSettings::default();
@@ -264,10 +265,34 @@ fn remove_needs_two_steps_and_disables_autostart_first() {
         Outcome::Done {
             ok: true,
             error: None,
+            cleanup_errors: 0,
         },
         "late",
     );
     assert!(step.show_removed);
+}
+
+#[test]
+fn remove_keeps_cleanup_errors_while_advancing_to_removed() {
+    let mut model = SetupSettings::default();
+    model.ask_remove();
+    assert!(model.begin_remove(&mut || Ok(())).is_some());
+    let step = model.route(
+        RequestKind::Remove,
+        Outcome::Done {
+            ok: true,
+            error: None,
+            cleanup_errors: 2,
+        },
+        "late",
+    );
+    assert!(step.show_removed);
+    assert_eq!(model.removed_cleanup_errors(), 2);
+
+    // Retrying or starting a fresh remove clears stale cleanup counts.
+    model.ask_remove();
+    assert!(model.begin_remove(&mut || Ok(())).is_some());
+    assert_eq!(model.removed_cleanup_errors(), 0);
 }
 
 #[test]
@@ -284,6 +309,7 @@ fn remove_failure_keeps_settings_with_retry() {
         Outcome::Done {
             ok: false,
             error: Some("node exited 1".into()),
+            cleanup_errors: 0,
         },
         "late",
     );

@@ -230,6 +230,7 @@ fn repo_decision_clears_pending_and_acks() {
         id: 42,
         ok: true,
         error: None,
+        cleanup_errors: 0,
     };
     assert_eq!(
         effects,
@@ -250,6 +251,7 @@ fn repo_decision_failure_acks_with_the_error() {
         id: 42,
         ok: false,
         error: Some(RunError::NoCli.to_string()),
+        cleanup_errors: 0,
     };
     assert_eq!(effects, vec![Effect::Reply { token: 7, msg }]);
 }
@@ -377,6 +379,7 @@ fn unknown_harness_is_refused_without_node() {
         id: 9,
         ok: false,
         error: Some("unknown harness cursor".to_string()),
+        cleanup_errors: 0,
     };
     assert_eq!(refused, Some(Effect::Reply { token: 3, msg }));
     assert_eq!(guard.next_job(0), None);
@@ -468,6 +471,7 @@ fn no_cli_finishes_client_requests_with_an_error() {
         id: 2,
         ok: false,
         error: Some(no_cli.clone()),
+        cleanup_errors: 0,
     };
     let effects = guard.finish(&setup, Err(RunError::NoCli), 0);
     assert_eq!(effects, vec![Effect::Reply { token: 1, msg }]);
@@ -477,6 +481,7 @@ fn no_cli_finishes_client_requests_with_an_error() {
         id: 4,
         ok: false,
         error: Some(no_cli),
+        cleanup_errors: 0,
     };
     let effects = guard.finish(&decide, Err(RunError::NoCli), 0);
     assert_eq!(effects, vec![Effect::Reply { token: 3, msg }]);
@@ -636,6 +641,16 @@ fn ack(ok: bool, error: Option<&str>) -> ServerMsg {
         id: 1,
         ok,
         error: error.map(str::to_string),
+        cleanup_errors: 0,
+    }
+}
+
+fn ack_with_cleanup(ok: bool, error: Option<&str>, cleanup_errors: u32) -> ServerMsg {
+    ServerMsg::Ack {
+        id: 1,
+        ok,
+        error: error.map(str::to_string),
+        cleanup_errors,
     }
 }
 
@@ -690,6 +705,32 @@ fn remove_with_only_ok_and_refused_targets_acks_true() {
     assert_eq!(
         run_setup(&mut guard, SetupAction::Remove, done),
         ack(true, None)
+    );
+}
+
+#[test]
+fn remove_with_card_cleanup_note_carries_cleanup_errors_count() {
+    let mut guard = guard_with_targets(Vec::new());
+    let one_note = result_with(
+        vec![harness_target("claude-code", "/a", TargetState::Ok)],
+        &["1 card data entry could not be removed"],
+    );
+    assert_eq!(
+        run_setup(&mut guard, SetupAction::Remove, one_note),
+        ack_with_cleanup(true, None, 1)
+    );
+
+    let mut guard = guard_with_targets(Vec::new());
+    let two_notes_plus_target_err = result_with(
+        vec![harness_target("codex", "/a", TargetState::Error)],
+        &[
+            "2 card data entries could not be removed",
+            "extra cleanup note",
+        ],
+    );
+    assert_eq!(
+        run_setup(&mut guard, SetupAction::Remove, two_notes_plus_target_err),
+        ack_with_cleanup(false, Some("1 entry was not removed."), 2)
     );
 }
 

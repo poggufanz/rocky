@@ -129,7 +129,7 @@ impl Model {
                 self.set_error = None;
                 self.open.iter().cloned().collect()
             }
-            ServerMsg::Ack { id, ok, error } => {
+            ServerMsg::Ack { id, ok, error, .. } => {
                 if self.sent.remove(&id) && !ok {
                     self.set_error = Some(error.unwrap_or_default());
                 }
