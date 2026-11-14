@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rocky_proto::cards::Card;
-use rocky_proto::paths::{cards_dir, cards_file, cards_none_file};
+use rocky_proto::paths::{cards_dir, cards_file, cards_none_file, desk_dir};
 
 /// Maximum card file size (8 MiB) before rotation trims older cards.
 pub const MAX_CARD_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -53,13 +53,7 @@ impl CardStore {
         let mut line = serde_json::to_vec(card).map_err(io::Error::other)?;
         line.push(b'\n');
 
-        let dir = cards_dir(&self.rocky_home);
-        fs::create_dir_all(&dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-        }
+        ensure_cards_dir(&self.rocky_home)?;
 
         let len = {
             let mut file = open_append_private(&path)?;
@@ -84,40 +78,43 @@ impl CardStore {
         Ok(())
     }
 
-    /// Returns one page of latest card revisions matching `query` before `before`,
-    /// sorted by `ended_ms` descending, with the cursor for the next page.
+    /// Returns one page of latest card revisions matching `query` strictly after
+    /// `before` in `(ended_ms.unwrap_or(started_ms) desc, card_id desc)` order,
+    /// along with the opaque `"<key_ms>:<card_id>"` cursor for the next page.
     pub fn page(
         &mut self,
         query: Option<&str>,
-        before: Option<u64>,
+        before: Option<&str>,
         limit: usize,
-    ) -> (Vec<Card>, Option<u64>) {
+    ) -> (Vec<Card>, Option<String>) {
         self.refresh_cache();
         let limit = limit.min(MAX_PAGE_LIMIT);
         if limit == 0 {
             return (Vec::new(), None);
         }
 
+        let cursor = before.and_then(parse_cursor);
         let needle = query.filter(|q| !q.is_empty()).map(str::to_lowercase);
         let latest = self.latest_cards();
 
         let mut matched: Vec<&Card> = latest
             .into_iter()
-            .filter(|card| before.is_none_or(|cursor| card.ended_ms.is_some_and(|ms| ms < cursor)))
+            .filter(|card| {
+                cursor.is_none_or(|(cur_key, cur_id)| {
+                    (card_sort_key(card), card.card_id.as_str()) < (cur_key, cur_id)
+                })
+            })
             .filter(|card| needle.as_deref().is_none_or(|q| matches_query(card, q)))
             .collect();
 
         matched.sort_by(|a, b| {
-            b.ended_ms
-                .cmp(&a.ended_ms)
-                .then_with(|| b.started_ms.cmp(&a.started_ms))
-                .then_with(|| a.card_id.cmp(&b.card_id))
+            (card_sort_key(b), b.card_id.as_str()).cmp(&(card_sort_key(a), a.card_id.as_str()))
         });
 
         let has_more = matched.len() > limit;
         let items: Vec<Card> = matched.into_iter().take(limit).cloned().collect();
         let next = if has_more {
-            items.last().and_then(|c| c.ended_ms)
+            items.last().map(format_cursor)
         } else {
             None
         };
@@ -165,7 +162,19 @@ impl CardStore {
     }
 
     fn refresh_cache(&mut self) {
+        let desk = desk_dir(&self.rocky_home);
         let dir = cards_dir(&self.rocky_home);
+        let (Ok(desk_meta), Ok(dir_meta)) =
+            (fs::symlink_metadata(&desk), fs::symlink_metadata(&dir))
+        else {
+            self.files.clear();
+            return;
+        };
+        if !is_real_dir(&desk_meta) || !is_real_dir(&dir_meta) {
+            self.files.clear();
+            return;
+        }
+
         let Ok(entries) = fs::read_dir(&dir) else {
             self.files.clear();
             return;
@@ -180,7 +189,7 @@ impl CardStore {
             let Ok(meta) = fs::symlink_metadata(&path) else {
                 continue;
             };
-            if !meta.file_type().is_file() {
+            if !is_real_file(&meta) {
                 continue;
             }
 
@@ -208,6 +217,23 @@ impl CardStore {
     }
 }
 
+fn card_sort_key(card: &Card) -> u64 {
+    card.ended_ms.unwrap_or(card.started_ms)
+}
+
+fn format_cursor(card: &Card) -> String {
+    format!("{}:{}", card_sort_key(card), card.card_id)
+}
+
+fn parse_cursor(cursor: &str) -> Option<(u64, &str)> {
+    let (key_str, card_id) = cursor.split_once(':')?;
+    if key_str.is_empty() || !key_str.bytes().all(|b| b.is_ascii_digit()) || card_id.is_empty() {
+        return None;
+    }
+    let key_ms = key_str.parse::<u64>().ok()?;
+    Some((key_ms, card_id))
+}
+
 fn is_newer_revision(candidate: &Card, current: &Card) -> bool {
     candidate.rev > current.rev
         || (candidate.rev == current.rev && candidate.ended_ms > current.ended_ms)
@@ -231,13 +257,128 @@ fn card_file_path(rocky_home: &Path, repo_id: &str) -> io::Result<PathBuf> {
     }
 }
 
-fn open_private(path: &Path, opts: &mut OpenOptions) -> io::Result<File> {
+fn is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_real_dir(meta: &fs::Metadata) -> bool {
+    !is_symlink_or_reparse(meta) && meta.file_type().is_dir()
+}
+
+fn is_real_file(meta: &fs::Metadata) -> bool {
+    !is_symlink_or_reparse(meta) && meta.file_type().is_file()
+}
+
+fn ensure_real_dir(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !is_real_dir(&meta) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "storage directory must not be a link",
+                ));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            match fs::create_dir(path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+            let meta = fs::symlink_metadata(path)?;
+            if !is_real_dir(&meta) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "storage directory must not be a link",
+                ));
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn ensure_cards_dir(rocky_home: &Path) -> io::Result<()> {
+    if !rocky_home.exists() {
+        fs::create_dir_all(rocky_home)?;
+    }
+    ensure_real_dir(&desk_dir(rocky_home))?;
+    let dir = cards_dir(rocky_home);
+    ensure_real_dir(&dir)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut opts = OpenOptions::new();
+        opts.read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
+        let dir_file = opts.open(&dir)?;
+        let meta = dir_file.metadata()?;
+        if !meta.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cards directory is not a directory",
+            ));
+        }
+        dir_file.set_permissions(fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn ensure_regular_file(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if !is_real_file(&meta) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "card file must not be a link",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_regular_file_or_missing(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !is_real_file(&meta) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "card file must not be a link",
+                ));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn open_nofollow_private(path: &Path, opts: &mut OpenOptions) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
+        opts.custom_flags(libc::O_NOFOLLOW);
     }
     let file = opts.open(path)?;
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "opened card file is not a regular file",
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -247,18 +388,34 @@ fn open_private(path: &Path, opts: &mut OpenOptions) -> io::Result<File> {
 }
 
 fn open_append_private(path: &Path) -> io::Result<File> {
+    ensure_regular_file_or_missing(path)?;
     let mut opts = OpenOptions::new();
     opts.create(true).append(true).read(true);
-    open_private(path, &mut opts)
+    open_nofollow_private(path, &mut opts)
 }
 
-fn open_truncate_private(path: &Path) -> io::Result<File> {
+fn prepare_tmp_file(tmp_path: &Path) -> io::Result<File> {
+    match fs::symlink_metadata(tmp_path) {
+        Ok(meta) => {
+            if !is_real_file(&meta) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "temporary card file must not be a link",
+                ));
+            }
+            fs::remove_file(tmp_path)?;
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
     let mut opts = OpenOptions::new();
-    opts.create(true).write(true).truncate(true);
-    open_private(path, &mut opts)
+    opts.write(true).create_new(true);
+    open_nofollow_private(tmp_path, &mut opts)
 }
 
 fn open_nofollow_readonly(path: &Path) -> io::Result<File> {
+    ensure_regular_file(path)?;
     let mut opts = OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
@@ -329,6 +486,16 @@ struct CardGroup {
 }
 
 fn rotate_file(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let dir_meta = fs::symlink_metadata(parent)?;
+        if !is_real_dir(&dir_meta) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cards directory must not be a link",
+            ));
+        }
+    }
+
     let mut groups: HashMap<String, CardGroup> = HashMap::new();
     {
         let file = open_nofollow_readonly(path)?;
@@ -399,8 +566,8 @@ fn rotate_file(path: &Path) -> io::Result<()> {
     kept_lines.sort_by_key(|(idx, _)| *idx);
 
     let tmp_path = tmp_file_path(path);
+    let file = prepare_tmp_file(&tmp_path)?;
     let write_res = (|| -> io::Result<()> {
-        let file = open_truncate_private(&tmp_path)?;
         let mut writer = BufWriter::new(file);
         for (_, bytes) in &kept_lines {
             writer.write_all(bytes)?;
@@ -409,6 +576,10 @@ fn rotate_file(path: &Path) -> io::Result<()> {
         writer.flush()
     })();
     if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    if let Err(err) = ensure_regular_file(path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(err);
     }
@@ -450,6 +621,7 @@ fn repo_name_from_root(root: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::Path;
@@ -458,7 +630,7 @@ mod tests {
         Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageState,
         Importance, Label, Quote, SymbolKind,
     };
-    use rocky_proto::paths::{cards_dir, cards_file, cards_none_file};
+    use rocky_proto::paths::{cards_dir, cards_file, cards_none_file, desk_dir};
 
     use super::{
         CardStore, MAX_CARD_FILE_BYTES, MAX_PAGE_LIMIT, ROTATE_TARGET_BYTES, tmp_file_path,
@@ -804,9 +976,9 @@ mod tests {
         assert_eq!(p1.len(), MAX_PAGE_LIMIT);
         assert_eq!(p1[0].ended_ms, Some(25_000));
         assert_eq!(p1[19].ended_ms, Some(6_000));
-        assert_eq!(next1, Some(6_000));
+        assert_eq!(next1.as_deref(), Some("6000:card-06"));
 
-        let (p2, next2) = store.page(None, next1, 20);
+        let (p2, next2) = store.page(None, next1.as_deref(), 20);
         assert_eq!(p2.len(), 5);
         assert_eq!(p2[0].ended_ms, Some(5_000));
         assert_eq!(p2[4].ended_ms, Some(1_000));
@@ -815,20 +987,202 @@ mod tests {
         // Smaller limit paging through multiple cursors.
         let (s1, sn1) = store.page(None, None, 10);
         assert_eq!(s1.len(), 10);
-        assert_eq!(sn1, Some(16_000));
+        assert_eq!(sn1.as_deref(), Some("16000:card-16"));
 
-        let (s2, sn2) = store.page(None, sn1, 10);
+        let (s2, sn2) = store.page(None, sn1.as_deref(), 10);
         assert_eq!(s2.len(), 10);
         assert_eq!(s2[0].ended_ms, Some(15_000));
-        assert_eq!(sn2, Some(6_000));
+        assert_eq!(sn2.as_deref(), Some("6000:card-06"));
 
-        let (s3, sn3) = store.page(None, sn2, 10);
+        let (s3, sn3) = store.page(None, sn2.as_deref(), 10);
         assert_eq!(s3.len(), 5);
         assert_eq!(sn3, None);
 
         let (empty, next_empty) = store.page(None, None, 0);
         assert!(empty.is_empty());
         assert_eq!(next_empty, None);
+    }
+
+    #[test]
+    fn page_cursor_breaks_identical_end_time_ties() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "dddddddddddddddddddddddddddddddd";
+
+        for i in 1..=21u64 {
+            let mut card = make_card(
+                &format!("card-{i:02}"),
+                1,
+                repo,
+                Some("/work/repo"),
+                Some(5_000),
+                &["src/lib.rs"],
+            );
+            // Vary started_ms in reverse order to verify sort order uses (key, card_id).
+            card.started_ms = 4_000 - i;
+            store.append(&card).unwrap();
+        }
+
+        let (p1, next1) = store.page(None, None, 20);
+        assert_eq!(p1.len(), 20);
+        assert_eq!(p1[0].card_id, "card-21");
+        assert_eq!(p1[19].card_id, "card-02");
+        assert_eq!(next1.as_deref(), Some("5000:card-02"));
+
+        let (p2, next2) = store.page(None, next1.as_deref(), 20);
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0].card_id, "card-01");
+        assert_eq!(next2, None);
+
+        let seen: HashSet<String> = p1
+            .iter()
+            .chain(p2.iter())
+            .map(|c| c.card_id.clone())
+            .collect();
+        assert_eq!(seen.len(), 21);
+    }
+
+    #[test]
+    fn page_cursor_reaches_and_crosses_open_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "dddddddddddddddddddddddddddddddd";
+
+        for i in 1..=21u64 {
+            let card = make_card(
+                &format!("done-{i:02}"),
+                1,
+                repo,
+                Some("/work/repo"),
+                Some(10_000 + i),
+                &["src/lib.rs"],
+            );
+            store.append(&card).unwrap();
+        }
+        let mut open_old = make_card("open-old", 1, repo, Some("/work/repo"), None, &["a.rs"]);
+        open_old.started_ms = 500;
+        open_old.status = CardStatus::Open;
+        store.append(&open_old).unwrap();
+
+        let (p1, next1) = store.page(None, None, 20);
+        assert_eq!(p1.len(), 20);
+        assert!(next1.is_some());
+
+        let (p2, next2) = store.page(None, next1.as_deref(), 20);
+        assert_eq!(p2.len(), 2);
+        assert_eq!(p2[0].card_id, "done-01");
+        assert_eq!(p2[1].card_id, "open-old");
+        assert_eq!(p2[1].ended_ms, None);
+        assert_eq!(next2, None);
+
+        // Now verify paging when an open card sits at the exact page boundary and
+        // shares its sort key with a completed card.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut store2 = CardStore::new(dir2.path().to_path_buf());
+        for i in 1..=19u64 {
+            store2
+                .append(&make_card(
+                    &format!("head-{i:02}"),
+                    1,
+                    repo,
+                    Some("/work/repo"),
+                    Some(30_000 + i),
+                    &["a.rs"],
+                ))
+                .unwrap();
+        }
+        let mut open_mid = make_card("card-open", 1, repo, Some("/work/repo"), None, &["b.rs"]);
+        open_mid.started_ms = 20_000;
+        open_mid.status = CardStatus::Open;
+        store2.append(&open_mid).unwrap();
+
+        let mut tied_closed = make_card(
+            "card-closed",
+            1,
+            repo,
+            Some("/work/repo"),
+            Some(20_000),
+            &["c.rs"],
+        );
+        tied_closed.started_ms = 19_000;
+        store2.append(&tied_closed).unwrap();
+
+        store2
+            .append(&make_card(
+                "tail-01",
+                1,
+                repo,
+                Some("/work/repo"),
+                Some(10_000),
+                &["d.rs"],
+            ))
+            .unwrap();
+
+        let (b1, bnext1) = store2.page(None, None, 20);
+        assert_eq!(b1.len(), 20);
+        assert_eq!(b1[19].card_id, "card-open");
+        assert_eq!(bnext1.as_deref(), Some("20000:card-open"));
+
+        let (b2, bnext2) = store2.page(None, bnext1.as_deref(), 20);
+        let b2_ids: Vec<&str> = b2.iter().map(|c| c.card_id.as_str()).collect();
+        assert_eq!(b2_ids, vec!["card-closed", "tail-01"]);
+        assert_eq!(bnext2, None);
+
+        // Single-item paging visits every card exactly once without duplicates.
+        let mut collected = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let (items, next) = store2.page(None, cursor.as_deref(), 1);
+            assert_eq!(items.len(), 1);
+            collected.push(items[0].card_id.clone());
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(collected.len(), 22);
+        let unique: HashSet<&str> = collected.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), 22);
+    }
+
+    #[test]
+    fn page_malformed_cursor_returns_first_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "dddddddddddddddddddddddddddddddd";
+
+        for (id, ms) in [("c1", 1_000), ("c2", 2_000), ("c3", 3_000)] {
+            store
+                .append(&make_card(
+                    id,
+                    1,
+                    repo,
+                    Some("/work/repo"),
+                    Some(ms),
+                    &["a.rs"],
+                ))
+                .unwrap();
+        }
+
+        let expected = store.page(None, None, 2);
+        for bad in [
+            "",
+            "invalid",
+            "2000",
+            ":c2",
+            "2000:",
+            "-1:c2",
+            "+2000:c2",
+            " 2000:c2",
+            "abc:c2",
+            "99999999999999999999999999999:c2",
+        ] {
+            assert_eq!(
+                store.page(None, Some(bad), 2),
+                expected,
+                "malformed cursor {bad:?} should return first page"
+            );
+        }
     }
 
     #[test]
@@ -883,13 +1237,12 @@ mod tests {
         assert_eq!(ids, vec!["c2", "c1"]);
     }
 
-    #[test]
-    fn failed_rotation_leaves_original_intact() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = CardStore::new(dir.path().to_path_buf());
-        let repo = "ffffffffffffffffffffffffffffffff";
-        let path = cards_file(dir.path(), repo);
-
+    fn prepare_near_limit_file(
+        store: &mut CardStore,
+        path: &Path,
+        repo: &str,
+        overflow_id: &str,
+    ) -> Card {
         let big_blocks: Vec<Block> = (1..=30)
             .map(|seq| sample_block(seq, &format!("src/file_{seq}.rs"), 2_500))
             .collect();
@@ -899,7 +1252,7 @@ mod tests {
             c
         };
 
-        let overflow = make_big("overflow-card", 99_999);
+        let overflow = make_big(overflow_id, 99_999);
         let overflow_bytes = serde_json::to_vec(&overflow).unwrap().len() as u64 + 1;
 
         let mut i = 0u64;
@@ -907,12 +1260,23 @@ mod tests {
             i += 1;
             let c = make_big(&format!("pre-{i:04}"), 1_000 + i);
             store.append(&c).unwrap();
-            let len = fs::metadata(&path).unwrap().len();
+            let len = fs::metadata(path).unwrap().len();
             assert!(len <= MAX_CARD_FILE_BYTES);
             if len + overflow_bytes > MAX_CARD_FILE_BYTES {
                 break;
             }
         }
+        overflow
+    }
+
+    #[test]
+    fn failed_rotation_leaves_original_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "ffffffffffffffffffffffffffffffff";
+        let path = cards_file(dir.path(), repo);
+
+        let overflow = prepare_near_limit_file(&mut store, &path, repo, "overflow-card");
 
         // Block `<file>.tmp` with a directory so rewriting fails.
         fs::create_dir(tmp_file_path(&path)).unwrap();
@@ -960,5 +1324,219 @@ mod tests {
         assert_eq!(store.disk_reads, 2);
         assert_eq!(store.page(None, None, 20).0.len(), 2);
         assert_eq!(store.disk_reads, 2);
+    }
+
+    fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link)
+        }
+    }
+
+    #[test]
+    fn append_refuses_symlinked_card_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "12121212121212121212121212121212";
+        fs::create_dir_all(cards_dir(dir.path())).unwrap();
+
+        let protected = dir.path().join("protected.jsonl");
+        fs::write(&protected, b"do-not-overwrite\n").unwrap();
+
+        let card_path = cards_file(dir.path(), repo);
+        if let Err(err) = create_file_symlink(&protected, &card_path) {
+            #[cfg(windows)]
+            {
+                eprintln!("skipping symlink assertion: cannot create symlink on this host: {err}");
+                return;
+            }
+            #[cfg(not(windows))]
+            panic!("failed to create symlink: {err}");
+        }
+
+        let card = make_card("c-link", 1, repo, Some("/work/r"), Some(1_000), &["a.rs"]);
+        assert!(store.append(&card).is_err());
+        assert_eq!(fs::read(&protected).unwrap(), b"do-not-overwrite\n");
+
+        let dangling_repo = "34343434343434343434343434343434";
+        let missing_target = dir.path().join("missing-target.jsonl");
+        let dangling_link = cards_file(dir.path(), dangling_repo);
+        create_file_symlink(&missing_target, &dangling_link).unwrap();
+
+        let dangling_card = make_card(
+            "c-dangling",
+            1,
+            dangling_repo,
+            Some("/work/r"),
+            Some(1_000),
+            &["a.rs"],
+        );
+        assert!(store.append(&dangling_card).is_err());
+        assert!(!missing_target.exists());
+    }
+
+    #[test]
+    fn rotation_refuses_symlinked_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "56565656565656565656565656565656";
+        let path = cards_file(dir.path(), repo);
+
+        let overflow = prepare_near_limit_file(&mut store, &path, repo, "overflow-link");
+
+        let protected = dir.path().join("protected-tmp-target.jsonl");
+        fs::write(&protected, b"must-not-truncate\n").unwrap();
+        let tmp = tmp_file_path(&path);
+        if let Err(err) = create_file_symlink(&protected, &tmp) {
+            #[cfg(windows)]
+            {
+                eprintln!("skipping symlink assertion: cannot create symlink on this host: {err}");
+                return;
+            }
+            #[cfg(not(windows))]
+            panic!("failed to create symlink: {err}");
+        }
+
+        assert!(store.append(&overflow).is_err());
+        assert_eq!(fs::read(&protected).unwrap(), b"must-not-truncate\n");
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn rotation_replaces_stale_regular_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "78787878787878787878787878787878";
+        let path = cards_file(dir.path(), repo);
+
+        let overflow = prepare_near_limit_file(&mut store, &path, repo, "overflow-stale");
+
+        let tmp = tmp_file_path(&path);
+        fs::write(&tmp, b"stale partial tmp\n").unwrap();
+
+        store.append(&overflow).unwrap();
+        assert!(!tmp.exists());
+        let final_len = fs::metadata(&path).unwrap().len();
+        assert!(final_len > 0 && final_len <= ROTATE_TARGET_BYTES);
+        assert!(store.get("overflow-stale").is_some());
+    }
+
+    #[test]
+    fn append_refuses_symlinked_cards_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "90909090909090909090909090909090";
+
+        let target_dir = dir.path().join("outside-cards-target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(desk_dir(dir.path())).unwrap();
+
+        let cdir = cards_dir(dir.path());
+        if let Err(err) = create_dir_symlink(&target_dir, &cdir) {
+            #[cfg(windows)]
+            {
+                eprintln!("skipping symlink assertion: cannot create symlink on this host: {err}");
+                return;
+            }
+            #[cfg(not(windows))]
+            panic!("failed to create dir symlink: {err}");
+        }
+
+        let card = make_card(
+            "c-dir-link",
+            1,
+            repo,
+            Some("/work/r"),
+            Some(1_000),
+            &["a.rs"],
+        );
+        assert!(store.append(&card).is_err());
+        assert_eq!(fs::read_dir(&target_dir).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn append_refuses_reparse_point_cards_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = CardStore::new(dir.path().to_path_buf());
+        let repo = "abababababababababababababababab";
+
+        let target_dir = dir.path().join("outside-junction-target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(desk_dir(dir.path())).unwrap();
+
+        let cdir = cards_dir(dir.path());
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&cdir)
+            .arg(&target_dir)
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            eprintln!(
+                "skipping reparse point assertion: mklink /J failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let card = make_card(
+            "c-junction",
+            1,
+            repo,
+            Some("/work/r"),
+            Some(1_000),
+            &["a.rs"],
+        );
+        assert!(store.append(&card).is_err());
+        assert_eq!(fs::read_dir(&target_dir).unwrap().count(), 0);
+
+        let existing = make_card(
+            "c-outside",
+            1,
+            repo,
+            Some("/work/r"),
+            Some(2_000),
+            &["b.rs"],
+        );
+        let line = serde_json::to_string(&existing).unwrap() + "\n";
+        fs::write(target_dir.join(format!("{repo}.jsonl")), line).unwrap();
+        assert!(store.get("c-outside").is_none());
+        assert!(store.page(None, None, 20).0.is_empty());
+
+        // Also refuse when desk_dir itself is a reparse point before cards_dir exists.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut store2 = CardStore::new(dir2.path().to_path_buf());
+        let desk_target = dir2.path().join("outside-desk-target");
+        fs::create_dir_all(&desk_target).unwrap();
+        let ddir = desk_dir(dir2.path());
+        let out2 = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&ddir)
+            .arg(&desk_target)
+            .output()
+            .unwrap();
+        assert!(out2.status.success());
+        assert!(store2.append(&card).is_err());
+        assert_eq!(fs::read_dir(&desk_target).unwrap().count(), 0);
     }
 }
