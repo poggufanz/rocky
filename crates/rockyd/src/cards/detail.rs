@@ -10,7 +10,7 @@ use rocky_facts::{
 use rocky_proto::cards::{
     Block, BlockSymbol, Card, CoverageReason, CoverageState, Label, SymbolKind as ProtoSymbolKind,
 };
-use rocky_proto::paths::{listening_store_dir, repo_id};
+use rocky_proto::paths::{canonical_path, listening_store_dir, repo_id};
 use rocky_proto::pipe::{
     BlockSnippet, DiffLine, DiffLineKind, LINE_CAP, ServerMsg, SnippetLine, encode,
 };
@@ -173,10 +173,15 @@ fn shrink_cards_vec_field(msg: &mut ServerMsg, field: CardTrimField) {
             if max_len == 0 {
                 return;
             }
-            let flows: Vec<_> = items.iter_mut().map(|c| std::mem::take(&mut c.flow)).collect();
+            let flows: Vec<_> = items
+                .iter_mut()
+                .map(|c| std::mem::take(&mut c.flow))
+                .collect();
             let base_more: Vec<u32> = items.iter().map(|c| c.flow_more).collect();
             for (c, orig) in items.iter_mut().zip(&flows) {
-                c.flow_more = c.flow_more.saturating_add(u32::try_from(orig.len()).unwrap_or(u32::MAX));
+                c.flow_more = c
+                    .flow_more
+                    .saturating_add(u32::try_from(orig.len()).unwrap_or(u32::MAX));
             }
             (max_len, Saved::Flow(flows, base_more))
         }
@@ -185,10 +190,15 @@ fn shrink_cards_vec_field(msg: &mut ServerMsg, field: CardTrimField) {
             if max_len == 0 {
                 return;
             }
-            let blks: Vec<_> = items.iter_mut().map(|c| std::mem::take(&mut c.blocks)).collect();
+            let blks: Vec<_> = items
+                .iter_mut()
+                .map(|c| std::mem::take(&mut c.blocks))
+                .collect();
             let base_more: Vec<u32> = items.iter().map(|c| c.more_count).collect();
             for (c, orig) in items.iter_mut().zip(&blks) {
-                c.more_count = c.more_count.saturating_add(u32::try_from(orig.len()).unwrap_or(u32::MAX));
+                c.more_count = c
+                    .more_count
+                    .saturating_add(u32::try_from(orig.len()).unwrap_or(u32::MAX));
             }
             (max_len, Saved::Blocks(blks, base_more))
         }
@@ -237,6 +247,40 @@ pub fn build_card_broadcast(mut item: Card) -> Option<ServerMsg> {
     prepare_list_card(&mut item);
     let mut msg = ServerMsg::Card { item };
     shrink_card_msg(&mut msg).then_some(msg)
+}
+
+/// Returns true when `card.root` is non-empty and canonicalizes to a root in `owned_roots`.
+pub fn is_card_root_owned(card: &Card, owned_roots: &BTreeSet<String>) -> bool {
+    let trimmed = card.root.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let card_canon = canonical_path(trimmed, cfg!(windows));
+    owned_roots
+        .iter()
+        .any(|root| canonical_path(root, cfg!(windows)) == card_canon)
+}
+
+/// Builds a `ServerMsg::CardDetail` reply for a card whose repo is not capture-owned,
+/// keeping block metadata without code snippets and marking `CoverageReason::CaptureOff`.
+pub fn build_card_detail_unowned(id: u64, card: &Card) -> ServerMsg {
+    let mut reply_card = card.clone();
+    let mut reasons: BTreeSet<CoverageReason> =
+        reply_card.coverage.reasons.iter().copied().collect();
+    reasons.insert(CoverageReason::CaptureOff);
+    reply_card.coverage.reasons = reasons.into_iter().collect();
+    reply_card.coverage.state = CoverageState::Partial;
+
+    let mut msg = ServerMsg::CardDetail {
+        id,
+        card: reply_card,
+        snippets: Vec::new(),
+    };
+    if shrink_card_msg(&mut msg) {
+        msg
+    } else {
+        error_ack(id, "too_large")
+    }
 }
 
 /// Builds a `ServerMsg::CardDetail` reply reading Listening objects from `home`.
@@ -476,7 +520,7 @@ fn error_ack(id: u64, code: &str) -> ServerMsg {
     }
 }
 
-fn missing_diff(id: u64) -> ServerMsg {
+pub fn missing_diff(id: u64) -> ServerMsg {
     ServerMsg::BlockDiff {
         id,
         lines: Vec::new(),
@@ -537,8 +581,8 @@ fn shrink_card_msg(msg: &mut ServerMsg) -> bool {
             }
             let card = msg_card_mut(msg);
             card.flow = saved_flow[..lo].to_vec();
-            card.flow_more = base_flow_more
-                .saturating_add(u32::try_from(orig_len - lo).unwrap_or(u32::MAX));
+            card.flow_more =
+                base_flow_more.saturating_add(u32::try_from(orig_len - lo).unwrap_or(u32::MAX));
             return true;
         }
     }
@@ -958,7 +1002,11 @@ mod tests {
 
         let reply = build_cards_reply(8, vec![card], None);
         let wire = encode(&reply);
-        assert!(wire.len() <= LINE_CAP, "reply exceeded LINE_CAP: {}", wire.len());
+        assert!(
+            wire.len() <= LINE_CAP,
+            "reply exceeded LINE_CAP: {}",
+            wire.len()
+        );
         let ServerMsg::Cards { id, items, next } = reply else {
             panic!("expected ServerMsg::Cards");
         };

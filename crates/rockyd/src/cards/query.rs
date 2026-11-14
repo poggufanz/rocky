@@ -1,6 +1,6 @@
 //! Single-worker read-only query executor for `cards`, `card_detail`, and `block_diff`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,8 +12,8 @@ use rocky_proto::pipe::ServerMsg;
 
 use crate::cards::CARD_WORKER_THREAD_PREFIX;
 use crate::cards::detail::{
-    build_block_diff, build_block_diff_with, build_card_detail, build_card_detail_with,
-    build_cards_reply,
+    build_block_diff, build_block_diff_with, build_card_detail, build_card_detail_unowned,
+    build_card_detail_with, build_cards_reply, is_card_root_owned, missing_diff,
 };
 use crate::cards::storage::CardStore;
 use crate::cards::store::ObjectRead;
@@ -31,12 +31,14 @@ enum QueryKind {
     CardDetail {
         id: u64,
         card_id: String,
+        owned_roots: BTreeSet<String>,
     },
     BlockDiff {
         id: u64,
         card_id: String,
         seq: u32,
         page: u32,
+        owned_roots: BTreeSet<String>,
     },
 }
 
@@ -146,8 +148,21 @@ impl CardQueryLoop {
     }
 
     /// Queues a `card_detail` request to run on the query worker.
-    pub fn card_detail(&mut self, id: u64, card_id: String, reply: SyncSender<ServerMsg>) {
-        self.submit(QueryKind::CardDetail { id, card_id }, reply);
+    pub fn card_detail(
+        &mut self,
+        id: u64,
+        card_id: String,
+        owned_roots: BTreeSet<String>,
+        reply: SyncSender<ServerMsg>,
+    ) {
+        self.submit(
+            QueryKind::CardDetail {
+                id,
+                card_id,
+                owned_roots,
+            },
+            reply,
+        );
     }
 
     /// Queues a `block_diff` page request to run on the query worker.
@@ -157,6 +172,7 @@ impl CardQueryLoop {
         card_id: String,
         seq: u32,
         page: u32,
+        owned_roots: BTreeSet<String>,
         reply: SyncSender<ServerMsg>,
     ) {
         self.submit(
@@ -165,6 +181,7 @@ impl CardQueryLoop {
                 card_id,
                 seq,
                 page,
+                owned_roots,
             },
             reply,
         );
@@ -276,11 +293,23 @@ fn run_query(
             let (items, next) = store.page(query.as_deref(), before.as_deref(), limit as usize);
             build_cards_reply(id, items, next)
         }
-        QueryKind::CardDetail { id, card_id } => match store.get(&card_id) {
-            Some(card) => match object_reader {
-                Some(read_obj) => build_card_detail_with(id, &card, |sha| read_obj(sha)),
-                None => build_card_detail(id, &card, home),
-            },
+        QueryKind::CardDetail {
+            id,
+            card_id,
+            owned_roots,
+        } => match store.get(&card_id) {
+            Some(card) => {
+                if is_card_root_owned(&card, &owned_roots) {
+                    match object_reader {
+                        Some(read_obj) => build_card_detail_with(id, &card, |sha| read_obj(sha)),
+                        None => build_card_detail(id, &card, home),
+                    }
+                } else if card.root.trim().is_empty() && card.blocks.iter().all(|b| !b.recorded) {
+                    build_card_detail_with(id, &card, |_| ObjectRead::Missing)
+                } else {
+                    build_card_detail_unowned(id, &card)
+                }
+            }
             None => ServerMsg::Ack {
                 id,
                 ok: false,
@@ -293,11 +322,20 @@ fn run_query(
             card_id,
             seq,
             page,
+            owned_roots,
         } => match store.get(&card_id) {
-            Some(card) => match object_reader {
-                Some(read_obj) => build_block_diff_with(id, &card, seq, page, |sha| read_obj(sha)),
-                None => build_block_diff(id, &card, seq, page, home),
-            },
+            Some(card) => {
+                if !is_card_root_owned(&card, &owned_roots) {
+                    missing_diff(id)
+                } else {
+                    match object_reader {
+                        Some(read_obj) => {
+                            build_block_diff_with(id, &card, seq, page, |sha| read_obj(sha))
+                        }
+                        None => build_block_diff(id, &card, seq, page, home),
+                    }
+                }
+            }
             None => ServerMsg::BlockDiff {
                 id,
                 lines: Vec::new(),
@@ -315,8 +353,8 @@ mod tests {
     use std::time::Duration;
 
     use rocky_proto::cards::{
-        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageState,
-        Importance, SymbolKind,
+        Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageReason,
+        CoverageState, Importance, SymbolKind,
     };
     use rocky_proto::paths::{canonical_path, listening_store_dir, repo_id};
 
@@ -404,6 +442,7 @@ mod tests {
         writer.append(&card).unwrap();
 
         let mut queries = CardQueryLoop::new(home, 1);
+        let owned = BTreeSet::from([card.root.clone()]);
 
         let (tx, rx) = mpsc::sync_channel(1);
         queries.cards(1, None, None, 20, tx);
@@ -414,7 +453,7 @@ mod tests {
         assert_eq!(items[0].card_id, "card-q-1");
 
         let (tx, rx) = mpsc::sync_channel(1);
-        queries.card_detail(2, "card-q-1".to_string(), tx);
+        queries.card_detail(2, "card-q-1".to_string(), owned.clone(), tx);
         let ServerMsg::CardDetail {
             id: 2, snippets, ..
         } = wait_reply(&rx, &mut queries)
@@ -424,7 +463,7 @@ mod tests {
         assert_eq!(snippets.len(), 1);
 
         let (tx, rx) = mpsc::sync_channel(1);
-        queries.block_diff(3, "card-q-1".to_string(), 1, 0, tx);
+        queries.block_diff(3, "card-q-1".to_string(), 1, 0, owned.clone(), tx);
         let ServerMsg::BlockDiff {
             id: 3,
             missing: false,
@@ -437,7 +476,7 @@ mod tests {
         assert!(!lines.is_empty());
 
         let (tx, rx) = mpsc::sync_channel(1);
-        queries.card_detail(4, "missing-card".to_string(), tx);
+        queries.card_detail(4, "missing-card".to_string(), owned.clone(), tx);
         assert_eq!(
             wait_reply(&rx, &mut queries),
             ServerMsg::Ack {
@@ -449,7 +488,7 @@ mod tests {
         );
 
         let (tx, rx) = mpsc::sync_channel(1);
-        queries.block_diff(5, "missing-card".to_string(), 1, 0, tx);
+        queries.block_diff(5, "missing-card".to_string(), 1, 0, owned, tx);
         assert_eq!(
             wait_reply(&rx, &mut queries),
             ServerMsg::BlockDiff {
@@ -548,10 +587,13 @@ mod tests {
             }),
         );
 
+        let mut owned = BTreeSet::new();
+        owned.insert(canon);
+
         let (tx1, rx1) = mpsc::sync_channel(1);
         let (tx2, rx2) = mpsc::sync_channel(1);
-        queries.card_detail(1, "card-panic".to_string(), tx1);
-        queries.card_detail(2, "card-ok".to_string(), tx2);
+        queries.card_detail(1, "card-panic".to_string(), owned.clone(), tx1);
+        queries.card_detail(2, "card-ok".to_string(), owned.clone(), tx2);
 
         assert_eq!(
             wait_reply(&rx1, &mut queries),
@@ -569,7 +611,7 @@ mod tests {
         assert_eq!(card.card_id, "card-ok");
 
         let (tx3, rx3) = mpsc::sync_channel(1);
-        queries.block_diff(3, "card-panic".to_string(), 1, 0, tx3);
+        queries.block_diff(3, "card-panic".to_string(), 1, 0, owned, tx3);
         assert_eq!(
             wait_reply(&rx3, &mut queries),
             ServerMsg::Ack {
@@ -595,5 +637,116 @@ mod tests {
             crate::log::is_card_worker_thread_name(observed.as_deref()),
             "unexpected query worker thread name: {observed:?}"
         );
+    }
+
+    #[test]
+    fn unowned_root_suppresses_detail_code_with_capture_off_and_returns_missing_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let repo = tmp.path().join("revoked-repo");
+        fs::create_dir_all(&repo).unwrap();
+        let canon = canonical_path(&repo.to_string_lossy(), cfg!(windows));
+        let rid = repo_id(&canon, cfg!(windows));
+        let objects = listening_store_dir(&home, &rid).join("objects");
+        fs::create_dir_all(&objects).unwrap();
+
+        let sha_a = "a".repeat(64);
+        let sha_b = "b".repeat(64);
+        fs::write(objects.join(&sha_a), "fn secret() {}\n").unwrap();
+        fs::write(objects.join(&sha_b), "fn secret() { 1 }\n").unwrap();
+
+        let card = Card {
+            v: CARD_VERSION,
+            card_id: "card-revoked".to_string(),
+            rev: 1,
+            repo_id: rid,
+            root: canon,
+            main_root: None,
+            branch: Some("main".to_string()),
+            session_id: "s-rev".to_string(),
+            agent_id: String::new(),
+            agent_type: "claude".to_string(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "demo".to_string(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: vec![Block {
+                seq: 1,
+                path: "src/secret.rs".to_string(),
+                symbol: None,
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec!["tu-1".to_string()],
+                bash: None,
+                before: Some(sha_a),
+                after: Some(sha_b),
+                recorded: true,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+                quote: None,
+            }],
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        };
+        let mut writer = CardStore::new(home.clone());
+        writer.append(&card).unwrap();
+
+        let read_calls = Arc::new(AtomicU64::new(0));
+        let read_calls_ref = Arc::clone(&read_calls);
+        let mut queries = CardQueryLoop::new_with_object_reader(
+            home,
+            1,
+            Arc::new(move |_| {
+                read_calls_ref.fetch_add(1, Ordering::Relaxed);
+                ObjectRead::Text("fn leaked() {}\n".to_string())
+            }),
+        );
+
+        let empty_owned = BTreeSet::new();
+        let (tx1, rx1) = mpsc::sync_channel(1);
+        queries.card_detail(10, "card-revoked".to_string(), empty_owned.clone(), tx1);
+        let ServerMsg::CardDetail {
+            id: 10,
+            card: detail_card,
+            snippets,
+        } = wait_reply(&rx1, &mut queries)
+        else {
+            panic!("expected CardDetail without snippets for unowned root");
+        };
+        assert_eq!(detail_card.blocks.len(), 1);
+        assert!(snippets.is_empty());
+        assert_eq!(detail_card.coverage.state, CoverageState::Partial);
+        assert!(
+            detail_card
+                .coverage
+                .reasons
+                .contains(&CoverageReason::CaptureOff)
+        );
+        assert_eq!(read_calls.load(Ordering::Relaxed), 0);
+
+        let (tx2, rx2) = mpsc::sync_channel(1);
+        queries.block_diff(11, "card-revoked".to_string(), 1, 0, empty_owned, tx2);
+        assert_eq!(
+            wait_reply(&rx2, &mut queries),
+            ServerMsg::BlockDiff {
+                id: 11,
+                lines: Vec::new(),
+                page: 0,
+                pages: 0,
+                missing: true,
+            }
+        );
+        assert_eq!(read_calls.load(Ordering::Relaxed), 0);
     }
 }

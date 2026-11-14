@@ -311,6 +311,7 @@ fn main() {
         // Drain every pending control request so shutdown stays prompt and a
         // burst of sets/timelines never waits for the next rescan.
         while let Ok(ctrl) = control_rx.try_recv() {
+            let owned_roots = captures.owned_roots();
             if let LoopAction::Stop {
                 id,
                 reply,
@@ -322,6 +323,7 @@ fn main() {
                 &hub,
                 &log,
                 &home,
+                &owned_roots,
                 &mut cards,
                 &mut queries,
                 &mut guards,
@@ -701,6 +703,7 @@ fn handle_control(
     hub: &Hub,
     log: &RotatingLog,
     home: &Path,
+    owned_roots: &std::collections::BTreeSet<String>,
     cards: &mut Engine,
     queries: &mut CardQueryLoop,
     guards: &mut GuardLoop,
@@ -769,7 +772,7 @@ fn handle_control(
             LoopAction::Continue
         }
         Control::CardDetail { id, card_id, reply } => {
-            queries.card_detail(id, card_id, reply);
+            queries.card_detail(id, card_id, owned_roots.clone(), reply);
             LoopAction::Continue
         }
         Control::BlockDiff {
@@ -779,7 +782,7 @@ fn handle_control(
             page,
             reply,
         } => {
-            queries.block_diff(id, card_id, seq, page, reply);
+            queries.block_diff(id, card_id, seq, page, owned_roots.clone(), reply);
             LoopAction::Continue
         }
     }
@@ -921,6 +924,8 @@ mod tests {
                 }),
             );
             let _unblock_worker = UnblockOnPanic(release_worker);
+            let mut owned = std::collections::BTreeSet::new();
+            owned.insert(home_bg.to_string_lossy().into_owned());
             let _ = handle_control(
                 Control::CardDetail {
                     id: 99,
@@ -931,6 +936,7 @@ mod tests {
                 &hub_bg,
                 &log_bg,
                 &home_bg,
+                &owned,
                 &mut cards,
                 &mut queries,
                 &mut guards,
@@ -1066,6 +1072,8 @@ mod tests {
 
             let (tx1, rx1) = mpsc::sync_channel(1);
             let (tx2, rx2) = mpsc::sync_channel(1);
+            let mut owned = std::collections::BTreeSet::new();
+            owned.insert(home.to_string_lossy().into_owned());
             let _ = handle_control(
                 Control::CardDetail {
                     id: 10,
@@ -1076,6 +1084,7 @@ mod tests {
                 &hub,
                 &log,
                 &home,
+                &owned,
                 &mut cards,
                 &mut queries,
                 &mut guards,
@@ -1090,6 +1099,7 @@ mod tests {
                 &hub,
                 &log,
                 &home,
+                &owned,
                 &mut cards,
                 &mut queries,
                 &mut guards,
@@ -1137,6 +1147,7 @@ mod tests {
                 &hub,
                 &log,
                 &home,
+                &owned,
                 &mut cards,
                 &mut queries,
                 &mut guards,
@@ -1333,6 +1344,7 @@ mod tests {
             &hub,
             &log,
             &home,
+            &owned,
             &mut cards,
             &mut queries,
             &mut guards,
@@ -1378,6 +1390,7 @@ mod tests {
             &hub,
             &log,
             &home,
+            &owned,
             &mut cards,
             &mut queries,
             &mut guards,
