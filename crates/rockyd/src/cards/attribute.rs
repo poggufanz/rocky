@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rocky_facts::{
-    Change as FactChange, FileInput, Label as FactLabel, MAX_BYTES, MAX_LABELS_PER_CHANGE, Side,
-    Symbol as FactSymbol, SymbolKind as FactSymbolKind, analyze,
+    Change as FactChange, ChangeSpan, FileInput, Label as FactLabel, MAX_BYTES,
+    MAX_LABELS_PER_CHANGE, Side, Symbol as FactSymbol, SymbolKind as FactSymbolKind, analyze,
 };
 use rocky_proto::cards::{
     BashInfo, Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage,
@@ -284,7 +284,7 @@ struct VersionAnalysis {
     changes: Vec<FactChange>,
     before_sha: Option<String>,
     after_sha: Option<String>,
-    line_counts: Vec<(Option<u32>, Option<u32>)>,
+    spans: Vec<ChangeSpan>,
 }
 
 struct CandidateBlock {
@@ -626,11 +626,8 @@ fn build_recorded_blocks(
                 );
                 let quote = lookup_quote(&input.quotes, tool_ids.first().map(String::as_str));
 
-                for (c_idx, (change, (added, removed))) in analyzed
-                    .changes
-                    .iter()
-                    .zip(&analyzed.line_counts)
-                    .enumerate()
+                for (c_idx, (change, span)) in
+                    analyzed.changes.iter().zip(&analyzed.spans).enumerate()
                 {
                     candidates.push(CandidateBlock {
                         sort_key: (ver.ts, edits[first_ew].orig_idx, v_idx, c_idx),
@@ -646,9 +643,9 @@ fn build_recorded_blocks(
                             before: analyzed.before_sha.clone(),
                             after: analyzed.after_sha.clone(),
                             recorded: true,
-                            line: None,
-                            added: *added,
-                            removed: *removed,
+                            line: span.line,
+                            added: span.added,
+                            removed: span.removed,
                             quote: quote.clone(),
                         },
                     });
@@ -804,7 +801,7 @@ fn build_bash_group_block(
     if version_results.len() == 1 && version_results[0].1.changes.len() == 1 {
         let (path, analysis) = version_results.into_iter().next()?;
         let change = &analysis.changes[0];
-        let (added, removed) = analysis.line_counts[0];
+        let span = analysis.spans[0];
         return Some(Block {
             seq: 0,
             path,
@@ -817,9 +814,9 @@ fn build_bash_group_block(
             before: analysis.before_sha,
             after: analysis.after_sha,
             recorded: true,
-            line: None,
-            added,
-            removed,
+            line: span.line,
+            added: span.added,
+            removed: span.removed,
             quote,
         });
     }
@@ -843,7 +840,7 @@ fn build_bash_group_block(
     let mut total_removed = Some(0u32);
 
     for (_, analysis) in &version_results {
-        for (change, (added, removed)) in analysis.changes.iter().zip(&analysis.line_counts) {
+        for (change, span) in analysis.changes.iter().zip(&analysis.spans) {
             let imp = convert_importance(change.importance);
             if imp > max_importance {
                 max_importance = imp;
@@ -852,12 +849,12 @@ fn build_bash_group_block(
             for label in &change.labels {
                 ranked_labels.push((label.importance(exported), label.clone()));
             }
-            match (total_added, added) {
-                (Some(acc), Some(v)) => total_added = Some(acc.saturating_add(*v)),
+            match (total_added, span.added) {
+                (Some(acc), Some(v)) => total_added = Some(acc.saturating_add(v)),
                 _ => total_added = None,
             }
-            match (total_removed, removed) {
-                (Some(acc), Some(v)) => total_removed = Some(acc.saturating_add(*v)),
+            match (total_removed, span.removed) {
+                (Some(acc), Some(v)) => total_removed = Some(acc.saturating_add(v)),
                 _ => total_removed = None,
             }
         }
@@ -970,37 +967,32 @@ fn analyze_version_pair(
         }
     };
 
-    let changes = match (before_side, after_side) {
-        (SideData::TooLarge, _) | (_, SideData::TooLarge) => {
-            vec![FactChange::new(None, vec![FactLabel::TooLarge {}])]
-        }
-        (_, SideData::Missing) => {
-            vec![FactChange::new(None, vec![FactLabel::NotCaptured {}])]
-        }
+    let (changes, spans) = match (before_side, after_side) {
+        (SideData::TooLarge, _) | (_, SideData::TooLarge) => (
+            vec![FactChange::new(None, vec![FactLabel::TooLarge {}])],
+            vec![ChangeSpan::default()],
+        ),
+        (_, SideData::Missing) => (
+            vec![FactChange::new(None, vec![FactLabel::NotCaptured {}])],
+            vec![ChangeSpan::default()],
+        ),
         _ => {
             let before = to_fact_side(before_side);
             let after = to_fact_side(after_side);
-            analyze(&FileInput {
+            let facts = analyze(&FileInput {
                 path: file_rel,
                 before,
                 after,
-            })
-            .changes
+            });
+            (facts.changes, facts.spans)
         }
     };
-
-    let b_fact = to_fact_side(before_side);
-    let a_fact = to_fact_side(after_side);
-    let line_counts = changes
-        .iter()
-        .map(|ch| diff_counts(ch, b_fact, a_fact))
-        .collect();
 
     VersionAnalysis {
         changes,
         before_sha,
         after_sha,
-        line_counts,
+        spans,
     }
 }
 
@@ -1010,39 +1002,6 @@ fn to_fact_side(side: SideData<'_>) -> Side<'_> {
         SideData::Unknown | SideData::TooLarge | SideData::Missing => Side::Unknown,
         SideData::Text(text) => Side::Text(text),
     }
-}
-
-fn diff_counts(
-    change: &FactChange,
-    before: Side<'_>,
-    after: Side<'_>,
-) -> (Option<u32>, Option<u32>) {
-    for label in &change.labels {
-        if let FactLabel::LinesChanged { added, removed } = label {
-            return (Some(*added), Some(*removed));
-        }
-    }
-    if change
-        .labels
-        .iter()
-        .any(|l| matches!(l, FactLabel::FileNew {}))
-        && let Side::Text(text) = after
-    {
-        return (Some(count_lines(text)), Some(0));
-    }
-    if change
-        .labels
-        .iter()
-        .any(|l| matches!(l, FactLabel::FileDeleted {}))
-        && let Side::Text(text) = before
-    {
-        return (Some(0), Some(count_lines(text)));
-    }
-    (None, None)
-}
-
-fn count_lines(text: &str) -> u32 {
-    u32::try_from(text.lines().count()).unwrap_or(u32::MAX)
 }
 
 fn build_flow(
@@ -1656,6 +1615,9 @@ mod tests {
             blk.quote.as_ref().map(|q| q.text.as_str()),
             Some("Generating client files now.")
         );
+        assert_eq!(blk.line, None);
+        assert_eq!(blk.added, Some(2));
+        assert_eq!(blk.removed, Some(1));
     }
 
     #[test]
@@ -1842,6 +1804,9 @@ mod tests {
         assert_eq!(blk.importance, Importance::None);
         assert!(blk.before.is_none());
         assert!(blk.after.is_none());
+        assert_eq!(blk.line, None);
+        assert_eq!(blk.added, None);
+        assert_eq!(blk.removed, None);
         assert_eq!(card.coverage.state, CoverageState::Full);
     }
 
@@ -1914,6 +1879,9 @@ mod tests {
         assert_eq!(card.blocks[0].labels, vec![Label::NotCaptured {}]);
         assert!(card.blocks[0].before.is_none());
         assert_eq!(card.blocks[0].after.as_deref(), Some("sha-after"));
+        assert_eq!(card.blocks[0].line, None);
+        assert_eq!(card.blocks[0].added, None);
+        assert_eq!(card.blocks[0].removed, None);
     }
 
     #[test]
@@ -2813,5 +2781,98 @@ mod tests {
         assert_eq!(card.blocks.len(), 1);
         assert_eq!(card.blocks[0].via, BlockVia::Bash);
         assert_eq!(card.blocks[0].bash.as_ref().unwrap().candidates, 2);
+    }
+
+    #[test]
+    fn edit_ts_function_records_line_and_counts() {
+        let mut input = base_input(base_turn(vec![edit_win(
+            "edit-1",
+            "sess-1",
+            repo_join("src/pricing.ts"),
+            2_000,
+            Some(2_300),
+            Some(true),
+        )]));
+        input.results = vec![CaptureResult {
+            root: test_root().to_string(),
+            started_ms: 2_400,
+            at_ms: 2_600,
+            coverage: "ok".to_string(),
+        }];
+        input.versions = vec![ver(
+            "src/pricing.ts",
+            2_500,
+            Some("sha-before"),
+            Some("sha-after"),
+        )];
+
+        let before = "// pricing helpers\n\
+                      export const BASE_FEE = 5;\n\
+                      \n\
+                      export function applyDiscount(price: number, member: boolean): number {\n\
+                          return price * 0.9;\n\
+                      }\n";
+        let after = "// pricing helpers\n\
+                     export const BASE_FEE = 5;\n\
+                     \n\
+                     export function applyDiscount(price: number, member: boolean): number {\n\
+                         if (!member) {\n\
+                             return price;\n\
+                         }\n\
+                         return price * 0.85;\n\
+                     }\n";
+        let read = |sha: &str| match sha {
+            "sha-before" => ObjectRead::Text(before.into()),
+            "sha-after" => ObjectRead::Text(after.into()),
+            _ => ObjectRead::Missing,
+        };
+
+        let card = build_card(&input, &read, &no_stat);
+        assert_eq!(card.blocks.len(), 1);
+        let blk = &card.blocks[0];
+        assert_eq!(blk.via, BlockVia::Edit);
+        assert_eq!(
+            blk.symbol.as_ref().map(|s| s.name.as_str()),
+            Some("applyDiscount")
+        );
+        assert_eq!(blk.line, Some(4));
+        assert_eq!(blk.added, Some(4));
+        assert_eq!(blk.removed, Some(1));
+    }
+
+    #[test]
+    fn bash_new_file_records_line_one_and_added_count() {
+        let mut input = base_input(base_turn(vec![bash_win(
+            "bash-1",
+            main_agent("sess-1"),
+            "cat <<'EOF' > notes/todo.md",
+            2_000,
+            Some(4_000),
+            Some(true),
+        )]));
+        input.results = vec![CaptureResult {
+            root: test_root().to_string(),
+            started_ms: 4_100,
+            at_ms: 4_200,
+            coverage: "ok".to_string(),
+        }];
+        let mut created = ver("notes/todo.md", 3_000, None, Some("sha-new"));
+        created.created = true;
+        input.versions = vec![created];
+
+        let read = |sha: &str| match sha {
+            "sha-new" => ObjectRead::Text("first line\nsecond line\nthird line\n".into()),
+            _ => ObjectRead::Missing,
+        };
+
+        let card = build_card(&input, &read, &no_stat);
+        assert_eq!(card.blocks.len(), 1);
+        let blk = &card.blocks[0];
+        assert_eq!(blk.via, BlockVia::Bash);
+        assert_eq!(blk.path, "notes/todo.md");
+        assert_eq!(blk.labels, vec![Label::FileNew {}]);
+        assert_eq!(blk.line, Some(1));
+        assert_eq!(blk.added, Some(3));
+        assert_eq!(blk.removed, Some(0));
     }
 }
