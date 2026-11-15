@@ -315,29 +315,36 @@ function errorCode(error: unknown): string | undefined {
   return error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : undefined;
 }
 
-function buildRootSpellings(rootRaw: string): string[] {
+interface RootSpelling {
+  readonly logSpelling: string;
+  readonly rawRoot: string;
+}
+
+function buildRootSpellings(rootRaw: string): RootSpelling[] {
   const candidates = [rootRaw, ...safeRealpath(rootRaw)];
-  const spellings: string[] = [];
+  const spellings: RootSpelling[] = [];
+  const seen = new Set<string>();
   for (const candidate of candidates) {
-    const spelling = canonicalPath(candidate);
-    if (spelling.length > 0 && !spellings.includes(spelling)) {
-      spellings.push(spelling);
+    const logSpelling = canonicalPath(candidate);
+    if (logSpelling.length > 0 && !seen.has(logSpelling)) {
+      seen.add(logSpelling);
+      spellings.push({ logSpelling, rawRoot: candidate });
     }
   }
   return spellings;
 }
 
-function pickExistingLogPath(spellings: readonly string[], home: string): {
+function pickExistingLogPath(spellings: readonly RootSpelling[], home: string): {
   status: "missing" | "non-regular" | "race" | "ready";
   logPath?: string;
-  matchedSpelling?: string;
+  selectedRoot?: string;
   lstat?: ReturnType<typeof lstatSync>;
 } {
   for (const spelling of spellings) {
-    const logPath = cardsFilePath(spelling, home);
+    const logPath = cardsFilePath(spelling.logSpelling, home);
     const probe = inspectLogPath(logPath);
     if (probe.status === "missing") continue;
-    return { ...probe, logPath, matchedSpelling: spelling };
+    return { ...probe, logPath, selectedRoot: spelling.rawRoot };
   }
   return { status: "missing" };
 }
@@ -544,24 +551,40 @@ function readAndParseCardsLog(
   };
 }
 
+function relativeWithinRoot(
+  fileAbs: string,
+  rootAbs: string,
+  platform: NodeJS.Platform,
+): { inside: boolean; rel?: string } {
+  const fileNorm = normalizeAbsForPlatform(fileAbs, platform);
+  const rootNorm = normalizeAbsForPlatform(rootAbs, platform);
+  if (fileNorm === rootNorm) {
+    return { inside: true };
+  }
+  const prefix = rootNorm.endsWith("/") ? rootNorm : `${rootNorm}/`;
+  if (fileNorm.startsWith(prefix)) {
+    const rel = fileNorm.slice(prefix.length);
+    return rel.length > 0 ? { inside: true, rel } : { inside: true };
+  }
+  return { inside: false };
+}
+
 function buildTargetKeysForRepo(
   absFile: string,
-  rootCandidates: readonly string[],
+  selectedRoot: string,
   platform: NodeJS.Platform,
 ): Set<string> {
   const keys = new Set<string>();
-  const fileCandidates = [absFile, ...safeRealpath(absFile)].map((candidate) =>
-    normalizeAbsForPlatform(candidate, platform),
-  );
-  const normRoots = rootCandidates.map((root) => normalizeAbsForPlatform(root, platform));
+  const ordinary = relativeWithinRoot(absFile, selectedRoot, platform);
+  if (ordinary.inside) {
+    if (ordinary.rel) keys.add(ordinary.rel);
+    return keys;
+  }
 
-  for (const fileCanon of fileCandidates) {
-    for (const rootCanon of normRoots) {
-      const prefix = rootCanon.endsWith("/") ? rootCanon : `${rootCanon}/`;
-      if (fileCanon.startsWith(prefix)) {
-        const rel = fileCanon.slice(prefix.length);
-        if (rel.length > 0) keys.add(rel);
-      }
+  for (const fileReal of safeRealpath(absFile)) {
+    const fallback = relativeWithinRoot(fileReal, selectedRoot, platform);
+    if (fallback.inside && fallback.rel) {
+      keys.add(fallback.rel);
     }
   }
   return keys;
@@ -622,19 +645,19 @@ export function cardsForFile(file: string, options: CardsForFileOptions = {}): C
 
   let logPath: string;
   let lstat: ReturnType<typeof lstatSync>;
-  let matchedSpelling: string | undefined;
+  let selectedRoot: string | undefined;
 
   if (inRepo) {
     const spellings = buildRootSpellings(rootRaw);
     const pick = pickExistingLogPath(spellings, home);
     if (pick.status === "missing") return emptyResult({ complete: true, skipped: 0 });
     if (pick.status === "non-regular") return emptyResult({ complete: false, skipped: 0 });
-    if (pick.status === "race" || !pick.logPath || !pick.lstat) {
+    if (pick.status === "race" || !pick.logPath || !pick.lstat || !pick.selectedRoot) {
       return emptyResult({ complete: false, reason: "read-race", skipped: 0 });
     }
     logPath = pick.logPath;
     lstat = pick.lstat;
-    matchedSpelling = pick.matchedSpelling;
+    selectedRoot = pick.selectedRoot;
   } else {
     logPath = join(home, "desk", "cards", "_none.jsonl");
     const probe = inspectLogPath(logPath);
@@ -651,13 +674,10 @@ export function cardsForFile(file: string, options: CardsForFileOptions = {}): C
     return emptyResult(parsed.earlyCoverage);
   }
 
-  const targetKeys = inRepo
-    ? buildTargetKeysForRepo(
-        absFile,
-        matchedSpelling ? [rootRaw, matchedSpelling] : [rootRaw],
-        platform,
-      )
-    : buildTargetKeysForNone(absFile, platform);
+  const targetKeys =
+    selectedRoot !== undefined
+      ? buildTargetKeysForRepo(absFile, selectedRoot, platform)
+      : buildTargetKeysForNone(absFile, platform);
 
   const candidates: Array<{ card: StoredCard; blocks: StoredBlock[] }> = [];
   if (targetKeys.size > 0 && limit > 0) {

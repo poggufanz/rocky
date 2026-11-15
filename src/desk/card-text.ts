@@ -5,41 +5,41 @@ export type PromptKind =
   | { kind: "cross_session" }
   | { kind: "slash_command"; name: string; args: string };
 
-const STATIC_LABEL_CHIPS: Readonly<Record<string, string>> = {
-  params_changed: "parameters changed",
-  return_type_changed: "return type changed",
-  guard_added: "new guard",
-  condition_changed: "condition changed",
-  branch_added: "new branch",
-  branch_removed: "branch removed",
-  error_handling_added: "error handling added",
-  error_handling_removed: "error handling removed",
-  loop_added: "new loop",
-  loop_removed: "loop removed",
-  return_changed: "return changed",
-  await_changed: "await changed",
-  body_changed: "body changed",
-  value_changed: "value changed",
-  config_changed: "config changed",
-  dep_added: "new dependency",
-  dep_removed: "dependency removed",
-  dep_version: "dependency version",
-  import_added: "new import",
-  import_removed: "import removed",
-  test_added: "new test",
-  test_removed: "test removed",
-  test_skipped: "test skipped",
-  test_only: "test .only",
-  file_new: "new file",
-  file_deleted: "file deleted",
-  file_renamed: "file renamed",
-  format_only: "format only",
-  rewrite: "rewritten",
-  lockfile_changed: "lockfile changed",
-  lines_changed: "lines changed",
-  too_large: "too large",
-  not_captured: "not captured",
-};
+const STATIC_LABEL_CHIPS: ReadonlyMap<string, string> = new Map<string, string>([
+  ["params_changed", "parameters changed"],
+  ["return_type_changed", "return type changed"],
+  ["guard_added", "new guard"],
+  ["condition_changed", "condition changed"],
+  ["branch_added", "new branch"],
+  ["branch_removed", "branch removed"],
+  ["error_handling_added", "error handling added"],
+  ["error_handling_removed", "error handling removed"],
+  ["loop_added", "new loop"],
+  ["loop_removed", "loop removed"],
+  ["return_changed", "return changed"],
+  ["await_changed", "await changed"],
+  ["body_changed", "body changed"],
+  ["value_changed", "value changed"],
+  ["config_changed", "config changed"],
+  ["dep_added", "new dependency"],
+  ["dep_removed", "dependency removed"],
+  ["dep_version", "dependency version"],
+  ["import_added", "new import"],
+  ["import_removed", "import removed"],
+  ["test_added", "new test"],
+  ["test_removed", "test removed"],
+  ["test_skipped", "test skipped"],
+  ["test_only", "test .only"],
+  ["file_new", "new file"],
+  ["file_deleted", "file deleted"],
+  ["file_renamed", "file renamed"],
+  ["format_only", "format only"],
+  ["rewrite", "rewritten"],
+  ["lockfile_changed", "lockfile changed"],
+  ["lines_changed", "lines changed"],
+  ["too_large", "too large"],
+  ["not_captured", "not captured"],
+]);
 
 function extractTag(text: string, open: string, close: string): string | undefined {
   const start = text.indexOf(open);
@@ -111,6 +111,6 @@ export function labelChip(label: { id: string; args?: Record<string, unknown> },
       return typeof name === "string" ? `no longer calls ${name}` : label.id;
     }
     default:
-      return STATIC_LABEL_CHIPS[label.id] ?? label.id;
+      return STATIC_LABEL_CHIPS.get(label.id) ?? label.id;
   }
 }

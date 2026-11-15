@@ -331,6 +331,69 @@ test("symlinked repo root falls back to realpath root spelling", (t) => {
   assert.deepEqual(result.cards.map((c) => c.card_id), ["card-realpath"]);
 });
 
+test("internal file symlink distinguishes its history from its target", (t) => {
+  if (skipIfSymlinkUnavailable(t, "file")) return;
+
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const { repoRoot } = makeRepo(temp);
+  const canonicalRoot = canonicalPath(repoRoot);
+  const logPath = cardsFilePath(canonicalRoot, home);
+
+  const realFile = join(repoRoot, "src", "real.ts");
+  const linkFile = join(repoRoot, "src", "link.ts");
+  writeFileSync(realFile, "export const real = 1;\n", "utf8");
+  symlinkSync(realFile, linkFile, "file");
+
+  writeJsonl(logPath, [
+    makeCard("card-real-only", canonicalRoot, [makeBlock(1, "src/real.ts")], { ended_ms: 1000 }),
+    makeCard("card-link-only", canonicalRoot, [makeBlock(1, "src/link.ts")], { ended_ms: 2000 }),
+  ]);
+
+  const linkResult = cardsForFile(linkFile, { home });
+  assert.deepEqual(linkResult.coverage, { complete: true, skipped: 0 });
+  assert.deepEqual(linkResult.cards.map((c) => c.card_id), ["card-link-only"]);
+
+  const realResult = cardsForFile(realFile, { home });
+  assert.deepEqual(realResult.coverage, { complete: true, skipped: 0 });
+  assert.deepEqual(realResult.cards.map((c) => c.card_id), ["card-real-only"]);
+});
+
+test("internal directory symlink distinguishes its history from its target", (t) => {
+  const dirCap = probeSymlink("dir");
+  if (!dirCap.available && process.platform !== "win32") {
+    t.skip(`symlink dir unavailable: ${dirCap.code}; owner: host filesystem capability`);
+    return;
+  }
+
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const { repoRoot } = makeRepo(temp);
+  const canonicalRoot = canonicalPath(repoRoot);
+  const logPath = cardsFilePath(canonicalRoot, home);
+
+  const realDir = join(repoRoot, "src", "real-dir");
+  const linkDir = join(repoRoot, "src", "link-dir");
+  mkdirSync(realDir, { recursive: true });
+  const realFile = join(realDir, "item.ts");
+  writeFileSync(realFile, "export const item = 1;\n", "utf8");
+  symlinkSync(realDir, linkDir, dirCap.available ? "dir" : "junction");
+  const linkFile = join(linkDir, "item.ts");
+
+  writeJsonl(logPath, [
+    makeCard("card-real-dir-only", canonicalRoot, [makeBlock(1, "src/real-dir/item.ts")], { ended_ms: 1000 }),
+    makeCard("card-link-dir-only", canonicalRoot, [makeBlock(1, "src/link-dir/item.ts")], { ended_ms: 2000 }),
+  ]);
+
+  const linkResult = cardsForFile(linkFile, { home });
+  assert.deepEqual(linkResult.coverage, { complete: true, skipped: 0 });
+  assert.deepEqual(linkResult.cards.map((c) => c.card_id), ["card-link-dir-only"]);
+
+  const realResult = cardsForFile(realFile, { home });
+  assert.deepEqual(realResult.coverage, { complete: true, skipped: 0 });
+  assert.deepEqual(realResult.cards.map((c) => c.card_id), ["card-real-dir-only"]);
+});
+
 test("16 MiB file size cap reads tail only and marks complete=false with reason=file-size-cap", (t) => {
   const temp = makeTempDir(t);
   const home = join(temp, "home");

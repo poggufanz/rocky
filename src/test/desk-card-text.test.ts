@@ -42,6 +42,9 @@ test("labelChip matches every vector in fixtures/cards/label-chips-en.json", () 
 test("labelChip falls back gracefully for unknown ids, missing args, and custom kinds", () => {
   assert.equal(labelChip({ id: "future_label", args: { count: 2 } }, "function"), "future_label");
   assert.equal(labelChip({ id: "future_label" }, null), "future_label");
+  assert.equal(labelChip({ id: "constructor" }, "function"), "constructor");
+  assert.equal(labelChip({ id: "toString" }, "function"), "toString");
+  assert.equal(labelChip({ id: "__proto__" }, null), "__proto__");
   assert.equal(labelChip({ id: "call_added", args: {} }, "function"), "call_added");
   assert.equal(labelChip({ id: "call_removed" }, "method"), "call_removed");
   assert.equal(labelChip({ id: "symbol_added", args: {} }, "macro"), "new macro");
