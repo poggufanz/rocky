@@ -62,11 +62,19 @@ pub(crate) fn diff_line_ops(before: &[&str], after: &[&str]) -> Option<Vec<DiffO
 
 /// Computes `(first_inserted_after_line, added, removed)` for normalized `before` and `after`.
 ///
-/// Above `MAX_DIFF_ITEMS`, falls back to multiset counts and returns `None` for the first line.
+/// Above `MAX_DIFF_ITEMS`, skips Myers diff, computes `first_inserted_after_line` via a linear
+/// common-prefix scan (`None` if `after` is a prefix of or equal to `before`), and falls back to
+/// multiset counts.
 pub(crate) fn line_diff(before: &str, after: &str) -> (Option<u32>, u32, u32) {
     let before_lines: Vec<&str> = before.lines().collect();
     let after_lines: Vec<&str> = after.lines().collect();
     let Some(ops) = diff_line_ops(&before_lines, &after_lines) else {
+        let prefix = before_lines
+            .iter()
+            .zip(&after_lines)
+            .take_while(|(b, a)| b == a)
+            .count();
+        let first_added = (prefix < after_lines.len()).then(|| saturating_u32(prefix + 1));
         let mut added = 0usize;
         let mut removed = 0usize;
         for (b_cnt, a_cnt) in multiset_pairs(&before_lines, &after_lines).into_values() {
@@ -76,7 +84,7 @@ pub(crate) fn line_diff(before: &str, after: &str) -> (Option<u32>, u32, u32) {
                 removed += b_cnt - a_cnt;
             }
         }
-        return (None, saturating_u32(added), saturating_u32(removed));
+        return (first_added, saturating_u32(added), saturating_u32(removed));
     };
 
     let mut first_added = None;
@@ -188,6 +196,25 @@ mod tests {
         let before = before_lines.join("\n");
         let after = after_lines.join("\n");
         assert_eq!(line_counts(&before, &after), (2, 1));
+    }
+
+    #[test]
+    fn large_line_diff_uses_prefix_scan_and_multiset() {
+        let before_lines: Vec<String> = (0..=MAX_DIFF_ITEMS).map(|i| format!("l{i}")).collect();
+        let before = before_lines.join("\n");
+
+        let prepended = format!("head\n{before}");
+        assert_eq!(line_diff(&before, &prepended), (Some(1), 1, 0));
+
+        let appended = format!("{before}\ntail");
+        assert_eq!(
+            line_diff(&before, &appended),
+            (Some(saturating_u32(before_lines.len() + 1)), 1, 0)
+        );
+
+        let prefix_only = before_lines[..before_lines.len() - 1].join("\n");
+        assert_eq!(line_diff(&before, &prefix_only), (None, 0, 1));
+        assert_eq!(line_diff(&before, &before), (None, 0, 0));
     }
 
     #[test]

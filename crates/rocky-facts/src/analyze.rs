@@ -791,4 +791,83 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn plain_large_file_preserves_change_line() {
+        use std::fmt::Write;
+
+        let old_len = MAX_DIFF_ITEMS + 1;
+        let mut before = String::new();
+        for i in 0..old_len {
+            let _ = writeln!(before, "line {i}");
+        }
+        assert!(before.len() < MAX_BYTES);
+
+        let prepended_after = format!("prepended line\n{before}");
+        let prepended = analyze(&FileInput {
+            path: "notes/large.md",
+            before: Side::Text(&before),
+            after: Side::Text(&prepended_after),
+        });
+        assert_eq!(
+            prepended.changes,
+            vec![Change::new(
+                None,
+                vec![Label::LinesChanged {
+                    added: 1,
+                    removed: 0,
+                }]
+            )]
+        );
+        assert_eq!(
+            prepended.spans,
+            vec![ChangeSpan {
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+            }]
+        );
+
+        let appended_after = format!("{before}appended line\n");
+        let appended = analyze(&FileInput {
+            path: "notes/large.md",
+            before: Side::Text(&before),
+            after: Side::Text(&appended_after),
+        });
+        assert_eq!(
+            appended.changes,
+            vec![Change::new(
+                None,
+                vec![Label::LinesChanged {
+                    added: 1,
+                    removed: 0,
+                }]
+            )]
+        );
+        assert_eq!(
+            appended.spans,
+            vec![ChangeSpan {
+                line: Some(text::saturating_u32(old_len + 1)),
+                added: Some(1),
+                removed: Some(0),
+            }]
+        );
+
+        let trimmed_after = before
+            .strip_suffix(&format!("line {}\n", old_len - 1))
+            .unwrap();
+        let prefix_deleted = analyze(&FileInput {
+            path: "notes/large.md",
+            before: Side::Text(&before),
+            after: Side::Text(trimmed_after),
+        });
+        assert_eq!(
+            prefix_deleted.spans,
+            vec![ChangeSpan {
+                line: None,
+                added: Some(0),
+                removed: Some(1),
+            }]
+        );
+    }
 }
