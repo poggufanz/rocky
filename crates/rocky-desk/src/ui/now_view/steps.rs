@@ -90,6 +90,44 @@ pub(super) fn steps_list(
     out
 }
 
+fn step_duration(dur: String) -> Div {
+    div()
+        .flex_shrink_0()
+        .whitespace_nowrap()
+        .font_family(mono_font())
+        .text_size(px(11.0))
+        .text_color(rgb(TEXT_MUTED))
+        .pt(px(1.0))
+        .child(dur)
+}
+
+fn step_row_content(step: &LiveStep) -> Div {
+    let mut title = div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .font_family(mono_font())
+        .text_size(px(12.0));
+    title = match step.mark {
+        StepMark::Running | StepMark::Waiting => title
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(TEXT_DARK)),
+        StepMark::Failed => title.text_color(rgb(STATUS_FAILED)),
+        StepMark::Ok => title.text_color(rgb(TEXT_BODY)),
+    };
+    title = title.child(step.title.clone());
+
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_start()
+        .gap(px(8.0))
+        .pb(px(8.0))
+        .child(title)
+        .child(step_duration(step.dur.clone()))
+}
+
 fn step_row(step: &LiveStep, has_line_below: bool, run_id: SharedString) -> Div {
     let marker = match step.mark {
         StepMark::Ok => settled_step_marker("\u{2713}", STATUS_DONE),
@@ -125,42 +163,11 @@ fn step_row(step: &LiveStep, has_line_below: bool, run_id: SharedString) -> Div 
         );
     }
 
-    let mut title = div()
-        .flex_1()
-        .min_w_0()
-        .truncate()
-        .font_family(mono_font())
-        .text_size(px(12.0));
-    title = match step.mark {
-        StepMark::Running | StepMark::Waiting => title
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_DARK)),
-        StepMark::Failed => title.text_color(rgb(STATUS_FAILED)),
-        StepMark::Ok => title.text_color(rgb(TEXT_BODY)),
-    };
-    title = title.child(step.title.clone());
-
-    let content = div()
-        .flex_1()
-        .min_w_0()
+    div()
         .flex()
-        .items_start()
-        .gap(px(8.0))
-        .pb(px(8.0))
-        .child(title)
-        .child(
-            div()
-                .ml_auto()
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .font_family(mono_font())
-                .text_size(px(11.0))
-                .text_color(rgb(TEXT_MUTED))
-                .pt(px(1.0))
-                .child(step.dur.clone()),
-        );
-
-    div().flex().gap(px(10.0)).child(rail).child(content)
+        .gap(px(10.0))
+        .child(rail)
+        .child(step_row_content(step))
 }
 
 fn settled_step_marker(glyph: &'static str, bg: u32) -> AnyElement {
@@ -179,4 +186,33 @@ fn settled_step_marker(glyph: &'static str, bg: u32) -> AnyElement {
         .text_color(rgb(CARD_BG))
         .child(glyph)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{DefiniteLength, Display, Length, Styled, px};
+
+    use super::{step_duration, step_row_content};
+    use crate::now_model::{LiveStep, StepMark};
+
+    #[test]
+    fn step_row_content_keeps_8px_gap_without_auto_margin() {
+        let step = LiveStep {
+            mark: StepMark::Running,
+            title: "cargo test -p rocky-desk".to_string(),
+            dur: "12s".to_string(),
+        };
+
+        let mut content = step_row_content(&step);
+        let style = content.style();
+        assert_eq!(style.display, Some(Display::Flex));
+        assert_eq!(style.gap.width, Some(DefiniteLength::from(px(8.0))));
+        assert_eq!(style.flex_grow, Some(1.0));
+        assert_eq!(style.min_size.width, Some(Length::from(px(0.0))));
+
+        let mut dur = step_duration(step.dur.clone());
+        let dur_style = dur.style();
+        assert_eq!(dur_style.margin.left, None);
+        assert_eq!(dur_style.flex_shrink, Some(0.0));
+    }
 }

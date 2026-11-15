@@ -250,56 +250,6 @@ fn session_header<T: 'static>(
     on_action: OnNowAction<T>,
 ) -> impl IntoElement {
     let key = card.key.clone();
-    let dot_id = SharedString::from(format!("now-dot:{}:{}", key.session_id, key.agent_id));
-    let mut line1 = div()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .w_full()
-        .min_w_0()
-        .child(status_dot(card.status, Some(dot_id)))
-        .child(
-            div()
-                .text_size(px(14.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT_DARK))
-                .truncate()
-                .child(card.repo.clone()),
-        );
-    if let Some(branch) = &card.branch {
-        line1 = line1.child(
-            div()
-                .text_size(px(13.0))
-                .text_color(rgb(TEXT_MUTED))
-                .truncate()
-                .child(format!("@ {branch}")),
-        );
-    }
-    line1 = line1
-        .child(
-            div()
-                .text_size(px(11.0))
-                .font_family(mono_font())
-                .text_color(rgb(TEXT_MUTED))
-                .whitespace_nowrap()
-                .flex_shrink_0()
-                .child(card.session_short.clone()),
-        )
-        .child(status_pill(lang, card.status).ml_auto())
-        .child(
-            div()
-                .min_w(px(40.0))
-                .flex()
-                .justify_end()
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::MEDIUM)
-                .font_family(mono_font())
-                .text_color(rgb(timer_color(card.status)))
-                .child(card.timer.clone()),
-        );
-
     let mut header = div()
         .id(SharedString::from(format!(
             "now-head:{}:{}",
@@ -316,12 +266,13 @@ fn session_header<T: 'static>(
         .on_click(cx.listener(move |this, _, window, cx| {
             on_action(this, NowAction::ToggleAgent(key.clone()), window, cx);
         }))
-        .child(line1);
+        .child(session_header_line1(lang, card));
 
     if let Some(prompt) = &card.prompt {
         header = header.child(
             div()
                 .pl(px(16.0))
+                .min_w_0()
                 .text_size(px(13.0))
                 .text_color(rgb(TEXT_BODY))
                 .truncate()
@@ -330,6 +281,77 @@ fn session_header<T: 'static>(
     }
 
     header
+}
+
+fn session_header_left(card: &SessionCard) -> Div {
+    let dot_id = SharedString::from(format!(
+        "now-dot:{}:{}",
+        card.key.session_id, card.key.agent_id
+    ));
+    let mut left = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .child(status_dot(card.status, Some(dot_id)))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(TEXT_DARK))
+                .child(card.repo.clone()),
+        );
+    if let Some(branch) = &card.branch {
+        left = left.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(13.0))
+                .text_color(rgb(TEXT_MUTED))
+                .child(format!("@ {branch}")),
+        );
+    }
+    left.child(
+        div()
+            .text_size(px(11.0))
+            .font_family(mono_font())
+            .text_color(rgb(TEXT_MUTED))
+            .whitespace_nowrap()
+            .flex_shrink_0()
+            .child(card.session_short.clone()),
+    )
+}
+
+fn session_header_timer(status: Status, timer: String) -> Div {
+    div()
+        .min_w(px(40.0))
+        .flex()
+        .justify_end()
+        .flex_shrink_0()
+        .whitespace_nowrap()
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .font_family(mono_font())
+        .text_color(rgb(timer_color(status)))
+        .child(timer)
+}
+
+fn session_header_line1(lang: UiLang, card: &SessionCard) -> Div {
+    // Avoid auto margins on rows using `gap`: taffy skips `gap` whenever `free_space > 0`
+    // and any item on the flex line has an auto main-axis margin.
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .w_full()
+        .min_w_0()
+        .child(session_header_left(card))
+        .child(status_pill(lang, card.status))
+        .child(session_header_timer(card.status, card.timer.clone()))
 }
 
 fn action_row(lang: UiLang, card: &SessionCard) -> Div {
@@ -458,6 +480,7 @@ fn sub_row_view<T: 'static>(
         row = row.child(
             div()
                 .pl(px(36.0))
+                .min_w_0()
                 .font_family(mono_font())
                 .text_size(px(12.0))
                 .text_color(rgb(TEXT_SUBTLE))
@@ -541,10 +564,13 @@ fn timer_color(status: Status) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Display, Length, Overflow, Styled, TextOverflow, WhiteSpace, px};
+    use gpui::{DefiniteLength, Display, Length, Overflow, Styled, TextOverflow, WhiteSpace, px};
     use rocky_proto::pipe::{AgentKey, Status};
 
-    use super::{action_row, action_tool_column};
+    use super::{
+        action_row, action_tool_column, session_header_left, session_header_line1,
+        session_header_timer, status_pill,
+    };
     use crate::i18n::UiLang;
     use crate::now_model::SessionCard;
 
@@ -613,5 +639,47 @@ mod tests {
         );
         let mut id_row = action_row(UiLang::Id, &id_fallback);
         assert_eq!(id_row.style().display, Some(Display::Flex));
+    }
+
+    #[test]
+    fn session_header_left_grows_and_keeps_8px_gap_with_and_without_branch() {
+        let with_branch = sample_card("Read", None, 0);
+        let mut without_branch = sample_card("Read", None, 0);
+        without_branch.branch = None;
+
+        for card in [&with_branch, &without_branch] {
+            let mut left = session_header_left(card);
+            let style = left.style();
+            assert_eq!(style.display, Some(Display::Flex));
+            assert_eq!(style.gap.width, Some(DefiniteLength::from(px(8.0))));
+            assert_eq!(style.flex_grow, Some(1.0));
+            assert_eq!(style.min_size.width, Some(Length::from(px(0.0))));
+            assert_eq!(style.overflow.x, Some(Overflow::Hidden));
+        }
+    }
+
+    #[test]
+    fn session_header_line1_keeps_8px_gap_without_auto_margins() {
+        let card = sample_card("Edit", None, 0);
+        let mut line1 = session_header_line1(UiLang::En, &card);
+        let line1_style = line1.style();
+        assert_eq!(line1_style.display, Some(Display::Flex));
+        assert_eq!(line1_style.gap.width, Some(DefiniteLength::from(px(8.0))));
+        assert_eq!(line1_style.min_size.width, Some(Length::from(px(0.0))));
+
+        for (lang, status) in [
+            (UiLang::En, Status::Working),
+            (UiLang::Id, Status::NeedsYou),
+        ] {
+            let mut pill = status_pill(lang, status);
+            let pill_style = pill.style();
+            assert_eq!(pill_style.margin.left, None);
+            assert_eq!(pill_style.flex_shrink, Some(0.0));
+        }
+
+        let mut timer = session_header_timer(Status::Working, "12s".to_string());
+        let timer_style = timer.style();
+        assert_eq!(timer_style.margin.left, None);
+        assert_eq!(timer_style.flex_shrink, Some(0.0));
     }
 }
