@@ -293,20 +293,30 @@ fn diff_paired_symbol(before: &SymbolInfo<'_>, after: &SymbolInfo<'_>) -> Change
     Change::new(Some(after.symbol.clone()), labels)
 }
 
-/// Compares two parsed `FileSyntax` representations into ordered `Change` facts.
-pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Change> {
+pub(crate) type LineRegion = (u32, u32);
+pub(crate) type RegionChange = (Change, Option<LineRegion>, Option<LineRegion>);
+
+/// Compares two parsed `FileSyntax` representations into ordered `(Change, before_lines, after_lines)` tuples.
+pub(crate) fn compare_regions(
+    before: &FileSyntax<'_>,
+    after: &FileSyntax<'_>,
+) -> Vec<RegionChange> {
     if before.has_error || after.has_error {
-        return vec![Change::new(
+        return vec![(
+            Change::new(
+                None,
+                vec![Label::LinesChanged {
+                    added: 0,
+                    removed: 0,
+                }],
+            ),
             None,
-            vec![Label::LinesChanged {
-                added: 0,
-                removed: 0,
-            }],
+            None,
         )];
     }
 
     if before.all == after.all {
-        return vec![Change::new(None, vec![Label::FormatOnly {}])];
+        return vec![(Change::new(None, vec![Label::FormatOnly {}]), None, None)];
     }
 
     let after_by_key: BTreeMap<MatchKey<'_>, usize> = after
@@ -318,8 +328,8 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
 
     let mut before_paired = vec![false; before.symbols.len()];
     let mut after_paired = vec![false; after.symbols.len()];
-    let mut after_changes: Vec<(usize, Change)> = Vec::new();
-    let mut removed_changes: Vec<(usize, Change)> = Vec::new();
+    let mut after_changes: Vec<(usize, RegionChange)> = Vec::new();
+    let mut removed_changes: Vec<(usize, RegionChange)> = Vec::new();
 
     for (b_idx, b_sym) in before.symbols.iter().enumerate() {
         if let Some(&a_idx) = after_by_key.get(&match_key(b_sym)) {
@@ -327,7 +337,14 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
             after_paired[a_idx] = true;
             let a_sym = &after.symbols[a_idx];
             if b_sym.all != a_sym.all {
-                after_changes.push((a_idx, diff_paired_symbol(b_sym, a_sym)));
+                after_changes.push((
+                    a_idx,
+                    (
+                        diff_paired_symbol(b_sym, a_sym),
+                        Some(b_sym.lines),
+                        Some(a_sym.lines),
+                    ),
+                ));
             }
         }
     }
@@ -357,11 +374,15 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
             let a_sym = &after.symbols[a_idx];
             after_changes.push((
                 a_idx,
-                Change::new(
-                    Some(a_sym.symbol.clone()),
-                    vec![Label::SymbolRenamed {
-                        from: cut(&b_sym.symbol.name, MAX_NAME_CHARS),
-                    }],
+                (
+                    Change::new(
+                        Some(a_sym.symbol.clone()),
+                        vec![Label::SymbolRenamed {
+                            from: cut(&b_sym.symbol.name, MAX_NAME_CHARS),
+                        }],
+                    ),
+                    Some(b_sym.lines),
+                    Some(a_sym.lines),
                 ),
             ));
         }
@@ -376,7 +397,14 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
             } else {
                 Label::SymbolAdded {}
             };
-            after_changes.push((a_idx, Change::new(Some(a_sym.symbol.clone()), vec![label])));
+            after_changes.push((
+                a_idx,
+                (
+                    Change::new(Some(a_sym.symbol.clone()), vec![label]),
+                    None,
+                    Some(a_sym.lines),
+                ),
+            ));
         }
     }
 
@@ -389,7 +417,14 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
             } else {
                 Label::SymbolRemoved {}
             };
-            removed_changes.push((b_idx, Change::new(Some(b_sym.symbol.clone()), vec![label])));
+            removed_changes.push((
+                b_idx,
+                (
+                    Change::new(Some(b_sym.symbol.clone()), vec![label]),
+                    Some(b_sym.lines),
+                    None,
+                ),
+            ));
         }
     }
 
@@ -418,16 +453,25 @@ pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Ch
 
     let mut changes = Vec::new();
     if !file_labels.is_empty() {
-        changes.push(Change::new(None, file_labels));
+        changes.push((Change::new(None, file_labels), None, None));
     }
-    changes.extend(after_changes.into_iter().map(|(_, c)| c));
-    changes.extend(removed_changes.into_iter().map(|(_, c)| c));
+    changes.extend(after_changes.into_iter().map(|(_, item)| item));
+    changes.extend(removed_changes.into_iter().map(|(_, item)| item));
 
     if changes.is_empty() {
-        changes.push(Change::new(None, vec![Label::BodyChanged {}]));
+        changes.push((Change::new(None, vec![Label::BodyChanged {}]), None, None));
     }
 
     changes
+}
+
+/// Compares two parsed `FileSyntax` representations into ordered `Change` facts.
+#[cfg(test)]
+pub(crate) fn compare(before: &FileSyntax<'_>, after: &FileSyntax<'_>) -> Vec<Change> {
+    compare_regions(before, after)
+        .into_iter()
+        .map(|(change, _, _)| change)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1098,6 +1142,62 @@ function pick(a: boolean, c: boolean, x: number) {
             vec![Label::SymbolRenamed {
                 from: format!("fn_{}", count - 1)
             }]
+        );
+    }
+
+    #[test]
+    fn compare_regions_tracks_regions_and_matches_compare() {
+        use crate::model::Lang;
+        use crate::syntax;
+
+        let before = "\
+import a from \"a\";
+function removedFn() {
+  return 0;
+}
+function editedFn(x: number) {
+  return x + 1;
+}
+function oldName() {
+  return 42;
+}
+";
+        let after = "\
+import b from \"b\";
+function addedFn() {
+  return 99;
+}
+function editedFn(x: number) {
+  return x + 2;
+}
+function newName() {
+  return 42;
+}
+";
+        let before_syn = syntax::parse(Lang::Typescript, before);
+        let after_syn = syntax::parse(Lang::Typescript, after);
+
+        let regions = super::compare_regions(&before_syn, &after_syn);
+        let changes_only = super::compare(&before_syn, &after_syn);
+        let projected: Vec<_> = regions
+            .iter()
+            .map(|(change, _, _)| change.clone())
+            .collect();
+        assert_eq!(projected, changes_only);
+
+        let summary: Vec<_> = regions
+            .iter()
+            .map(|(change, b, a)| (change.symbol.as_ref().map(|s| s.name.as_str()), *b, *a))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (None, None, None),
+                (Some("addedFn"), None, Some((2, 4))),
+                (Some("editedFn"), Some((5, 7)), Some((5, 7))),
+                (Some("newName"), Some((8, 10)), Some((8, 10))),
+                (Some("removedFn"), Some((2, 4)), None),
+            ]
         );
     }
 }

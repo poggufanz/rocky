@@ -3,7 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rocky_facts::{FileInput, Side, SnippetLine, Symbol, analyze, debug, snippet, snippets};
+use rocky_facts::{
+    ChangeSpan, FileInput, Side, SnippetLine, Symbol, analyze, debug, snippet, snippets,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -128,16 +130,27 @@ fn golden_fixtures() {
             let case_name = &case.name;
             let input = case.input();
 
-            let facts = analyze(&input);
+            let first_facts = analyze(&input);
+            let facts = &first_facts;
+            let spans: &[ChangeSpan] = &facts.spans;
+            if spans.len() != facts.changes.len() {
+                failures.push(format!(
+                    "{case_name}: spans length ({}) != changes length ({})",
+                    spans.len(),
+                    facts.changes.len()
+                ));
+                continue;
+            }
             let first = format!(
                 "{}\n",
                 serde_json::to_string_pretty(&facts).expect("serialize facts")
             );
+            let second_facts = analyze(&input);
             let second = format!(
                 "{}\n",
-                serde_json::to_string_pretty(&analyze(&input)).expect("serialize facts")
+                serde_json::to_string_pretty(&second_facts).expect("serialize facts")
             );
-            if first != second {
+            if first != second || first_facts.spans != second_facts.spans {
                 failures.push(format!(
                     "{case_name}: non-deterministic output\nfirst:\n{first}\nsecond:\n{second}"
                 ));

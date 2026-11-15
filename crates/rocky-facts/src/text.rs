@@ -48,15 +48,25 @@ fn multiset_pairs<'a, T: Eq + Hash>(
     counts
 }
 
-fn saturating_u32(value: usize) -> u32 {
+pub(crate) fn saturating_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// Counts `(added, removed)` lines using Myers diff, or multiset counts above `MAX_DIFF_ITEMS`.
-pub(crate) fn line_counts(before: &str, after: &str) -> (u32, u32) {
+/// Runs Myers diff on normalized line slices unless either side exceeds `MAX_DIFF_ITEMS`.
+pub(crate) fn diff_line_ops(before: &[&str], after: &[&str]) -> Option<Vec<DiffOp>> {
+    if before.len() > MAX_DIFF_ITEMS || after.len() > MAX_DIFF_ITEMS {
+        return None;
+    }
+    Some(capture_diff_slices(Algorithm::Myers, before, after))
+}
+
+/// Computes `(first_inserted_after_line, added, removed)` for normalized `before` and `after`.
+///
+/// Above `MAX_DIFF_ITEMS`, falls back to multiset counts and returns `None` for the first line.
+pub(crate) fn line_diff(before: &str, after: &str) -> (Option<u32>, u32, u32) {
     let before_lines: Vec<&str> = before.lines().collect();
     let after_lines: Vec<&str> = after.lines().collect();
-    if before_lines.len() > MAX_DIFF_ITEMS || after_lines.len() > MAX_DIFF_ITEMS {
+    let Some(ops) = diff_line_ops(&before_lines, &after_lines) else {
         let mut added = 0usize;
         let mut removed = 0usize;
         for (b_cnt, a_cnt) in multiset_pairs(&before_lines, &after_lines).into_values() {
@@ -66,26 +76,46 @@ pub(crate) fn line_counts(before: &str, after: &str) -> (u32, u32) {
                 removed += b_cnt - a_cnt;
             }
         }
-        return (saturating_u32(added), saturating_u32(removed));
-    }
+        return (None, saturating_u32(added), saturating_u32(removed));
+    };
 
-    let ops = capture_diff_slices(Algorithm::Myers, &before_lines, &after_lines);
+    let mut first_added = None;
     let mut added = 0usize;
     let mut removed = 0usize;
     for op in ops {
         match op {
             DiffOp::Equal { .. } => {}
             DiffOp::Delete { old_len, .. } => removed += old_len,
-            DiffOp::Insert { new_len, .. } => added += new_len,
-            DiffOp::Replace {
-                old_len, new_len, ..
+            DiffOp::Insert {
+                new_index, new_len, ..
             } => {
+                if first_added.is_none() && new_len > 0 {
+                    first_added = Some(saturating_u32(new_index + 1));
+                }
+                added += new_len;
+            }
+            DiffOp::Replace {
+                old_len,
+                new_index,
+                new_len,
+                ..
+            } => {
+                if first_added.is_none() && new_len > 0 {
+                    first_added = Some(saturating_u32(new_index + 1));
+                }
                 removed += old_len;
                 added += new_len;
             }
         }
     }
-    (saturating_u32(added), saturating_u32(removed))
+    (first_added, saturating_u32(added), saturating_u32(removed))
+}
+
+/// Counts `(added, removed)` lines using Myers diff, or multiset counts above `MAX_DIFF_ITEMS`.
+#[cfg(test)]
+pub(crate) fn line_counts(before: &str, after: &str) -> (u32, u32) {
+    let (_, added, removed) = line_diff(before, after);
+    (added, removed)
 }
 
 /// Computes `100 - round(100 * matched / max(len_a, len_b))` over token slices.

@@ -255,11 +255,22 @@ impl Change {
     }
 }
 
+/// Where a change sits in the after version and how many diff lines it covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChangeSpan {
+    /// 1-based first line of the change in the after version.
+    pub line: Option<u32>,
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+}
+
 /// Complete change facts produced for a single file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileFacts {
     pub lang: Lang,
     pub changes: Vec<Change>,
+    #[serde(skip)]
+    pub spans: Vec<ChangeSpan>,
 }
 
 #[cfg(test)]
@@ -578,6 +589,25 @@ mod tests {
             Label::CallAdded {
                 name: "call_11".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn file_facts_skips_spans_in_json() {
+        let facts = FileFacts {
+            lang: Lang::Plain,
+            changes: vec![Change::new(None, vec![Label::FileNew {}])],
+            spans: vec![ChangeSpan {
+                line: Some(1),
+                added: Some(3),
+                removed: Some(0),
+            }],
+        };
+        let serialized = serde_json::to_string(&facts).unwrap();
+        assert!(!serialized.contains("spans"));
+        assert_eq!(
+            serialized,
+            r#"{"lang":"plain","changes":[{"symbol":null,"labels":[{"id":"file_new","args":{}}],"importance":"medium"}]}"#
         );
     }
 }
