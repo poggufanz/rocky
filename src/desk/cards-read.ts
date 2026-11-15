@@ -114,6 +114,15 @@ export interface CardsForFileOptions {
   limit?: number;
 }
 
+/** @internal Test-only signature for injecting `readSync` faults. */
+export type CardsReadSyncHook = (
+  fd: number,
+  buffer: NodeJS.ArrayBufferView,
+  offset: number,
+  length: number,
+  position: number | bigint | null,
+) => number;
+
 function emptyResult(coverage: CardsReadCoverage): CardsForFile {
   return { cards: [], matched: new Map(), coverage };
 }
@@ -482,6 +491,7 @@ function readAndParseCardsLog(
   logPath: string,
   expectedLstat: ReturnType<typeof lstatSync>,
   remainingBudgetBytes: number,
+  readBytes: CardsReadSyncHook = readSync,
 ): ParsedLogResult {
   const cardsById = new Map<string, StoredCard>();
   let fd: number;
@@ -500,46 +510,63 @@ function readAndParseCardsLog(
   try {
     const opened = fstatSync(fd, { bigint: true });
     if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(expectedLstat, opened)) {
-      return { cardsById, coverage: { complete: false, reason: "read-race", skipped: 0 }, bytesRead: 0 };
+      return { cardsById, coverage: { complete: false, reason: "read-race", skipped: 0 }, bytesRead: totalReadFromFile };
     }
 
     const totalBytesBig = opened.size;
     const capBytesBig = BigInt(MAX_CARDS_FILE_BYTES);
     sizeCapped = totalBytesBig > capBytesBig;
-    const plannedReadBig = sizeCapped ? capBytesBig : totalBytesBig;
+    // Account for the 1-byte preceding-newline probe when tail-reading capped logs.
+    const plannedReadBig = sizeCapped ? capBytesBig + 1n : totalBytesBig;
     if (plannedReadBig > BigInt(Math.max(0, remainingBudgetBytes))) {
       return {
         cardsById,
         coverage: { complete: false, reason: "file-size-cap", skipped: 0 },
-        bytesRead: 0,
+        bytesRead: totalReadFromFile,
         hitBudget: true,
       };
     }
 
     let pos = sizeCapped ? totalBytesBig - capBytesBig : 0n;
-    const startPos = pos;
 
     const readBuf = Buffer.allocUnsafe(READ_CHUNK_BYTES);
     let skippingPartialFirstLine = false;
     if (sizeCapped) {
       const prevByte = Buffer.allocUnsafe(1);
-      if (readSync(fd, prevByte, 0, 1, pos - 1n) !== 1) {
-        return { cardsById, coverage: { complete: false, reason: "read-race", skipped: 0 }, bytesRead: 0 };
+      const prevBytesRead = readBytes(fd, prevByte, 0, 1, pos - 1n);
+      if (prevBytesRead > 0) {
+        totalReadFromFile += prevBytesRead;
+      }
+      if (prevBytesRead !== 1) {
+        return {
+          cardsById,
+          coverage: { complete: false, reason: "read-race", skipped: 0 },
+          bytesRead: totalReadFromFile,
+        };
       }
       skippingPartialFirstLine = prevByte[0] !== 0x0a;
     }
     let droppingLongLine = false;
+    let stoppedAtBudget = false;
     let pendingChunks: Buffer[] = [];
     let pendingBytes = 0;
 
     while (pos < totalBytesBig) {
       const remaining = totalBytesBig - pos;
-      const toRead = remaining < BigInt(READ_CHUNK_BYTES) ? Number(remaining) : READ_CHUNK_BYTES;
-      const bytesRead = readSync(fd, readBuf, 0, toRead, pos);
+      const budgetRemaining = Math.max(0, remainingBudgetBytes - totalReadFromFile);
+      if (budgetRemaining === 0) {
+        sizeCapped = true;
+        stoppedAtBudget = true;
+        break;
+      }
+      const chunkMax = Math.min(READ_CHUNK_BYTES, budgetRemaining);
+      const toRead = remaining < BigInt(chunkMax) ? Number(remaining) : chunkMax;
+      const bytesRead = readBytes(fd, readBuf, 0, toRead, pos);
       if (bytesRead <= 0) {
         readRace = true;
         break;
       }
+      totalReadFromFile += bytesRead;
       pos += BigInt(bytesRead);
       const chunk = readBuf.subarray(0, bytesRead);
 
@@ -606,9 +633,7 @@ function readAndParseCardsLog(
       }
     }
 
-    totalReadFromFile = Number(pos - startPos);
-
-    if (!readRace && !skippingPartialFirstLine && !droppingLongLine && pendingBytes > 0) {
+    if (!readRace && !stoppedAtBudget && !skippingPartialFirstLine && !droppingLongLine && pendingBytes > 0) {
       const lastChunk = pendingChunks[pendingChunks.length - 1]!;
       const trimmedCrLen = pendingBytes - (lastChunk[lastChunk.length - 1] === 0x0d ? 1 : 0);
       if (trimmedCrLen > MAX_CARDS_LINE_BYTES) {
@@ -739,6 +764,23 @@ function compareCards(left: StoredCard, right: StoredCard): number {
 
 /** Read the latest change cards touching `file`, ordered newest first. */
 export function cardsForFile(file: string, options: CardsForFileOptions = {}): CardsForFile {
+  return cardsForFileInternal(file, options, readSync);
+}
+
+/** @internal Test-only entry point for injecting `readSync` faults. */
+export function cardsForFileForTest(
+  file: string,
+  options: CardsForFileOptions = {},
+  readBytes: CardsReadSyncHook = readSync,
+): CardsForFile {
+  return cardsForFileInternal(file, options, readBytes);
+}
+
+function cardsForFileInternal(
+  file: string,
+  options: CardsForFileOptions,
+  readBytes: CardsReadSyncHook,
+): CardsForFile {
   const platform = options.platform ?? process.platform;
   const cwd = options.cwd ?? process.cwd();
   const home = options.home ?? resolveRockyPaths().home;
@@ -776,7 +818,7 @@ export function cardsForFile(file: string, options: CardsForFileOptions = {}): C
         addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
       } else {
         selectedRoot = pick.selectedRoot;
-        const parsed = readAndParseCardsLog(pick.logPath, pick.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+        const parsed = readAndParseCardsLog(pick.logPath, pick.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead, readBytes);
         totalBytesRead += parsed.bytesRead;
         mergeParsedCards(merged, parsed.cardsById, true);
         addCoverage(covAcc, parsed.coverage);
@@ -796,7 +838,7 @@ export function cardsForFile(file: string, options: CardsForFileOptions = {}): C
       if (!probe.lstat) {
         addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
       } else {
-        const parsed = readAndParseCardsLog(nonePath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+        const parsed = readAndParseCardsLog(nonePath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead, readBytes);
         totalBytesRead += parsed.bytesRead;
         mergeParsedCards(merged, parsed.cardsById, false);
         addCoverage(covAcc, parsed.coverage);
@@ -832,12 +874,12 @@ export function cardsForFile(file: string, options: CardsForFileOptions = {}): C
         addCoverage(covAcc, { complete: false, reason: "file-size-cap", skipped: 0 });
         break;
       }
-      const parsed = readAndParseCardsLog(extraPath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+      const parsed = readAndParseCardsLog(extraPath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead, readBytes);
+      totalBytesRead += parsed.bytesRead;
       if (parsed.hitBudget) {
         addCoverage(covAcc, { complete: false, reason: "file-size-cap", skipped: 0 });
         break;
       }
-      totalBytesRead += parsed.bytesRead;
       mergeParsedCards(merged, parsed.cardsById, false);
       addCoverage(covAcc, parsed.coverage);
     }

@@ -1,12 +1,12 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { canonicalPath } from "../core/memory-read.js";
-import { cardsForFile, type StoredBlock, type StoredCard } from "../desk/cards-read.js";
+import { cardsForFile, cardsForFileForTest, type CardsReadSyncHook, type StoredBlock, type StoredCard } from "../desk/cards-read.js";
 import { cardsFilePath } from "../listening/cards-path.js";
 import { probeSymlink, skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
@@ -782,4 +782,233 @@ test("cross-log extra scan stops at 64 extra files or 64 MiB total read with fil
   assert.equal(overBytes.coverage.complete, false);
   assert.equal(overBytes.coverage.reason, "file-size-cap");
   assert.equal(overBytes.cards.some((c) => c.card_id === "card-beyond-64mib"), false);
+});
+
+function writeExactSizeCardsLog(logPath: string, firstCard: StoredCard, targetBytes: number): void {
+  mkdirSync(dirname(logPath), { recursive: true });
+  const firstLine = `${JSON.stringify(firstCard)}\n`;
+  const bigFiller = `${JSON.stringify(makeCard("filler", "", [makeBlock(1, "/unrelated/file.ts")], { prompt: "x".repeat(524_288) }))}\n`;
+  const smallBase = `${JSON.stringify(makeCard("filler-tail", "", [makeBlock(1, "/unrelated/file.ts")], { prompt: "" }))}\n`;
+
+  const firstLen = Buffer.byteLength(firstLine, "utf8");
+  const bigLen = Buffer.byteLength(bigFiller, "utf8");
+  const smallBaseLen = Buffer.byteLength(smallBase, "utf8");
+  let remaining = targetBytes - firstLen;
+  const bigCount = Math.floor((remaining - smallBaseLen) / bigLen);
+  remaining -= bigCount * bigLen;
+  const tailLine = `${JSON.stringify(makeCard("filler-tail", "", [makeBlock(1, "/unrelated/file.ts")], { prompt: "x".repeat(remaining - smallBaseLen) }))}\n`;
+
+  const content = `${firstLine}${bigFiller.repeat(bigCount)}${tailLine}`;
+  assert.equal(Buffer.byteLength(content, "utf8"), targetBytes);
+  writeFileSync(logPath, content, "utf8");
+}
+
+test("thrown reads after successful chunks charge partial bytes against the 64 MiB budget", (t) => {
+  const MiB = 1024 * 1024;
+  const LOG_BYTES = 16 * MiB;
+  const THROW_AFTER_BYTES = 15 * MiB;
+  const BUDGET_BYTES = 64 * MiB;
+
+  const temp = makeTempDir(t, "rocky-cards-throw-budget-");
+  const home = join(temp, "home");
+  const { repoRoot, filePath } = makeRepo(temp, "repo-throw");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const absTarget = canonicalPath(filePath);
+
+  const ownLog = cardsFilePath(canonicalRoot, home);
+  writeExactSizeCardsLog(
+    ownLog,
+    makeCard("card-throw-own", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 1000 }),
+    LOG_BYTES,
+  );
+  for (let i = 1; i <= 5; i += 1) {
+    const extraLog = join(home, "desk", "cards", `extra-0${i}.jsonl`);
+    writeExactSizeCardsLog(
+      extraLog,
+      makeCard(`card-throw-${i}`, "", [makeBlock(1, absTarget)], { ended_ms: 1000 + i * 1000 }),
+      LOG_BYTES,
+    );
+  }
+
+  let actualBytesRead = 0;
+  let bytesInCurrentFile = 0;
+  let lastFd: number | undefined;
+  let lastPos = -1n;
+
+  const throwingRead: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+    const posBig = position === null ? 0n : BigInt(position);
+    if (lastFd === undefined || fd !== lastFd || posBig <= lastPos) {
+      bytesInCurrentFile = 0;
+    }
+    lastFd = fd;
+    lastPos = posBig;
+
+    if (bytesInCurrentFile >= THROW_AFTER_BYTES) {
+      const err = new Error("EIO: i/o error, read");
+      (err as NodeJS.ErrnoException).code = "EIO";
+      throw err;
+    }
+    const readCount = readSync(fd, buffer, offset, length, position);
+    if (readCount > 0) {
+      actualBytesRead += readCount;
+      bytesInCurrentFile += readCount;
+    }
+    return readCount;
+  };
+
+  const res = cardsForFileForTest(filePath, { home }, throwingRead);
+  assert.ok(
+    actualBytesRead <= BUDGET_BYTES,
+    `total bytes read (${actualBytesRead}) must not exceed 64 MiB (${BUDGET_BYTES})`,
+  );
+  assert.equal(actualBytesRead, 4 * THROW_AFTER_BYTES);
+  assert.equal(res.coverage.complete, false);
+  assert.equal(res.coverage.reason, "read-race");
+  assert.deepEqual(
+    res.cards.map((c) => c.card_id),
+    ["card-throw-3", "card-throw-2", "card-throw-1", "card-throw-own"],
+  );
+});
+
+test("short reads, snapshot identity mismatches, and capped tail probes charge bytes to the 64 MiB budget", (t) => {
+  const MiB = 1024 * 1024;
+  const LOG_BYTES = 16 * MiB;
+  const STOP_AFTER_BYTES = 15 * MiB;
+  const BUDGET_BYTES = 64 * MiB;
+
+  const temp = makeTempDir(t, "rocky-cards-exit-budgets-");
+  const { repoRoot, filePath } = makeRepo(temp, "repo-exit-paths");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const absTarget = canonicalPath(filePath);
+
+  // 1. Short reads (return 0 after 15 MiB) across 6 x 16 MiB logs.
+  const homeShort = join(temp, "home-short");
+  writeExactSizeCardsLog(
+    cardsFilePath(canonicalRoot, homeShort),
+    makeCard("card-short-own", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 1000 }),
+    LOG_BYTES,
+  );
+  for (let i = 1; i <= 5; i += 1) {
+    writeExactSizeCardsLog(
+      join(homeShort, "desk", "cards", `short-0${i}.jsonl`),
+      makeCard(`card-short-${i}`, "", [makeBlock(1, absTarget)], { ended_ms: 1000 + i * 1000 }),
+      LOG_BYTES,
+    );
+  }
+  let shortActualBytes = 0;
+  let shortFileBytes = 0;
+  let shortLastFd: number | undefined;
+  let shortLastPos = -1n;
+  const shortRead: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+    const posBig = position === null ? 0n : BigInt(position);
+    if (shortLastFd === undefined || fd !== shortLastFd || posBig <= shortLastPos) {
+      shortFileBytes = 0;
+    }
+    shortLastFd = fd;
+    shortLastPos = posBig;
+    if (shortFileBytes >= STOP_AFTER_BYTES) return 0;
+    const n = readSync(fd, buffer, offset, length, position);
+    if (n > 0) {
+      shortActualBytes += n;
+      shortFileBytes += n;
+    }
+    return n;
+  };
+  const shortRes = cardsForFileForTest(filePath, { home: homeShort }, shortRead);
+  assert.ok(shortActualBytes <= BUDGET_BYTES);
+  assert.equal(shortActualBytes, 4 * STOP_AFTER_BYTES);
+  assert.equal(shortRes.coverage.complete, false);
+  assert.equal(shortRes.coverage.reason, "read-race");
+  assert.equal(shortRes.cards.some((c) => c.card_id === "card-short-4"), false);
+
+  // 2. Post-read snapshot size/identity mismatch across 5 x 16 MiB logs.
+  const homeMismatch = join(temp, "home-mismatch");
+  const mismatchLogs: string[] = [];
+  for (let i = 1; i <= 5; i += 1) {
+    const p = join(homeMismatch, "desk", "cards", `mismatch-0${i}.jsonl`);
+    mismatchLogs.push(p);
+    writeExactSizeCardsLog(
+      p,
+      makeCard(`card-mismatch-${i}`, "", [makeBlock(1, absTarget)], { ended_ms: i * 1000 }),
+      LOG_BYTES,
+    );
+  }
+  let mismatchActualBytes = 0;
+  let mismatchFileIndex = -1;
+  let mismatchLastFd: number | undefined;
+  let mismatchLastPos = -1n;
+  let mutatedCurrent = false;
+  const mismatchRead: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+    const posBig = position === null ? 0n : BigInt(position);
+    if (mismatchLastFd === undefined || fd !== mismatchLastFd || posBig <= mismatchLastPos) {
+      mismatchFileIndex += 1;
+      mutatedCurrent = false;
+    }
+    mismatchLastFd = fd;
+    mismatchLastPos = posBig;
+    const n = readSync(fd, buffer, offset, length, position);
+    if (n > 0) mismatchActualBytes += n;
+    if (!mutatedCurrent && posBig + BigInt(n) >= BigInt(LOG_BYTES)) {
+      mutatedCurrent = true;
+      appendFileSync(mismatchLogs[mismatchFileIndex]!, "\n", "utf8");
+    }
+    return n;
+  };
+  const mismatchRes = cardsForFileForTest(filePath, { home: homeMismatch }, mismatchRead);
+  assert.ok(mismatchActualBytes <= BUDGET_BYTES);
+  assert.equal(mismatchActualBytes, BUDGET_BYTES);
+  assert.equal(mismatchRes.coverage.complete, false);
+  assert.equal(mismatchRes.coverage.reason, "read-race");
+  assert.equal(mismatchRes.cards.some((c) => c.card_id === "card-mismatch-5"), false);
+
+  // 3. Size-capped (> 16 MiB) logs account for the 1-byte prevByte probe in both normal and throwing paths.
+  const homeCapped = join(temp, "home-capped");
+  const CAPPED_LOG_BYTES = LOG_BYTES + 512;
+  for (let i = 1; i <= 5; i += 1) {
+    writeExactSizeCardsLog(
+      join(homeCapped, "desk", "cards", `capped-0${i}.jsonl`),
+      makeCard(`card-capped-${i}`, "", [makeBlock(1, absTarget)], { ended_ms: i * 1000 }),
+      CAPPED_LOG_BYTES,
+    );
+  }
+  let cappedNormalBytes = 0;
+  const cappedNormalRead: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+    const n = readSync(fd, buffer, offset, length, position);
+    if (n > 0) cappedNormalBytes += n;
+    return n;
+  };
+  const cappedNormalRes = cardsForFileForTest(filePath, { home: homeCapped }, cappedNormalRead);
+  assert.ok(cappedNormalBytes <= BUDGET_BYTES);
+  assert.equal(cappedNormalBytes, 3 * (LOG_BYTES + 1));
+  assert.equal(cappedNormalRes.coverage.complete, false);
+  assert.equal(cappedNormalRes.coverage.reason, "file-size-cap");
+
+  let cappedThrowBytes = 0;
+  let cappedFileBytes = 0;
+  let cappedLastFd: number | undefined;
+  let cappedLastPos = -1n;
+  const cappedThrowRead: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+    const posBig = position === null ? 0n : BigInt(position);
+    if (cappedLastFd === undefined || fd !== cappedLastFd || posBig <= cappedLastPos) {
+      cappedFileBytes = 0;
+    }
+    cappedLastFd = fd;
+    cappedLastPos = posBig;
+    if (cappedFileBytes >= STOP_AFTER_BYTES + 1) {
+      const err = new Error("EIO: i/o error, read");
+      (err as NodeJS.ErrnoException).code = "EIO";
+      throw err;
+    }
+    const n = readSync(fd, buffer, offset, length, position);
+    if (n > 0) {
+      cappedThrowBytes += n;
+      cappedFileBytes += n;
+    }
+    return n;
+  };
+  const cappedThrowRes = cardsForFileForTest(filePath, { home: homeCapped }, cappedThrowRead);
+  assert.ok(cappedThrowBytes <= BUDGET_BYTES);
+  assert.equal(cappedThrowBytes, 4 * (STOP_AFTER_BYTES + 1));
+  assert.equal(cappedThrowRes.coverage.complete, false);
+  assert.equal(cappedThrowRes.coverage.reason, "read-race");
 });
