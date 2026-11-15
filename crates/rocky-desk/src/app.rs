@@ -116,10 +116,9 @@ impl Controller {
         let active_keys = self.model.active_primary_keys();
         let mut requests = self.timeline_fetch.on_msg(msg, &active_keys, now_ms);
         for key in legacy_requests {
-            if self.model.accepts_timeline(&key)
-                && !self.timeline_fetch.is_tracked(&key)
+            if !active_keys.contains(&key)
+                && self.model.accepts_timeline(&key)
                 && !requests.contains(&key)
-                && self.timeline_fetch.on_open(&key, &active_keys, now_ms)
             {
                 requests.push(key);
             }
@@ -127,7 +126,7 @@ impl Controller {
         requests
     }
 
-    /// Toggles row expansion and dispatches a timeline fetch only when outside cooldown.
+    /// Toggles row expansion, debouncing active primary keys and sending child expansions directly.
     fn toggle_open(&mut self, key: &AgentKey, now_ms: u64) {
         if let Some(key) = self.model.toggle_open(key)
             && self.model.accepts_timeline(&key)
@@ -350,13 +349,18 @@ mod tests {
         (ctl, out_rx)
     }
 
-    fn test_agent(session_id: &str, status: Status, last_event_ms: u64) -> AgentStatus {
+    fn test_agent_with_id(
+        session_id: &str,
+        agent_id: &str,
+        status: Status,
+        last_event_ms: u64,
+    ) -> AgentStatus {
         AgentStatus {
             key: AgentKey {
                 session_id: session_id.to_string(),
-                agent_id: String::new(),
+                agent_id: agent_id.to_string(),
             },
-            agent_type: None,
+            agent_type: (!agent_id.is_empty()).then(|| "Explore".to_string()),
             status,
             action: None,
             summary: None,
@@ -372,6 +376,10 @@ mod tests {
             },
             prompt: None,
         }
+    }
+
+    fn test_agent(session_id: &str, status: Status, last_event_ms: u64) -> AgentStatus {
+        test_agent_with_id(session_id, "", status, last_event_ms)
     }
 
     fn apply_at(ctl: &mut Controller, msg: ServerMsg, now_ms: u64) {
@@ -460,5 +468,223 @@ mod tests {
             2_100,
         );
         assert!(drain_timelines(&rx).is_empty());
+    }
+
+    #[test]
+    fn controller_rapid_child_collapse_and_reopen_refills_timeline() {
+        let (mut ctl, rx) = test_controller();
+        let k_main = AgentKey {
+            session_id: "S1".to_string(),
+            agent_id: String::new(),
+        };
+        let k_child = AgentKey {
+            session_id: "S1".to_string(),
+            agent_id: "sub-1".to_string(),
+        };
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Snapshot {
+                agents: vec![
+                    test_agent("S1", Status::Working, 900),
+                    test_agent_with_id("S1", "sub-1", Status::Working, 950),
+                ],
+                aggregate: Status::Working,
+                health: Health::default(),
+                settings: Settings::default(),
+                repo_pending: Vec::new(),
+            },
+            1_000,
+        );
+        assert_eq!(drain_timelines(&rx), vec![k_main]);
+
+        ctl.toggle_open(&k_child, 1_000);
+        assert!(ctl.model.is_open(&k_child));
+        assert_eq!(drain_timelines(&rx), vec![k_child.clone()]);
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Timeline {
+                id: 1,
+                key: k_child.clone(),
+                entries: vec![TimelineEntry {
+                    ms: 960,
+                    kind: TimelineKind::Tool,
+                    tool_name: Some("Read".to_string()),
+                    text: Some("src/lib.rs".to_string()),
+                    outcome: Some(Outcome::Ok),
+                    dur_ms: Some(100),
+                }],
+            },
+            1_050,
+        );
+        assert_eq!(
+            ctl.model
+                .timeline_rows(&k_child, &crate::clock::utc_hhmm)
+                .len(),
+            1
+        );
+
+        // Collapse clears cached child entries; reopening inside 500 ms must fetch again directly.
+        ctl.toggle_open(&k_child, 1_100);
+        assert!(!ctl.model.is_open(&k_child));
+        assert!(
+            ctl.model
+                .timeline_rows(&k_child, &crate::clock::utc_hhmm)
+                .is_empty()
+        );
+        assert!(drain_timelines(&rx).is_empty());
+
+        ctl.toggle_open(&k_child, 1_200);
+        assert!(ctl.model.is_open(&k_child));
+        assert_eq!(
+            drain_timelines(&rx),
+            vec![k_child.clone()],
+            "reopening a child row inside 500 ms must re-request its timeline directly"
+        );
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Timeline {
+                id: 2,
+                key: k_child.clone(),
+                entries: vec![
+                    TimelineEntry {
+                        ms: 960,
+                        kind: TimelineKind::Tool,
+                        tool_name: Some("Read".to_string()),
+                        text: Some("src/lib.rs".to_string()),
+                        outcome: Some(Outcome::Ok),
+                        dur_ms: Some(100),
+                    },
+                    TimelineEntry {
+                        ms: 1_180,
+                        kind: TimelineKind::Tool,
+                        tool_name: Some("Grep".to_string()),
+                        text: Some("TimelineFetch".to_string()),
+                        outcome: Some(Outcome::Pending),
+                        dur_ms: None,
+                    },
+                ],
+            },
+            1_250,
+        );
+        assert_eq!(
+            ctl.model
+                .timeline_rows(&k_child, &crate::clock::utc_hhmm)
+                .len(),
+            2
+        );
+
+        ctl.poll_timelines(1_500);
+        assert!(drain_timelines(&rx).is_empty());
+    }
+
+    #[test]
+    fn controller_open_child_status_upsert_inside_cooldown_still_sends() {
+        let (mut ctl, rx) = test_controller();
+        let k_main = AgentKey {
+            session_id: "S1".to_string(),
+            agent_id: String::new(),
+        };
+        let k_child = AgentKey {
+            session_id: "S1".to_string(),
+            agent_id: "sub-1".to_string(),
+        };
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Snapshot {
+                agents: vec![
+                    test_agent("S1", Status::Working, 900),
+                    test_agent_with_id("S1", "sub-1", Status::Working, 950),
+                ],
+                aggregate: Status::Working,
+                health: Health::default(),
+                settings: Settings::default(),
+                repo_pending: Vec::new(),
+            },
+            1_000,
+        );
+        assert_eq!(drain_timelines(&rx), vec![k_main]);
+
+        ctl.toggle_open(&k_child, 1_000);
+        assert_eq!(drain_timelines(&rx), vec![k_child.clone()]);
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Status {
+                op: rocky_proto::pipe::StatusOp::Upsert,
+                agent: test_agent_with_id("S1", "sub-1", Status::Working, 1_200),
+            },
+            1_200,
+        );
+        assert_eq!(
+            drain_timelines(&rx),
+            vec![k_child.clone()],
+            "open child status upsert inside 500 ms must send directly"
+        );
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Status {
+                op: rocky_proto::pipe::StatusOp::Upsert,
+                agent: test_agent_with_id("S1", "sub-1", Status::NeedsYou, 1_350),
+            },
+            1_350,
+        );
+        assert_eq!(drain_timelines(&rx), vec![k_child.clone()]);
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Status {
+                op: rocky_proto::pipe::StatusOp::Upsert,
+                agent: test_agent_with_id("S1", "sub-1", Status::Done, 1_400),
+            },
+            1_400,
+        );
+        assert!(drain_timelines(&rx).is_empty());
+
+        // A child initially promoted in a main-less session becomes unthrottled once main arrives.
+        let k_s2_main = AgentKey {
+            session_id: "S2".to_string(),
+            agent_id: String::new(),
+        };
+        let k_s2_child = AgentKey {
+            session_id: "S2".to_string(),
+            agent_id: "sub-a".to_string(),
+        };
+        apply_at(
+            &mut ctl,
+            ServerMsg::Status {
+                op: rocky_proto::pipe::StatusOp::Upsert,
+                agent: test_agent_with_id("S2", "sub-a", Status::Working, 1_000),
+            },
+            1_000,
+        );
+        assert_eq!(drain_timelines(&rx), vec![k_s2_child.clone()]);
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Status {
+                op: rocky_proto::pipe::StatusOp::Upsert,
+                agent: test_agent("S2", Status::Working, 1_100),
+            },
+            1_100,
+        );
+        assert_eq!(drain_timelines(&rx), vec![k_s2_main]);
+
+        ctl.toggle_open(&k_s2_child, 1_150);
+        assert_eq!(drain_timelines(&rx), vec![k_s2_child.clone()]);
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Status {
+                op: rocky_proto::pipe::StatusOp::Upsert,
+                agent: test_agent_with_id("S2", "sub-a", Status::Working, 1_200),
+            },
+            1_200,
+        );
+        assert_eq!(drain_timelines(&rx), vec![k_s2_child]);
     }
 }

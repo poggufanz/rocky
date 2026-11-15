@@ -589,3 +589,34 @@ fn timeline_fetch_debounces_expansion_after_automatic_fetch() {
     );
     assert_eq!(fetch.poll(&model.active_primary_keys(), 2_600), vec![k1]);
 }
+
+#[test]
+fn timeline_fetch_leaves_non_primary_child_expansions_unthrottled() {
+    let k_main = key("S1", "");
+    let k_child = key("S1", "sub-1");
+    let mut model = Model::new();
+    let mut fetch = TimelineFetch::new();
+
+    let snap = snapshot(vec![
+        agent("S1", "", Status::Working, 900),
+        agent("S1", "sub-1", Status::Working, 950),
+    ]);
+    model.apply(snap.clone());
+    assert_eq!(
+        fetch.on_msg(&snap, &model.active_primary_keys(), 1_000),
+        vec![k_main.clone()]
+    );
+
+    // Expanding a non-primary child sends immediately and never enters cooldown or pending.
+    assert!(fetch.on_open(&k_child, &model.active_primary_keys(), 1_000));
+    assert!(fetch.on_open(&k_child, &model.active_primary_keys(), 1_200));
+    assert!(fetch.poll(&model.active_primary_keys(), 1_500).is_empty());
+
+    // Active main rows still respect the 500 ms expansion cooldown and trailing flush.
+    assert!(fetch.on_open(&k_main, &model.active_primary_keys(), 1_600));
+    assert!(!fetch.on_open(&k_main, &model.active_primary_keys(), 1_700));
+    assert_eq!(
+        fetch.poll(&model.active_primary_keys(), 2_100),
+        vec![k_main]
+    );
+}

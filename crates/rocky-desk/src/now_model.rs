@@ -117,11 +117,6 @@ impl TimelineFetch {
         self.pending.clear();
     }
 
-    /// Returns whether `key` is active, queued, or still inside its 500 ms cooldown window.
-    pub fn is_tracked(&self, key: &AgentKey) -> bool {
-        self.active.contains(key) || self.last_sent.contains_key(key) || self.pending.contains(key)
-    }
-
     /// Inspects an incoming daemon message after `model.apply` and returns due timeline keys.
     pub fn on_msg(
         &mut self,
@@ -163,10 +158,12 @@ impl TimelineFetch {
         }
     }
 
-    /// Requests a timeline fetch on row expansion while enforcing the 500 ms per-key cooldown.
+    /// Requests a timeline fetch on row expansion while enforcing the 500 ms per-key cooldown
+    /// for active primary agents.
     ///
     /// Active primary keys inside cooldown are queued for trailing flush on [`Self::poll`], while
-    /// any already-cached timeline stays visible immediately.
+    /// any already-cached timeline stays visible immediately. Non-primary keys bypass the
+    /// scheduler so child/subagent expansions stay direct with no cooldown.
     pub fn on_open(
         &mut self,
         key: &AgentKey,
@@ -176,11 +173,8 @@ impl TimelineFetch {
         self.prune_inactive(active_keys, now_ms);
         if active_keys.contains(key) {
             self.request_or_defer(key, now_ms)
-        } else if self.cooldown_ready(key, now_ms) {
-            self.last_sent.insert(key.clone(), now_ms);
-            true
         } else {
-            false
+            true
         }
     }
 
