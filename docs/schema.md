@@ -559,10 +559,12 @@ leases. It exits 1 when the collector fails and 2 on any other arguments.
 ### Storage layout and rotation
 
 Change cards are append-only UTF-8 JSONL stored under
-`<ROCKY_HOME>/desk/cards/`: `<repo_id>.jsonl` for edits in a repository and
-`_none.jsonl` when `repo_id` is empty or `"_none"` (edits outside any Git
-repository). A linked Git worktree stores cards under its own worktree
-`repo_id`, while `main_root` points to the main repository. On Unix,
+`<ROCKY_HOME>/desk/cards/`: `<repo_id>.jsonl` when a session starts in a Git
+repository and `_none.jsonl` when `repo_id` is empty or `"_none"` (sessions
+outside any Git repository). A linked Git worktree stores cards under its own
+worktree `repo_id`, while `main_root` points to the main repository. Edits
+outside the card's session root are stored with absolute or `~/…` block paths
+inside that session's log file. On Unix,
 `desk/cards/` is created with mode `0700` and card files with `0600`; opens
 refuse symlinks (`O_NOFOLLOW`) and Windows reparse points on directories,
 card files, and temporary files.
@@ -570,8 +572,14 @@ card files, and temporary files.
 `rockyd` is the only writer. Updates to a turn append a full `Card` object
 with the same `card_id` and a higher `rev`. Readers keep the latest revision
 per `card_id` (highest `rev`; equal `rev` prefers the later line in a file,
-or the higher `ended_ms` across files). CLI and MCP readers inspect up to the
-trailing `16 MiB` of a card file and skip lines larger than `1 MiB`.
+and across logs keeps the later log read). CLI and MCP readers inspect up to
+the trailing `16 MiB` of a card file (advancing to the next line boundary when a
+cut lands mid-line) and skip lines larger than `1 MiB`. When querying one target
+file, readers inspect the target repo's log (and sibling worktree/repo logs
+under the same main repository) plus `_none.jsonl` and other `*.jsonl` card logs
+for matching absolute or `~/…` block paths (ignoring foreign-repo relative
+paths), bounded at `64` extra logs and `64 MiB` total bytes read across all card
+logs (`16 MiB` per file).
 
 When an append leaves a card file larger than `8 MiB`, `rockyd` compacts it
 via a sibling `.tmp` file and atomic rename: it keeps only the latest
@@ -616,11 +624,11 @@ One JSON object per line:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `seq` | integer | Block sequence number within the card. |
-| `path` | string | Changed file path (repo-relative when inside a repo). |
+| `path` | string | Changed file path (repo-relative when inside the card's session root; absolute or `~/…` when outside). |
 | `symbol` | `BlockSymbol \| null` | `{ kind, name, container: string \| null, exported: bool, nth?: u32 }`; `nth` is omitted when `0`. `kind` is one of `function`, `method`, `class`, `struct`, `enum`, `trait`, `interface`, `type`, `const`, `test`, `key`. |
 | `labels` | `Label[]` | Up to `12` structured labels `{ "id": string, "args": object }`, sorted by importance descending then catalog order. |
 | `importance` | string | `"none"`, `"low"`, `"medium"`, or `"high"`. |
-| `via` | string | `"edit"` or `"bash"`. |
+| `via` | string | Attribution channel string (typically `"edit"` or `"bash"`; readers accept any string and project over MCP as `"edit"`, `"bash"`, or `"other"`). |
 | `tool_use_ids` | string[] | Matching tool call ids. |
 | `bash` | `BashInfo \| null` | `{ cmd: string, candidates: u32 }` when `via` is `"bash"`. |
 | `before` | string \| null | Listening object SHA-256 hash before the change, or `null`. Source bytes stay in Listening storage, not in card files. |
@@ -726,6 +734,37 @@ is `symbol.kind` (or `"file"` when `symbol` is `null`).
 | 36 | `lines_changed` | `{"added":u32,"removed":u32}` | `low` | `lines changed` |
 | 37 | `too_large` | `{}` | `low` | `too large` |
 | 38 | `not_captured` | `{}` | `low` | `not captured` |
+
+### MCP `why_file` projection
+
+MCP `why_file` projects up to `limit` newest matching cards (default `5`, capped
+at `10`) with a separate `cardsCoverage` read-completeness object
+(`{ complete, reason?, skipped }`):
+
+- **Card fields**: `card_id` (`32` lowercase hex chars pass through under
+  `sanitized` exposure; other card IDs are projected), `started_ms`, `ended_ms`,
+  `repo` (basename of `main_root ?? root`), `prompt` (first line or classified
+  title clipped to `200` code points), `prompt_kind`, `agent_type`, up to `10`
+  matching `blocks`, and optional `more_blocks`.
+- **Slash commands**: under both `sanitized` and `raw` exposure, a slash
+  command name matching `^/[A-Za-z0-9:_.-]{1,64}$` passes through unchanged in
+  `prompt_kind.name` and as the leading token of `card.prompt`, while command
+  `args` continue through `projectText` at the active exposure; invalid or
+  control-bearing names stay projected.
+- **Block projection & `more_blocks`**: `blocks[].via` maps `"edit"` to `"edit"`,
+  `"bash"` to `"bash"`, and any other string to `"other"`; `blocks[].quote` is
+  clipped to `500` code points. When valid matching blocks exceed `10`,
+  `more_blocks` records the number of dropped matching blocks (omitted when
+  `0`) and `truncated` is `true`. Stored hashes (`before`, `after`),
+  `tool_use_ids`, `flow`, `symbol.exported`, and `symbol.nth` are never
+  returned.
+- **Label `args` allowlist**: `labels[].args` is projected through a strict
+  per-label allowlist aligned with the catalog above. Literal `before`, `after`,
+  and `version` label values (and any unknown label keys or un-allowlisted
+  args) are **never** returned under either `sanitized` or `raw` exposure (for
+  example, `config_changed`, `value_changed`, `dep_version`, and `dep_added`
+  return only `key` or `name`; allowlisted strings use `projectText`, and
+  allowlisted counters require safe non-negative integers).
 
 ## Pipe v3
 

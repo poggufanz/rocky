@@ -79,6 +79,7 @@ test("MCP why_file bounds and validates hostile possible evidence without throwi
     exposure: "sanitized",
     memory: memoryWith({ whyFileEvidence: () => evidence }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/maybe.ts", limit: 10 }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -99,6 +100,7 @@ test("MCP why_file possible evidence forces conservative coverage", async () => 
       coverageIncomplete: false,
     }) }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/maybe.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -125,6 +127,7 @@ test("MCP why_file bounds hostile custom matches before response projection", as
       coverageIncomplete: true,
     }) }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/legacy.ts", limit: 1 }, new AbortController().signal);
   assert.equal((result.structuredContent.items as unknown[]).length, 1);
@@ -136,6 +139,7 @@ test("legacy custom MemoryQueries keep missing triple coverage conservatively un
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [legacyTriple()] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/legacy.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -166,6 +170,7 @@ test("MCP legacy why fallback preserves origin-platform path identity", async ()
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [record] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "C:/work/src/foo.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -187,6 +192,7 @@ test("MCP legacy why fallback discloses missing-platform coverage conservatively
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [record] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -216,6 +222,7 @@ test("MCP custom why evidence cannot associate an unrelated match", async () => 
       }),
     }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -238,6 +245,7 @@ test("MCP legacy why fallback refuses ambiguous suffix rationale", async () => {
       suffix("two", "two/src/missing.ts"),
     ] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;

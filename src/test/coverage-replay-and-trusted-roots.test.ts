@@ -64,7 +64,12 @@ function emptyMemory(overrides: Partial<MemoryQueries> = {}): MemoryQueries {
 }
 
 function registry(memory: MemoryQueries, exposure: "sanitized" | "raw" = "sanitized") {
-  return createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi });
+  return createToolRegistry({
+    exposure,
+    memory,
+    recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  });
 }
 
 const TEST_SIGNAL = new AbortController().signal;

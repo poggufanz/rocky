@@ -214,6 +214,7 @@ test("why and how commands support --diff with mock gitDiff dependency", () => {
     say: speak,
     out: support,
     now: 1700000001000,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   assert.equal(codeWhy1, 0);
   assert.ok(!supported.some((line) => line.includes("diff (")), "Why without --diff must not show diff header");
@@ -231,6 +232,7 @@ test("why and how commands support --diff with mock gitDiff dependency", () => {
     out: support,
     now: 1700000001000,
     gitDiff: mockGitDiff,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   assert.equal(codeWhy2, 0);
   assert.ok(supported.some((line) => line.includes("diff (commit commit1):")), "Why with --diff must show diff header");
@@ -245,6 +247,7 @@ test("why and how commands support --diff with mock gitDiff dependency", () => {
     out: support,
     now: 1700000001000,
     gitDiff: () => undefined,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   assert.equal(codeWhyUnavailable, 0);
   assert.ok(supported.some((line) => line.includes("(git diff unavailable)")), "Why with unavailable diff must print (git diff unavailable)");
@@ -289,6 +292,7 @@ test("MCP why_file supports optional diff parameter and secret redaction", async
     exposure: "sanitized",
     memory: createMemoryQueries(() => [mockTriple]),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
 
   // 1. Call without diff parameter

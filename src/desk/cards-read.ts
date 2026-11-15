@@ -1,6 +1,6 @@
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { gitRootFor } from "../core/compare-data.js";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { canonicalPath } from "../core/memory-read.js";
@@ -8,6 +8,8 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { cardsFilePath } from "../listening/cards-path.js";
 
 const MAX_CARDS_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_EXTRA_LOG_FILES = 64;
+const MAX_TOTAL_CARDS_BYTES = 64 * 1024 * 1024;
 const MAX_CARDS_LINE_BYTES = 1024 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const DEFAULT_LIMIT = 5;
@@ -42,7 +44,7 @@ export interface StoredBlock {
   symbol?: StoredBlockSymbol | null;
   labels: StoredLabel[];
   importance: string;
-  via?: "edit" | "bash";
+  via?: string;
   tool_use_ids?: string[];
   bash?: StoredBashInfo | null;
   before?: string | null;
@@ -162,7 +164,7 @@ function isValidBlock(value: unknown): value is StoredBlock {
   if (!Array.isArray(value.labels) || !value.labels.every(isValidLabel)) return false;
   if (typeof value.importance !== "string") return false;
   if (value.symbol !== undefined && value.symbol !== null && !isValidSymbol(value.symbol)) return false;
-  if (value.via !== undefined && value.via !== "edit" && value.via !== "bash") return false;
+  if (value.via !== undefined && typeof value.via !== "string") return false;
   if (value.tool_use_ids !== undefined && !isStringArray(value.tool_use_ids)) return false;
   if (value.bash !== undefined && value.bash !== null && !isValidBashInfo(value.bash)) return false;
   if (value.before !== undefined && value.before !== null && typeof value.before !== "string") return false;
@@ -371,6 +373,79 @@ function inspectLogPath(logPath: string): {
 interface ParsedLogResult {
   cardsById: Map<string, StoredCard>;
   coverage: CardsReadCoverage;
+  bytesRead: number;
+  hitBudget?: boolean;
+}
+
+interface MergedCardEntry {
+  card: StoredCard;
+  fromOwnRepo: boolean;
+}
+
+interface CoverageAccumulator {
+  complete: boolean;
+  skipped: number;
+  reason?: CardsReadCoverage["reason"];
+}
+
+function addCoverage(acc: CoverageAccumulator, cov: CardsReadCoverage): void {
+  if (!cov.complete) {
+    acc.complete = false;
+    if (acc.reason === undefined && cov.reason !== undefined) {
+      acc.reason = cov.reason;
+    }
+  }
+  acc.skipped += cov.skipped;
+}
+
+function mergeParsedCards(
+  merged: Map<string, MergedCardEntry>,
+  parsed: ReadonlyMap<string, StoredCard>,
+  fromOwnRepo: boolean,
+): void {
+  for (const [cardId, card] of parsed) {
+    const existing = merged.get(cardId);
+    if (!existing || card.rev >= existing.card.rev) {
+      merged.set(cardId, { card, fromOwnRepo });
+    }
+  }
+}
+
+function finalizeCoverage(acc: CoverageAccumulator): CardsReadCoverage {
+  if (acc.complete && acc.skipped === 0) {
+    return { complete: true, skipped: 0 };
+  }
+  return acc.reason !== undefined
+    ? { complete: false, reason: acc.reason, skipped: acc.skipped }
+    : { complete: false, skipped: acc.skipped };
+}
+
+function normalizeFileKey(name: string, platform: NodeJS.Platform): string {
+  return platform === "win32" ? name.toLowerCase() : name;
+}
+
+function listExtraCardLogs(
+  home: string,
+  excludedNames: ReadonlySet<string>,
+  platform: NodeJS.Platform,
+): { status: "missing" | "non-regular" | "race" | "ready"; cardsDir: string; files: string[] } {
+  const cardsDir = join(home, "desk", "cards");
+  try {
+    const stats = lstatSync(cardsDir, { bigint: true });
+    if (!stats.isDirectory()) {
+      return { status: "non-regular", cardsDir, files: [] };
+    }
+    const files = readdirSync(cardsDir)
+      .filter((name) => name.endsWith(".jsonl") && !excludedNames.has(normalizeFileKey(name, platform)))
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return { status: "ready", cardsDir, files };
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { status: "missing", cardsDir, files: [] };
+    }
+    return { status: "race", cardsDir, files: [] };
+  }
 }
 
 function parseJsonlLine(
@@ -406,32 +481,53 @@ function parseJsonlLine(
 function readAndParseCardsLog(
   logPath: string,
   expectedLstat: ReturnType<typeof lstatSync>,
-): ParsedLogResult | { earlyCoverage: CardsReadCoverage } {
+  remainingBudgetBytes: number,
+): ParsedLogResult {
   const cardsById = new Map<string, StoredCard>();
   let fd: number;
   try {
     fd = openSync(logPath, constants.O_RDONLY | NO_FOLLOW_FLAG | NO_BLOCK_FLAG);
   } catch {
-    return { earlyCoverage: { complete: false, reason: "read-race", skipped: 0 } };
+    return { cardsById, coverage: { complete: false, reason: "read-race", skipped: 0 }, bytesRead: 0 };
   }
 
   let sizeCapped = false;
   let lineCapped = false;
+  let readRace = false;
   let skipped = 0;
+  let totalReadFromFile = 0;
 
   try {
     const opened = fstatSync(fd, { bigint: true });
     if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(expectedLstat, opened)) {
-      return { earlyCoverage: { complete: false, reason: "read-race", skipped: 0 } };
+      return { cardsById, coverage: { complete: false, reason: "read-race", skipped: 0 }, bytesRead: 0 };
     }
 
     const totalBytesBig = opened.size;
     const capBytesBig = BigInt(MAX_CARDS_FILE_BYTES);
     sizeCapped = totalBytesBig > capBytesBig;
+    const plannedReadBig = sizeCapped ? capBytesBig : totalBytesBig;
+    if (plannedReadBig > BigInt(Math.max(0, remainingBudgetBytes))) {
+      return {
+        cardsById,
+        coverage: { complete: false, reason: "file-size-cap", skipped: 0 },
+        bytesRead: 0,
+        hitBudget: true,
+      };
+    }
+
     let pos = sizeCapped ? totalBytesBig - capBytesBig : 0n;
+    const startPos = pos;
 
     const readBuf = Buffer.allocUnsafe(READ_CHUNK_BYTES);
-    let skippingPartialFirstLine = sizeCapped;
+    let skippingPartialFirstLine = false;
+    if (sizeCapped) {
+      const prevByte = Buffer.allocUnsafe(1);
+      if (readSync(fd, prevByte, 0, 1, pos - 1n) !== 1) {
+        return { cardsById, coverage: { complete: false, reason: "read-race", skipped: 0 }, bytesRead: 0 };
+      }
+      skippingPartialFirstLine = prevByte[0] !== 0x0a;
+    }
     let droppingLongLine = false;
     let pendingChunks: Buffer[] = [];
     let pendingBytes = 0;
@@ -441,7 +537,8 @@ function readAndParseCardsLog(
       const toRead = remaining < BigInt(READ_CHUNK_BYTES) ? Number(remaining) : READ_CHUNK_BYTES;
       const bytesRead = readSync(fd, readBuf, 0, toRead, pos);
       if (bytesRead <= 0) {
-        return { earlyCoverage: { complete: false, reason: "read-race", skipped: 0 } };
+        readRace = true;
+        break;
       }
       pos += BigInt(bytesRead);
       const chunk = readBuf.subarray(0, bytesRead);
@@ -509,7 +606,9 @@ function readAndParseCardsLog(
       }
     }
 
-    if (!skippingPartialFirstLine && !droppingLongLine && pendingBytes > 0) {
+    totalReadFromFile = Number(pos - startPos);
+
+    if (!readRace && !skippingPartialFirstLine && !droppingLongLine && pendingBytes > 0) {
       const lastChunk = pendingChunks[pendingChunks.length - 1]!;
       const trimmedCrLen = pendingBytes - (lastChunk[lastChunk.length - 1] === 0x0d ? 1 : 0);
       if (trimmedCrLen > MAX_CARDS_LINE_BYTES) {
@@ -531,10 +630,10 @@ function readAndParseCardsLog(
       after.mtimeNs !== opened.mtimeNs ||
       after.ctimeNs !== opened.ctimeNs
     ) {
-      return { earlyCoverage: { complete: false, reason: "read-race", skipped: 0 } };
+      readRace = true;
     }
   } catch {
-    return { earlyCoverage: { complete: false, reason: "read-race", skipped: 0 } };
+    readRace = true;
   } finally {
     try {
       closeSync(fd);
@@ -543,11 +642,12 @@ function readAndParseCardsLog(
     }
   }
 
-  const reason = sizeCapped ? "file-size-cap" : lineCapped ? "line-cap" : undefined;
-  const complete = !sizeCapped && !lineCapped && skipped === 0;
+  const reason = readRace ? "read-race" : sizeCapped ? "file-size-cap" : lineCapped ? "line-cap" : undefined;
+  const complete = !readRace && !sizeCapped && !lineCapped && skipped === 0;
   return {
     cardsById,
     coverage: reason ? { complete, reason, skipped } : { complete, skipped },
+    bytesRead: totalReadFromFile,
   };
 }
 
@@ -598,22 +698,34 @@ function buildTargetKeysForNone(absFile: string, platform: NodeJS.Platform): Set
   return keys;
 }
 
+function isAbsOrTildeBlockPath(blockPath: string): boolean {
+  return (
+    blockPath === "~" ||
+    blockPath.startsWith("~/") ||
+    blockPath.startsWith("~\\") ||
+    /^[a-zA-Z]:[\\/]/.test(blockPath) ||
+    blockPath.startsWith("/") ||
+    blockPath.startsWith("\\")
+  );
+}
+
 function blockMatches(
   blockPath: string,
-  inRepo: boolean,
-  targetKeys: ReadonlySet<string>,
+  fromOwnRepo: boolean,
+  repoTargetKeys: ReadonlySet<string>,
+  absTargetKeys: ReadonlySet<string>,
   platform: NodeJS.Platform,
 ): boolean {
-  if (inRepo) {
-    const normalized = normalizeRepoBlockPath(blockPath, platform);
-    return normalized !== undefined && targetKeys.has(normalized);
+  if (isAbsOrTildeBlockPath(blockPath)) {
+    const expanded = expandTilde(blockPath);
+    return absTargetKeys.has(normalizeAbsForPlatform(expanded, platform));
   }
 
-  const expanded = expandTilde(blockPath);
-  if (!/^[a-zA-Z]:[\\/]/.test(expanded) && !expanded.startsWith("/") && !expanded.startsWith("\\")) {
+  if (!fromOwnRepo) {
     return false;
   }
-  return targetKeys.has(normalizeAbsForPlatform(expanded, platform));
+  const normalized = normalizeRepoBlockPath(blockPath, platform);
+  return normalized !== undefined && repoTargetKeys.has(normalized);
 }
 
 function compareCards(left: StoredCard, right: StoredCard): number {
@@ -643,48 +755,106 @@ export function cardsForFile(file: string, options: CardsForFileOptions = {}): C
   const rootRaw = gitRootFor(absFile, existsSync);
   const inRepo = rootRaw !== undefined;
 
-  let logPath: string;
-  let lstat: ReturnType<typeof lstatSync>;
+  const merged = new Map<string, MergedCardEntry>();
+  const covAcc: CoverageAccumulator = { complete: true, skipped: 0 };
+  const excludedNames = new Set<string>();
+  let totalBytesRead = 0;
   let selectedRoot: string | undefined;
 
   if (inRepo) {
     const spellings = buildRootSpellings(rootRaw);
     const pick = pickExistingLogPath(spellings, home);
-    if (pick.status === "missing") return emptyResult({ complete: true, skipped: 0 });
-    if (pick.status === "non-regular") return emptyResult({ complete: false, skipped: 0 });
-    if (pick.status === "race" || !pick.logPath || !pick.lstat || !pick.selectedRoot) {
-      return emptyResult({ complete: false, reason: "read-race", skipped: 0 });
+    if (pick.logPath) {
+      excludedNames.add(normalizeFileKey(basename(pick.logPath), platform));
     }
-    logPath = pick.logPath;
-    lstat = pick.lstat;
-    selectedRoot = pick.selectedRoot;
+    if (pick.status === "non-regular") {
+      addCoverage(covAcc, { complete: false, skipped: 0 });
+    } else if (pick.status === "race") {
+      addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+    } else if (pick.status === "ready") {
+      if (!pick.logPath || !pick.lstat || !pick.selectedRoot) {
+        addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+      } else {
+        selectedRoot = pick.selectedRoot;
+        const parsed = readAndParseCardsLog(pick.logPath, pick.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+        totalBytesRead += parsed.bytesRead;
+        mergeParsedCards(merged, parsed.cardsById, true);
+        addCoverage(covAcc, parsed.coverage);
+      }
+    }
   } else {
-    logPath = join(home, "desk", "cards", "_none.jsonl");
-    const probe = inspectLogPath(logPath);
-    if (probe.status === "missing") return emptyResult({ complete: true, skipped: 0 });
-    if (probe.status === "non-regular") return emptyResult({ complete: false, skipped: 0 });
-    if (probe.status === "race" || !probe.lstat) {
-      return emptyResult({ complete: false, reason: "read-race", skipped: 0 });
+    const nonePath = join(home, "desk", "cards", "_none.jsonl");
+    const probe = inspectLogPath(nonePath);
+    if (probe.status !== "missing") {
+      excludedNames.add(normalizeFileKey("_none.jsonl", platform));
     }
-    lstat = probe.lstat;
+    if (probe.status === "non-regular") {
+      addCoverage(covAcc, { complete: false, skipped: 0 });
+    } else if (probe.status === "race") {
+      addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+    } else if (probe.status === "ready") {
+      if (!probe.lstat) {
+        addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+      } else {
+        const parsed = readAndParseCardsLog(nonePath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+        totalBytesRead += parsed.bytesRead;
+        mergeParsedCards(merged, parsed.cardsById, false);
+        addCoverage(covAcc, parsed.coverage);
+      }
+    }
   }
 
-  const parsed = readAndParseCardsLog(logPath, lstat);
-  if ("earlyCoverage" in parsed) {
-    return emptyResult(parsed.earlyCoverage);
+  const listing = listExtraCardLogs(home, excludedNames, platform);
+  if (listing.status === "non-regular") {
+    addCoverage(covAcc, { complete: false, skipped: 0 });
+  } else if (listing.status === "race") {
+    addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+  } else if (listing.status === "ready") {
+    let extraScanned = 0;
+    for (const name of listing.files) {
+      if (extraScanned >= MAX_EXTRA_LOG_FILES) {
+        addCoverage(covAcc, { complete: false, reason: "file-size-cap", skipped: 0 });
+        break;
+      }
+      const extraPath = join(listing.cardsDir, name);
+      const probe = inspectLogPath(extraPath);
+      if (probe.status === "missing") continue;
+      extraScanned += 1;
+      if (probe.status === "non-regular") {
+        addCoverage(covAcc, { complete: false, skipped: 0 });
+        continue;
+      }
+      if (probe.status === "race" || !probe.lstat) {
+        addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+        continue;
+      }
+      if (totalBytesRead >= MAX_TOTAL_CARDS_BYTES) {
+        addCoverage(covAcc, { complete: false, reason: "file-size-cap", skipped: 0 });
+        break;
+      }
+      const parsed = readAndParseCardsLog(extraPath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+      if (parsed.hitBudget) {
+        addCoverage(covAcc, { complete: false, reason: "file-size-cap", skipped: 0 });
+        break;
+      }
+      totalBytesRead += parsed.bytesRead;
+      mergeParsedCards(merged, parsed.cardsById, false);
+      addCoverage(covAcc, parsed.coverage);
+    }
   }
 
-  const targetKeys =
-    selectedRoot !== undefined
-      ? buildTargetKeysForRepo(absFile, selectedRoot, platform)
-      : buildTargetKeysForNone(absFile, platform);
+  const absTargetKeys = buildTargetKeysForNone(absFile, platform);
+  const repoTargetKeys =
+    selectedRoot !== undefined ? buildTargetKeysForRepo(absFile, selectedRoot, platform) : new Set<string>();
 
   const candidates: Array<{ card: StoredCard; blocks: StoredBlock[] }> = [];
-  if (targetKeys.size > 0 && limit > 0) {
-    for (const card of parsed.cardsById.values()) {
-      const matchingBlocks = card.blocks.filter((block) => blockMatches(block.path, inRepo, targetKeys, platform));
+  if (limit > 0 && (absTargetKeys.size > 0 || repoTargetKeys.size > 0)) {
+    for (const entry of merged.values()) {
+      const matchingBlocks = entry.card.blocks.filter((block) =>
+        blockMatches(block.path, entry.fromOwnRepo, repoTargetKeys, absTargetKeys, platform),
+      );
       if (matchingBlocks.length > 0) {
-        candidates.push({ card, blocks: matchingBlocks });
+        candidates.push({ card: entry.card, blocks: matchingBlocks });
       }
     }
   }
@@ -699,5 +869,5 @@ export function cardsForFile(file: string, options: CardsForFileOptions = {}): C
     matched.set(item.card.card_id, item.blocks);
   }
 
-  return { cards, matched, coverage: parsed.coverage };
+  return { cards, matched, coverage: finalizeCoverage(covAcc) };
 }

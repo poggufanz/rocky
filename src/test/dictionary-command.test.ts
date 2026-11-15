@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -105,7 +105,15 @@ function exportSeeded(now = Date.UTC(2026, 0, 31, 12, 0, 0)): MemoryRecord[] {
 export function sinks() {
   const sayLines: string[] = [];
   const outLines: string[] = [];
-  return { sayLines, outLines, deps: { say: (l: string) => sayLines.push(l), out: (l: string) => outLines.push(l) } };
+  return {
+    sayLines,
+    outLines,
+    deps: {
+      say: (l: string) => sayLines.push(l),
+      out: (l: string) => outLines.push(l),
+      cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+    },
+  };
 }
 
 test("what speaks tentative mapping and evidence for a hit", async () => {
@@ -231,7 +239,10 @@ test("dictionary terminal surfaces inertly render the full hostile triple and ne
   const howOutput = capture();
   assert.equal(how(["matrixneedle"], howOutput.deps), 0);
   const whyOutput = capture();
-  assert.equal(why([triple.mechanism.files[0]!.path], whyOutput.deps), 0);
+  assert.equal(why([triple.mechanism.files[0]!.path], {
+    ...whyOutput.deps,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  }), 0);
   const digestOutput = capture();
   assert.equal(digest([], { ...digestOutput.deps, now }), 0);
   const quizOutput = capture();
@@ -1132,7 +1143,10 @@ test("default what, how and why print no record id and no internal label", async
   const printed = await printedOnStderr(async () => {
     assert.equal(await what(["naikin"], { load: seeded }), 0);
     assert.equal(how(["naikin"], { load: seeded }), 0);
-    assert.equal(why(["src/app.css"], { load: seeded }), 0);
+    assert.equal(why(["src/app.css"], {
+      load: seeded,
+      cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+    }), 0);
   });
   assert.match(printed, /margin-top/u);
   assert.match(printed, /by claude-code\. Some changed files may be missing\./u);
@@ -1373,5 +1387,40 @@ test("quiz keeps hostile memory text bounded, terminal-safe, and free of stray q
     assert.ok(!line.includes("\u001b"), JSON.stringify(line));
     assert.ok(!/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(line), JSON.stringify(line));
     assert.ok(Buffer.byteLength(line, "utf8") <= 512, String(Buffer.byteLength(line, "utf8")));
+  }
+});
+
+test("sinks helper isolates why() from real ROCKY_HOME desk change cards", () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-iso-home-")));
+  const nonRepo = realpathSync(mkdtempSync(join(tmpdir(), "rocky-iso-dir-")));
+  const target = join(nonRepo, "isolated.ts");
+  const prevHome = process.env.ROCKY_HOME;
+  try {
+    mkdirSync(join(home, "desk", "cards"), { recursive: true });
+    writeFileSync(
+      join(home, "desk", "cards", "_none.jsonl"),
+      `${JSON.stringify({
+        v: 1,
+        card_id: "isolated-cli-card",
+        rev: 1,
+        root: nonRepo,
+        main_root: null,
+        started_ms: 1000,
+        ended_ms: 2000,
+        prompt: "Leaked card from ambient ROCKY_HOME",
+        blocks: [{ seq: 1, path: target, symbol: null, labels: [{ id: "file_edited" }], importance: "normal", via: "edit", line: 1, added: 1, removed: 0, quote: null }],
+      })}\n`,
+      "utf8",
+    );
+    process.env.ROCKY_HOME = home;
+    const output = sinks();
+    assert.equal(why([target], { load: () => [], ...output.deps }), 0);
+    assert.equal(output.sayLines.some((line) => line.includes("Agent changes to")), false);
+    assert.equal(output.outLines.some((line) => line.includes("Leaked card")), false);
+  } finally {
+    if (prevHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(nonRepo, { recursive: true, force: true });
   }
 });

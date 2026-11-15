@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { canonicalPath } from "../core/memory-read.js";
 import { cardsForFile, type StoredBlock, type StoredCard } from "../desk/cards-read.js";
 import { cardsFilePath } from "../listening/cards-path.js";
@@ -473,8 +475,11 @@ test("malformed JSON and invalid schema fields increment skipped while extra fie
     { ...makeBlock(1, "src/target.ts"), quote: "not-an-object" as unknown as StoredBlock["quote"] },
   ]);
   const badVia = makeCard("card-bad-via", canonicalRoot, [
-    { ...makeBlock(1, "src/target.ts"), via: "python" as unknown as "edit" },
+    { ...makeBlock(1, "src/target.ts"), via: 123 as unknown as string },
   ]);
+  const stringVia = makeCard("card-string-via", canonicalRoot, [
+    makeBlock(1, "src/target.ts", { via: "python" }),
+  ], { ended_ms: 4000 });
   const missingEndedMs: Record<string, unknown> = {
     ...makeCard("card-no-ended", canonicalRoot, [makeBlock(1, "src/target.ts")]),
   };
@@ -488,10 +493,12 @@ test("malformed JSON and invalid schema fields increment skipped while extra fie
     missingEndedMs,
     "",
     withExtraField,
+    stringVia,
   ]);
 
   const result = cardsForFile(filePath, { home });
-  assert.deepEqual(result.cards.map((c) => c.card_id), ["card-valid-extra"]);
+  assert.deepEqual(result.cards.map((c) => c.card_id), ["card-string-via", "card-valid-extra"]);
+  assert.equal(result.matched.get("card-string-via")?.[0]?.via, "python");
   assert.equal(result.coverage.complete, false);
   assert.equal(result.coverage.reason, undefined);
   assert.equal(result.coverage.skipped, 5);
@@ -530,4 +537,249 @@ test("sort order uses ended_ms ?? started_ms desc then card_id asc and respects 
   const zeroLimit = cardsForFile(filePath, { home, limit: 0 });
   assert.equal(zeroLimit.cards.length, 0);
   assert.equal(zeroLimit.matched.size, 0);
+});
+
+test("16 MiB tail read preserves first card when cut lands on a line boundary and skips mid-line cuts", (t) => {
+  const MAX_TAIL = 16 * 1024 * 1024;
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const { repoRoot, filePath } = makeRepo(temp, "repo-boundary");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const logPath = cardsFilePath(canonicalRoot, home);
+
+  const beforeCut = `${JSON.stringify(makeCard("card-before-cut", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 1000 }))}\n`;
+  const boundaryCard = `${JSON.stringify(makeCard("card-exact-boundary", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 5000 }))}\n`;
+  const boundaryLen = Buffer.byteLength(boundaryCard, "utf8");
+
+  // Pad the remaining (MAX_TAIL - boundaryLen) bytes with valid non-matching cards of exact total length.
+  const templateFiller = JSON.stringify(makeCard("card-filler", canonicalRoot, [makeBlock(1, "src/other.ts")], { prompt: "" }));
+  const lineOverhead = Buffer.byteLength(templateFiller, "utf8") + 1;
+  const lines: string[] = [];
+  let remaining = MAX_TAIL - boundaryLen;
+  let seq = 0;
+  while (remaining > 0) {
+    const id = `f-${seq++}`;
+    const base = JSON.stringify(makeCard(id, canonicalRoot, [makeBlock(1, "src/other.ts")], { prompt: "" }));
+    const baseLen = Buffer.byteLength(base, "utf8") + 1;
+    const chunkTarget = remaining <= 800_000 ? remaining : 800_000;
+    const padLen = chunkTarget - baseLen;
+    if (padLen < 0) throw new Error(`unexpected filler size remaining=${remaining} baseLen=${baseLen}`);
+    // Avoid leaving < lineOverhead bytes for the final line.
+    const nextRem = remaining - chunkTarget;
+    const adjustedChunk = nextRem > 0 && nextRem < lineOverhead + 10 ? chunkTarget - (lineOverhead + 20) : chunkTarget;
+    const promptPad = "a".repeat(adjustedChunk - baseLen);
+    const line = `${JSON.stringify(makeCard(id, canonicalRoot, [makeBlock(1, "src/other.ts")], { prompt: promptPad }))}\n`;
+    lines.push(line);
+    remaining -= Buffer.byteLength(line, "utf8");
+  }
+
+  mkdirSync(dirname(logPath), { recursive: true });
+  const exactContent = `${beforeCut}${boundaryCard}${lines.join("")}`;
+  assert.equal(Buffer.byteLength(exactContent, "utf8"), Buffer.byteLength(beforeCut, "utf8") + MAX_TAIL);
+  writeFileSync(logPath, exactContent, "utf8");
+
+  const exactRes = cardsForFile(filePath, { home });
+  assert.equal(exactRes.coverage.complete, false);
+  assert.equal(exactRes.coverage.reason, "file-size-cap");
+  assert.equal(exactRes.coverage.skipped, 0);
+  assert.deepEqual(exactRes.cards.map((c) => c.card_id), ["card-exact-boundary"]);
+
+  // Shift cut 10 bytes into a matching card so pos - 1 is not 0x0a: that partial line must be skipped.
+  const midCut = `${JSON.stringify(makeCard("card-mid-cut", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 4000 }))}\n`;
+  const midAfter = `${JSON.stringify(makeCard("card-after-mid", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 6000 }))}\n`;
+  const midTailLen = Buffer.byteLength(midCut, "utf8") - 10 + Buffer.byteLength(midAfter, "utf8");
+  const midFillers: string[] = [];
+  let midRem = MAX_TAIL - midTailLen;
+  let midSeq = 0;
+  while (midRem > 0) {
+    const id = `mf-${midSeq++}`;
+    const base = JSON.stringify(makeCard(id, canonicalRoot, [makeBlock(1, "src/other.ts")], { prompt: "" }));
+    const baseLen = Buffer.byteLength(base, "utf8") + 1;
+    const chunk = midRem <= 800_000 ? midRem : 800_000;
+    const next = midRem - chunk;
+    const adj = next > 0 && next < lineOverhead + 10 ? chunk - (lineOverhead + 20) : chunk;
+    const line = `${JSON.stringify(makeCard(id, canonicalRoot, [makeBlock(1, "src/other.ts")], { prompt: "b".repeat(adj - baseLen) }))}\n`;
+    midFillers.push(line);
+    midRem -= Buffer.byteLength(line, "utf8");
+  }
+  writeFileSync(logPath, `${midCut}${midAfter}${midFillers.join("")}`, "utf8");
+
+  const midRes = cardsForFile(filePath, { home });
+  assert.equal(midRes.coverage.complete, false);
+  assert.equal(midRes.coverage.reason, "file-size-cap");
+  assert.deepEqual(midRes.cards.map((c) => c.card_id), ["card-after-mid"]);
+});
+
+test("mid-read race keeps cards parsed so far and reports read-race without retrying", (t) => {
+  const temp = makeTempDir(t, "rocky-cards-race-");
+  const home = join(temp, "home");
+  const { repoRoot, filePath } = makeRepo(temp);
+  const canonicalRoot = canonicalPath(repoRoot);
+  const logPath = cardsFilePath(canonicalRoot, home);
+
+  const first = makeCard("card-parsed-first", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 2000 });
+  const filler = makeCard("card-chunk-two", canonicalRoot, [makeBlock(1, "src/other.ts")], { prompt: "z".repeat(70_000) });
+  writeJsonl(logPath, [first, filler]);
+
+  const marker = join(temp, "race-fired");
+  const preload = join(temp, "cards-race.cjs");
+  writeFileSync(preload, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalRead = fs.readSync.bind(fs);",
+    "const fds = new Set();",
+    "let reads = 0;",
+    "fs.openSync = (value, ...args) => { const fd = originalOpen(value, ...args); if (String(value) === process.env.ROCKY_TEST_CARDS_LOG) fds.add(fd); return fd; };",
+    "fs.readSync = (fd, ...args) => { if (fds.has(fd)) { reads += 1; if (reads >= 2) { fs.writeFileSync(process.env.ROCKY_TEST_CARDS_MARKER, '1'); return 0; } } return originalRead(fd, ...args); };",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+
+  const modulePath = join(process.cwd(), "dist", "desk", "cards-read.js");
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", [
+    `const { cardsForFile } = await import(${JSON.stringify(pathToFileURL(modulePath).href)});`,
+    `const res = cardsForFile(${JSON.stringify(filePath)}, { home: ${JSON.stringify(home)} });`,
+    "process.stdout.write(JSON.stringify({ ids: res.cards.map((c) => c.card_id), coverage: res.coverage }));",
+  ].join("\n")], {
+    env: {
+      ...process.env,
+      NODE_OPTIONS: `--require=${preload}`,
+      ROCKY_TEST_CARDS_LOG: logPath,
+      ROCKY_TEST_CARDS_MARKER: marker,
+    },
+    encoding: "utf8",
+    timeout: 20_000,
+    windowsHide: true,
+  });
+
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(existsSync(marker), true);
+  const parsed = JSON.parse(child.stdout) as { ids: string[]; coverage: { complete: boolean; reason?: string; skipped: number } };
+  assert.deepEqual(parsed.ids, ["card-parsed-first"]);
+  assert.deepEqual(parsed.coverage, { complete: false, reason: "read-race", skipped: 0 });
+});
+
+test("cross-log scan finds abs/~ blocks in _none, other repo, and own repo while rejecting foreign relative paths", (t) => {
+  const temp = makeTempDir(t, "rocky-cross-log-");
+  const home = join(temp, "home");
+  const fakeUserHome = join(temp, "user-home");
+  mkdirSync(join(fakeUserHome, "work"), { recursive: true });
+  const { repoRoot, filePath } = makeRepo(join(fakeUserHome, "work"), "repo-a");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const ownLog = cardsFilePath(canonicalRoot, home);
+  const otherRepoRoot = join(fakeUserHome, "work", "repo-b");
+  mkdirSync(join(otherRepoRoot, ".git"), { recursive: true });
+  const otherLog = cardsFilePath(canonicalPath(otherRepoRoot), home);
+  const noneLog = join(home, "desk", "cards", "_none.jsonl");
+
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeUserHome;
+  process.env.USERPROFILE = fakeUserHome;
+  try {
+    writeJsonl(ownLog, [
+      makeCard("card-own-rel", canonicalRoot, [makeBlock(1, "src/target.ts")], { ended_ms: 1000 }),
+      makeCard("card-own-abs", canonicalRoot, [makeBlock(1, canonicalPath(filePath))], { ended_ms: 2000 }),
+      makeCard("card-own-tilde", canonicalRoot, [makeBlock(1, "~/work/repo-a/src/target.ts")], { ended_ms: 3000 }),
+    ]);
+    writeJsonl(noneLog, [
+      makeCard("card-none-abs", "", [makeBlock(1, canonicalPath(filePath))], { ended_ms: 4000 }),
+      makeCard("card-none-rel-ignored", "", [makeBlock(1, "src/target.ts")], { ended_ms: 4500 }),
+    ]);
+    writeJsonl(otherLog, [
+      makeCard("card-other-abs", canonicalPath(otherRepoRoot), [makeBlock(1, canonicalPath(filePath))], { ended_ms: 5000 }),
+      makeCard("card-other-rel-ignored", canonicalPath(otherRepoRoot), [makeBlock(1, "src/target.ts")], { ended_ms: 6000 }),
+    ]);
+
+    const res = cardsForFile(filePath, { home });
+    assert.deepEqual(res.coverage, { complete: true, skipped: 0 });
+    assert.deepEqual(
+      res.cards.map((c) => c.card_id),
+      ["card-other-abs", "card-none-abs", "card-own-tilde", "card-own-abs", "card-own-rel"],
+    );
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
+  }
+});
+
+test("cross-log scan merges by card_id (latest rev wins, tie later log) and combines coverage", (t) => {
+  const temp = makeTempDir(t, "rocky-cross-merge-");
+  const home = join(temp, "home");
+  const { repoRoot, filePath } = makeRepo(temp, "repo-main");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const absTarget = canonicalPath(filePath);
+  const ownLog = cardsFilePath(canonicalRoot, home);
+  const logA = join(home, "desk", "cards", "aaaa.jsonl");
+  const logZ = join(home, "desk", "cards", "zzzz.jsonl");
+
+  const hugePrompt = "q".repeat(1024 * 1024 + 16);
+  const lineCapCard = makeCard("card-over-line", canonicalRoot, [makeBlock(1, "src/other.ts")], { prompt: hugePrompt });
+
+  writeJsonl(ownLog, [
+    "{corrupt-own",
+    makeCard("shared-drop", canonicalRoot, [makeBlock(1, "src/target.ts")], { rev: 1, ended_ms: 1000 }),
+    makeCard("shared-tie", canonicalRoot, [makeBlock(1, "src/target.ts")], { rev: 2, prompt: "from-own", ended_ms: 3000 }),
+  ]);
+  writeJsonl(logA, [
+    "{corrupt-a",
+    lineCapCard,
+    makeCard("shared-drop", "", [makeBlock(1, absTarget)], { rev: 2, ended_ms: 2000, blocks: [makeBlock(1, "/unrelated/file.ts")] }),
+    makeCard("shared-tie", "", [makeBlock(1, absTarget)], { rev: 2, prompt: "from-log-a", ended_ms: 3000 }),
+    makeCard("rev-wins", "", [makeBlock(1, absTarget)], { rev: 5, prompt: "winner-rev-5", ended_ms: 4000 }),
+  ]);
+  writeJsonl(logZ, [
+    makeCard("shared-tie", "", [makeBlock(1, absTarget)], { rev: 2, prompt: "from-log-z", ended_ms: 3000 }),
+    makeCard("rev-wins", "", [makeBlock(1, absTarget)], { rev: 4, prompt: "stale-rev-4", ended_ms: 4000 }),
+  ]);
+
+  const res = cardsForFile(filePath, { home });
+  assert.deepEqual(res.cards.map((c) => c.card_id), ["rev-wins", "shared-tie"]);
+  assert.equal(res.cards[0]?.prompt, "winner-rev-5");
+  assert.equal(res.cards[1]?.prompt, "from-log-z");
+  assert.equal(res.coverage.complete, false);
+  assert.equal(res.coverage.reason, "line-cap");
+  assert.equal(res.coverage.skipped, 3);
+});
+
+test("cross-log extra scan stops at 64 extra files or 64 MiB total read with file-size-cap", (t) => {
+  const temp = makeTempDir(t, "rocky-cross-bounds-");
+  const homeCount = join(temp, "home-count");
+  const { repoRoot, filePath } = makeRepo(temp, "repo-bounds");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const absTarget = canonicalPath(filePath);
+
+  for (let i = 1; i <= 64; i += 1) {
+    const name = `extra-${String(i).padStart(3, "0")}.jsonl`;
+    writeJsonl(join(homeCount, "desk", "cards", name), [
+      makeCard(`c-${i}`, "", [makeBlock(1, "/unrelated/file.ts")], { ended_ms: i }),
+    ]);
+  }
+  const exact64 = cardsForFile(filePath, { home: homeCount });
+  assert.deepEqual(exact64.coverage, { complete: true, skipped: 0 });
+
+  writeJsonl(join(homeCount, "desk", "cards", "extra-065.jsonl"), [
+    makeCard("card-65", "", [makeBlock(1, absTarget)], { ended_ms: 9999 }),
+  ]);
+  const over64 = cardsForFile(filePath, { home: homeCount });
+  assert.equal(over64.coverage.complete, false);
+  assert.equal(over64.coverage.reason, "file-size-cap");
+  assert.equal(over64.cards.some((c) => c.card_id === "card-65"), false);
+
+  const homeBytes = join(temp, "home-bytes");
+  const fillerUnit = `${JSON.stringify(makeCard("filler", "", [makeBlock(1, "/unrelated/file.ts")], { prompt: "x".repeat(700_000) }))}\n`;
+  const bigChunk = fillerUnit.repeat(20); // ~14 MiB per log
+  writeJsonl(cardsFilePath(canonicalRoot, homeBytes), [bigChunk.trimEnd()]);
+  for (let i = 1; i <= 4; i += 1) {
+    const name = `bytes-${String(i).padStart(2, "0")}.jsonl`;
+    const prefix = i === 4 ? `${JSON.stringify(makeCard("card-beyond-64mib", "", [makeBlock(1, absTarget)], { ended_ms: 8888 }))}\n` : "";
+    mkdirSync(join(homeBytes, "desk", "cards"), { recursive: true });
+    writeFileSync(join(homeBytes, "desk", "cards", name), `${prefix}${bigChunk}`, "utf8");
+  }
+  const overBytes = cardsForFile(filePath, { home: homeBytes });
+  assert.equal(overBytes.coverage.complete, false);
+  assert.equal(overBytes.coverage.reason, "file-size-cap");
+  assert.equal(overBytes.cards.some((c) => c.card_id === "card-beyond-64mib"), false);
 });

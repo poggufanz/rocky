@@ -657,7 +657,7 @@ export interface ProjectedWhyCardBlock {
   symbol: ProjectedWhyCardSymbol | null;
   labels: ProjectedWhyCardLabel[];
   importance: string;
-  via: "edit" | "bash";
+  via: "edit" | "bash" | "other";
   line: number | null;
   added: number | null;
   removed: number | null;
@@ -680,6 +680,7 @@ export interface ProjectedWhyCard {
   prompt_kind: ProjectedPromptKind;
   agent_type: string;
   blocks: ProjectedWhyCardBlock[];
+  more_blocks?: number;
 }
 
 export interface ProjectedWhyCardsResult {
@@ -747,6 +748,12 @@ function validateCardCoverage(coverage: unknown): CardsReadCoverage {
   }
 }
 
+const SAFE_SLASH_COMMAND = /^\/[A-Za-z0-9:_.-]{1,64}$/;
+
+function isSafeSlashCommandName(name: string): boolean {
+  return SAFE_SLASH_COMMAND.test(name);
+}
+
 function projectPromptKind(
   kind: PromptKind,
   exposure: Exposure,
@@ -756,48 +763,93 @@ function projectPromptKind(
   if (kind.kind === "slash_command") {
     return {
       kind: "slash_command",
-      name: projectText(kind.name, exposure, `${path}.name`, truncation),
+      name: isSafeSlashCommandName(kind.name)
+        ? kind.name
+        : projectText(kind.name, exposure, `${path}.name`, truncation),
       args: projectText(kind.args, exposure, `${path}.args`, truncation),
     };
   }
   return { kind: kind.kind };
 }
 
-function projectCardLabelValue(
-  value: unknown,
+function projectCardPrompt(
+  title: string,
+  kind: PromptKind,
   exposure: Exposure,
   path: string,
   truncation: Truncation,
-  depth: number,
-): unknown {
-  if (typeof value === "string") return projectText(value, exposure, path, truncation);
-  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-  if (typeof value === "boolean" || value === null) return value;
-  if (depth >= 2) return undefined;
-  if (Array.isArray(value)) {
-    const bound = Math.min(value.length, MAX_NESTED_ITEMS);
-    if (value.length > bound) truncation.fields.push(path);
-    const out: unknown[] = [];
-    for (let index = 0; index < bound; index += 1) {
-      const projected = projectCardLabelValue(value[index], exposure, `${path}[${index}]`, truncation, depth + 1);
-      if (projected !== undefined) out.push(projected);
-    }
-    return out;
+): string {
+  if (kind.kind === "slash_command" && isSafeSlashCommandName(kind.name)) {
+    const singleLineArgs = kind.args.replace(/[\r\n\u2028\u2029]+/g, " ").trim();
+    const projectedArgs = singleLineArgs.length > 0
+      ? projectText(singleLineArgs, exposure, path, truncation).trim()
+      : "";
+    const joined = projectedArgs.length > 0 ? `${kind.name} ${projectedArgs}` : kind.name;
+    return sliceCodePoints(joined, MAX_CARD_PROMPT_CHARS, path, truncation);
   }
-  if (isPlainRecord(value)) {
-    const entries = Object.entries(value);
-    const bound = Math.min(entries.length, MAX_NESTED_ITEMS);
-    if (entries.length > bound) truncation.fields.push(path);
-    const out: Record<string, unknown> = {};
-    for (let index = 0; index < bound; index += 1) {
-      const [key, entryValue] = entries[index]!;
-      const projectedKey = projectText(key, exposure, `${path}.key`, truncation);
-      const projectedVal = projectCardLabelValue(entryValue, exposure, `${path}.${projectedKey}`, truncation, depth + 1);
-      if (projectedVal !== undefined) out[projectedKey] = projectedVal;
+  return projectClippedCardText(title, exposure, path, truncation, MAX_CARD_PROMPT_CHARS);
+}
+
+interface CardLabelArgSpec {
+  readonly strings?: readonly string[];
+  readonly numbers?: readonly string[];
+}
+
+// Strict per-label allowlist aligned with crates/rocky-facts/src/model.rs;
+// literal `before`, `after`, and `version` values are never projected.
+const CARD_LABEL_ARG_ALLOWLIST: Readonly<Record<string, CardLabelArgSpec>> = {
+  params_changed: { numbers: ["added", "removed", "changed"] },
+  symbol_renamed: { strings: ["from"] },
+  call_added: { strings: ["name"] },
+  call_removed: { strings: ["name"] },
+  await_changed: { numbers: ["added", "removed"] },
+  value_changed: { strings: ["name"] },
+  config_changed: { strings: ["key"] },
+  dep_added: { strings: ["name"] },
+  dep_removed: { strings: ["name"] },
+  dep_version: { strings: ["name"] },
+  import_added: { strings: ["module"] },
+  import_removed: { strings: ["module"] },
+  test_added: { strings: ["name"] },
+  test_removed: { strings: ["name"] },
+  test_skipped: { strings: ["name"] },
+  test_only: { strings: ["name"] },
+  file_renamed: { strings: ["from"] },
+  rewrite: { numbers: ["pct"] },
+  lines_changed: { numbers: ["added", "removed"] },
+};
+
+function hasOwn(record: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function projectCardLabelArgs(
+  labelId: string,
+  rawArgs: Record<string, unknown>,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): Record<string, unknown> {
+  const spec = hasOwn(CARD_LABEL_ARG_ALLOWLIST, labelId)
+    ? CARD_LABEL_ARG_ALLOWLIST[labelId]
+    : undefined;
+  if (!spec) return {};
+  const out: Record<string, unknown> = {};
+  for (const key of spec.strings ?? []) {
+    if (!hasOwn(rawArgs, key)) continue;
+    const value = rawArgs[key];
+    if (typeof value === "string") {
+      out[key] = projectText(value, exposure, `${path}.${key}`, truncation);
     }
-    return out;
   }
-  return undefined;
+  for (const key of spec.numbers ?? []) {
+    if (!hasOwn(rawArgs, key)) continue;
+    const value = rawArgs[key];
+    if (isSafeNonNegativeInteger(value)) {
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 function projectCardLabels(
@@ -817,7 +869,7 @@ function projectCardLabels(
     let args: Record<string, unknown> = {};
     if (entry.args !== undefined && entry.args !== null) {
       if (!isPlainRecord(entry.args)) return undefined;
-      args = projectCardLabelValue(entry.args, exposure, `${labelPath}.args`, truncation, 0) as Record<string, unknown>;
+      args = projectCardLabelArgs(entry.id, entry.args, exposure, `${labelPath}.args`, truncation);
     }
     projected.push({
       id: projectText(entry.id, exposure, `${labelPath}.id`, truncation),
@@ -864,7 +916,7 @@ function projectCardBlock(
   if (!isSafeNonNegativeInteger(rawBlock.seq)) return undefined;
   if (typeof rawBlock.path !== "string" || rawBlock.path.length === 0) return undefined;
   if (typeof rawBlock.importance !== "string") return undefined;
-  if (rawBlock.via !== undefined && rawBlock.via !== "edit" && rawBlock.via !== "bash") return undefined;
+  if (rawBlock.via !== undefined && typeof rawBlock.via !== "string") return undefined;
 
   const line = optionalSafeCardInt(rawBlock.line);
   const added = optionalSafeCardInt(rawBlock.added);
@@ -889,7 +941,12 @@ function projectCardBlock(
   const labels = projectCardLabels(rawBlock.labels, exposure, `${path}.labels`, truncation);
   if (labels === undefined) return undefined;
 
-  const via = rawBlock.via === "bash" ? "bash" : "edit";
+  const via: "edit" | "bash" | "other" =
+    rawBlock.via === undefined || rawBlock.via === "edit"
+      ? "edit"
+      : rawBlock.via === "bash"
+        ? "bash"
+        : "other";
   return {
     seq: rawBlock.seq,
     path: projectText(rawBlock.path, exposure, `${path}.path`, truncation),
@@ -966,17 +1023,32 @@ export function projectWhyCards(
       const title = promptTitle(promptInput);
 
       const blocks: ProjectedWhyCardBlock[] = [];
+      let moreBlocks = 0;
       const matchingBlocks = matchedMap?.get(rawCardId);
       if (Array.isArray(matchingBlocks)) {
         const blockScanBound = Math.min(matchingBlocks.length, MAX_NESTED_ITEMS);
-        for (let blockIndex = 0; blockIndex < blockScanBound && blocks.length < MAX_BLOCKS_PER_CARD; blockIndex += 1) {
-          const projectedBlock = projectCardBlock(
-            matchingBlocks[blockIndex],
-            exposure,
-            `${at}.blocks[${blocks.length}]`,
-            truncation,
-          );
-          if (projectedBlock !== undefined) blocks.push(projectedBlock);
+        const discardTruncation: Truncation = { fields: [] };
+        for (let blockIndex = 0; blockIndex < blockScanBound; blockIndex += 1) {
+          if (blocks.length < MAX_BLOCKS_PER_CARD) {
+            const projectedBlock = projectCardBlock(
+              matchingBlocks[blockIndex],
+              exposure,
+              `${at}.blocks[${blocks.length}]`,
+              truncation,
+            );
+            if (projectedBlock !== undefined) blocks.push(projectedBlock);
+          } else {
+            const extraBlock = projectCardBlock(
+              matchingBlocks[blockIndex],
+              exposure,
+              `${at}.blocks[${MAX_BLOCKS_PER_CARD + moreBlocks}]`,
+              discardTruncation,
+            );
+            if (extraBlock !== undefined) moreBlocks += 1;
+          }
+        }
+        if (moreBlocks > 0 || matchingBlocks.length > blockScanBound) {
+          truncation.fields.push(`${at}.blocks`);
         }
       }
 
@@ -985,10 +1057,11 @@ export function projectWhyCards(
         ended_ms: rawEndedMs === undefined || rawEndedMs === null ? null : rawEndedMs,
         started_ms: rawStartedMs,
         repo: projectText(lastPathSegment(rawRoot), exposure, `${at}.repo`, truncation),
-        prompt: projectClippedCardText(title, exposure, `${at}.prompt`, truncation, MAX_CARD_PROMPT_CHARS),
+        prompt: projectCardPrompt(title, promptKind, exposure, `${at}.prompt`, truncation),
         prompt_kind: projectPromptKind(promptKind, exposure, `${at}.prompt_kind`, truncation),
         agent_type: projectText(rawAgentType, exposure, `${at}.agent_type`, truncation),
         blocks,
+        ...(moreBlocks > 0 ? { more_blocks: moreBlocks } : {}),
       });
     } catch {
       // A hostile card object cannot break MCP projection.

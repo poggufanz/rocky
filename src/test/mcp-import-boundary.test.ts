@@ -142,9 +142,13 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     // are reached through core/dictionary.ts, whose `rationalesForFile` serves
     // why_file.
     "core/concepts.ts",
-    "core/compare-data.ts",
     "core/cs-explain.ts",
     "core/dictionary.ts",
+    // Audited read-only helper: desk/cards-read.ts imports only pure
+    // `gitRootFor` (walks parent directories using injected `existsSync`).
+    // `execFileSync` in this module is only used by other functions never
+    // imported or called by MCP.
+    "core/compare-data.ts",
     // Audited pure predicate: no imports, no filesystem access; read-side
     // retrieval filtering only (retrieval-quality spec, step 0).
     "core/envelope.ts",

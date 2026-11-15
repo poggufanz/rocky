@@ -825,17 +825,17 @@ function sayChangeCards(
     return;
   }
   const cards = result.cards.slice(0, MAX_CHANGE_CARDS);
-  if (cards.length === 0) return;
-
-  speak(terminalSafe(`Agent changes to ${safePath} (newest first)`, MAX_OUTPUT_LINE_BYTES));
-  for (const card of cards) {
-    support(formatCardHeader(card, now));
-    const blocks = result.matched.get(card.card_id) ?? [];
-    for (const block of blocks.slice(0, MAX_CARD_BLOCKS)) {
-      support(formatCardBlock(block));
-    }
-    if (blocks.length > MAX_CARD_BLOCKS) {
-      support(`         +${blocks.length - MAX_CARD_BLOCKS} more`);
+  if (cards.length > 0) {
+    speak(terminalSafe(`Agent changes to ${safePath} (newest first)`, MAX_OUTPUT_LINE_BYTES));
+    for (const card of cards) {
+      support(formatCardHeader(card, now));
+      const blocks = result.matched.get(card.card_id) ?? [];
+      for (const block of blocks.slice(0, MAX_CARD_BLOCKS)) {
+        support(formatCardBlock(block));
+      }
+      if (blocks.length > MAX_CARD_BLOCKS) {
+        support(`         +${blocks.length - MAX_CARD_BLOCKS} more`);
+      }
     }
   }
   if (!result.coverage.complete) {

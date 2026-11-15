@@ -810,3 +810,40 @@ test("why reads real change cards end-to-end via cardsForFile and ROCKY_HOME", (
     cleanup();
   }
 });
+
+test("why emits partial-read coverage line even with zero matching cards and handles non-bash string via", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+
+  const partialZero = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...partialZero,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([], { complete: false, reason: "file-size-cap", skipped: 0 }),
+    }),
+    0,
+  );
+  assert.equal(partialZero.errLines.some((line) => line.includes("Agent changes to")), false);
+  assert.deepEqual(partialZero.outLines, [
+    "Change cards were only partly read (file-size-cap); older changes may be missing.",
+  ]);
+
+  const unknownViaCard = makeCard({
+    blocks: [makeBlock({ via: "python", bash: { cmd: "ignored", candidates: 1 } })],
+  });
+  const unknownViaSinks = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...unknownViaSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([unknownViaCard]),
+    }),
+    0,
+  );
+  const blockLine = unknownViaSinks.outLines[1] ?? "";
+  assert.equal(blockLine.includes("(via "), false, blockLine);
+});

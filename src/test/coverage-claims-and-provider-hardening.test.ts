@@ -73,7 +73,12 @@ function emptyMemory(overrides: Partial<MemoryQueries> = {}): MemoryQueries {
 }
 
 function agentHookRegistry(memory: MemoryQueries) {
-  return createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+  return createToolRegistry({
+    exposure: "sanitized",
+    memory,
+    recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  });
 }
 
 test("coverage is claim-scoped when late append creates a new live generation", async () => {
