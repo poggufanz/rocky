@@ -400,7 +400,7 @@ fn block_matches_query(block: &Block, needle_lower: &str) -> bool {
     !needle_lower.is_empty() && block.path.to_lowercase().contains(needle_lower)
 }
 
-fn first_non_empty_line(text: &str) -> &str {
+pub(crate) fn first_non_empty_line(text: &str) -> &str {
     text.split(['\r', '\n'])
         .map(str::trim)
         .find(|l| !l.is_empty())

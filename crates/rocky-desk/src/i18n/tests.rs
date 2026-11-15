@@ -579,6 +579,14 @@ fn card_copy_matches_brief_details() {
         card_text(UiLang::Id, &CardMsg::TaskNoticePrompt),
         "Notifikasi task latar"
     );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::WaitingApproval),
+        "waiting for approval"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::WaitingApproval),
+        "menunggu izin"
+    );
 }
 
 fn card_msg_variant_count() -> usize {
@@ -622,10 +630,11 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::BackDone
         | CardMsg::SettingCards
         | CardMsg::NoticeConsent
-        | CardMsg::TaskNoticePrompt => {}
+        | CardMsg::TaskNoticePrompt
+        | CardMsg::WaitingApproval => {}
     };
     let _ = check;
-    39
+    40
 }
 
 #[test]

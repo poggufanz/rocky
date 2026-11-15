@@ -14,6 +14,7 @@ pub mod i18n;
 pub mod icons;
 pub mod notified;
 pub mod notify;
+pub mod now_model;
 pub mod os_notice;
 pub mod quit;
 pub mod relay;

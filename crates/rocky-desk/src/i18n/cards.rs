@@ -78,6 +78,7 @@ pub enum CardMsg {
     SettingCards,
     NoticeConsent,
     TaskNoticePrompt,
+    WaitingApproval,
 }
 
 /// Every [`CardMsg`] variant with sample arguments for parity and text scans.
@@ -126,6 +127,7 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::SettingCards,
         CardMsg::NoticeConsent,
         CardMsg::TaskNoticePrompt,
+        CardMsg::WaitingApproval,
     ]
 }
 
@@ -191,6 +193,7 @@ fn card_en(msg: &CardMsg) -> String {
                 .to_string()
         }
         CardMsg::TaskNoticePrompt => "Background task notice".to_string(),
+        CardMsg::WaitingApproval => "waiting for approval".to_string(),
     }
 }
 
@@ -248,6 +251,7 @@ fn card_id(msg: &CardMsg) -> String {
                 .to_string()
         }
         CardMsg::TaskNoticePrompt => "Notifikasi task latar".to_string(),
+        CardMsg::WaitingApproval => "menunggu izin".to_string(),
     }
 }
 

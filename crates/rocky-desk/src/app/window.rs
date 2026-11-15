@@ -26,6 +26,7 @@ use crate::i18n::{Msg, detect_ui_lang, tr};
 use crate::icons::tray_icon;
 use crate::notified::NotifiedStore;
 use crate::notify::Notifier;
+use crate::now_model::TimelineFetch;
 use crate::os_notice::OsNotices;
 use crate::requests::Requests;
 use crate::search_input::{Debounce, SearchInput};
@@ -161,6 +162,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
         let detected = detect_ui_lang();
         let mut ctl = Controller {
             model: Model::new(),
+            timeline_fetch: TimelineFetch::new(),
             notifier: Notifier::default(),
             inbox: None,
             outbox: None,
@@ -394,6 +396,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                             let mut show = false;
                             v.update(cx, |v, cx| {
                                 v.on_inbox(cx, active);
+                                v.poll_timelines();
                                 v.poll_search_debounce(cx);
                                 v.on_clicks();
                                 v.refresh_tray(cx);

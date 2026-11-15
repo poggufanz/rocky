@@ -26,6 +26,7 @@ use crate::desklog::LogOnce;
 use crate::i18n::{Msg, UiLang, resolve_lang};
 use crate::notified::NotifiedStore;
 use crate::notify::Notifier;
+use crate::now_model::TimelineFetch;
 use crate::os_notice::OsNotices;
 use crate::requests::Requests;
 use crate::search_input::{Debounce, SearchInput};
@@ -58,6 +59,8 @@ fn now_ms() -> u64 {
 
 struct Controller {
     model: Model,
+    /// Per-key 500 ms debounce and trailing refresh tracker for active timelines.
+    timeline_fetch: TimelineFetch,
     /// Notification rules; remembers statuses across messages.
     notifier: Notifier,
     /// Live inbox, or `None` once its disconnect has been handled. The

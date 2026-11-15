@@ -121,7 +121,7 @@ impl Model {
                 self.health = health;
                 self.settings = Some(settings);
                 self.open.retain(|k| self.agents.contains_key(k));
-                self.timelines.retain(|k, _| self.open.contains(k));
+                self.retain_timelines();
                 self.open.iter().cloned().collect()
             }
             ServerMsg::Settings { settings } => {
@@ -139,6 +139,7 @@ impl Model {
                 StatusOp::Upsert => {
                     let key = agent.key.clone();
                     self.agents.insert(key.clone(), agent);
+                    self.retain_timelines();
                     if self.open.contains(&key) {
                         vec![key]
                     } else {
@@ -148,11 +149,12 @@ impl Model {
                 StatusOp::Remove => {
                     self.agents.remove(&agent.key);
                     self.close(&agent.key);
+                    self.retain_timelines();
                     Vec::new()
                 }
             },
             ServerMsg::Timeline { key, entries, .. } => {
-                if self.open.contains(&key) {
+                if self.accepts_timeline(&key) {
                     self.timelines.insert(key, entries);
                 }
                 Vec::new()
@@ -177,7 +179,9 @@ impl Model {
     /// drops the stored entries and returns `None`.
     pub fn toggle_open(&mut self, key: &AgentKey) -> Option<AgentKey> {
         if self.open.remove(key) {
-            self.timelines.remove(key);
+            if !self.active_primary_keys().contains(key) {
+                self.timelines.remove(key);
+            }
             None
         } else {
             self.open.insert(key.clone());
@@ -195,6 +199,9 @@ impl Model {
         key: &AgentKey,
         fmt_time: &dyn Fn(u64) -> String,
     ) -> Vec<TimelineRow> {
+        if !self.open.contains(key) {
+            return Vec::new();
+        }
         self.timelines
             .get(key)
             .map(|entries| {
@@ -249,6 +256,62 @@ impl Model {
 
     pub fn agents(&self) -> &BTreeMap<AgentKey, AgentStatus> {
         &self.agents
+    }
+
+    pub(crate) fn timeline(&self, key: &AgentKey) -> Option<&[TimelineEntry]> {
+        self.timelines.get(key).map(Vec::as_slice)
+    }
+
+    fn retain_timelines(&mut self) {
+        let active = self.active_primary_keys();
+        self.timelines.retain(|k, _| {
+            active.contains(k)
+                || (self.open.contains(k)
+                    && self
+                        .agents
+                        .get(k)
+                        .is_none_or(|a| is_active_status(a.status)))
+        });
+    }
+
+    fn accepts_timeline(&self, key: &AgentKey) -> bool {
+        if self.active_primary_keys().contains(key) {
+            return true;
+        }
+        self.open.contains(key)
+            && self
+                .agents
+                .get(key)
+                .is_none_or(|a| is_active_status(a.status))
+    }
+
+    pub(crate) fn subagent_tree_enabled(&self) -> bool {
+        self.settings.as_ref().is_none_or(|s| s.subagent_tree)
+    }
+
+    pub(crate) fn active_primary_keys(&self) -> BTreeSet<AgentKey> {
+        let mut by_session: BTreeMap<&str, &AgentKey> = BTreeMap::new();
+        for k in self.agents.keys() {
+            by_session
+                .entry(k.session_id.as_str())
+                .and_modify(|best| {
+                    if (!k.agent_id.is_empty(), &k.agent_id)
+                        < (!best.agent_id.is_empty(), &best.agent_id)
+                    {
+                        *best = k;
+                    }
+                })
+                .or_insert(k);
+        }
+        by_session
+            .into_values()
+            .filter(|k| {
+                self.agents
+                    .get(*k)
+                    .is_some_and(|a| is_active_status(a.status))
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn groups(&self, now_ms: u64) -> Vec<RepoGroup> {
@@ -463,7 +526,11 @@ fn distinct_roots(sessions: &BTreeMap<String, Vec<&AgentStatus>>) -> Vec<String>
 }
 
 /// First 8 chars, char-safe.
-fn short8(s: &str) -> String {
+pub(crate) fn is_active_status(status: Status) -> bool {
+    matches!(status, Status::NeedsYou | Status::Working)
+}
+
+pub(crate) fn short8(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
@@ -479,42 +546,65 @@ pub(crate) fn agent_label(a: &AgentStatus) -> Msg {
     }
 }
 
-fn age_secs(now_ms: u64, last_ms: u64) -> u64 {
+pub(crate) fn age_secs(now_ms: u64, last_ms: u64) -> u64 {
     now_ms.saturating_sub(last_ms) / 1000
 }
 
-pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> String {
-    let text = if let Some(command) = a.command.as_deref() {
-        format!("{} {command}", a.tool_name)
-    } else if let Some(path) = a.target_path.as_deref() {
-        let path = path.replace('\\', "/");
-        let rel = match repo_root {
-            Some(root) => {
-                let root = root.replace('\\', "/");
-                let root = root.trim_end_matches('/');
-                // ponytail: empty root can't prefix-match; fall through to full path
-                if !root.is_empty()
-                    && path.len() > root.len()
-                    && path.as_bytes()[..root.len()].eq_ignore_ascii_case(root.as_bytes())
-                    && path.as_bytes()[root.len()] == b'/'
-                {
-                    &path[root.len() + 1..]
-                } else {
-                    &path
-                }
+fn action_target_raw(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> Option<String> {
+    if let Some(command) = a.command.as_deref() {
+        return Some(command.to_string());
+    }
+    let path = a.target_path.as_deref()?.replace('\\', "/");
+    let rel = match repo_root {
+        Some(root) => {
+            let root = root.replace('\\', "/");
+            let root = root.trim_end_matches('/');
+            // ponytail: empty root can't prefix-match; fall through to full path
+            if !root.is_empty()
+                && path.len() > root.len()
+                && path.as_bytes()[..root.len()].eq_ignore_ascii_case(root.as_bytes())
+                && path.as_bytes()[root.len()] == b'/'
+            {
+                &path[root.len() + 1..]
+            } else {
+                &path
             }
-            None => &path,
-        };
-        format!("{} {rel}", a.tool_name)
-    } else {
-        a.tool_name.clone()
+        }
+        None => &path,
     };
+    Some(rel.to_string())
+}
+
+fn truncate_80(text: String) -> String {
     if text.chars().count() <= 80 {
         text
     } else {
         let head: String = text.chars().take(79).collect();
         format!("{head}…")
     }
+}
+
+pub(crate) fn action_target(
+    a: &rocky_proto::pipe::Action,
+    repo_root: Option<&str>,
+) -> Option<String> {
+    let raw = action_target_raw(a, repo_root)?;
+    let clean = crate::cards_model::sanitize_single_line(&raw)
+        .trim()
+        .to_string();
+    if clean.is_empty() {
+        None
+    } else {
+        Some(truncate_80(clean))
+    }
+}
+
+pub fn action_text(a: &rocky_proto::pipe::Action, repo_root: Option<&str>) -> String {
+    let text = match action_target_raw(a, repo_root) {
+        Some(target) => format!("{} {target}", a.tool_name),
+        None => a.tool_name.clone(),
+    };
+    truncate_80(text)
 }
 
 #[cfg(test)]

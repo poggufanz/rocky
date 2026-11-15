@@ -62,7 +62,23 @@ impl DeskView {
                             &mut self.block_diff,
                             card_lang,
                         );
-                        requests.extend(self.ctl.model.apply(msg));
+                        let legacy_requests = self.ctl.model.apply(msg);
+                        let active_keys = self.ctl.model.active_primary_keys();
+                        let fetch_requests =
+                            self.ctl
+                                .timeline_fetch
+                                .on_msg(&for_notify, &active_keys, now_ms());
+                        for key in legacy_requests {
+                            if !self.ctl.timeline_fetch.is_tracked(&key) && !requests.contains(&key)
+                            {
+                                requests.push(key);
+                            }
+                        }
+                        for key in fetch_requests {
+                            if !requests.contains(&key) {
+                                requests.push(key);
+                            }
+                        }
                         if settings_msg {
                             self.register_notices();
                         }
@@ -94,6 +110,7 @@ impl DeskView {
                 self.ctl.inbox = Some(inbox);
             } else {
                 self.ctl.outbox = None;
+                self.ctl.timeline_fetch.reset();
                 let action = self.ctl.state.on_disconnect(now_ms());
                 self.ctl.act(action);
                 changed = true;
@@ -133,6 +150,14 @@ impl DeskView {
         }
         if changed {
             cx.notify();
+        }
+    }
+
+    /// Dispatches any active agent timeline fetches whose debounce window has elapsed.
+    pub(super) fn poll_timelines(&mut self) {
+        let active_keys = self.ctl.model.active_primary_keys();
+        for key in self.ctl.timeline_fetch.poll(&active_keys, now_ms()) {
+            self.ctl.request_timeline(key);
         }
     }
 }

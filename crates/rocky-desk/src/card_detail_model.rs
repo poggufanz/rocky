@@ -557,7 +557,7 @@ fn block_fact(block: &Block) -> String {
     }
 }
 
-fn format_step_dur(dur_ms: u64) -> String {
+pub(crate) fn format_step_dur(dur_ms: u64) -> String {
     let secs = dur_ms / 1000;
     if secs < 60 {
         return format!("{secs}s");
