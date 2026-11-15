@@ -126,7 +126,11 @@ redacted with prefix-fragment scrubbing when cut, then controls `<= 0x1f` and
 `0x7f..=0x9f` other than `\n` and `\t` mapped to spaces, then ≤1,000 Unicode
 scalar chars). Ids and names cap at 256 bytes, paths at 4 KiB; truncation cuts
 at a char boundary (or char limit on `prompt`) and sets `truncated: true`.
-The daemon removes `prompt` before writing desk history or status snapshots.
+When ingesting a spool record, the daemon extracts `prompt` for live in-memory
+`AgentStatus` and card building, and removes it from the event before writing
+`desk/history/` (so `AgentStatus.prompt` is never written to `desk/history/` or
+restored from history replay, though its source text passes through the spool
+file and may be stored in a change card).
 
 A `shell_env` record keeps only the five variable names listed under Record
 shapes, and `config_dir` only the value of `CLAUDE_CONFIG_DIR`. No other
@@ -177,9 +181,12 @@ drops the command text and subagent descriptions from agents already in
 memory, and clears the text of timeline entries that came from a tool input
 (a command, or a subagent description). Path text stays. Every `settings`
 broadcast makes the desk re-request its open timelines, so cleared text
-disappears there too. While `cards` is off, the hook omits `prompt`, the
-daemon stops building new change cards and does not retain live prompts in
-memory; existing card files stay on disk until purged or removed.
+disappears there too. Turning `cards` off creates `desk/cards-off` so the hook stops recording new
+`prompt` values, and disables new change card building in the daemon (resetting
+card-engine turn tracking); unlike `tool_text`, it does not clear any
+`AgentStatus.prompt` already held in daemon memory, and on ingest the daemon
+still applies prompts from already-spooled files without checking `cards`.
+Existing card files stay on disk until purged or removed.
 
 ## Desk history v1
 
@@ -585,7 +592,7 @@ One JSON object per line:
 | `rev` | integer | Revision counter within `card_id`. |
 | `repo_id` | string | Repository id, or `"_none"` outside Git. |
 | `root` | string | Workspace or worktree root path (`""` outside Git). |
-| `main_root` | string \| null | Main repository root for linked worktrees; else `null`. |
+| `main_root` | string \| null | Main repository root (equal to `root` in the main checkout, different in a linked worktree), or `null` only when it cannot be resolved (such as outside Git). |
 | `branch` | string \| null | Branch name, or `null`. |
 | `session_id` | string | Session identifier. |
 | `agent_id` | string | Subagent identifier (`""` for the main agent). |
@@ -596,7 +603,7 @@ One JSON object per line:
 | `status` | string | `"open"`, `"done"`, or `"failed"`. |
 | `prompt` | string | Main agent prompt from `UserPromptSubmit`, or subagent's first user message (≤1,000 chars); stored raw. |
 | `prompt_truncated` | boolean | `true` if `prompt` was cut at scan or character bounds. |
-| `importance` | string | Maximum block importance on the card: `"none"`, `"low"`, `"medium"`, or `"high"`. |
+| `importance` | string | Maximum block importance across all attributed blocks for the turn (computed before the `30`-block truncation, so omitted overflow blocks count): `"none"`, `"low"`, `"medium"`, or `"high"`. |
 | `blocks` | `Block[]` | Attributed file/symbol changes, capped at `30` entries per card. |
 | `more_count` | integer | Number of overflow blocks omitted beyond `30` (`#[serde(default)]`). |
 | `flow` | `FlowStep[]` | Chronological Bash and edit steps, capped at `100` entries per card. |
@@ -622,7 +629,7 @@ One JSON object per line:
 | `line` | integer \| null | 1-based start line in `after` (see line/diff semantics below). |
 | `added` | integer \| null | Added line count attributed to this block. |
 | `removed` | integer \| null | Removed line count attributed to this block. |
-| `quote` | `Quote \| null` | `{ text: string, shared: bool }` — redacted agent transcript excerpt (≤500 chars); `shared: true` when multiple tool calls share the same text. |
+| `quote` | `Quote \| null` | `{ text: string, shared: bool }` — redacted agent transcript excerpt (≤500 chars); `shared` records quote provenance (`false` when taken from the assistant message that issued the tool call, `true` when falling back to earlier assistant text, regardless of how many tool calls use that text). |
 
 #### `line`, `added`, and `removed` semantics
 
@@ -950,14 +957,14 @@ Example:
 
 ## Pipe v4
 
-Current wire protocol between `rockyd` and `rocky-desk`. Shares v3's newline-delimited JSON framing, `64 KiB` (`LINE_CAP`) per-line cap, `1024`-message outbound queue per client, and `"version"` error close behavior, with the changes below.
+Current wire protocol between `rockyd` and `rocky-desk`. Shares v3's newline-delimited JSON framing, `1024`-message outbound queue per client, and `"version"` error close behavior. `LINE_CAP` (`64 KiB`) bounds client-to-daemon lines (the server disconnects on a longer client line); card replies (`cards`, `card_detail`, `block_diff`) and live `card` pushes apply their own `64 KiB` shrinking, drop, or `too_large` rules, while `rocky-desk` accepts general daemon-to-desk lines (such as large `snapshot` messages) up to `16 MiB` (`SERVER_LINE_CAP`). Changes from v3:
 
 ### Version and additive fields
 
 - Every frame uses `"v": 4`.
-- `AgentStatus.prompt` (optional, omitted when unset): `{"text": string, "truncated": bool}` carrying the main agent's live `UserPromptSubmit` prompt. Held in memory only while change cards are enabled (`desk/cards-off` absent), never persisted to `desk/history/` or spool, and unset after a daemon restart until the next prompt.
+- `AgentStatus.prompt` (optional, omitted when unset): `{"text": string, "truncated": bool}` carrying the main agent's live `UserPromptSubmit` prompt in daemon memory. Never written to `desk/history/` or persisted status files (and unset after a daemon restart until a new prompt arrives), though its source text passes through `<ROCKY_HOME>/desk/spool/` when recorded by the hook and may be stored on disk in a change card. Switching `cards` off stops new prompt recording by the hook (`desk/cards-off`) and stops new card building, without clearing an `AgentStatus.prompt` already held in memory; on ingest, the daemon still applies prompts from already-spooled files without checking `cards`.
 - `TimelineEntry.dur_ms` (optional, omitted when pending): unsigned millisecond duration filled when the matching tool outcome arrives.
-- `RepoInfo.main_root` (optional, omitted when unset): main repository root path for linked Git worktrees.
+- `RepoInfo.main_root` (optional, omitted when unset): main repository root path for any resolved Git repository (equal to `root` in the main checkout, different in a linked Git worktree); omitted only when it cannot be resolved (such as outside Git).
 - `Ack.cleanup_errors` (`u32`, defaults to `0`): count of cleanup errors during `setup` removal.
 
 ### New card query and push messages
