@@ -129,6 +129,8 @@ impl QuoteGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockView {
     pub seq: u32,
+    pub path: String,
+    pub symbol: Option<String>,
     pub head: String,
     pub chips: Vec<(String, bool)>,
     pub code: Vec<CodeLine>,
@@ -408,21 +410,30 @@ fn build_block_view(
         })
         .unwrap_or_default();
 
+    let (path, symbol, head) = block_head_parts(block);
     BlockView {
         seq: block.seq,
-        head: block_head(block),
+        path,
+        symbol,
+        head,
         chips: build_block_chips(block, card_root, lang),
         code,
         diffable: block.recorded && (block.before.is_some() || block.after.is_some()),
     }
 }
 
-fn block_head(block: &Block) -> String {
+fn block_head_parts(block: &Block) -> (String, Option<String>, String) {
     let path = sanitize_single_line(&block.path);
-    match format_symbol(block.symbol.as_ref()) {
+    let symbol = format_symbol(block.symbol.as_ref()).filter(|s| !s.is_empty());
+    let head = match &symbol {
         Some(sym) => format!("{path} \u{203a} {sym}"),
-        None => path,
-    }
+        None => path.clone(),
+    };
+    (path, symbol, head)
+}
+
+fn block_head(block: &Block) -> String {
+    block_head_parts(block).2
 }
 
 fn build_block_chips(block: &Block, card_root: &str, lang: UiLang) -> Vec<(String, bool)> {

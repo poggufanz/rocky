@@ -153,6 +153,15 @@ fn single_line_fields_sanitize_controls_while_detail_keeps_prompt_and_quote() {
         "my repo \u{00b7} feat cards \u{00b7} 9 s \u{00b7} Ex plore"
     );
     assert_no_control_chars("meta", &view.meta);
+    assert_eq!(view.groups[0].blocks[0].path, "src/my file.rs");
+    assert_eq!(
+        view.groups[0].blocks[0].symbol.as_deref(),
+        Some("run cmd ()")
+    );
+    assert_no_control_chars("path", &view.groups[0].blocks[0].path);
+    if let Some(sym) = &view.groups[0].blocks[0].symbol {
+        assert_no_control_chars("symbol", sym);
+    }
     assert_no_control_chars("head", &view.groups[0].blocks[0].head);
     for (chip, _) in &view.groups[0].blocks[0].chips {
         assert_no_control_chars("chip", chip);

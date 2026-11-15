@@ -1,21 +1,18 @@
 //! Render tree for the paged unified diff view of a change block.
 
 use gpui::prelude::*;
-use gpui::{Context, Div, SharedString, Stateful, div, rgb};
+use gpui::{Context, Div, FontWeight, SharedString, Stateful, div, px, rgb};
 use rocky_proto::pipe::{DiffLine, DiffLineKind};
 
-use crate::card_detail_model::{DetailModel, DetailState, DiffModel, DiffState};
+use crate::card_detail_model::{BlockView, DetailModel, DetailState, DiffModel, DiffState};
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::ui::cards_view::{CardAction, OnCardAction};
 use crate::ui::tooltip::{
-    BORDER_SUBTLE, CARD_BG, DIFF_ADD_BG, DIFF_ADD_FG, DIFF_DEL_BG, DIFF_DEL_FG, TEXT_DARK,
-    TEXT_DIM, TEXT_MUTED, back_button, mono_font,
+    BORDER_SUBTLE, DiffLineTone, LINK, ROW_HOVER_BG, TEXT_DIM, TEXT_MUTED, back_button,
+    card_container, card_header, code_block_container, diff_code_line, path_symbol_text,
 };
 
-const BTN_ACTIVE_BG: u32 = 0xD4D4D4;
-const BTN_DISABLED_BG: u32 = 0xEDEDEC;
-
-/// Renders the paged unified diff view and navigation header.
+/// Renders the paged unified diff view inside a change card shell.
 pub fn block_diff_view<T: 'static>(
     lang: UiLang,
     detail: Option<&DetailModel>,
@@ -25,20 +22,12 @@ pub fn block_diff_view<T: 'static>(
 ) -> Div {
     let mut out = div().flex().flex_col().gap_2();
 
-    let back_label = block_back_label(detail, diff);
-    let mut header = div().flex().justify_between().items_center().gap_2().child(
-        div().flex().min_w_0().flex_1().child(back_button(
-            "diff-back",
-            back_label,
-            move |this, window, cx| on_action(this, CardAction::BackFromDiff, window, cx),
-            cx,
-        )),
-    );
-
-    if let Some(DiffState::Page { page, pages, .. }) = diff.map(DiffModel::state) {
-        header = header.child(pager(*page, *pages, lang, cx, on_action));
-    }
-    out = out.child(header);
+    out = out.child(back_button(
+        "diff-back",
+        card_text(lang, &CardMsg::BackDone),
+        move |this, window, cx| on_action(this, CardAction::BackFromDiff, window, cx),
+        cx,
+    ));
 
     match diff.map(DiffModel::state) {
         None | Some(DiffState::Loading) => {
@@ -65,49 +54,71 @@ pub fn block_diff_view<T: 'static>(
                     .child(card_text(lang, &CardMsg::CardNotFound)),
             );
         }
-        Some(DiffState::Page { lines, .. }) => {
-            let mut body = div()
-                .flex()
-                .flex_col()
-                .p_2()
-                .rounded_sm()
-                .bg(rgb(CARD_BG))
-                .border_1()
-                .border_color(rgb(BORDER_SUBTLE))
-                .font_family(mono_font())
-                .text_xs();
-            for line in lines {
-                body = body.child(diff_line_view(line));
-            }
-            out = out.child(body);
+        Some(DiffState::Page { lines, page, pages }) => {
+            out = out.child(diff_card(
+                detail, diff, lines, *page, *pages, lang, cx, on_action,
+            ));
         }
     }
 
     out
 }
 
-fn block_back_label(detail: Option<&DetailModel>, diff: Option<&DiffModel>) -> Div {
-    let mut label = div().flex().items_center().gap_1().min_w_0();
-    label = label.child(div().flex_shrink_0().child("\u{2039}"));
-    let seq = diff.map(DiffModel::seq);
-    if let (Some(detail), Some(seq)) = (detail, seq)
-        && let DetailState::Ready(view) = detail.state()
-        && let Some(head) = view
-            .groups
-            .iter()
-            .flat_map(|g| g.blocks.iter())
-            .find(|b| b.seq == seq)
-            .map(|b| b.head.as_str())
-    {
-        label = label.child(
-            div()
-                .min_w_0()
-                .truncate()
-                .font_family(mono_font())
-                .child(head.to_string()),
+#[allow(clippy::too_many_arguments)]
+fn diff_card<T: 'static>(
+    detail: Option<&DetailModel>,
+    diff: Option<&DiffModel>,
+    lines: &[DiffLine],
+    page: u32,
+    pages: u32,
+    lang: UiLang,
+    cx: &mut Context<T>,
+    on_action: OnCardAction<T>,
+) -> Div {
+    let mut card = card_container();
+
+    let block = find_block(detail, diff);
+    if let Some(block) = block {
+        card = card.child(
+            card_header()
+                .child(path_symbol_text(&block.path, block.symbol.as_deref()).max_w_full()),
         );
     }
-    label
+
+    let mut code = code_block_container();
+    if block.is_some() {
+        code = code.border_t_1().border_color(rgb(BORDER_SUBTLE));
+    }
+    for line in lines {
+        code = code.child(diff_line_view(line));
+    }
+    card = card.child(code);
+
+    card.child(
+        div()
+            .flex()
+            .justify_end()
+            .items_center()
+            .border_t_1()
+            .border_color(rgb(BORDER_SUBTLE))
+            .py(px(8.0))
+            .px(px(12.0))
+            .child(pager(page, pages, lang, cx, on_action)),
+    )
+}
+
+fn find_block<'a>(
+    detail: Option<&'a DetailModel>,
+    diff: Option<&DiffModel>,
+) -> Option<&'a BlockView> {
+    let seq = diff.map(DiffModel::seq)?;
+    let DetailState::Ready(view) = detail?.state() else {
+        return None;
+    };
+    view.groups
+        .iter()
+        .flat_map(|g| g.blocks.iter())
+        .find(|b| b.seq == seq)
 }
 
 fn pager<T: 'static>(
@@ -152,8 +163,7 @@ fn pager<T: 'static>(
         .child(prev)
         .child(
             div()
-                .text_xs()
-                .font_family(mono_font())
+                .text_size(px(12.0))
                 .text_color(rgb(TEXT_MUTED))
                 .whitespace_nowrap()
                 .child(label),
@@ -171,20 +181,17 @@ fn page_arrow<T: 'static>(
 ) -> Stateful<Div> {
     let mut btn = div()
         .id(SharedString::from(id))
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
-        .text_xs()
-        .text_color(rgb(if enabled { TEXT_DARK } else { TEXT_DIM }))
-        .bg(rgb(if enabled {
-            BTN_ACTIVE_BG
-        } else {
-            BTN_DISABLED_BG
-        }))
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(if enabled { LINK } else { TEXT_DIM }))
         .child(symbol);
     if enabled {
         btn = btn
             .cursor_pointer()
+            .hover(|s| s.bg(rgb(ROW_HOVER_BG)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 on_action(this, CardAction::DiffPage(target_page), window, cx);
             }));
@@ -193,23 +200,10 @@ fn page_arrow<T: 'static>(
 }
 
 fn diff_line_view(line: &DiffLine) -> Div {
-    match line.kind {
-        DiffLineKind::Added => div()
-            .w_full()
-            .px_1()
-            .bg(rgb(DIFF_ADD_BG))
-            .text_color(rgb(DIFF_ADD_FG))
-            .child(line.text.clone()),
-        DiffLineKind::Removed => div()
-            .w_full()
-            .px_1()
-            .bg(rgb(DIFF_DEL_BG))
-            .text_color(rgb(DIFF_DEL_FG))
-            .child(line.text.clone()),
-        DiffLineKind::Context => div()
-            .w_full()
-            .px_1()
-            .text_color(rgb(TEXT_MUTED))
-            .child(line.text.clone()),
-    }
+    let tone = match line.kind {
+        DiffLineKind::Added => DiffLineTone::Added,
+        DiffLineKind::Removed => DiffLineTone::Removed,
+        DiffLineKind::Context => DiffLineTone::Context,
+    };
+    diff_code_line(tone, line.text.clone())
 }

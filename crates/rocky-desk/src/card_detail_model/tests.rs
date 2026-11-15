@@ -302,6 +302,8 @@ fn quote_groups_share_consecutive_quotes() {
     );
     assert_eq!(view.groups[0].blocks.len(), 2);
     assert_eq!(view.groups[0].blocks[0].seq, 1);
+    assert_eq!(view.groups[0].blocks[0].path, "src/auth.rs");
+    assert_eq!(view.groups[0].blocks[0].symbol.as_deref(), Some("verify()"));
     assert_eq!(
         view.groups[0].blocks[0].head,
         "src/auth.rs \u{203a} verify()"
@@ -313,6 +315,8 @@ fn quote_groups_share_consecutive_quotes() {
             ("return diubah".to_string(), true),
         ]
     );
+    assert_eq!(view.groups[0].blocks[1].path, "src/session.rs");
+    assert_eq!(view.groups[0].blocks[1].symbol.as_deref(), Some("Session"));
     assert_eq!(
         view.groups[0].blocks[1].head,
         "src/session.rs \u{203a} Session"
@@ -324,6 +328,8 @@ fn quote_groups_share_consecutive_quotes() {
 
     assert_eq!(view.groups[1].quote.as_deref(), Some("Issue fresh tokens"));
     assert_eq!(view.groups[1].blocks.len(), 1);
+    assert_eq!(view.groups[1].blocks[0].path, "src/token.rs");
+    assert_eq!(view.groups[1].blocks[0].symbol.as_deref(), Some("issue()"));
     assert_eq!(
         view.groups[1].blocks[0].head,
         "src/token.rs \u{203a} issue()"
@@ -336,6 +342,8 @@ fn quote_groups_share_consecutive_quotes() {
     // Non-consecutive block with the same quote stays a separate group.
     assert_eq!(view.groups[2].quote.as_deref(), Some(long_quote.as_str()));
     assert_eq!(view.groups[2].blocks.len(), 1);
+    assert_eq!(view.groups[2].blocks[0].path, "src/extra.rs");
+    assert_eq!(view.groups[2].blocks[0].symbol, None);
     assert_eq!(view.groups[2].blocks[0].head, "src/extra.rs");
 }
 
@@ -849,4 +857,70 @@ fn unrecorded_block_not_diffable() {
 
     assert!(blocks[3].diffable);
     assert!(blocks[4].diffable);
+}
+
+#[test]
+fn block_head_splits_path_and_symbol() {
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+
+    let mut fn_block = sample_block(1, "src/cart.ts", vec![Label::SymbolAdded {}]);
+    fn_block.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "applyDiscount".to_string(),
+        container: None,
+        exported: true,
+        nth: 0,
+    });
+
+    let mut sep_in_path = sample_block(2, "src/a \u{203a} b.rs", vec![Label::BodyChanged {}]);
+    sep_in_path.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Key,
+        name: "dependencies".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+
+    let mut empty_sym = sample_block(3, "src/types.rs", vec![Label::BodyChanged {}]);
+    empty_sym.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Struct,
+        name: String::new(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+
+    let no_sym = sample_block(
+        4,
+        "golden_replay.rs",
+        vec![Label::TestAdded {
+            name: "runs".to_string(),
+        }],
+    );
+
+    card.blocks = vec![fn_block, sep_in_path, empty_sym, no_sym];
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    let blocks = &view.groups[0].blocks;
+    assert_eq!(blocks.len(), 4);
+
+    assert_eq!(blocks[0].path, "src/cart.ts");
+    assert_eq!(blocks[0].symbol.as_deref(), Some("applyDiscount()"));
+    assert_eq!(blocks[0].head, "src/cart.ts \u{203a} applyDiscount()");
+
+    assert_eq!(blocks[1].path, "src/a \u{203a} b.rs");
+    assert_eq!(blocks[1].symbol.as_deref(), Some("dependencies"));
+    assert_eq!(blocks[1].head, "src/a \u{203a} b.rs \u{203a} dependencies");
+
+    assert_eq!(blocks[2].path, "src/types.rs");
+    assert_eq!(blocks[2].symbol, None);
+    assert_eq!(blocks[2].head, "src/types.rs");
+
+    assert_eq!(blocks[3].path, "golden_replay.rs");
+    assert_eq!(blocks[3].symbol, None);
+    assert_eq!(blocks[3].head, "golden_replay.rs");
 }

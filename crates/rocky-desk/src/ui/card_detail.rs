@@ -1,7 +1,7 @@
 //! Render tree for change card detail, quote groups, snippets, and execution timeline.
 
 use gpui::prelude::*;
-use gpui::{Context, Div, FontWeight, SharedString, div, px, rgb};
+use gpui::{Context, Div, FontWeight, SharedString, div, px, relative, rgb};
 
 use crate::card_detail_model::{
     BlockView, CodeLine, DetailModel, DetailState, DetailView, QuoteGroup, Step,
@@ -9,14 +9,10 @@ use crate::card_detail_model::{
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::ui::cards_view::{CardAction, OnCardAction};
 use crate::ui::tooltip::{
-    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, DIFF_ADD_BG, DIFF_ADD_FG, DIFF_DEL_BG, DIFF_DEL_FG,
-    TEXT_DARK, TEXT_DIM, TEXT_MUTED, back_button, chip_badge, mono_font, seq_badge,
+    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, DIFF_DEL_FG, DiffLineTone, LINK, OK, TEXT_DARK, TEXT_DIM,
+    TEXT_MUTED, back_button, card_container, card_header, chip_badge, code_block_container,
+    diff_code_line, mono_font, path_symbol_text, seq_badge,
 };
-
-const CODE_BG: u32 = 0xF8F8F7;
-const LINK_COLOR: u32 = 0x2B7DD9;
-const OK_COLOR: u32 = 0x2BA044;
-const ERR_COLOR: u32 = 0xD92B2B;
 
 /// Renders the full detail screen for an opened change card.
 pub fn card_detail_view<T: 'static>(
@@ -25,7 +21,7 @@ pub fn card_detail_view<T: 'static>(
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
 ) -> Div {
-    let mut out = div().flex().flex_col().gap_3();
+    let mut out = div().flex().flex_col().gap_2();
 
     out = out.child(back_button(
         "detail-back",
@@ -52,47 +48,43 @@ pub fn card_detail_view<T: 'static>(
             );
         }
         Some(DetailState::Ready(view)) => {
-            out = out.child(ready_body(lang, view, cx, on_action));
+            out = out.child(ready_card(lang, view, cx, on_action));
         }
     }
 
     out
 }
 
-fn ready_body<T: 'static>(
+fn ready_card<T: 'static>(
     lang: UiLang,
     view: &DetailView,
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
 ) -> Div {
-    let mut body = div().flex().flex_col().gap_3();
-
-    body = body.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(section_label(card_text(lang, &CardMsg::YouAsked)))
+    let mut card = card_container().child(
+        card_header()
+            .child(small_label(card_text(lang, &CardMsg::YouAsked)))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT_DARK))
                     .child(view.prompt.clone()),
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(12.0))
                     .text_color(rgb(TEXT_MUTED))
                     .child(view.meta.clone()),
             ),
     );
 
     for group in &view.groups {
-        body = body.child(quote_group_view(lang, group, cx, on_action));
+        card = card.child(quote_group_view(lang, group, cx, on_action));
     }
 
     if !view.timeline.is_empty() || view.timeline_more.is_some() {
-        body = body.child(timeline_section(
+        card = card.child(timeline_section(
             lang,
             &view.timeline,
             view.timeline_more.as_deref(),
@@ -101,28 +93,28 @@ fn ready_body<T: 'static>(
 
     let mut foot = div()
         .flex()
-        .flex_col()
-        .gap_1()
-        .pt_1()
+        .justify_between()
+        .items_start()
+        .gap_2()
         .border_t_1()
         .border_color(rgb(BORDER_SUBTLE))
-        .text_xs()
+        .py(px(8.0))
+        .px(px(12.0))
+        .text_size(px(12.0))
         .text_color(rgb(TEXT_MUTED))
-        .child(view.coverage.clone());
+        .child(div().flex_1().min_w_0().child(view.coverage.clone()));
     if let Some(outside) = &view.outside {
-        foot = foot.child(outside.clone());
+        foot = foot.child(div().flex_shrink_0().text_right().child(outside.clone()));
     }
-    body = body.child(foot);
-
-    body
+    card.child(foot)
 }
 
-fn section_label(text: String) -> Div {
+fn small_label(text: String) -> Div {
     div()
-        .text_xs()
+        .text_size(px(10.5))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(TEXT_MUTED))
-        .child(text)
+        .text_color(rgb(TEXT_DIM))
+        .child(text.to_uppercase())
 }
 
 fn quote_group_view<T: 'static>(
@@ -131,34 +123,53 @@ fn quote_group_view<T: 'static>(
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
 ) -> Div {
-    let mut out = div().flex().flex_col().gap_2();
+    let mut out = div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .border_t_1()
+        .border_color(rgb(BORDER_SUBTLE))
+        .pt(px(9.0))
+        .px(px(12.0))
+        .pb(px(10.0));
+
     let (quote_line, is_dim) = group.quote_line(lang);
-    let quote = if is_dim {
-        div()
-            .text_xs()
-            .italic()
-            .text_color(rgb(TEXT_DIM))
-            .child(quote_line)
+    let mut quote = div()
+        .flex()
+        .flex_col()
+        .ml(px(24.0))
+        .border_l_2()
+        .border_color(rgb(TEXT_DIM))
+        .pl(px(8.0));
+    if is_dim {
+        quote = quote.child(
+            div()
+                .text_size(px(12.5))
+                .line_height(relative(1.45))
+                .italic()
+                .text_color(rgb(TEXT_DIM))
+                .child(quote_line),
+        );
     } else {
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(section_label(card_text(lang, &CardMsg::AgentSaid)))
+        quote = quote
+            .gap(px(1.0))
+            .child(small_label(card_text(lang, &CardMsg::AgentSaid)))
             .child(
                 div()
-                    .border_l_2()
-                    .border_color(rgb(BORDER_LIGHT))
-                    .pl_2()
-                    .text_sm()
+                    .text_size(px(12.5))
+                    .line_height(relative(1.45))
                     .text_color(rgb(TEXT_DARK))
                     .child(quote_line),
-            )
-    };
+            );
+    }
     out = out.child(quote);
 
-    for block in &group.blocks {
-        out = out.child(block_view(lang, block, cx, on_action));
+    if !group.blocks.is_empty() {
+        let mut blocks = div().flex().flex_col().gap(px(10.0));
+        for block in &group.blocks {
+            blocks = blocks.child(block_view(lang, block, cx, on_action));
+        }
+        out = out.child(blocks);
     }
     out
 }
@@ -169,61 +180,48 @@ fn block_view<T: 'static>(
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
 ) -> Div {
-    let mut card = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_2()
-        .rounded_sm()
-        .bg(rgb(CARD_BG))
-        .border_1()
-        .border_color(rgb(BORDER_SUBTLE));
+    let mut out = div().flex().flex_col().gap(px(6.0));
 
-    let mut header = div()
+    let mut head_right = div()
         .flex()
+        .flex_1()
+        .min_w_0()
         .flex_wrap()
         .items_center()
-        .gap_1()
-        .child(seq_badge(block.seq))
-        .child(
-            div()
-                .text_xs()
-                .font_family(mono_font())
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT_DARK))
-                .child(block.head.clone()),
-        );
+        .gap(px(6.0))
+        .child(path_symbol_text(&block.path, block.symbol.as_deref()).max_w_full());
     for (chip, high) in &block.chips {
-        header = header.child(chip_badge(chip.clone(), *high));
+        head_right = head_right.child(chip_badge(chip.clone(), *high));
     }
-    card = card.child(header);
+
+    out = out.child(
+        div()
+            .flex()
+            .items_start()
+            .gap(px(6.0))
+            .child(seq_badge(block.seq).pt(px(2.0)))
+            .child(head_right),
+    );
 
     if !block.code.is_empty() {
-        let mut snippet = div()
-            .flex()
-            .flex_col()
-            .p_1()
-            .rounded_sm()
-            .bg(rgb(CODE_BG))
-            .border_1()
-            .border_color(rgb(BORDER_SUBTLE))
-            .font_family(mono_font())
-            .text_xs();
+        let mut snippet = code_block_container().ml(px(24.0)).rounded(px(6.0));
         for line in &block.code {
             snippet = snippet.child(snippet_line_view(line));
         }
-        card = card.child(snippet);
+        out = out.child(snippet);
     }
 
     if block.diffable {
         let seq = block.seq;
-        card = card.child(
-            div().flex().child(
+        out = out.child(
+            div().flex().justify_end().child(
                 div()
                     .id(SharedString::from(format!("diff-link:{seq}")))
-                    .text_xs()
-                    .text_color(rgb(LINK_COLOR))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(LINK))
                     .cursor_pointer()
+                    .hover(|s| s.underline())
                     .child(card_text(lang, &CardMsg::ViewFullDiff))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         on_action(this, CardAction::OpenDiff(seq), window, cx);
@@ -232,103 +230,101 @@ fn block_view<T: 'static>(
         );
     }
 
-    card
+    out
 }
 
 fn snippet_line_view(line: &CodeLine) -> Div {
-    match line {
-        CodeLine::Added(text) => div()
-            .w_full()
-            .px_1()
-            .bg(rgb(DIFF_ADD_BG))
-            .text_color(rgb(DIFF_ADD_FG))
-            .child(text.clone()),
-        CodeLine::Removed(text) => div()
-            .w_full()
-            .px_1()
-            .bg(rgb(DIFF_DEL_BG))
-            .text_color(rgb(DIFF_DEL_FG))
-            .child(text.clone()),
-        CodeLine::Context(text) => div()
-            .w_full()
-            .px_1()
-            .text_color(rgb(TEXT_MUTED))
-            .child(text.clone()),
-        CodeLine::Fold(text) => div()
-            .w_full()
-            .px_1()
-            .italic()
-            .text_color(rgb(TEXT_DIM))
-            .child(text.clone()),
-    }
+    let (tone, text) = match line {
+        CodeLine::Added(text) => (DiffLineTone::Added, text.clone()),
+        CodeLine::Removed(text) => (DiffLineTone::Removed, text.clone()),
+        CodeLine::Context(text) => (DiffLineTone::Context, text.clone()),
+        CodeLine::Fold(text) => (DiffLineTone::Fold, text.clone()),
+    };
+    diff_code_line(tone, text).min_w_0().truncate()
 }
 
 fn timeline_section(lang: UiLang, steps: &[Step], more: Option<&str>) -> Div {
-    let mut wrap = div().flex().flex_col().gap_1();
-    wrap = wrap.child(
-        div()
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_MUTED))
-            .child(card_text(lang, &CardMsg::TimelineHeading)),
-    );
-
-    let mut box_div = div()
+    let mut section = div()
         .flex()
         .flex_col()
-        .p_2()
-        .rounded_sm()
-        .bg(rgb(CARD_BG))
-        .border_1()
-        .border_color(rgb(BORDER_SUBTLE));
+        .border_t_1()
+        .border_color(rgb(BORDER_SUBTLE))
+        .pt(px(8.0))
+        .px(px(12.0))
+        .pb(px(10.0));
+
+    section = section.child(
+        div()
+            .mb(px(6.0))
+            .text_size(px(11.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(TEXT_DIM))
+            .child(card_text(lang, &CardMsg::TimelineHeading).to_uppercase()),
+    );
 
     let last_idx = steps.len().saturating_sub(1);
     for (idx, step) in steps.iter().enumerate() {
         let has_line = idx < last_idx || more.is_some();
-        box_div = box_div.child(timeline_step_row(step, has_line));
+        section = section.child(timeline_step_row(step, has_line));
     }
 
     if let Some(more_text) = more {
-        box_div = box_div.child(
+        section = section.child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .child(
                     div()
-                        .w(px(14.0))
+                        .w(px(16.0))
+                        .flex_shrink_0()
                         .flex()
                         .justify_center()
-                        .text_xs()
-                        .text_color(rgb(TEXT_DIM))
-                        .child("\u{2022}"),
+                        .items_center()
+                        .child(div().w(px(4.0)).h(px(4.0)).rounded_full().bg(rgb(TEXT_DIM))),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(12.0))
                         .text_color(rgb(TEXT_DIM))
                         .child(more_text.to_string()),
                 ),
         );
     }
 
-    wrap.child(box_div)
+    section
 }
 
 fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
-    let (mark, mark_color) = if step.ok {
-        ("\u{2713}", OK_COLOR)
+    let (mark, marker_bg) = if step.ok {
+        ("\u{2713}", OK)
     } else {
-        ("\u{2717}", ERR_COLOR)
+        ("\u{2717}", DIFF_DEL_FG)
     };
 
-    let mut rail = div().w(px(14.0)).flex().flex_col().items_center().child(
-        div()
-            .text_xs()
-            .font_weight(FontWeight::BOLD)
-            .text_color(rgb(mark_color))
-            .child(mark),
-    );
+    let marker = div()
+        .mt(px(2.0))
+        .w(px(14.0))
+        .h(px(14.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .bg(rgb(marker_bg))
+        .text_size(px(9.0))
+        .line_height(relative(1.0))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgb(CARD_BG))
+        .child(mark);
+
+    let mut rail = div()
+        .w(px(16.0))
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(marker);
     if has_line_below {
         rail = rail.child(div().w(px(1.0)).flex_1().bg(rgb(BORDER_LIGHT)));
     }
@@ -337,12 +333,17 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
         .flex_1()
         .min_w_0()
         .truncate()
-        .text_xs()
+        .text_size(px(12.0))
         .font_family(mono_font())
         .text_color(rgb(TEXT_DARK))
         .child(step.title.clone());
 
-    let mut content = div().flex().flex_col().flex_1().min_w_0().pb_2().child(
+    let mut content = div().flex().flex_col().flex_1().min_w_0().gap(px(2.0));
+    if has_line_below {
+        content = content.pb(px(8.0));
+    }
+
+    content = content.child(
         div()
             .flex()
             .justify_between()
@@ -351,7 +352,7 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
             .child(title)
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(11.0))
                     .font_family(mono_font())
                     .text_color(rgb(TEXT_DIM))
                     .whitespace_nowrap()
@@ -367,26 +368,27 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
             .items_center()
             .gap_2()
             .min_w_0()
-            .pl_2()
+            .pl(px(8.0))
             .child(
                 div()
                     .flex()
-                    .flex_auto()
+                    .flex_1()
                     .min_w_0()
                     .items_center()
-                    .gap_1()
+                    .gap(px(6.0))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(TEXT_DIM))
-                            .flex_shrink_0()
-                            .child("\u{2022}"),
+                            .w(px(4.0))
+                            .h(px(4.0))
+                            .rounded_full()
+                            .bg(rgb(BORDER_LIGHT))
+                            .flex_shrink_0(),
                     )
                     .child(
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_xs()
+                            .text_size(px(12.0))
                             .text_color(rgb(TEXT_MUTED))
                             .child(sub_label.clone()),
                     ),
@@ -397,7 +399,7 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
                     .min_w_0()
                     .truncate()
                     .text_right()
-                    .text_xs()
+                    .text_size(px(11.0))
                     .font_family(mono_font())
                     .text_color(rgb(TEXT_DIM))
                     .child(fact.clone()),

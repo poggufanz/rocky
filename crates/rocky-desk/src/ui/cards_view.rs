@@ -11,7 +11,8 @@ use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::search_input::SearchInput;
 use crate::ui::tooltip::{
     BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, CHIP_HIGH_FG, LINK, MATCH_BG, ROW_HOVER_BG,
-    SURFACE_SUBTLE, TEXT_DARK, TEXT_DIM, TEXT_MUTED, chip_badge, mono_font, tooltip_view,
+    SURFACE_SUBTLE, TEXT_DARK, TEXT_DIM, TEXT_MUTED, card_container, card_header, chip_badge,
+    mono_font, path_symbol_text, seq_badge, tooltip_view,
 };
 
 /// User interactions emitted by the cards list, detail, and diff views.
@@ -164,15 +165,8 @@ fn search_box<T: 'static>(
 
 fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAction<T>) -> Div {
     let card_id = row.card_id.clone();
-    let mut card = div()
+    let mut card = card_container()
         .id(SharedString::from(format!("card:{}", row.card_id)))
-        .flex()
-        .flex_col()
-        .rounded(px(10.0))
-        .overflow_hidden()
-        .bg(rgb(CARD_BG))
-        .border_1()
-        .border_color(rgb(BORDER_SUBTLE))
         .cursor_pointer()
         .hover(|s| s.border_color(rgb(BORDER_LIGHT)).shadow_sm())
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -180,13 +174,7 @@ fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAct
         }));
 
     card = card.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .pt(px(10.0))
-            .px(px(12.0))
-            .pb(px(8.0))
+        card_header()
             .child(
                 div()
                     .flex()
@@ -291,16 +279,7 @@ fn edit_row_view(card_id: &str, idx: usize, edit: &EditRow) -> Stateful<Div> {
         row = row.hover(|s| s.bg(rgb(ROW_HOVER_BG)));
     }
 
-    row = row.child(
-        div()
-            .w(px(18.0))
-            .flex_shrink_0()
-            .text_size(px(11.0))
-            .font_family(mono_font())
-            .text_color(rgb(TEXT_DIM))
-            .whitespace_nowrap()
-            .child(edit.seq.to_string()),
-    );
+    row = row.child(seq_badge(edit.seq));
 
     let left = match &edit.bash {
         Some(bash) => bash_left(bash),
@@ -321,28 +300,9 @@ fn edit_row_view(card_id: &str, idx: usize, edit: &EditRow) -> Stateful<Div> {
 }
 
 fn file_left(edit: &EditRow) -> Div {
-    let container = div()
+    path_symbol_text(&edit.file, edit.symbol.as_deref())
         .flex_1()
-        .min_w_0()
         .truncate()
-        .text_size(px(12.5))
-        .font_family(mono_font())
-        .text_color(rgb(TEXT_DARK));
-
-    match &edit.symbol {
-        Some(sym) if !sym.is_empty() => {
-            let sep = " \u{203a} ";
-            let full = format!("{}{sep}{sym}", edit.file);
-            let start = edit.file.len();
-            let end = full.len();
-            let style = HighlightStyle {
-                color: Some(rgb(TEXT_MUTED).into()),
-                ..Default::default()
-            };
-            container.child(StyledText::new(full).with_highlights([(start..end, style)]))
-        }
-        _ => container.child(edit.file.clone()),
-    }
 }
 
 fn bash_left(bash: &BashRow) -> Div {
