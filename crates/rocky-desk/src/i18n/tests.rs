@@ -571,6 +571,14 @@ fn card_copy_matches_brief_details() {
         card_text(UiLang::En, &CardMsg::CoveragePartial { reasons: vec![] }),
         "Partial"
     );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::TaskNoticePrompt),
+        "Background task notice"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::TaskNoticePrompt),
+        "Notifikasi task latar"
+    );
 }
 
 fn card_msg_variant_count() -> usize {
@@ -613,10 +621,11 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::TimelineMoreSteps { .. }
         | CardMsg::BackDone
         | CardMsg::SettingCards
-        | CardMsg::NoticeConsent => {}
+        | CardMsg::NoticeConsent
+        | CardMsg::TaskNoticePrompt => {}
     };
     let _ = check;
-    38
+    39
 }
 
 #[test]

@@ -6,8 +6,8 @@ use rocky_proto::cards::{Block, Card, CoverageState, FlowKind, FlowStep, Importa
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, SnippetLine};
 
 use crate::cards_model::{
-    block_kind, block_status, format_symbol, last_path_segment, repo_name, sanitize_single_line,
-    status_chip,
+    block_kind, block_status, format_symbol, last_path_segment, prompt_display, repo_name,
+    sanitize_single_line, status_chip,
 };
 use crate::i18n::{CardMsg, UiLang, card_text, label_chip};
 
@@ -100,6 +100,7 @@ impl DetailModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailView {
     pub prompt: String,
+    pub prompt_is_notice: bool,
     pub meta: String,
     pub groups: Vec<QuoteGroup>,
     pub timeline: Vec<Step>,
@@ -337,8 +338,11 @@ fn build_detail_view(card: &Card, snippets: &[BlockSnippet], lang: UiLang) -> De
         )
     });
 
+    let (prompt, prompt_is_notice) = prompt_display(&card.prompt, lang);
+
     DetailView {
-        prompt: card.prompt.clone(),
+        prompt,
+        prompt_is_notice,
         meta: build_meta(card, lang),
         groups,
         timeline,

@@ -66,16 +66,23 @@ fn ready_card<T: 'static>(
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
 ) -> Div {
+    let prompt_line = div().text_size(px(14.0));
+    let prompt_line = if view.prompt_is_notice {
+        prompt_line
+            .font_weight(FontWeight::NORMAL)
+            .italic()
+            .text_color(rgb(TEXT_DIM))
+    } else {
+        prompt_line
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(TEXT_DARK))
+    }
+    .child(view.prompt.clone());
+
     let mut card = card_container().child(
         card_header()
             .child(small_label(card_text(lang, &CardMsg::YouAsked)))
-            .child(
-                div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT_DARK))
-                    .child(view.prompt.clone()),
-            )
+            .child(prompt_line)
             .child(
                 div()
                     .text_size(px(12.0))

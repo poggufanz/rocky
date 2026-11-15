@@ -77,6 +77,7 @@ pub enum CardMsg {
     BackDone,
     SettingCards,
     NoticeConsent,
+    TaskNoticePrompt,
 }
 
 /// Every [`CardMsg`] variant with sample arguments for parity and text scans.
@@ -124,6 +125,7 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::BackDone,
         CardMsg::SettingCards,
         CardMsg::NoticeConsent,
+        CardMsg::TaskNoticePrompt,
     ]
 }
 
@@ -188,6 +190,7 @@ fn card_en(msg: &CardMsg) -> String {
             "Change cards keep your prompts and the agent's words on this machine. You can turn them off in Settings."
                 .to_string()
         }
+        CardMsg::TaskNoticePrompt => "Background task notice".to_string(),
     }
 }
 
@@ -244,6 +247,7 @@ fn card_id(msg: &CardMsg) -> String {
             "Kartu perubahan menyimpan prompt dan kata agent di mesin ini. Bisa dimatikan di Settings."
                 .to_string()
         }
+        CardMsg::TaskNoticePrompt => "Notifikasi task latar".to_string(),
     }
 }
 

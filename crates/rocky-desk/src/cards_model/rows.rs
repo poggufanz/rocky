@@ -1,6 +1,8 @@
 //! Single-line row shaping, grouping, tooltip formatting, and repo-root path checks.
 
-use rocky_proto::cards::{Block, BlockSymbol, BlockVia, Card, Importance, Label, SymbolKind};
+use rocky_proto::cards::{
+    Block, BlockSymbol, BlockVia, Card, Importance, Label, PromptKind, SymbolKind, classify_prompt,
+};
 
 use super::{BashRow, CardRow, EditRow, TooltipLine};
 use crate::clock::local_hhmm;
@@ -24,7 +26,8 @@ pub(super) fn build_card_row(
     query_lower: &str,
     lang: UiLang,
 ) -> CardRow {
-    let first_line = sanitize_single_line(first_non_empty_line(&card.prompt));
+    let (display_prompt, _) = prompt_display(&card.prompt, lang);
+    let first_line = sanitize_single_line(first_non_empty_line(&display_prompt));
     let raw_title = if !indent && !card.agent_type.is_empty() {
         format!(
             "{} \u{203a} {first_line}",
@@ -62,6 +65,22 @@ pub(super) fn card_matches_query(card: &Card, needle_lower: &str) -> bool {
     card.blocks
         .iter()
         .any(|block| block_matches_query(block, needle_lower))
+}
+
+/// Formats a card prompt for display and reports whether it is a background task notice.
+pub(crate) fn prompt_display(prompt: &str, lang: UiLang) -> (String, bool) {
+    match classify_prompt(prompt) {
+        PromptKind::Plain => (prompt.to_string(), false),
+        PromptKind::TaskNotification => (card_text(lang, &CardMsg::TaskNoticePrompt), true),
+        PromptKind::SlashCommand { name, args } => {
+            let text = if args.is_empty() {
+                name
+            } else {
+                format!("{name} {args}")
+            };
+            (sanitize_single_line(&text), false)
+        }
+    }
 }
 
 pub(crate) fn sanitize_single_line(text: &str) -> String {

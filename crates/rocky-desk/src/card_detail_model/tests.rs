@@ -927,3 +927,54 @@ fn block_head_splits_path_and_symbol() {
     assert_eq!(blocks[3].symbol, None);
     assert_eq!(blocks[3].head, "golden_replay.rs");
 }
+
+#[test]
+fn detail_prompt_formats_harness_envelopes_and_plain_prompts() {
+    let open_prompt = |id: &str, prompt: &str, lang: UiLang| -> DetailView {
+        let (mut model, _) = DetailModel::open(id.to_string(), 1);
+        let mut card = sample_card(id, 1_000, Some(2_000));
+        card.prompt = prompt.to_string();
+        model.on_detail(1, card, Vec::new(), lang);
+        match model.state() {
+            DetailState::Ready(view) => view.clone(),
+            other => panic!("expected Ready state, got {other:?}"),
+        }
+    };
+
+    let notice_prompt = "<task-notification>\n<task-id>x</task-id>\n</task-notification>";
+    let en_notice = open_prompt("c-en-notice", notice_prompt, UiLang::En);
+    assert_eq!(en_notice.prompt, "Background task notice");
+    assert!(en_notice.prompt_is_notice);
+
+    let id_notice = open_prompt("c-id-notice", notice_prompt, UiLang::Id);
+    assert_eq!(id_notice.prompt, "Notifikasi task latar");
+    assert!(id_notice.prompt_is_notice);
+
+    let bare_cmd = open_prompt(
+        "c-bare",
+        "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>",
+        UiLang::En,
+    );
+    assert_eq!(bare_cmd.prompt, "/compact");
+    assert!(!bare_cmd.prompt_is_notice);
+
+    let args_cmd = open_prompt(
+        "c-args",
+        "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>64\n--fast</command-args>",
+        UiLang::Id,
+    );
+    assert_eq!(args_cmd.prompt, "/review 64 --fast");
+    assert!(!args_cmd.prompt_is_notice);
+
+    let plain = open_prompt("c-plain", "Fix the bug in cart.ts\nSecond line", UiLang::En);
+    assert_eq!(plain.prompt, "Fix the bug in cart.ts\nSecond line");
+    assert!(!plain.prompt_is_notice);
+
+    let mid = open_prompt(
+        "c-mid",
+        "see <command-name>/x</command-name> in docs",
+        UiLang::En,
+    );
+    assert_eq!(mid.prompt, "see <command-name>/x</command-name> in docs");
+    assert!(!mid.prompt_is_notice);
+}

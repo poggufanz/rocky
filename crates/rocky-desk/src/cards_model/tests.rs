@@ -837,3 +837,57 @@ fn meta_splits_high_importance_part_cleanly() {
     assert_eq!(en_rows[2].meta, "rocky \u{00b7} 1 edit");
     assert_eq!(en_rows[2].meta_high, None);
 }
+
+#[test]
+fn row_titles_format_harness_envelopes_and_plain_prompts() {
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+
+    let mut notice = sample_card("c-notice", 6_000, Some(7_000));
+    notice.prompt = "<task-notification>\n<task-id>t1</task-id>\n</task-notification>".to_string();
+
+    let mut sub_notice = sample_card("c-sub-notice", 5_000, Some(6_000));
+    sub_notice.agent_id = "sub-1".to_string();
+    sub_notice.agent_type = "Explore".to_string();
+    sub_notice.prompt = " \n<task-notification>\n<status>completed</status>".to_string();
+
+    let mut cmd_bare = sample_card("c-cmd-bare", 4_000, Some(5_000));
+    cmd_bare.prompt = "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>".to_string();
+
+    let mut cmd_args = sample_card("c-cmd-args", 3_000, Some(4_000));
+    cmd_args.prompt = "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>64 --fast</command-args>".to_string();
+
+    let mut plain = sample_card("c-plain", 2_000, Some(3_000));
+    plain.prompt = "Fix discount calculation".to_string();
+
+    let mut mid_mention = sample_card("c-mid", 1_000, Some(2_000));
+    mid_mention.prompt = "Please explain what <task-notification> means".to_string();
+
+    model.on_cards(
+        1,
+        vec![notice, sub_notice, cmd_bare, cmd_args, plain, mid_mention],
+        None,
+    );
+
+    let en_rows = model.rows(UiLang::En);
+    assert_eq!(en_rows[0].title, "Background task notice");
+    assert_eq!(en_rows[1].title, "Explore \u{203a} Background task notice");
+    assert_eq!(en_rows[2].title, "/compact");
+    assert_eq!(en_rows[3].title, "/review 64 --fast");
+    assert_eq!(en_rows[4].title, "Fix discount calculation");
+    assert_eq!(
+        en_rows[5].title,
+        "Please explain what <task-notification> means"
+    );
+
+    let id_rows = model.rows(UiLang::Id);
+    assert_eq!(id_rows[0].title, "Notifikasi task latar");
+    assert_eq!(id_rows[1].title, "Explore \u{203a} Notifikasi task latar");
+    assert_eq!(id_rows[2].title, "/compact");
+    assert_eq!(id_rows[3].title, "/review 64 --fast");
+    assert_eq!(id_rows[4].title, "Fix discount calculation");
+    assert_eq!(
+        id_rows[5].title,
+        "Please explain what <task-notification> means"
+    );
+}

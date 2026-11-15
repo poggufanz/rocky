@@ -272,6 +272,50 @@ pub struct Card {
     pub coverage: Coverage,
 }
 
+/// How a card prompt should be shown when a harness envelope, not a person, started the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptKind {
+    /// An ordinary prompt; show it as is.
+    Plain,
+    /// A background task notification envelope.
+    TaskNotification,
+    /// A slash command envelope: the command name (with its leading `/`) and its arguments.
+    SlashCommand { name: String, args: String },
+}
+
+/// Classifies a card prompt as plain user text or a Claude Code harness envelope.
+pub fn classify_prompt(prompt: &str) -> PromptKind {
+    let trimmed = prompt.trim_start();
+    if trimmed.starts_with("<task-notification>") {
+        return PromptKind::TaskNotification;
+    }
+    if trimmed.starts_with("<command-name>") || trimmed.starts_with("<command-message>") {
+        let Some(raw_name) = extract_tag(trimmed, "<command-name>", "</command-name>") else {
+            return PromptKind::Plain;
+        };
+        if raw_name.is_empty() {
+            return PromptKind::Plain;
+        }
+        let name = if raw_name.starts_with('/') {
+            raw_name.to_string()
+        } else {
+            format!("/{raw_name}")
+        };
+        let args = extract_tag(trimmed, "<command-args>", "</command-args>")
+            .unwrap_or_default()
+            .to_string();
+        return PromptKind::SlashCommand { name, args };
+    }
+    PromptKind::Plain
+}
+
+fn extract_tag<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let rest = &text[start..];
+    let end = rest.find(close)?;
+    Some(rest[..end].trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +361,68 @@ mod tests {
                 "transcript_unreadable",
                 "turn_unclosed"
             ])
+        );
+    }
+
+    #[test]
+    fn classify_prompt_handles_envelopes_and_plain_prompts() {
+        assert_eq!(
+            classify_prompt("<task-notification>\n<task-id>x</task-id>\n</task-notification>"),
+            PromptKind::TaskNotification
+        );
+        assert_eq!(
+            classify_prompt("  \n\t<task-notification>\n<task-id>x</task-id>"),
+            PromptKind::TaskNotification
+        );
+
+        assert_eq!(
+            classify_prompt(
+                "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"
+            ),
+            PromptKind::SlashCommand {
+                name: "/compact".to_string(),
+                args: String::new(),
+            }
+        );
+        assert_eq!(
+            classify_prompt(
+                "\n <command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>64 --fast</command-args>"
+            ),
+            PromptKind::SlashCommand {
+                name: "/review".to_string(),
+                args: "64 --fast".to_string(),
+            }
+        );
+        assert_eq!(
+            classify_prompt("<command-name>compact</command-name>"),
+            PromptKind::SlashCommand {
+                name: "/compact".to_string(),
+                args: String::new(),
+            }
+        );
+
+        assert_eq!(
+            classify_prompt("<command-name></command-name>"),
+            PromptKind::Plain
+        );
+        assert_eq!(
+            classify_prompt("<command-name>   \n</command-name>"),
+            PromptKind::Plain
+        );
+        assert_eq!(classify_prompt("<command-name>/x"), PromptKind::Plain);
+        assert_eq!(
+            classify_prompt("<command-message>review</command-message>"),
+            PromptKind::Plain
+        );
+
+        assert_eq!(classify_prompt("Fix the bug in cart.ts"), PromptKind::Plain);
+        assert_eq!(
+            classify_prompt("Please explain what <task-notification> means"),
+            PromptKind::Plain
+        );
+        assert_eq!(
+            classify_prompt("see <command-name>/x</command-name>"),
+            PromptKind::Plain
         );
     }
 }
