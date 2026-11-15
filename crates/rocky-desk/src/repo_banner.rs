@@ -54,7 +54,6 @@ mod tests {
             name: name.to_string(),
             branch: None,
             roots: roots.iter().map(|r| r.to_string()).collect(),
-            sessions: Vec::new(),
         }
     }
 

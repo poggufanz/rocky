@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rocky_proto::hook::HookEvent;
 use rocky_proto::pipe::{
-    Action, AgentKey, AgentStatus, Gap, GapReason, Outcome, RepoInfo, Status, TimelineEntry,
-    TimelineKind,
+    Action, AgentKey, AgentStatus, Gap, GapReason, Outcome, PromptText, RepoInfo, Status,
+    TimelineEntry, TimelineKind,
 };
 
 pub const DONE_TO_IDLE_MS: u64 = 30 * 60_000;
@@ -32,6 +32,7 @@ struct Agent {
     in_flight: Vec<InFlight>,
     timeline: VecDeque<TimelineRecord>,
     last_recv_ms: u64,
+    prompt_recv_ms: Option<u64>,
 }
 
 /// A timeline entry plus the private facts `timeline()` never exposes.
@@ -232,10 +233,12 @@ impl StatusState {
                 last_event_ms: recv_ms,
                 quiet_10m: false,
                 repo: repo.clone(),
+                prompt: None,
             },
             in_flight: Vec::new(),
             timeline: VecDeque::new(),
             last_recv_ms: recv_ms,
+            prompt_recv_ms: None,
         });
         agent.status.repo = repo;
         agent.status.last_event_ms = recv_ms;
@@ -295,7 +298,7 @@ impl StatusState {
                 } else {
                     Outcome::Failed
                 };
-                resolve_pending(agent, ev.tool_use_id.as_deref(), outcome);
+                resolve_pending(agent, ev.tool_use_id.as_deref(), outcome, recv_ms);
             }
             "PermissionRequest" => {
                 agent.status.status = Status::NeedsYou;
@@ -452,6 +455,30 @@ impl StatusState {
         roots.into_iter().map(str::to_owned).collect()
     }
 
+    /// Sets the live prompt on a session's main agent (`agent_id == ""`) in memory.
+    /// Returns the main agent key when its status changed so callers can broadcast it.
+    pub fn set_prompt(
+        &mut self,
+        session_id: &str,
+        recv_ms: u64,
+        prompt: PromptText,
+    ) -> Option<AgentKey> {
+        let key = AgentKey {
+            session_id: session_id.to_owned(),
+            agent_id: String::new(),
+        };
+        let agent = self.agents.get_mut(&key)?;
+        if agent.prompt_recv_ms.is_some_and(|prev| recv_ms < prev) {
+            return None;
+        }
+        agent.prompt_recv_ms = Some(recv_ms);
+        if agent.status.prompt.as_ref() == Some(&prompt) {
+            return None;
+        }
+        agent.status.prompt = Some(prompt);
+        Some(key)
+    }
+
     pub fn agents(&self) -> Vec<AgentStatus> {
         self.agents.values().map(|a| a.status.clone()).collect()
     }
@@ -510,6 +537,7 @@ impl TimelineRecord {
                 tool_name: None,
                 text: None,
                 outcome: None,
+                dur_ms: None,
             },
             tool_use_id: None,
             text_source: TextSource::None,
@@ -531,7 +559,7 @@ fn current_action(agent: &Agent) -> Option<Action> {
 }
 
 /// Resolves the newest pending tool entry, by id when the event has one.
-fn resolve_pending(agent: &mut Agent, tool_use_id: Option<&str>, outcome: Outcome) {
+fn resolve_pending(agent: &mut Agent, tool_use_id: Option<&str>, outcome: Outcome, recv_ms: u64) {
     let pending = agent.timeline.iter_mut().rev().find(|record| {
         record.entry.kind == TimelineKind::Tool
             && record.entry.outcome == Some(Outcome::Pending)
@@ -542,6 +570,7 @@ fn resolve_pending(agent: &mut Agent, tool_use_id: Option<&str>, outcome: Outcom
     });
     if let Some(record) = pending {
         record.entry.outcome = Some(outcome);
+        record.entry.dur_ms = Some(recv_ms.saturating_sub(record.entry.ms));
     }
 }
 

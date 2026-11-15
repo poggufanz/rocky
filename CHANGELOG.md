@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+The desktop app shows change cards: a list under the live sessions with search by file or repo, a detail view with each edit's code, labels, the agent's own words and a step timeline, and a full diff. Settings has a Change cards switch.
+
 The desk hook records the prompt you submit to Claude Code (redacted, at most 1,000 characters) for change cards. The background process removes it before writing history or status. While `<ROCKY_HOME>/desk/cards-off` exists, the hook records no prompt. Purging a repo's capture also deletes that repo's change cards.
 
 The daemon builds change cards after each agent turn and serves them—along with card details and block diffs—over desk protocol 4 (older desks see a version mismatch); the cards cursor is an opaque string. Remove Rocky (and `rocky setup --auto remove --json`) also deletes change cards and spool files (`<ROCKY_HOME>/desk/cards/`, top-level `*.json` in `<ROCKY_HOME>/desk/spool/`, and `<ROCKY_HOME>/desk/spool/bad/`).

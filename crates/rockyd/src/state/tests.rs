@@ -790,3 +790,114 @@ fn session_roots_lists_distinct_roots() {
     st.apply(&in_dir(ev("PreToolUse", "S4", None), None), 4, &mut repo_at);
     assert_eq!(st.session_roots(), vec!["/a".to_string(), "/b".to_string()]);
 }
+
+#[test]
+fn tool_entry_gets_dur_ms_on_outcome_and_keeps_none_while_pending() {
+    let mut st = StatusState::new();
+    st.apply(&ev("SessionStart", "S1", None), 10, &mut repo);
+    st.apply(&ev("UserPromptSubmit", "S1", None), 20, &mut repo);
+    st.apply(
+        &tool_ev("PreToolUse", "S1", None, "Edit", "t1", Some("C:/r/a.ts")),
+        100,
+        &mut repo,
+    );
+    assert_eq!(st.timeline(&main_key("S1"))[2].dur_ms, None);
+
+    st.apply(
+        &tool_ev("PostToolUse", "S1", None, "Edit", "t1", None),
+        350,
+        &mut repo,
+    );
+    st.apply(
+        &tool_ev("PreToolUse", "S1", None, "Bash", "t2", None),
+        400,
+        &mut repo,
+    );
+    st.apply(
+        &tool_ev("PostToolUseFailure", "S1", None, "Bash", "t2", None),
+        405,
+        &mut repo,
+    );
+    st.apply(
+        &tool_ev("PreToolUse", "S1", None, "Read", "t3", Some("C:/r/b.ts")),
+        500,
+        &mut repo,
+    );
+    st.apply(
+        &tool_ev("PostToolUse", "S1", None, "Read", "t3", None),
+        500,
+        &mut repo,
+    );
+    st.apply(
+        &tool_ev("PreToolUse", "S1", None, "Read", "t4", Some("C:/r/c.ts")),
+        600,
+        &mut repo,
+    );
+    st.apply(&ev("Stop", "S1", None), 700, &mut repo);
+
+    let tl = st.timeline(&main_key("S1"));
+    assert_eq!(tl[0].dur_ms, None);
+    assert_eq!(tl[1].dur_ms, None);
+    assert_eq!(tl[2].outcome, Some(Outcome::Ok));
+    assert_eq!(tl[2].dur_ms, Some(250));
+    assert_eq!(tl[3].outcome, Some(Outcome::Failed));
+    assert_eq!(tl[3].dur_ms, Some(5));
+    assert_eq!(tl[4].outcome, Some(Outcome::Ok));
+    assert_eq!(tl[4].dur_ms, Some(0));
+    assert_eq!(tl[5].outcome, Some(Outcome::Pending));
+    assert_eq!(tl[5].dur_ms, None);
+    assert_eq!(tl[6].dur_ms, None);
+}
+
+#[test]
+fn set_prompt_updates_main_agent_only_and_skips_stale_prompts() {
+    let mut st = StatusState::new();
+    let missing = st.set_prompt(
+        "missing",
+        10,
+        PromptText {
+            text: "ignored".into(),
+            truncated: false,
+        },
+    );
+    assert_eq!(missing, None);
+
+    st.apply(&ev("UserPromptSubmit", "S1", None), 100, &mut repo);
+    st.apply(&ev("SubagentStart", "S1", Some("A1")), 110, &mut repo);
+    let first = PromptText {
+        text: "first".into(),
+        truncated: false,
+    };
+    assert_eq!(
+        st.set_prompt("S1", 100, first.clone()),
+        Some(main_key("S1"))
+    );
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, Some(first.clone()));
+    assert_eq!(st.get(&key("S1", "A1")).unwrap().prompt, None);
+
+    // Repeating the same prompt returns None; a stale timestamp is ignored.
+    assert_eq!(st.set_prompt("S1", 100, first.clone()), None);
+    assert_eq!(
+        st.set_prompt(
+            "S1",
+            99,
+            PromptText {
+                text: "stale".into(),
+                truncated: false,
+            },
+        ),
+        None
+    );
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, Some(first));
+
+    let second = PromptText {
+        text: "second".into(),
+        truncated: true,
+    };
+    assert_eq!(
+        st.set_prompt("S1", 200, second.clone()),
+        Some(main_key("S1"))
+    );
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, Some(second));
+    assert_eq!(st.get(&key("S1", "A1")).unwrap().prompt, None);
+}

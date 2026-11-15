@@ -35,8 +35,9 @@ pub struct TranscriptRead {
     pub complete: bool,
 }
 
-/// Validates that `path` is a canonical, non-symlink `.jsonl` file inside `<dir>/projects/`
-/// for one of `config_dirs`.
+/// Validates that `path` resolves to a regular `.jsonl` file inside `<dir>/projects/` of one
+/// of `config_dirs`. Links along the way are followed; the resolved file must stay inside a
+/// `projects/` directory, and the final component must not be a link.
 pub fn validate_transcript_path(path: &str, config_dirs: &[PathBuf]) -> Option<PathBuf> {
     if path.is_empty() || path.contains('\0') {
         return None;
@@ -46,7 +47,6 @@ pub fn validate_transcript_path(path: &str, config_dirs: &[PathBuf]) -> Option<P
         || raw
             .components()
             .any(|component| matches!(component, Component::ParentDir))
-        || raw.extension() != Some(OsStr::new("jsonl"))
     {
         return None;
     }
@@ -58,11 +58,17 @@ pub fn validate_transcript_path(path: &str, config_dirs: &[PathBuf]) -> Option<P
 
     let canon = fs::canonicalize(raw).ok()?;
     let canon_stripped = strip_verbatim_str(canon.to_str()?);
-    if !paths_match(canon_stripped, path) {
+    let canon_path = Path::new(canon_stripped);
+    if canon_path.extension() != Some(OsStr::new("jsonl")) {
+        return None;
+    }
+    let canon_meta = fs::symlink_metadata(canon_path).ok()?;
+    if !canon_meta.file_type().is_file() {
         return None;
     }
 
-    let canon_path = Path::new(canon_stripped);
+    // Containment is checked on the resolved path, so a link can only lead to a file the daemon
+    // may read anyway. A link that leads outside every `projects/` directory is rejected.
     for dir in config_dirs {
         let Some(projects_dir) = canonical_projects_dir(dir) else {
             continue;
@@ -150,17 +156,6 @@ fn strip_verbatim_str(path_str: &str) -> &str {
     }
 }
 
-fn paths_match(canon_stripped: &str, raw_input: &str) -> bool {
-    #[cfg(windows)]
-    {
-        canon_stripped.to_lowercase() == raw_input.to_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        canon_stripped == raw_input
-    }
-}
-
 fn canonical_projects_dir(config_dir: &Path) -> Option<PathBuf> {
     if !config_dir.is_absolute() {
         return None;
@@ -168,8 +163,8 @@ fn canonical_projects_dir(config_dir: &Path) -> Option<PathBuf> {
     let canon_dir = fs::canonicalize(config_dir).ok()?;
     let canon_dir_clean = Path::new(strip_verbatim_str(canon_dir.to_str()?));
     let projects_raw = canon_dir_clean.join("projects");
-    let projects_meta = fs::symlink_metadata(&projects_raw).ok()?;
-    if !projects_meta.file_type().is_dir() {
+    let projects_meta = fs::metadata(&projects_raw).ok()?;
+    if !projects_meta.is_dir() {
         return None;
     }
     let canon_projects = fs::canonicalize(&projects_raw).ok()?;
@@ -1929,8 +1924,97 @@ mod tests {
         assert_eq!(validate_transcript_path(&dotdot, &[cfg]), None);
     }
 
+    fn create_dir_link(link: &Path, target: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            if let Err(err) = std::os::unix::fs::symlink(target, link) {
+                eprintln!("skipping dir-link assertion: cannot create symlink on this host: {err}");
+                return false;
+            }
+            true
+        }
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd")
+                .args([
+                    OsStr::new("/C"),
+                    OsStr::new("mklink"),
+                    OsStr::new("/J"),
+                    link.as_os_str(),
+                    target.as_os_str(),
+                ])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => true,
+                Ok(out) => {
+                    eprintln!(
+                        "skipping dir-link assertion: mklink /J failed ({}): {} {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stdout).trim(),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                    false
+                }
+                Err(err) => {
+                    eprintln!("skipping dir-link assertion: failed to run mklink /J: {err}");
+                    false
+                }
+            }
+        }
+    }
+
     #[test]
-    fn verbatim_prefix_spelling_rejected_unless_equal() {
+    fn linked_config_projects_dir_is_followed() {
+        let temp = TempDir::new().expect("tempdir");
+        let root = strip_verbatim(fs::canonicalize(temp.path()).expect("canonical temp"));
+        let real_projects = root.join("real").join("projects");
+        let real_file = real_projects.join("p").join("s.jsonl");
+        fs::create_dir_all(real_file.parent().unwrap()).expect("create real projects");
+        fs::write(&real_file, "{}\n").expect("write real transcript");
+        let canon_real_file =
+            strip_verbatim(fs::canonicalize(&real_file).expect("canonical real file"));
+
+        let cfg = root.join("cfg");
+        fs::create_dir_all(&cfg).expect("create cfg");
+        let cfg_projects = cfg.join("projects");
+        if !create_dir_link(&cfg_projects, &real_projects) {
+            return;
+        }
+
+        let linked_file = cfg_projects.join("p").join("s.jsonl");
+        assert_eq!(
+            validate_transcript_path(linked_file.to_str().unwrap(), &[cfg]),
+            Some(canon_real_file)
+        );
+    }
+
+    #[test]
+    fn link_escaping_projects_is_rejected() {
+        let temp = TempDir::new().expect("tempdir");
+        let root = strip_verbatim(fs::canonicalize(temp.path()).expect("canonical temp"));
+        let cfg = root.join("cfg");
+        let projects = cfg.join("projects");
+        fs::create_dir_all(&projects).expect("create cfg/projects");
+
+        let outside_dir = root.join("outside");
+        fs::create_dir_all(&outside_dir).expect("create outside");
+        let outside_file = outside_dir.join("x.jsonl");
+        fs::write(&outside_file, "{}\n").expect("write outside x.jsonl");
+
+        let evil_link = projects.join("evil");
+        if !create_dir_link(&evil_link, &outside_dir) {
+            return;
+        }
+
+        let escaped_file = evil_link.join("x.jsonl");
+        assert_eq!(
+            validate_transcript_path(escaped_file.to_str().unwrap(), &[cfg]),
+            None
+        );
+    }
+
+    #[test]
+    fn alternate_spellings_resolve_to_canonical() {
         let (_temp, cfg, valid) = setup_projects_tree();
         let valid_str = valid.to_str().expect("valid str");
         assert_eq!(
@@ -1939,6 +2023,12 @@ mod tests {
         );
 
         let verbatim = format!(r"\\?\{valid_str}");
+        #[cfg(windows)]
+        assert_eq!(
+            validate_transcript_path(&verbatim, std::slice::from_ref(&cfg)),
+            Some(valid.clone())
+        );
+        #[cfg(not(windows))]
         assert_eq!(
             validate_transcript_path(&verbatim, std::slice::from_ref(&cfg)),
             None
@@ -1947,7 +2037,7 @@ mod tests {
         let dot_segment = valid.parent().unwrap().join(".").join("session.jsonl");
         assert_eq!(
             validate_transcript_path(dot_segment.to_str().unwrap(), std::slice::from_ref(&cfg)),
-            None
+            Some(valid.clone())
         );
 
         #[cfg(windows)]
@@ -1955,7 +2045,7 @@ mod tests {
             let forward = valid_str.replace('\\', "/");
             assert_eq!(
                 validate_transcript_path(&forward, std::slice::from_ref(&cfg)),
-                None
+                Some(valid.clone())
             );
 
             // Windows comparison is case-insensitive when canonical spelling otherwise matches.
@@ -1966,7 +2056,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn short_name_spelling_is_rejected_on_windows() {
+    fn short_name_spelling_resolves_on_windows() {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
@@ -2006,8 +2096,8 @@ mod tests {
 
         assert_eq!(
             validate_transcript_path(&short_path, std::slice::from_ref(&cfg)),
-            None,
-            "expected 8.3 alias {short_path:?} to be rejected"
+            Some(valid.clone()),
+            "expected 8.3 alias {short_path:?} to resolve to canonical path"
         );
         assert_eq!(validate_transcript_path(valid_str, &[cfg]), Some(valid));
     }

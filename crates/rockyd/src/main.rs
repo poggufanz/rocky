@@ -18,8 +18,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, settings_path, spool_dir};
 use rocky_proto::pipe::{
-    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, RepoInfo, ServerMsg, SetupAction,
-    SetupHealth, StatusOp,
+    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, PromptText, RepoInfo, ServerMsg,
+    SetupAction, SetupHealth, StatusOp,
 };
 use rocky_proto::settings::Settings;
 use rockyd::cards::query::CardQueryLoop;
@@ -493,10 +493,26 @@ fn rescan_with(
             s.gaps.push(*gap);
             s.state.record_gap(gap);
         }
+        let mut prompt_upserts = Vec::new();
+        for prompt in &out.prompts {
+            let live_prompt = PromptText {
+                text: prompt.text.clone(),
+                truncated: prompt.truncated,
+            };
+            if let Some(key) = s
+                .state
+                .set_prompt(&prompt.session_id, prompt.recv_ms, live_prompt)
+                && !out.changes.upserted.contains(&key)
+                && !prompt_upserts.contains(&key)
+            {
+                prompt_upserts.push(key);
+            }
+        }
         guards.rescanned(&out.config_locations, &s.state.session_roots());
-        let mut msgs =
-            Vec::with_capacity(out.changes.upserted.len() + out.changes.removed.len() + 1);
-        for key in &out.changes.upserted {
+        let mut msgs = Vec::with_capacity(
+            out.changes.upserted.len() + prompt_upserts.len() + out.changes.removed.len() + 1,
+        );
+        for key in out.changes.upserted.iter().chain(prompt_upserts.iter()) {
             if let Some(agent) = s.state.get(key) {
                 s.last_known.insert(key.clone(), agent.clone());
                 msgs.push(ServerMsg::Status {
@@ -515,7 +531,7 @@ fn rescan_with(
                 health: health.clone(),
             });
         }
-        let upserts = out.changes.upserted.len();
+        let upserts = out.changes.upserted.len() + prompt_upserts.len();
         let cards_enabled = s.settings.cards && !s.cards_removed;
         if cards_enabled {
             let sessions_starting: HashSet<&str> = out
@@ -1584,6 +1600,233 @@ mod tests {
             &mut resolver,
         );
         assert_eq!(resolve_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    fn read_history_text(home: &Path) -> String {
+        let mut bytes = Vec::new();
+        for entry in std::fs::read_dir(history_dir(home)).unwrap().flatten() {
+            bytes.extend(std::fs::read(entry.path()).unwrap());
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn drain_server_msgs(rx: &mpsc::Receiver<String>) -> Vec<ServerMsg> {
+        rx.try_iter()
+            .map(|line| rocky_proto::pipe::decode::<ServerMsg>(line.trim_end()).unwrap())
+            .collect()
+    }
+
+    fn stub_repo_resolver(cwd: &str) -> RepoInfo {
+        RepoInfo {
+            root: None,
+            main_root: None,
+            name: Path::new(cwd)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string(),
+            branch: None,
+        }
+    }
+
+    #[test]
+    fn rescan_sets_live_prompt_on_main_agent_and_keeps_it_out_of_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        std::fs::create_dir_all(&spool).unwrap();
+        let log = RotatingLog::new(&log_path(&home));
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().history =
+            History::open(&history_dir(&home), HISTORY_CAP_BYTES, true);
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut cards = Engine::new(home.clone(), 1);
+
+        std::fs::write(
+            spool.join("0000000001000-1-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"sess-live","cwd":"/tmp/r"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spool.join("0000000001010-2-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1010,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"sess-live","cwd":"/tmp/r","prompt":"SECRET_LIVE_PROMPT"}}"#,
+        )
+        .unwrap();
+
+        let mut resolver = stub_repo_resolver;
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+
+        let main_key = AgentKey {
+            session_id: "sess-live".into(),
+            agent_id: String::new(),
+        };
+        let want_prompt = PromptText {
+            text: "SECRET_LIVE_PROMPT".into(),
+            truncated: false,
+        };
+        {
+            let s = shared.lock().unwrap();
+            let agent = s.state.get(&main_key).unwrap();
+            assert_eq!(agent.prompt.as_ref(), Some(&want_prompt));
+            assert_eq!(
+                s.last_known.get(&main_key).unwrap().prompt.as_ref(),
+                Some(&want_prompt)
+            );
+            let tl_json = serde_json::to_string(&s.state.timeline(&main_key)).unwrap();
+            assert!(!tl_json.contains("SECRET_LIVE_PROMPT"), "{tl_json}");
+        }
+
+        let msgs = drain_server_msgs(&rx);
+        assert!(
+            msgs.iter().any(|msg| matches!(
+                msg,
+                ServerMsg::Status { op: StatusOp::Upsert, agent }
+                    if agent.key == main_key && agent.prompt.as_ref() == Some(&want_prompt)
+            )),
+            "expected upsert broadcast with prompt, got: {msgs:?}"
+        );
+
+        let history_text = read_history_text(&home);
+        assert!(history_text.contains("UserPromptSubmit"), "{history_text}");
+        assert!(
+            !history_text.contains("SECRET_LIVE_PROMPT"),
+            "prompt leaked into history: {history_text}"
+        );
+        assert!(
+            !history_text.contains(r#""prompt""#),
+            "prompt key leaked into history: {history_text}"
+        );
+    }
+
+    #[test]
+    fn rescan_replaces_earlier_prompt_and_leaves_subagents_without_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        std::fs::create_dir_all(&spool).unwrap();
+        let log = RotatingLog::new(&log_path(&home));
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().history =
+            History::open(&history_dir(&home), HISTORY_CAP_BYTES, true);
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut cards = Engine::new(home.clone(), 1);
+        let mut resolver = stub_repo_resolver;
+
+        std::fs::write(
+            spool.join("0000000001000-1-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"sess-sub","cwd":"/tmp/r"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spool.join("0000000001010-2-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1010,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"sess-sub","cwd":"/tmp/r","prompt":"FIRST_PROMPT"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spool.join("0000000001020-3-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1020,"kind":"event","event":{"hook_event_name":"SubagentStart","session_id":"sess-sub","agent_id":"sub-1","agent_type":"Explore","cwd":"/tmp/r"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+
+        let main_key = AgentKey {
+            session_id: "sess-sub".into(),
+            agent_id: String::new(),
+        };
+        let sub_key = AgentKey {
+            session_id: "sess-sub".into(),
+            agent_id: "sub-1".into(),
+        };
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(
+                s.state.get(&main_key).unwrap().prompt,
+                Some(PromptText {
+                    text: "FIRST_PROMPT".into(),
+                    truncated: false,
+                })
+            );
+            assert_eq!(s.state.get(&sub_key).unwrap().prompt, None);
+        }
+        let batch1_msgs = drain_server_msgs(&rx);
+        assert!(
+            batch1_msgs.iter().any(|msg| matches!(
+                msg,
+                ServerMsg::Status { op: StatusOp::Upsert, agent }
+                    if agent.key == sub_key && agent.prompt.is_none()
+            )),
+            "expected subagent upsert with no prompt, got: {batch1_msgs:?}"
+        );
+
+        std::fs::write(
+            spool.join("0000000002000-4-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":2000,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"sess-sub","cwd":"/tmp/r","prompt":"SECOND_PROMPT","truncated":true}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+
+        let second_prompt = PromptText {
+            text: "SECOND_PROMPT".into(),
+            truncated: true,
+        };
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(
+                s.state.get(&main_key).unwrap().prompt.as_ref(),
+                Some(&second_prompt)
+            );
+            assert_eq!(s.state.get(&sub_key).unwrap().prompt, None);
+        }
+        let batch2_msgs = drain_server_msgs(&rx);
+        assert!(
+            batch2_msgs.iter().any(|msg| matches!(
+                msg,
+                ServerMsg::Status { op: StatusOp::Upsert, agent }
+                    if agent.key == main_key && agent.prompt.as_ref() == Some(&second_prompt)
+            )),
+            "expected second prompt broadcast, got: {batch2_msgs:?}"
+        );
+
+        let history_text = read_history_text(&home);
+        assert!(!history_text.contains("FIRST_PROMPT"), "{history_text}");
+        assert!(!history_text.contains("SECOND_PROMPT"), "{history_text}");
+        assert!(!history_text.contains(r#""prompt""#), "{history_text}");
     }
 
     fn run_command_with_timeout(

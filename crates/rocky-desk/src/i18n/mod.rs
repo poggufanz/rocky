@@ -6,8 +6,10 @@
 use rocky_proto::pipe::{GapReason, Outcome, Status, TimelineKind};
 use rocky_proto::settings::Lang;
 
+mod cards;
 mod setup;
 
+pub use cards::{CardMsg, card_samples, card_text, label_chip, label_full, reason_text};
 #[cfg(test)]
 use setup::setup_samples;
 pub use setup::{SetupMsg, setup_en, setup_id};
@@ -126,6 +128,8 @@ pub enum Msg {
     NoticeDone,
     /// Setup guard and capture health copy.
     Setup(SetupMsg),
+    /// Change cards copy.
+    Cards(CardMsg),
 }
 
 #[cfg(test)]
@@ -253,6 +257,7 @@ fn samples() -> Vec<Msg> {
     ]
     .into_iter()
     .chain(setup_samples().into_iter().map(Msg::Setup))
+    .chain(card_samples().into_iter().map(Msg::Cards))
     .collect()
 }
 
@@ -345,6 +350,7 @@ pub fn en(m: &Msg) -> String {
         Msg::NoticeFailed { agent } => format!("{agent} failed"),
         Msg::NoticeDone => "Finished".to_string(),
         Msg::Setup(m) => setup_en(m),
+        Msg::Cards(m) => card_text(UiLang::En, m),
     }
 }
 
@@ -442,6 +448,7 @@ pub fn id(m: &Msg) -> String {
         Msg::NoticeFailed { agent } => format!("{agent} gagal"),
         Msg::NoticeDone => "Selesai".to_string(),
         Msg::Setup(m) => setup_id(m),
+        Msg::Cards(m) => card_text(UiLang::Id, m),
     }
 }
 
@@ -704,3 +711,5 @@ fn gap_id(count: u64, from: &str, to: &str, reason: GapReason) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_now;

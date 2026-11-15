@@ -131,6 +131,7 @@ pub enum RemoveFlow {
 pub struct Step {
     pub send_plan: bool,
     pub send_repo_list: bool,
+    pub refresh_cards: bool,
     pub show_removed: bool,
 }
 
@@ -145,7 +146,9 @@ pub enum CloseAction {
 pub fn close_action(view: View) -> CloseAction {
     match view {
         View::Removed => CloseAction::Quit,
-        View::Agents | View::Settings | View::Consent => CloseAction::Hide,
+        View::Agents | View::Settings | View::Consent | View::CardDetail | View::BlockDiff => {
+            CloseAction::Hide
+        }
     }
 }
 
@@ -563,9 +566,13 @@ impl SetupSettings {
                     self.show_error(control, error.unwrap_or_default());
                 }
                 match kind {
-                    RequestKind::RepoAllow(_)
-                    | RequestKind::RepoDecline(_)
-                    | RequestKind::RepoPurge(_) => step.send_repo_list = true,
+                    RequestKind::RepoAllow(_) | RequestKind::RepoDecline(_) => {
+                        step.send_repo_list = true;
+                    }
+                    RequestKind::RepoPurge(_) => {
+                        step.send_repo_list = true;
+                        step.refresh_cards = ok;
+                    }
                     _ => step.send_plan = true,
                 }
             }

@@ -126,3 +126,666 @@ fn delete_history_ask_says_recording_stops_in_both_languages() {
         setup_id(&m)
     );
 }
+
+fn sample_labels() -> Vec<rocky_proto::cards::Label> {
+    use rocky_proto::cards::Label;
+
+    vec![
+        Label::ParamsChanged {
+            added: 1,
+            removed: 2,
+            changed: 3,
+        },
+        Label::ReturnTypeChanged {},
+        Label::SymbolRemoved {},
+        Label::SymbolAdded {},
+        Label::SymbolRenamed {
+            from: "oldFn".into(),
+        },
+        Label::GuardAdded {},
+        Label::ConditionChanged {},
+        Label::BranchAdded {},
+        Label::BranchRemoved {},
+        Label::ErrorHandlingAdded {},
+        Label::ErrorHandlingRemoved {},
+        Label::LoopAdded {},
+        Label::LoopRemoved {},
+        Label::ReturnChanged {},
+        Label::CallAdded {
+            name: "validate".into(),
+        },
+        Label::CallRemoved {
+            name: "legacyCheck".into(),
+        },
+        Label::AwaitChanged {
+            added: 1,
+            removed: 1,
+        },
+        Label::BodyChanged {},
+        Label::ValueChanged {
+            name: "MAX_RETRY".into(),
+            before: "3".into(),
+            after: "5".into(),
+        },
+        Label::ConfigChanged {
+            key: "timeout".into(),
+            before: None,
+            after: Some("30s".into()),
+        },
+        Label::DepAdded {
+            name: "serde".into(),
+            version: "1.0".into(),
+        },
+        Label::DepRemoved {
+            name: "old_pkg".into(),
+        },
+        Label::DepVersion {
+            name: "tokio".into(),
+            before: "1.37".into(),
+            after: "1.40".into(),
+        },
+        Label::ImportAdded {
+            module: "std::path::Path".into(),
+        },
+        Label::ImportRemoved {
+            module: "std::env".into(),
+        },
+        Label::TestAdded {
+            name: "parses_empty".into(),
+        },
+        Label::TestRemoved {
+            name: "old_smoke".into(),
+        },
+        Label::TestSkipped {
+            name: "slow_sync".into(),
+        },
+        Label::TestOnly {
+            name: "focus_case".into(),
+        },
+        Label::FileNew {},
+        Label::FileDeleted {},
+        Label::FileRenamed {
+            from: "src/old.rs".into(),
+        },
+        Label::FormatOnly {},
+        Label::Rewrite { pct: 80 },
+        Label::LockfileChanged {},
+        Label::LinesChanged {
+            added: 12,
+            removed: 4,
+        },
+        Label::TooLarge {},
+        Label::NotCaptured {},
+    ]
+}
+
+fn all_coverage_reasons() -> [rocky_proto::cards::CoverageReason; 6] {
+    use rocky_proto::cards::CoverageReason;
+
+    [
+        CoverageReason::DaemonGap,
+        CoverageReason::CaptureLate,
+        CoverageReason::CaptureOff,
+        CoverageReason::TooLarge,
+        CoverageReason::TranscriptUnreadable,
+        CoverageReason::TurnUnclosed,
+    ]
+}
+
+fn all_symbol_kinds() -> [rocky_proto::cards::SymbolKind; 11] {
+    use rocky_proto::cards::SymbolKind;
+
+    [
+        SymbolKind::Function,
+        SymbolKind::Method,
+        SymbolKind::Class,
+        SymbolKind::Struct,
+        SymbolKind::Enum,
+        SymbolKind::Trait,
+        SymbolKind::Interface,
+        SymbolKind::Type,
+        SymbolKind::Const,
+        SymbolKind::Test,
+        SymbolKind::Key,
+    ]
+}
+
+#[test]
+fn card_catalog_renders_every_sample_in_both_languages() {
+    for m in card_samples() {
+        assert!(!card_text(UiLang::En, &m).trim().is_empty(), "{m:?}");
+        assert!(!card_text(UiLang::Id, &m).trim().is_empty(), "{m:?}");
+    }
+    let labels = sample_labels();
+    assert_eq!(labels.len(), 38);
+    for label in &labels {
+        for kind in [None, Some(rocky_proto::cards::SymbolKind::Function)] {
+            assert!(
+                !label_chip(UiLang::En, label, kind).trim().is_empty(),
+                "{label:?}"
+            );
+            assert!(
+                !label_chip(UiLang::Id, label, kind).trim().is_empty(),
+                "{label:?}"
+            );
+            assert!(
+                !label_full(UiLang::En, label, kind).trim().is_empty(),
+                "{label:?}"
+            );
+            assert!(
+                !label_full(UiLang::Id, label, kind).trim().is_empty(),
+                "{label:?}"
+            );
+        }
+    }
+    for r in all_coverage_reasons() {
+        assert!(!reason_text(UiLang::En, r).trim().is_empty(), "{r:?}");
+        assert!(!reason_text(UiLang::Id, r).trim().is_empty(), "{r:?}");
+    }
+}
+
+#[test]
+fn card_templates_have_no_causal_words() {
+    let id_banned = ["untuk", "agar", "supaya", "karena", "sehingga"];
+    let en_banned = ["because", "so that", "in order to", "to ensure"];
+
+    let mut rendered = Vec::new();
+    for lang in [UiLang::En, UiLang::Id] {
+        for m in card_samples() {
+            rendered.push(card_text(lang, &m));
+        }
+        for label in sample_labels() {
+            rendered.push(label_chip(lang, &label, None));
+            rendered.push(label_full(lang, &label, None));
+            for kind in all_symbol_kinds() {
+                rendered.push(label_chip(lang, &label, Some(kind)));
+                rendered.push(label_full(lang, &label, Some(kind)));
+            }
+        }
+        for r in all_coverage_reasons() {
+            rendered.push(reason_text(lang, r));
+        }
+    }
+
+    for text in rendered {
+        let lower = text.to_lowercase();
+        for word in lower.split(|c: char| !c.is_alphanumeric()) {
+            assert!(
+                !id_banned.contains(&word),
+                "banned ID word `{word}` in `{text}`"
+            );
+        }
+        for phrase in en_banned {
+            assert!(
+                !lower.contains(phrase),
+                "banned EN phrase `{phrase}` in `{text}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn chip_uses_kind_word() {
+    use rocky_proto::cards::{Label, SymbolKind};
+
+    assert_eq!(
+        label_chip(
+            UiLang::Id,
+            &Label::SymbolAdded {},
+            Some(SymbolKind::Function)
+        ),
+        "fungsi baru"
+    );
+    assert_eq!(
+        label_chip(
+            UiLang::En,
+            &Label::SymbolAdded {},
+            Some(SymbolKind::Function)
+        ),
+        "new function"
+    );
+    assert_eq!(
+        label_chip(UiLang::Id, &Label::SymbolAdded {}, None),
+        "file baru"
+    );
+    assert_eq!(
+        label_chip(UiLang::En, &Label::SymbolAdded {}, None),
+        "new file"
+    );
+    assert_eq!(
+        label_chip(
+            UiLang::Id,
+            &Label::SymbolRemoved {},
+            Some(SymbolKind::Class)
+        ),
+        "kelas dihapus"
+    );
+    assert_eq!(
+        label_chip(
+            UiLang::En,
+            &Label::SymbolRemoved {},
+            Some(SymbolKind::Class)
+        ),
+        "class removed"
+    );
+    assert_eq!(
+        label_chip(UiLang::Id, &Label::SymbolAdded {}, Some(SymbolKind::Const)),
+        "konstanta baru"
+    );
+    assert_eq!(
+        label_chip(UiLang::Id, &Label::SymbolAdded {}, Some(SymbolKind::Type)),
+        "tipe baru"
+    );
+    assert_eq!(
+        label_chip(UiLang::Id, &Label::SymbolAdded {}, Some(SymbolKind::Key)),
+        "kunci baru"
+    );
+}
+
+#[test]
+fn full_form_omits_zero_parts() {
+    use rocky_proto::cards::{Label, SymbolKind};
+
+    let one_added = Label::ParamsChanged {
+        added: 1,
+        removed: 0,
+        changed: 0,
+    };
+    assert_eq!(
+        label_full(UiLang::Id, &one_added, Some(SymbolKind::Function)),
+        "parameter: 1 baru"
+    );
+    assert_eq!(
+        label_full(UiLang::En, &one_added, Some(SymbolKind::Function)),
+        "parameters: 1 added"
+    );
+
+    let two_parts = Label::ParamsChanged {
+        added: 2,
+        removed: 0,
+        changed: 3,
+    };
+    assert_eq!(
+        label_full(UiLang::Id, &two_parts, None),
+        "parameter: 2 baru, 3 diubah"
+    );
+    assert_eq!(
+        label_full(UiLang::En, &two_parts, None),
+        "parameters: 2 added, 3 changed"
+    );
+
+    assert_eq!(
+        label_full(
+            UiLang::En,
+            &Label::AwaitChanged {
+                added: 2,
+                removed: 0
+            },
+            None
+        ),
+        "await +2"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::Id,
+            &Label::AwaitChanged {
+                added: 0,
+                removed: 1
+            },
+            None
+        ),
+        "await \u{2212}1"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::En,
+            &Label::LinesChanged {
+                added: 5,
+                removed: 0
+            },
+            None
+        ),
+        "+5"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::Id,
+            &Label::LinesChanged {
+                added: 0,
+                removed: 4
+            },
+            None
+        ),
+        "\u{2212}4"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::En,
+            &Label::ConfigChanged {
+                key: "port".into(),
+                before: None,
+                after: Some("8080".into())
+            },
+            None
+        ),
+        "port: \u{2014} \u{2192} 8080"
+    );
+}
+
+#[test]
+fn card_copy_matches_brief_details() {
+    use rocky_proto::cards::CoverageReason;
+
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::MetaEdits { n: 1 }),
+        "1 edit"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::MetaEdits { n: 3 }),
+        "3 edits"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::MetaEdits { n: 1 }),
+        "1 edit"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::MetaEdits { n: 3 }),
+        "3 edit"
+    );
+
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::Duration { secs: 45 }),
+        "45 dtk"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::Duration { secs: 45 }),
+        "45 s"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::Duration { secs: 125 }),
+        "2 mnt"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::Duration { secs: 125 }),
+        "2 min"
+    );
+
+    let partial = CardMsg::CoveragePartial {
+        reasons: vec![CoverageReason::DaemonGap, CoverageReason::TurnUnclosed],
+    };
+    assert_eq!(
+        card_text(UiLang::Id, &partial),
+        "Sebagian \u{00b7} daemon sempat mati, turn tidak selesai"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &partial),
+        "Partial \u{00b7} daemon was down, turn not closed"
+    );
+
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::BackDone),
+        "\u{2039} Selesai"
+    );
+    assert_eq!(card_text(UiLang::En, &CardMsg::BackDone), "\u{2039} Done");
+    assert_eq!(card_text(UiLang::Id, &CardMsg::Loading), "Memuat\u{2026}");
+    assert_eq!(card_text(UiLang::En, &CardMsg::Loading), "Loading\u{2026}");
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::CodeFold { n: 4 }),
+        "\u{2026} 4 baris"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::CodeFold { n: 4 }),
+        "\u{2026} 4 lines"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::DiffPage { page: 2, total: 5 }),
+        "Halaman 2/5"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::DiffPage { page: 2, total: 5 }),
+        "Page 2 of 5"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::BashGroupBefore { n: 2 }),
+        "2 file berubah saat"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::BashGroupBefore { n: 2 }),
+        "2 files changed while"
+    );
+    assert_eq!(card_text(UiLang::Id, &CardMsg::BashGroupAfter), "berjalan");
+    assert_eq!(card_text(UiLang::En, &CardMsg::BashGroupAfter), "ran");
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::BashUncertain),
+        "\u{00b7} agent tidak pasti"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::BashUncertain),
+        "\u{00b7} agent uncertain"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::CoveragePartial { reasons: vec![] }),
+        "Sebagian"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::CoveragePartial { reasons: vec![] }),
+        "Partial"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::TaskNoticePrompt),
+        "Background task notice"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::TaskNoticePrompt),
+        "Notifikasi task latar"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::WaitingApproval),
+        "waiting for approval"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::WaitingApproval),
+        "menunggu izin"
+    );
+}
+
+fn card_msg_variant_count() -> usize {
+    // Exhaustive guard so adding a CardMsg variant forces updating this count and card_samples().
+    let check = |m: &CardMsg| match m {
+        CardMsg::SectionNow
+        | CardMsg::SectionDone
+        | CardMsg::SearchPlaceholder
+        | CardMsg::LoadMore
+        | CardMsg::Empty
+        | CardMsg::Loading
+        | CardMsg::MetaEdits { .. }
+        | CardMsg::MetaImportant { .. }
+        | CardMsg::MoreEdits { .. }
+        | CardMsg::YouAsked
+        | CardMsg::AgentSaid
+        | CardMsg::NoAgentWords
+        | CardMsg::MainAgent
+        | CardMsg::Duration { .. }
+        | CardMsg::CoverageFull
+        | CardMsg::CoveragePartial { .. }
+        | CardMsg::OutsideFiles { .. }
+        | CardMsg::ViewFullDiff
+        | CardMsg::DiffNotStored
+        | CardMsg::DiffPage { .. }
+        | CardMsg::CardNotFound
+        | CardMsg::CodeFold { .. }
+        | CardMsg::CodeFoldMore { .. }
+        | CardMsg::UnrecordedChip
+        | CardMsg::UnrecordedTooltip
+        | CardMsg::OutsideRepo
+        | CardMsg::OtherRepo
+        | CardMsg::FormatCollapse { .. }
+        | CardMsg::ViaBash
+        | CardMsg::BashGroupBefore { .. }
+        | CardMsg::BashGroupAfter
+        | CardMsg::BashUncertain
+        | CardMsg::ExportedTooltip
+        | CardMsg::TimelineHeading
+        | CardMsg::TimelineMoreSteps { .. }
+        | CardMsg::BackDone
+        | CardMsg::SettingCards
+        | CardMsg::NoticeConsent
+        | CardMsg::TaskNoticePrompt
+        | CardMsg::CrossSessionPrompt
+        | CardMsg::WaitingApproval
+        | CardMsg::SetupNotes { .. }
+        | CardMsg::Show
+        | CardMsg::Hide
+        | CardMsg::ActiveCount { .. }
+        | CardMsg::NeedYouCount { .. }
+        | CardMsg::EarlierSteps { .. }
+        | CardMsg::Collapse
+        | CardMsg::DoneAge { .. }
+        | CardMsg::ViewCard
+        | CardMsg::IdleSessions { .. }
+        | CardMsg::FailuresChip { .. } => {}
+    };
+    let _ = check;
+    52
+}
+
+#[test]
+fn card_samples_covers_every_variant_and_label_full_details() {
+    use rocky_proto::cards::{CoverageReason, Label, SymbolKind};
+    use std::collections::HashSet;
+
+    let distinct: HashSet<_> = card_samples().iter().map(std::mem::discriminant).collect();
+    assert_eq!(distinct.len(), card_msg_variant_count());
+
+    let expected_kinds = [
+        (SymbolKind::Function, "fungsi", "function"),
+        (SymbolKind::Method, "method", "method"),
+        (SymbolKind::Class, "kelas", "class"),
+        (SymbolKind::Struct, "struct", "struct"),
+        (SymbolKind::Enum, "enum", "enum"),
+        (SymbolKind::Trait, "trait", "trait"),
+        (SymbolKind::Interface, "interface", "interface"),
+        (SymbolKind::Type, "tipe", "type"),
+        (SymbolKind::Const, "konstanta", "const"),
+        (SymbolKind::Test, "test", "test"),
+        (SymbolKind::Key, "kunci", "key"),
+    ];
+    for (kind, id_word, en_word) in expected_kinds {
+        assert_eq!(
+            label_chip(UiLang::Id, &Label::SymbolAdded {}, Some(kind)),
+            format!("{id_word} baru")
+        );
+        assert_eq!(
+            label_chip(UiLang::En, &Label::SymbolAdded {}, Some(kind)),
+            format!("new {en_word}")
+        );
+    }
+
+    let expected_reasons = [
+        (
+            CoverageReason::DaemonGap,
+            "daemon sempat mati",
+            "daemon was down",
+        ),
+        (
+            CoverageReason::CaptureLate,
+            "rekaman terlambat",
+            "capture late",
+        ),
+        (CoverageReason::CaptureOff, "rekaman mati", "capture off"),
+        (
+            CoverageReason::TooLarge,
+            "file terlalu besar",
+            "file too large",
+        ),
+        (
+            CoverageReason::TranscriptUnreadable,
+            "transcript tak terbaca",
+            "transcript unreadable",
+        ),
+        (
+            CoverageReason::TurnUnclosed,
+            "turn tidak selesai",
+            "turn not closed",
+        ),
+    ];
+    for (reason, id_str, en_str) in expected_reasons {
+        assert_eq!(reason_text(UiLang::Id, reason), id_str);
+        assert_eq!(reason_text(UiLang::En, reason), en_str);
+    }
+
+    let renamed = Label::SymbolRenamed {
+        from: "oldFn".into(),
+    };
+    assert_eq!(
+        label_full(UiLang::Id, &renamed, Some(SymbolKind::Method)),
+        "method diganti nama dari oldFn"
+    );
+    assert_eq!(
+        label_full(UiLang::En, &renamed, Some(SymbolKind::Method)),
+        "method renamed from oldFn"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::Id,
+            &Label::FileRenamed {
+                from: "a.rs".into()
+            },
+            None
+        ),
+        "dari a.rs"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::En,
+            &Label::FileRenamed {
+                from: "a.rs".into()
+            },
+            None
+        ),
+        "from a.rs"
+    );
+    assert_eq!(
+        label_full(UiLang::Id, &Label::Rewrite { pct: 75 }, None),
+        "75% berubah"
+    );
+    assert_eq!(
+        label_full(UiLang::En, &Label::Rewrite { pct: 75 }, None),
+        "75% changed"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::En,
+            &Label::ConfigChanged {
+                key: "k".into(),
+                before: None,
+                after: None
+            },
+            None
+        ),
+        "k: \u{2014} \u{2192} \u{2014}"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::Id,
+            &Label::DepAdded {
+                name: "serde".into(),
+                version: "1.0".into()
+            },
+            None
+        ),
+        "serde 1.0"
+    );
+    assert_eq!(
+        label_full(
+            UiLang::En,
+            &Label::ParamsChanged {
+                added: 0,
+                removed: 0,
+                changed: 0
+            },
+            None
+        ),
+        "parameters changed"
+    );
+}
