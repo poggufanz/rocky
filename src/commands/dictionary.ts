@@ -13,6 +13,8 @@ import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, isVerbose, phrase, prompt as rockyPrompt, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 import { formatGitDiffLines, resolveGitDiff, type GitDiffOptions, type GitDiffResult } from "../core/git-diff.js";
+import { labelChip, promptTitle } from "../desk/card-text.js";
+import { cardsForFile, type CardsForFile, type StoredBlock, type StoredCard } from "../desk/cards-read.js";
 import { CliUsageError, parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
 
 const MAX_QUERY_DISPLAY_BYTES = 160;
@@ -22,6 +24,11 @@ const MAX_PROVENANCE_PATH_BYTES = 96;
 const MAX_INTENT_DISPLAY_BYTES = 128;
 const MAX_OUTPUT_LINE_BYTES = 512;
 const MAX_FILE_RATIONALES = 5;
+const MAX_CHANGE_CARDS = 5;
+const MAX_CARD_BLOCKS = 5;
+const MAX_CARD_TITLE_CHARS = 100;
+const MAX_CARD_QUOTE_CHARS = 120;
+const MAX_CARD_BASH_CHARS = 60;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPORT_USAGE = "Export takes --kind failure|fix|note|triple and --since 30d.";
@@ -49,6 +56,7 @@ export interface DictionaryCommandDeps {
   rank?: DictionaryRankPort;
   now?: number;
   gitDiff?: (options: GitDiffOptions) => GitDiffResult | undefined;
+  cards?: (file: string) => CardsForFile;
 }
 
 interface Sinks {
@@ -675,6 +683,112 @@ function whyAdd(args: readonly string[], speak: (line: string) => void, records:
   return 0;
 }
 
+/** Truncate raw text by Unicode code points before terminal sanitization. */
+function cutChars(value: string, maxChars: number): string {
+  const limit = Math.max(1, maxChars);
+  const chars = Array.from(value);
+  if (chars.length <= limit) return value;
+  return `${chars.slice(0, limit - 1).join("")}\u2026`;
+}
+
+/** Format a card timestamp in local time as HH:MM today or YYYY-MM-DD HH:MM otherwise. */
+function formatCardTime(ms: number, now: number): string {
+  if (!Number.isFinite(ms)) return "--:--";
+  const date = new Date(ms);
+  const ref = new Date(now);
+  const hm = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const sameLocalDay =
+    date.getFullYear() === ref.getFullYear()
+    && date.getMonth() === ref.getMonth()
+    && date.getDate() === ref.getDate();
+  if (sameLocalDay) return hm;
+  const yyyy = String(date.getFullYear()).padStart(4, "0");
+  const mon = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mon}-${dd} ${hm}`;
+}
+
+/** Format a change block symbol prefix or fall back to file. */
+function formatBlockSymbol(symbol: StoredBlock["symbol"]): string {
+  if (!symbol) return "file";
+  const name = terminalSafe(symbol.name, MAX_SUBJECT_DISPLAY_BYTES);
+  if (!name) return "file";
+  const container = symbol.container ? terminalSafe(symbol.container, MAX_SUBJECT_DISPLAY_BYTES) : "";
+  return container ? `${container}.${name}` : name;
+}
+
+/** Format one matched change block indented beneath its card line. */
+function formatCardBlock(block: StoredBlock): string {
+  const symbol = formatBlockSymbol(block.symbol);
+  const firstLabel = block.labels[0];
+  const rawChip = firstLabel ? labelChip(firstLabel, block.symbol?.kind ?? null) : "changed";
+  const chip = terminalSafe(rawChip || "changed", MAX_SUBJECT_DISPLAY_BYTES) || "changed";
+  let line = `         ${symbol}: ${chip}.`;
+  const rawQuote = block.quote?.text ?? "";
+  if (rawQuote.length > 0) {
+    const safeQuote = terminalSafe(cutChars(rawQuote, MAX_CARD_QUOTE_CHARS), MAX_OUTPUT_LINE_BYTES);
+    if (safeQuote.length > 0) {
+      line += ` Agent said: "${safeQuote}". Recorded, not verified.`;
+    }
+  }
+  if (block.via === "bash") {
+    const rawCmd = block.bash?.cmd ?? "";
+    const safeCmd = rawCmd.length > 0
+      ? terminalSafe(cutChars(rawCmd, MAX_CARD_BASH_CHARS), MAX_SUBJECT_DISPLAY_BYTES)
+      : "";
+    line += safeCmd.length > 0 ? ` (via ${safeCmd})` : " (via bash)";
+  }
+  return terminalSafe(line, MAX_OUTPUT_LINE_BYTES);
+}
+
+/** Format the summary line for a single change card. */
+function formatCardHeader(card: StoredCard, now: number): string {
+  const time = formatCardTime(card.ended_ms ?? card.started_ms, now);
+  const safeTitle = terminalSafe(cutChars(promptTitle(card.prompt), MAX_CARD_TITLE_CHARS), MAX_OUTPUT_LINE_BYTES);
+  const safeAgent = card.agent_type ? terminalSafe(card.agent_type, MAX_SUBJECT_DISPLAY_BYTES).trim() : "";
+  const label = safeAgent.length > 0 ? `${safeAgent} \u203a ${safeTitle}` : safeTitle;
+  return terminalSafe(`  ${time}  ${label}`, MAX_OUTPUT_LINE_BYTES);
+}
+
+/** Print recent change cards affecting a file after rocky why's existing output. */
+function sayChangeCards(
+  filePath: string,
+  safePath: string,
+  now: number,
+  speak: (line: string) => void,
+  support: (line: string) => void,
+  readCards?: (file: string) => CardsForFile,
+): void {
+  let result: CardsForFile;
+  try {
+    result = readCards ? readCards(filePath) : cardsForFile(filePath, { cwd: process.cwd() });
+  } catch {
+    return;
+  }
+  const cards = result.cards.slice(0, MAX_CHANGE_CARDS);
+  if (cards.length === 0) return;
+
+  speak(terminalSafe(`Agent changes to ${safePath} (newest first)`, MAX_OUTPUT_LINE_BYTES));
+  for (const card of cards) {
+    support(formatCardHeader(card, now));
+    const blocks = result.matched.get(card.card_id) ?? [];
+    for (const block of blocks.slice(0, MAX_CARD_BLOCKS)) {
+      support(formatCardBlock(block));
+    }
+    if (blocks.length > MAX_CARD_BLOCKS) {
+      support(`         +${blocks.length - MAX_CARD_BLOCKS} more`);
+    }
+  }
+  if (!result.coverage.complete) {
+    const reason = result.coverage.reason
+      ?? (result.coverage.skipped > 0 ? `${result.coverage.skipped} skipped` : "incomplete");
+    support(terminalSafe(
+      `Change cards were only partly read (${reason}); older changes may be missing.`,
+      MAX_OUTPUT_LINE_BYTES,
+    ));
+  }
+}
+
 export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   const { speak, support, records, coverage } = resolve(deps);
   if (argv[0] === "--add") {
@@ -727,6 +841,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       support(terminalSafe(isVerbose()
         ? `coverage status: ${coverageStatus}; no silent rationale selection; confidence=incomplete reason=ambiguous path`
         : AMBIGUOUS_PATH_WORDS, MAX_OUTPUT_LINE_BYTES));
+      sayChangeCards(path, safePath, now, speak, support, deps.cards);
       return 0;
     }
     const scanIncomplete = scan !== undefined && coverageIncomplete(scan);
@@ -752,6 +867,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
       }
     }
     sayFileRationales(speak, support, fileRationales);
+    sayChangeCards(path, safePath, now, speak, support, deps.cards);
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
@@ -801,6 +917,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     }
   }
   sayFileRationales(speak, support, fileRationales);
+  sayChangeCards(path, safePath, now, speak, support, deps.cards);
   return 0;
 }
 
