@@ -274,7 +274,7 @@ impl Model {
         });
     }
 
-    fn accepts_timeline(&self, key: &AgentKey) -> bool {
+    pub(crate) fn accepts_timeline(&self, key: &AgentKey) -> bool {
         if self.active_primary_keys().contains(key) {
             return true;
         }

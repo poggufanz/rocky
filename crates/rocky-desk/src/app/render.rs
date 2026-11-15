@@ -161,9 +161,7 @@ impl Render for DeskView {
                         .on_click(cx.listener({
                             let key = a.key.clone();
                             move |this, _event, _window, cx| {
-                                if let Some(key) = this.ctl.model.toggle_open(&key) {
-                                    this.ctl.request_timeline(key);
-                                }
+                                this.ctl.toggle_open(&key, now_ms());
                                 cx.notify();
                             }
                         }));

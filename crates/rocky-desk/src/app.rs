@@ -106,6 +106,47 @@ impl Controller {
         });
     }
 
+    /// Collects due timeline keys after `self.model.apply(msg)`.
+    fn collect_timeline_requests(
+        &mut self,
+        msg: &ServerMsg,
+        legacy_requests: Vec<AgentKey>,
+        now_ms: u64,
+    ) -> Vec<AgentKey> {
+        let active_keys = self.model.active_primary_keys();
+        let mut requests = self.timeline_fetch.on_msg(msg, &active_keys, now_ms);
+        for key in legacy_requests {
+            if self.model.accepts_timeline(&key)
+                && !self.timeline_fetch.is_tracked(&key)
+                && !requests.contains(&key)
+                && self.timeline_fetch.on_open(&key, &active_keys, now_ms)
+            {
+                requests.push(key);
+            }
+        }
+        requests
+    }
+
+    /// Toggles row expansion and dispatches a timeline fetch only when outside cooldown.
+    fn toggle_open(&mut self, key: &AgentKey, now_ms: u64) {
+        if let Some(key) = self.model.toggle_open(key)
+            && self.model.accepts_timeline(&key)
+        {
+            let active_keys = self.model.active_primary_keys();
+            if self.timeline_fetch.on_open(&key, &active_keys, now_ms) {
+                self.request_timeline(key);
+            }
+        }
+    }
+
+    /// Dispatches deferred active timeline requests whose cooldown has elapsed.
+    fn poll_timelines(&mut self, now_ms: u64) {
+        let active_keys = self.model.active_primary_keys();
+        for key in self.timeline_fetch.poll(&active_keys, now_ms) {
+            self.request_timeline(key);
+        }
+    }
+
     /// Handle one decision from `ConnState` (foreground, non-blocking).
     fn act(&mut self, action: Action) {
         match action {
@@ -273,5 +314,151 @@ impl DeskView {
         self.ctl.last_tooltip = Msg::NoAgents;
         self.menu_stale = true;
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rocky_proto::pipe::{AgentStatus, Health, Outcome, RepoInfo, TimelineEntry, TimelineKind};
+    use rocky_proto::settings::Settings;
+
+    use super::*;
+
+    fn test_controller() -> (Controller, Receiver<ClientMsg>) {
+        let (out_tx, out_rx) = mpsc::channel();
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let ctl = Controller {
+            model: Model::new(),
+            timeline_fetch: TimelineFetch::new(),
+            notifier: Notifier::default(),
+            inbox: None,
+            outbox: Some(out_tx),
+            worker_rx,
+            worker_tx,
+            state: ConnState::new(3, 300_000),
+            cmd_id: 0,
+            rocky_home: PathBuf::from("."),
+            last_aggregate: Status::Idle,
+            last_tooltip: Msg::NoAgents,
+            ui_lang: UiLang::En,
+            detected: UiLang::En,
+            view: View::Agents,
+            tray_start: false,
+            autostart_on: None,
+            autostart_failed: false,
+        };
+        (ctl, out_rx)
+    }
+
+    fn test_agent(session_id: &str, status: Status, last_event_ms: u64) -> AgentStatus {
+        AgentStatus {
+            key: AgentKey {
+                session_id: session_id.to_string(),
+                agent_id: String::new(),
+            },
+            agent_type: None,
+            status,
+            action: None,
+            summary: None,
+            description: None,
+            failures: 0,
+            last_event_ms,
+            quiet_10m: false,
+            repo: RepoInfo {
+                root: Some("/repos/rocky".to_string()),
+                main_root: None,
+                name: "rocky".to_string(),
+                branch: Some("main".to_string()),
+            },
+            prompt: None,
+        }
+    }
+
+    fn apply_at(ctl: &mut Controller, msg: ServerMsg, now_ms: u64) {
+        let copy = msg.clone();
+        let legacy = ctl.model.apply(msg);
+        for key in ctl.collect_timeline_requests(&copy, legacy, now_ms) {
+            ctl.request_timeline(key);
+        }
+    }
+
+    fn drain_timelines(rx: &Receiver<ClientMsg>) -> Vec<AgentKey> {
+        let mut keys = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ClientMsg::Timeline { key, .. } = msg {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn controller_debounces_expansion_after_snapshot_fetch() {
+        let (mut ctl, rx) = test_controller();
+        let k1 = AgentKey {
+            session_id: "S1".to_string(),
+            agent_id: String::new(),
+        };
+
+        apply_at(
+            &mut ctl,
+            ServerMsg::Snapshot {
+                agents: vec![test_agent("S1", Status::Working, 900)],
+                aggregate: Status::Working,
+                health: Health::default(),
+                settings: Settings::default(),
+                repo_pending: Vec::new(),
+            },
+            1_000,
+        );
+        assert_eq!(drain_timelines(&rx), vec![k1.clone()]);
+
+        // Simulate daemon reply caching the timeline before expansion.
+        apply_at(
+            &mut ctl,
+            ServerMsg::Timeline {
+                id: 1,
+                key: k1.clone(),
+                entries: vec![TimelineEntry {
+                    ms: 950,
+                    kind: TimelineKind::Tool,
+                    tool_name: Some("Bash".to_string()),
+                    text: Some("cargo test".to_string()),
+                    outcome: Some(Outcome::Ok),
+                    dur_ms: Some(1_000),
+                }],
+            },
+            1_050,
+        );
+        assert!(drain_timelines(&rx).is_empty());
+
+        // Expanding within 500 ms must use the cached timeline and emit no extra request.
+        ctl.toggle_open(&k1, 1_100);
+        assert!(ctl.model.is_open(&k1));
+        assert_eq!(
+            ctl.model.timeline_rows(&k1, &crate::clock::utc_hhmm).len(),
+            1
+        );
+        assert!(
+            drain_timelines(&rx).is_empty(),
+            "expansion inside 500 ms cooldown must not send a second timeline request"
+        );
+
+        ctl.poll_timelines(1_499);
+        assert!(drain_timelines(&rx).is_empty());
+
+        ctl.poll_timelines(1_500);
+        assert_eq!(drain_timelines(&rx), vec![k1.clone()]);
+
+        // Leaving active while open must not emit a dead request via legacy open requests.
+        apply_at(
+            &mut ctl,
+            ServerMsg::Status {
+                op: rocky_proto::pipe::StatusOp::Upsert,
+                agent: test_agent("S1", Status::Done, 2_100),
+            },
+            2_100,
+        );
+        assert!(drain_timelines(&rx).is_empty());
     }
 }

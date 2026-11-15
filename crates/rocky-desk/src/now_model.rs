@@ -96,9 +96,10 @@ pub struct IdleRow {
     pub age: String,
 }
 
-/// Tracks per-key timeline request cooldowns and deferred trailing refreshes.
+/// Tracks per-key active state, 500 ms request cooldowns, and deferred trailing refreshes.
 #[derive(Debug, Default)]
 pub struct TimelineFetch {
+    active: BTreeSet<AgentKey>,
     last_sent: BTreeMap<AgentKey, u64>,
     pending: BTreeSet<AgentKey>,
 }
@@ -109,15 +110,16 @@ impl TimelineFetch {
         Self::default()
     }
 
-    /// Clears cooldowns and pending refreshes (used on pipe disconnect).
+    /// Clears active tracking, cooldowns, and pending refreshes (used on pipe disconnect).
     pub fn reset(&mut self) {
+        self.active.clear();
         self.last_sent.clear();
         self.pending.clear();
     }
 
-    /// Returns whether `key` is currently tracked as an active primary agent.
+    /// Returns whether `key` is active, queued, or still inside its 500 ms cooldown window.
     pub fn is_tracked(&self, key: &AgentKey) -> bool {
-        self.last_sent.contains_key(key) || self.pending.contains(key)
+        self.active.contains(key) || self.last_sent.contains_key(key) || self.pending.contains(key)
     }
 
     /// Inspects an incoming daemon message after `model.apply` and returns due timeline keys.
@@ -127,9 +129,10 @@ impl TimelineFetch {
         active_keys: &BTreeSet<AgentKey>,
         now_ms: u64,
     ) -> Vec<AgentKey> {
-        self.retain_active(active_keys);
+        self.prune_inactive(active_keys, now_ms);
         match msg {
             ServerMsg::Snapshot { .. } => {
+                self.active = active_keys.clone();
                 let mut due = Vec::new();
                 for key in active_keys {
                     if self.request_or_defer(key, now_ms) {
@@ -139,14 +142,16 @@ impl TimelineFetch {
                 due
             }
             ServerMsg::Status { op, agent } => {
+                let prev_active = std::mem::replace(&mut self.active, active_keys.clone());
                 let mut due = Vec::new();
                 for key in active_keys {
-                    if !self.last_sent.contains_key(key) && self.request_or_defer(key, now_ms) {
+                    if !prev_active.contains(key) && self.request_or_defer(key, now_ms) {
                         due.push(key.clone());
                     }
                 }
                 if *op == StatusOp::Upsert
                     && active_keys.contains(&agent.key)
+                    && prev_active.contains(&agent.key)
                     && !due.contains(&agent.key)
                     && self.request_or_defer(&agent.key, now_ms)
                 {
@@ -158,9 +163,30 @@ impl TimelineFetch {
         }
     }
 
+    /// Requests a timeline fetch on row expansion while enforcing the 500 ms per-key cooldown.
+    ///
+    /// Active primary keys inside cooldown are queued for trailing flush on [`Self::poll`], while
+    /// any already-cached timeline stays visible immediately.
+    pub fn on_open(
+        &mut self,
+        key: &AgentKey,
+        active_keys: &BTreeSet<AgentKey>,
+        now_ms: u64,
+    ) -> bool {
+        self.prune_inactive(active_keys, now_ms);
+        if active_keys.contains(key) {
+            self.request_or_defer(key, now_ms)
+        } else if self.cooldown_ready(key, now_ms) {
+            self.last_sent.insert(key.clone(), now_ms);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Flushes any deferred keys whose 500 ms cooldown has elapsed by `now_ms`.
     pub fn poll(&mut self, active_keys: &BTreeSet<AgentKey>, now_ms: u64) -> Vec<AgentKey> {
-        self.retain_active(active_keys);
+        self.prune_inactive(active_keys, now_ms);
         let ready: Vec<AgentKey> = self
             .pending
             .iter()
@@ -174,9 +200,12 @@ impl TimelineFetch {
         ready
     }
 
-    fn retain_active(&mut self, active_keys: &BTreeSet<AgentKey>) {
-        self.last_sent.retain(|k, _| active_keys.contains(k));
+    fn prune_inactive(&mut self, active_keys: &BTreeSet<AgentKey>, now_ms: u64) {
+        self.active.retain(|k| active_keys.contains(k));
         self.pending.retain(|k| active_keys.contains(k));
+        self.last_sent.retain(|k, &mut last| {
+            active_keys.contains(k) || now_ms.saturating_sub(last) < TIMELINE_DEBOUNCE_MS
+        });
     }
 
     fn cooldown_ready(&self, key: &AgentKey, now_ms: u64) -> bool {
@@ -380,17 +409,14 @@ fn build_steps(
         Some(idx) => &entries[idx + 1..],
         None => entries,
     };
-    let relevant: Vec<&TimelineEntry> = slice
-        .iter()
-        .filter(|e| matches!(e.kind, TimelineKind::Tool | TimelineKind::NeedsYou))
-        .collect();
-    let last_idx = relevant.len().saturating_sub(1);
+    let turn_last = slice.len().saturating_sub(1);
 
-    let mut steps: Vec<LiveStep> = relevant
-        .into_iter()
+    let mut steps: Vec<LiveStep> = slice
+        .iter()
         .enumerate()
+        .filter(|(_, e)| matches!(e.kind, TimelineKind::Tool | TimelineKind::NeedsYou))
         .map(|(idx, entry)| {
-            let mark = step_mark(entry, idx == last_idx, agent_status);
+            let mark = step_mark(entry, idx == turn_last, agent_status);
             let title = step_title(entry, lang);
             let dur = match mark {
                 StepMark::Running | StepMark::Waiting => {
@@ -527,3 +553,5 @@ fn clean_opt(raw: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_timeline;
