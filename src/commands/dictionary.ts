@@ -29,6 +29,17 @@ const MAX_CARD_BLOCKS = 5;
 const MAX_CARD_TITLE_CHARS = 100;
 const MAX_CARD_QUOTE_CHARS = 120;
 const MAX_CARD_BASH_CHARS = 60;
+const MAX_CARD_SYMBOL_BYTES = MAX_SUBJECT_DISPLAY_BYTES * 2 + 1;
+const MIN_CARD_SYMBOL_BYTES = 96;
+const MIN_CARD_CHIP_BYTES = 72;
+const MIN_CARD_BASH_BYTES = 72;
+const MIN_CARD_QUOTE_BYTES = 213;
+const CARD_BLOCK_INDENT = "         ";
+const CARD_BLOCK_QUOTE_PREFIX = ' Agent said: "';
+const CARD_BLOCK_QUOTE_SUFFIX = '". Recorded, not verified.';
+const CARD_BLOCK_BASH_PREFIX = " (via ";
+const CARD_BLOCK_BASH_SUFFIX = ")";
+const CARD_BLOCK_BASH_FALLBACK = " (via bash)";
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPORT_USAGE = "Export takes --kind failure|fix|note|triple and --since 30d.";
@@ -708,37 +719,85 @@ function formatCardTime(ms: number, now: number): string {
   return `${yyyy}-${mon}-${dd} ${hm}`;
 }
 
-/** Format a change block symbol prefix or fall back to file. */
-function formatBlockSymbol(symbol: StoredBlock["symbol"]): string {
-  if (!symbol) return "file";
-  const name = terminalSafe(symbol.name, MAX_SUBJECT_DISPLAY_BYTES);
-  if (!name) return "file";
-  const container = symbol.container ? terminalSafe(symbol.container, MAX_SUBJECT_DISPLAY_BYTES) : "";
-  return container ? `${container}.${name}` : name;
+/** Format a change block symbol prefix within maxBytes UTF-8 bytes, falling back to file. */
+function formatBlockSymbol(symbol: StoredBlock["symbol"], maxBytes = MAX_CARD_SYMBOL_BYTES): string {
+  if (!symbol || maxBytes <= 0) return "file";
+  const fullSafeName = terminalSafe(symbol.name, maxBytes);
+  if (!fullSafeName) return "file";
+  if (!symbol.container) return fullSafeName;
+  const nameBytes = Buffer.byteLength(fullSafeName, "utf8");
+  const minNameReserve = Math.min(nameBytes, Math.floor(maxBytes / 2));
+  const maxContainerBytes = maxBytes - minNameReserve - 1;
+  const safeContainer = maxContainerBytes > 0 ? terminalSafe(symbol.container, maxContainerBytes) : "";
+  if (!safeContainer) return fullSafeName;
+  const containerBytes = Buffer.byteLength(safeContainer, "utf8");
+  const finalName = terminalSafe(symbol.name, maxBytes - containerBytes - 1);
+  return finalName ? `${safeContainer}.${finalName}` : fullSafeName;
+}
+
+/** Distribute a byte budget across variable fields, honoring each field's floor before giving away spare bytes. */
+function allocateByteBudgets(
+  totalBudget: number,
+  requests: readonly { desired: number; floor: number }[],
+): number[] {
+  const budgets = requests.map(({ desired, floor }) => Math.min(desired, floor));
+  let spare = Math.max(0, totalBudget - budgets.reduce((sum, bytes) => sum + bytes, 0));
+  for (let i = 0; i < requests.length && spare > 0; i += 1) {
+    const request = requests[i];
+    const current = budgets[i];
+    if (request === undefined || current === undefined) continue;
+    const extra = Math.min(spare, request.desired - current);
+    budgets[i] = current + extra;
+    spare -= extra;
+  }
+  return budgets;
 }
 
 /** Format one matched change block indented beneath its card line. */
 function formatCardBlock(block: StoredBlock): string {
-  const symbol = formatBlockSymbol(block.symbol);
+  const fullSymbol = formatBlockSymbol(block.symbol, MAX_CARD_SYMBOL_BYTES);
   const firstLabel = block.labels[0];
   const rawChip = firstLabel ? labelChip(firstLabel, block.symbol?.kind ?? null) : "changed";
-  const chip = terminalSafe(rawChip || "changed", MAX_SUBJECT_DISPLAY_BYTES) || "changed";
-  let line = `         ${symbol}: ${chip}.`;
+  const fullChip = terminalSafe(rawChip || "changed", MAX_SUBJECT_DISPLAY_BYTES) || "changed";
+
   const rawQuote = block.quote?.text ?? "";
-  if (rawQuote.length > 0) {
-    const safeQuote = terminalSafe(cutChars(rawQuote, MAX_CARD_QUOTE_CHARS), MAX_OUTPUT_LINE_BYTES);
-    if (safeQuote.length > 0) {
-      line += ` Agent said: "${safeQuote}". Recorded, not verified.`;
-    }
-  }
-  if (block.via === "bash") {
-    const rawCmd = block.bash?.cmd ?? "";
-    const safeCmd = rawCmd.length > 0
-      ? terminalSafe(cutChars(rawCmd, MAX_CARD_BASH_CHARS), MAX_SUBJECT_DISPLAY_BYTES)
-      : "";
-    line += safeCmd.length > 0 ? ` (via ${safeCmd})` : " (via bash)";
-  }
-  return terminalSafe(line, MAX_OUTPUT_LINE_BYTES);
+  const cutQuote = rawQuote.length > 0 ? cutChars(rawQuote, MAX_CARD_QUOTE_CHARS) : "";
+  const fullQuote = cutQuote.length > 0 ? terminalSafe(cutQuote, MAX_OUTPUT_LINE_BYTES) : "";
+  const hasQuote = fullQuote.length > 0;
+
+  const isBash = block.via === "bash";
+  const rawCmd = isBash ? (block.bash?.cmd ?? "") : "";
+  const cutCmd = rawCmd.length > 0 ? cutChars(rawCmd, MAX_CARD_BASH_CHARS) : "";
+  const fullCmd = cutCmd.length > 0 ? terminalSafe(cutCmd, MAX_SUBJECT_DISPLAY_BYTES) : "";
+  const hasCmd = isBash && fullCmd.length > 0;
+
+  // Reserve space for fixed wording and the Bash suffix before bounding variable
+  // fields so whole-line capping never removes qualification or provenance.
+  const fixedBytes = Buffer.byteLength(`${CARD_BLOCK_INDENT}: .`, "utf8")
+    + (hasQuote ? Buffer.byteLength(`${CARD_BLOCK_QUOTE_PREFIX}${CARD_BLOCK_QUOTE_SUFFIX}`, "utf8") : 0)
+    + (isBash
+      ? Buffer.byteLength(hasCmd ? `${CARD_BLOCK_BASH_PREFIX}${CARD_BLOCK_BASH_SUFFIX}` : CARD_BLOCK_BASH_FALLBACK, "utf8")
+      : 0);
+  const variableBudget = Math.max(0, MAX_OUTPUT_LINE_BYTES - fixedBytes);
+  const [symbolBudget = 0, chipBudget = 0, cmdBudget = 0, quoteBudget = 0] = allocateByteBudgets(variableBudget, [
+    { desired: Buffer.byteLength(fullSymbol, "utf8"), floor: MIN_CARD_SYMBOL_BYTES },
+    { desired: Buffer.byteLength(fullChip, "utf8"), floor: MIN_CARD_CHIP_BYTES },
+    { desired: hasCmd ? Buffer.byteLength(fullCmd, "utf8") : 0, floor: hasCmd ? MIN_CARD_BASH_BYTES : 0 },
+    { desired: hasQuote ? Buffer.byteLength(fullQuote, "utf8") : 0, floor: hasQuote ? MIN_CARD_QUOTE_BYTES : 0 },
+  ]);
+
+  const symbol = symbolBudget < Buffer.byteLength(fullSymbol, "utf8")
+    ? formatBlockSymbol(block.symbol, symbolBudget)
+    : fullSymbol;
+  const chip = truncateUtf8(fullChip, chipBudget).value || "changed";
+  const quoteClause = hasQuote
+    ? `${CARD_BLOCK_QUOTE_PREFIX}${truncateUtf8(fullQuote, quoteBudget).value}${CARD_BLOCK_QUOTE_SUFFIX}`
+    : "";
+  const bashClause = isBash
+    ? (hasCmd ? `${CARD_BLOCK_BASH_PREFIX}${truncateUtf8(fullCmd, cmdBudget).value}${CARD_BLOCK_BASH_SUFFIX}` : CARD_BLOCK_BASH_FALLBACK)
+    : "";
+
+  return terminalSafe(`${CARD_BLOCK_INDENT}${symbol}: ${chip}.${quoteClause}${bashClause}`, MAX_OUTPUT_LINE_BYTES);
 }
 
 /** Format the summary line for a single change card. */

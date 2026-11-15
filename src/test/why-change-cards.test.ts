@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { why, type DictionaryCommandDeps } from "../commands/dictionary.js";
@@ -119,6 +119,19 @@ function makeResult(cards: StoredCard[], coverage: CardsForFile["coverage"] = { 
     matched.set(card.card_id, card.blocks);
   }
   return { cards, matched, coverage };
+}
+
+function withTempRockyHome<T>(fn: (home: string) => T): T {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-why-home-")));
+  const prevHome = process.env.ROCKY_HOME;
+  try {
+    process.env.ROCKY_HOME = home;
+    return fn(home);
+  } finally {
+    if (prevHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 function freshRepoAndHome(): { home: string; repoRoot: string; cleanup: () => void } {
@@ -336,9 +349,12 @@ test("why appends cards after every exit-0 path and preserves prior lines, while
     },
   });
 
-  const addSinks = makeSinks();
-  assert.equal(why(["--add", "src/cart.ts", "Because discounts stack"], { ...nonQueryDeps(), ...addSinks }), 0);
-  assert.equal(cardCalls, 0);
+  withTempRockyHome((home) => {
+    const addSinks = makeSinks();
+    assert.equal(why(["--add", "src/cart.ts", "Because discounts stack"], { ...nonQueryDeps(), ...addSinks }), 0);
+    assert.equal(cardCalls, 0);
+    assert.equal(existsSync(join(home, "memory.jsonl")), true);
+  });
 
   const missingSinks = makeSinks();
   assert.equal(why([], { ...nonQueryDeps(), ...missingSinks }), 2);
@@ -520,6 +536,97 @@ test("why neutralizes terminal-hostile text and bounds every output line to 512 
     assert.equal(Buffer.byteLength(line, "utf8") <= 512, true, `line exceeded 512 bytes: ${line}`);
     assert.equal(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff?？]/u.test(line), false, line);
   }
+});
+
+test("why preserves Recorded, not verified. and Bash suffix across multibyte quotes and long symbol or label text", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const multibyteQuote = "𝄞".repeat(120);
+  const card = makeCard({
+    blocks: [
+      makeBlock({
+        seq: 1,
+        symbol: { kind: "function", name: "applyDiscount", container: null, exported: true },
+        labels: [{ id: "symbol_added" }],
+        quote: { text: multibyteQuote, shared: true },
+        via: "bash",
+        bash: { cmd: "npm run fmt", candidates: 1 },
+      }),
+      makeBlock({
+        seq: 2,
+        symbol: {
+          kind: "method",
+          name: "applyLongDiscountCalculationMethodName".repeat(4),
+          container: "VeryLongCartDiscountContainerBox".repeat(5),
+          exported: true,
+        },
+        labels: [{ id: "call_added", args: { name: "calculateLongMemberDiscountRate".repeat(5) } }],
+        quote: { text: multibyteQuote, shared: true },
+        via: "bash",
+        bash: { cmd: `npm run ${"𐍈".repeat(52)}`, candidates: 2 },
+      }),
+      makeBlock({
+        seq: 3,
+        symbol: {
+          kind: "method",
+          name: "removeDiscountRule".repeat(8),
+          container: "CheckoutDiscountRegistry".repeat(6),
+          exported: true,
+        },
+        labels: [{ id: "call_removed", args: { name: "legacyTaxCalculationHelper".repeat(5) } }],
+        quote: null,
+        via: "bash",
+        bash: { cmd: "𐍈".repeat(60), candidates: 1 },
+      }),
+      makeBlock({
+        seq: 4,
+        symbol: { kind: "function", name: "applyDiscount", container: null, exported: true },
+        labels: [{ id: "body_changed" }],
+        quote: { text: multibyteQuote, shared: true },
+        via: "bash",
+        bash: { cmd: "\u001b[31m", candidates: 1 },
+      }),
+    ],
+  });
+
+  const sinks = makeSinks();
+  const code = why(["src/cart.ts"], {
+    ...sinks,
+    load: () => [],
+    coverage: () => completeCoverage(),
+    now,
+    cards: () => makeResult([card]),
+  });
+
+  assert.equal(code, 0);
+  assert.equal(sinks.outLines.length, 5);
+  for (const line of [...sinks.errLines, ...sinks.outLines]) {
+    assert.equal(Buffer.byteLength(line, "utf8") <= 512, true, `line exceeded 512 bytes: ${line}`);
+    assert.equal(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff?？]/u.test(line), false, line);
+  }
+
+  const block1 = sinks.outLines[1]!;
+  assert.equal(block1.startsWith("         applyDiscount: new function. "), true, block1);
+  assert.equal(block1.includes('Agent said: "'), true, block1);
+  assert.equal(block1.includes('". Recorded, not verified.'), true, block1);
+  assert.equal(block1.endsWith(" (via npm run fmt)"), true, block1);
+
+  const block2 = sinks.outLines[2]!;
+  assert.equal(block2.startsWith("         "), true, block2);
+  assert.equal(block2.includes(": calls "), true, block2);
+  assert.equal(block2.includes('Agent said: "'), true, block2);
+  assert.equal(block2.includes('". Recorded, not verified.'), true, block2);
+  assert.equal(block2.includes(" (via npm run "), true, block2);
+  assert.equal(block2.endsWith(")"), true, block2);
+
+  const block3 = sinks.outLines[3]!;
+  assert.equal(block3.includes(": no longer calls "), true, block3);
+  assert.equal(block3.includes("Agent said:"), false, block3);
+  assert.equal(block3.includes(" (via "), true, block3);
+  assert.equal(block3.endsWith(")"), true, block3);
+
+  const block4 = sinks.outLines[4]!;
+  assert.equal(block4.includes('". Recorded, not verified.'), true, block4);
+  assert.equal(block4.endsWith(" (via bash)"), true, block4);
 });
 
 test("why emits partial-read coverage line and suppresses errors from card reader", () => {
