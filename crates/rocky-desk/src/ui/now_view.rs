@@ -342,14 +342,7 @@ fn action_row(lang: UiLang, card: &SessionCard) -> Div {
         .py(px(6.0))
         .px(px(12.0))
         .hover(|s| s.bg(rgb(ROW_HOVER_BG)))
-        .child(
-            div()
-                .min_w(px(34.0))
-                .flex_shrink_0()
-                .text_size(px(11.0))
-                .text_color(rgb(TEXT_MUTED))
-                .child(card.tool.clone()),
-        );
+        .child(action_tool_column(card.tool.clone()));
 
     if let Some(action) = &card.action {
         row = row.child(
@@ -374,6 +367,16 @@ fn action_row(lang: UiLang, card: &SessionCard) -> Div {
     }
 
     row
+}
+
+fn action_tool_column(tool: String) -> Div {
+    div()
+        .w(px(34.0))
+        .flex_shrink_0()
+        .truncate()
+        .text_size(px(11.0))
+        .text_color(rgb(TEXT_MUTED))
+        .child(tool)
 }
 
 fn sub_row_view<T: 'static>(
@@ -533,5 +536,82 @@ fn timer_color(status: Status) -> u32 {
         Status::NeedsYou => TIMER_NEEDS_YOU,
         Status::Working => TIMER_WORKING,
         Status::Done | Status::Failed | Status::Idle | Status::Ended => TEXT_MUTED,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Display, Length, Overflow, Styled, TextOverflow, WhiteSpace, px};
+    use rocky_proto::pipe::{AgentKey, Status};
+
+    use super::{action_row, action_tool_column};
+    use crate::i18n::UiLang;
+    use crate::now_model::SessionCard;
+
+    fn sample_card(tool: &str, action: Option<&str>, failures: u32) -> SessionCard {
+        SessionCard {
+            key: AgentKey {
+                session_id: "sess-12345678".to_string(),
+                agent_id: String::new(),
+            },
+            status: Status::Working,
+            repo: "rocky".to_string(),
+            branch: Some("main".to_string()),
+            session_short: "sess-123".to_string(),
+            timer: "12s".to_string(),
+            prompt: Some("fix layout".to_string()),
+            tool: tool.to_string(),
+            action: action.map(str::to_string),
+            failures,
+            steps: Vec::new(),
+            hidden_steps: 0,
+            expanded: false,
+            subs: Vec::new(),
+            hidden_children: None,
+        }
+    }
+
+    #[test]
+    fn action_tool_column_is_fixed_34px_non_shrinking_single_line_truncated() {
+        for label in [
+            "mcp__filesystem__read_multiple_files",
+            "menunggu persetujuan pengguna",
+        ] {
+            let mut col = action_tool_column(label.to_string());
+            let style = col.style();
+            assert_eq!(style.size.width, Some(Length::from(px(34.0))));
+            assert_eq!(style.min_size.width, None);
+            assert_eq!(style.flex_shrink, Some(0.0));
+            assert_eq!(style.overflow.x, Some(Overflow::Hidden));
+            assert_eq!(style.overflow.y, Some(Overflow::Hidden));
+            let text = style.text.as_ref().expect("truncate sets text style");
+            assert_eq!(text.white_space, Some(WhiteSpace::Nowrap));
+            assert!(
+                matches!(
+                    text.text_overflow.as_ref(),
+                    Some(TextOverflow::Truncate(s)) if s.as_ref() == "\u{2026}"
+                ),
+                "expected ellipsis truncation for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_row_handles_long_tool_and_indonesian_fallback_with_action_and_failures() {
+        let long_tool = sample_card(
+            "mcp__filesystem__read_multiple_files",
+            Some("cargo test -p rocky-desk"),
+            2,
+        );
+        let mut long_row = action_row(UiLang::En, &long_tool);
+        assert_eq!(long_row.style().display, Some(Display::Flex));
+
+        let id_fallback = sample_card(
+            "menunggu persetujuan pengguna",
+            Some("git status --short"),
+            3,
+        );
+        let mut id_row = action_row(UiLang::Id, &id_fallback);
+        assert_eq!(id_row.style().display, Some(Display::Flex));
     }
 }
