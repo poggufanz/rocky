@@ -3,7 +3,8 @@
 use rocky_proto::pipe::ServerMsg;
 
 use super::{DeskView, now_ms};
-use crate::notify::{NotifyCtx, notice_text};
+use crate::i18n::resolve_lang;
+use crate::notify::{NotifyCtx, notice_text, show_once_toast};
 use crate::requests::RequestKind;
 
 impl DeskView {
@@ -75,9 +76,10 @@ impl DeskView {
         }
     }
 
-    /// Once-only repo and harness notices. They are always recorded; a toast
-    /// shows only while the window is not active. A click just opens the
-    /// window.
+    /// Once-only repo, harness, and change-cards notices. They are always
+    /// recorded; repo and harness toasts show only while the window is not
+    /// active, while the change-cards notice also shows when open. A click
+    /// just opens the window.
     pub(super) fn notify_once(&mut self, msg: &ServerMsg, window_active: bool) {
         // While an approval is in flight its own installs must not toast: the
         // first health after the answer seeds them instead.
@@ -88,12 +90,18 @@ impl DeskView {
         {
             self.log.once("notified", &e);
         }
-        if window_active || notices.is_empty() {
+        let to_show: Vec<_> = notices
+            .into_iter()
+            .filter(|n| show_once_toast(n.kind, window_active))
+            .collect();
+        if to_show.is_empty() {
             return;
         }
         self.prepare_notices();
-        let lang = self.ctl.ui_lang;
-        for n in &notices {
+        let lang = self.ctl.model.settings().map_or(self.ctl.ui_lang, |s| {
+            resolve_lang(s.lang, self.ctl.detected)
+        });
+        for n in &to_show {
             let (title, body) = notice_text(lang, n);
             let click_tx = self.click_tx.clone();
             let shown = self.notices.show(

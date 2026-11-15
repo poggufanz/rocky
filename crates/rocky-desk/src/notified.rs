@@ -9,26 +9,29 @@ use std::path::Path;
 
 use rocky_proto::pipe::{ConsentState, PendingRepo, ServerMsg, SetupHealth, TargetState};
 
-use crate::i18n::{Msg, SetupMsg};
+use crate::i18n::{CardMsg, Msg, SetupMsg};
 use crate::notify::{Notice, NoticeKind};
 
 const FILE_VERSION: u64 = 1;
 const NOTICE_TITLE: &str = "Rocky";
+/// Persistence key in `notified.json` for the one-time change-cards notice.
+pub const CARDS_NOTICE_KEY: &str = "cards_notice_v1";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NotifiedStore {
     repos: BTreeSet<String>,
     harnesses: BTreeSet<String>,
+    notices: BTreeSet<String>,
     seeded: bool,
     dirty: bool,
 }
 
-fn notice(kind: NoticeKind, key: String, msg: SetupMsg) -> Notice {
+fn notice(kind: NoticeKind, key: String, agent: Msg) -> Notice {
     Notice {
         kind,
         session_id: key,
         repo: NOTICE_TITLE.to_string(),
-        agent: Msg::Setup(msg),
+        agent,
         summary: None,
     }
 }
@@ -57,6 +60,7 @@ impl NotifiedStore {
             "v": FILE_VERSION,
             "repos": self.repos,
             "harnesses": self.harnesses,
+            "notices": self.notices,
             "seeded": self.seeded,
         });
         let mut tmp = path.as_os_str().to_owned();
@@ -82,13 +86,27 @@ impl NotifiedStore {
                 out.push(notice(
                     NoticeKind::RepoConsent,
                     format!("repo:{}", r.key),
-                    SetupMsg::RepoConsent {
+                    Msg::Setup(SetupMsg::RepoConsent {
                         name: r.name.clone(),
-                    },
+                    }),
                 ));
             }
         }
         out
+    }
+
+    /// One-time change-cards notice while `cards` is enabled. Recorded when
+    /// generated, so later snapshots or restarts stay quiet.
+    pub fn cards_notice(&mut self, cards_on: bool) -> Option<Notice> {
+        if !cards_on || !self.notices.insert(CARDS_NOTICE_KEY.to_string()) {
+            return None;
+        }
+        self.dirty = true;
+        Some(notice(
+            NoticeKind::CardsNotice,
+            CARDS_NOTICE_KEY.to_string(),
+            Msg::Cards(CardMsg::NoticeConsent),
+        ))
     }
 
     /// Harness notices once consent is approved. The first approved call
@@ -122,9 +140,9 @@ impl NotifiedStore {
                     out.push(notice(
                         NoticeKind::HarnessInstalled,
                         format!("harness:{harness}"),
-                        SetupMsg::HarnessInstalled {
+                        Msg::Setup(SetupMsg::HarnessInstalled {
                             harness: harness.to_string(),
-                        },
+                        }),
                     ));
                 }
             }
@@ -152,14 +170,21 @@ impl NotifiedStore {
             ServerMsg::Snapshot {
                 health,
                 repo_pending,
+                settings,
                 ..
             } => {
                 let mut out = harness(self, &health.setup);
                 out.extend(self.repo_notices(repo_pending));
+                if let Some(n) = self.cards_notice(settings.cards) {
+                    out.push(n);
+                }
                 out
             }
             ServerMsg::Health { health } => harness(self, &health.setup),
             ServerMsg::RepoPending { repos } => self.repo_notices(repos),
+            ServerMsg::Settings { settings } => {
+                self.cards_notice(settings.cards).into_iter().collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -170,16 +195,21 @@ fn parse(text: &str) -> Option<NotifiedStore> {
     if v.get("v")?.as_u64()? != FILE_VERSION {
         return None;
     }
-    let set = |key: &str| -> Option<BTreeSet<String>> {
-        v.get(key)?
-            .as_array()?
+    let parse_set = |val: &serde_json::Value| -> Option<BTreeSet<String>> {
+        val.as_array()?
             .iter()
             .map(|x| x.as_str().map(str::to_string))
             .collect()
     };
+    let set = |key: &str| parse_set(v.get(key)?);
+    let notices = match v.get("notices") {
+        None => BTreeSet::new(),
+        Some(val) => parse_set(val)?,
+    };
     Some(NotifiedStore {
         repos: set("repos")?,
         harnesses: set("harnesses")?,
+        notices,
         seeded: v.get("seeded")?.as_bool()?,
         dirty: false,
     })
@@ -427,5 +457,92 @@ mod tests {
         );
         assert!(!s.take_dirty());
         assert!(s.on_message(&ServerMsg::Show).is_empty());
+    }
+
+    #[test]
+    fn cards_notice_shows_once() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("desk").join("notified.json");
+        let mut s = NotifiedStore::default();
+        let off_msg = ServerMsg::Settings {
+            settings: rocky_proto::settings::Settings {
+                cards: false,
+                ..Default::default()
+            },
+        };
+        assert!(s.on_message(&off_msg).is_empty());
+        assert!(!s.take_dirty());
+
+        let snap_on = ServerMsg::Snapshot {
+            agents: Vec::new(),
+            aggregate: rocky_proto::pipe::Status::Idle,
+            health: rocky_proto::pipe::Health::default(),
+            settings: rocky_proto::settings::Settings::default(),
+            repo_pending: Vec::new(),
+        };
+        let out = s.on_message(&snap_on);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, NoticeKind::CardsNotice);
+        assert_eq!(out[0].session_id, "cards_notice_v1");
+        assert_eq!(out[0].repo, "Rocky");
+        assert_eq!(
+            out[0].agent,
+            Msg::Cards(crate::i18n::CardMsg::NoticeConsent)
+        );
+        assert_eq!(out[0].summary, None);
+        let (title, body_en) = crate::notify::notice_text(crate::i18n::UiLang::En, &out[0]);
+        assert_eq!(title, "Rocky");
+        assert_eq!(
+            body_en,
+            crate::i18n::card_text(
+                crate::i18n::UiLang::En,
+                &crate::i18n::CardMsg::NoticeConsent
+            )
+        );
+        let (_, body_id) = crate::notify::notice_text(crate::i18n::UiLang::Id, &out[0]);
+        assert_eq!(
+            body_id,
+            crate::i18n::card_text(
+                crate::i18n::UiLang::Id,
+                &crate::i18n::CardMsg::NoticeConsent
+            )
+        );
+        assert!(s.take_dirty());
+        assert!(!s.take_dirty());
+
+        assert!(s.on_message(&snap_on).is_empty());
+        assert!(
+            s.on_message(&ServerMsg::Settings {
+                settings: rocky_proto::settings::Settings::default(),
+            })
+            .is_empty()
+        );
+        assert!(!s.take_dirty());
+
+        s.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"cards_notice_v1\""), "{raw}");
+        let (mut reloaded, bad) = NotifiedStore::load(&path);
+        assert!(!bad);
+        assert!(reloaded.on_message(&snap_on).is_empty());
+        assert!(!reloaded.take_dirty());
+    }
+
+    #[test]
+    fn legacy_notified_without_notices_loads() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("notified.json");
+        std::fs::write(
+            &path,
+            r#"{"v":1,"repos":["repo:a"],"harnesses":["codex"],"seeded":true}"#,
+        )
+        .unwrap();
+        let (mut s, bad) = NotifiedStore::load(&path);
+        assert!(!bad);
+        let out = s.on_message(&ServerMsg::Settings {
+            settings: rocky_proto::settings::Settings::default(),
+        });
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].session_id, "cards_notice_v1");
     }
 }

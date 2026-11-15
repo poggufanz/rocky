@@ -3,7 +3,7 @@
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, Div, IntoElement, SharedString, Stateful, Window, div, rgb};
 
-use crate::consent_view::{ConsentModel, PlanRow, Stage, plan_failure_msg};
+use crate::consent_view::{ConsentModel, PlanRow, Stage, consent_notes, plan_failure_msg};
 use crate::i18n::{Msg, SetupMsg, UiLang, tr};
 use crate::settings_view::toggle_row;
 
@@ -123,36 +123,33 @@ pub fn consent_screen(
             done,
         )));
     }
-    root.child(div().text_xs().child(text(lang, SetupMsg::ConsentJsonNote)))
-        .child(
-            div()
-                .text_xs()
-                .child(text(lang, SetupMsg::ConsentBackupNote)),
-        )
-        .child(toggle_row(
-            SharedString::from("consent-autostart"),
-            text(lang, SetupMsg::ConsentAutostart),
-            model.autostart,
-            model.can_agree(),
-            toggle_autostart,
-        ))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(button(
-                    "consent-agree",
-                    text(lang, SetupMsg::ConsentAgree),
-                    model.can_agree(),
-                    agree,
-                ))
-                .child(button(
-                    "consent-later",
-                    text(lang, SetupMsg::ConsentLater),
-                    model.can_later(),
-                    later,
-                )),
-        )
+    for note in consent_notes(lang) {
+        root = root.child(div().text_xs().child(note));
+    }
+    root.child(toggle_row(
+        SharedString::from("consent-autostart"),
+        text(lang, SetupMsg::ConsentAutostart),
+        model.autostart,
+        model.can_agree(),
+        toggle_autostart,
+    ))
+    .child(
+        div()
+            .flex()
+            .gap_2()
+            .child(button(
+                "consent-agree",
+                text(lang, SetupMsg::ConsentAgree),
+                model.can_agree(),
+                agree,
+            ))
+            .child(button(
+                "consent-later",
+                text(lang, SetupMsg::ConsentLater),
+                model.can_later(),
+                later,
+            )),
+    )
 }
 
 /// The Settings row that opens the consent screen.

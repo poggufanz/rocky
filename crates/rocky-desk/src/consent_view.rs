@@ -5,7 +5,7 @@ use std::io;
 
 use rocky_proto::pipe::{ConsentState, SetupTarget, TargetHealth, TargetState};
 
-use crate::i18n::{Msg, SetupMsg};
+use crate::i18n::{CardMsg, Msg, SetupMsg, UiLang, tr};
 use crate::requests::{Outcome, RequestKind};
 use crate::settings_view::View;
 use crate::setup_lines::target_line;
@@ -101,6 +101,15 @@ pub fn plan_failure_msg(why: PlanFailure) -> SetupMsg {
         PlanFailure::TimedOut => SetupMsg::RequestTimedOut,
         PlanFailure::NotConnected => SetupMsg::ConsentNotConnected,
     }
+}
+
+/// Footer note lines shown below the plan rows on the consent screen.
+pub fn consent_notes(lang: UiLang) -> [String; 3] {
+    [
+        tr(lang, &Msg::Setup(SetupMsg::ConsentJsonNote)),
+        tr(lang, &Msg::Setup(SetupMsg::ConsentBackupNote)),
+        tr(lang, &Msg::Cards(CardMsg::NoticeConsent)),
+    ]
 }
 
 /// The failure line for one plan row, if its state is a failure. A missing or
@@ -671,5 +680,20 @@ mod tests {
         assert_eq!(calls, 1);
         assert!(err.is_some());
         assert_eq!(checked.stage, Stage::Applying);
+    }
+
+    #[test]
+    fn consent_view_has_cards_line() {
+        for lang in [crate::i18n::UiLang::En, crate::i18n::UiLang::Id] {
+            let lines = consent_notes(lang);
+            assert_eq!(
+                lines,
+                [
+                    crate::i18n::tr(lang, &Msg::Setup(SetupMsg::ConsentJsonNote)),
+                    crate::i18n::tr(lang, &Msg::Setup(SetupMsg::ConsentBackupNote)),
+                    crate::i18n::card_text(lang, &crate::i18n::CardMsg::NoticeConsent),
+                ]
+            );
+        }
     }
 }

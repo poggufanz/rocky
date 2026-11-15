@@ -9,7 +9,7 @@ use gpui::{App, ClickEvent, IntoElement, SharedString, Window, div, px, rgb};
 use rocky_proto::pipe::ClientMsg;
 use rocky_proto::settings::{Lang, Settings};
 
-use crate::i18n::Msg;
+use crate::i18n::{CardMsg, Msg};
 
 /// One boolean setting the panel can toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,16 +17,18 @@ pub enum SettingId {
     SubagentTree,
     History,
     ToolText,
+    Cards,
     NotifyNeedsYou,
     NotifyFailed,
     NotifyDone,
 }
 
 impl SettingId {
-    pub const ALL: [SettingId; 6] = [
+    pub const ALL: [SettingId; 7] = [
         SettingId::SubagentTree,
         SettingId::History,
         SettingId::ToolText,
+        SettingId::Cards,
         SettingId::NotifyNeedsYou,
         SettingId::NotifyFailed,
         SettingId::NotifyDone,
@@ -38,6 +40,7 @@ impl SettingId {
             SettingId::SubagentTree => "subagent_tree",
             SettingId::History => "history",
             SettingId::ToolText => "tool_text",
+            SettingId::Cards => "cards",
             SettingId::NotifyNeedsYou => "notify_needs_you",
             SettingId::NotifyFailed => "notify_failed",
             SettingId::NotifyDone => "notify_done",
@@ -50,6 +53,7 @@ impl SettingId {
             SettingId::SubagentTree => s.subagent_tree,
             SettingId::History => s.history,
             SettingId::ToolText => s.tool_text,
+            SettingId::Cards => s.cards,
             SettingId::NotifyNeedsYou => s.notify_needs_you,
             SettingId::NotifyFailed => s.notify_failed,
             SettingId::NotifyDone => s.notify_done,
@@ -62,6 +66,7 @@ impl SettingId {
             SettingId::SubagentTree => Msg::SettingSubagentTree,
             SettingId::History => Msg::SettingHistory,
             SettingId::ToolText => Msg::SettingToolText,
+            SettingId::Cards => Msg::Cards(CardMsg::SettingCards),
             SettingId::NotifyNeedsYou => Msg::SettingNotifyNeedsYou,
             SettingId::NotifyFailed => Msg::SettingNotifyFailed,
             SettingId::NotifyDone => Msg::SettingNotifyDone,
@@ -271,5 +276,42 @@ mod tests {
         assert!(!show_autostart_banner(true, Some(&unanswered)));
         assert!(!show_autostart_banner(false, Some(&answered)));
         assert!(!show_autostart_banner(false, None));
+    }
+
+    #[test]
+    fn cards_setting_round_trip() {
+        assert!(SettingId::ALL.contains(&SettingId::Cards));
+        assert_eq!(SettingId::Cards.wire_name(), "cards");
+        let on = Settings::default();
+        assert!(SettingId::Cards.get(&on));
+        let off = Settings {
+            cards: false,
+            ..Settings::default()
+        };
+        assert!(!SettingId::Cards.get(&off));
+        assert_eq!(
+            set_bool(9, SettingId::Cards, false),
+            ClientMsg::Set {
+                id: 9,
+                name: "cards".into(),
+                value: serde_json::json!(false),
+            }
+        );
+        assert_eq!(
+            set_bool(10, SettingId::Cards, true),
+            ClientMsg::Set {
+                id: 10,
+                name: "cards".into(),
+                value: serde_json::json!(true),
+            }
+        );
+        assert_eq!(
+            crate::i18n::tr(crate::i18n::UiLang::En, &SettingId::Cards.label()),
+            "Change cards"
+        );
+        assert_eq!(
+            crate::i18n::tr(crate::i18n::UiLang::Id, &SettingId::Cards.label()),
+            "Kartu perubahan"
+        );
     }
 }

@@ -128,6 +128,8 @@ pub enum Msg {
     NoticeDone,
     /// Setup guard and capture health copy.
     Setup(SetupMsg),
+    /// Change cards copy.
+    Cards(CardMsg),
 }
 
 #[cfg(test)]
@@ -255,6 +257,7 @@ fn samples() -> Vec<Msg> {
     ]
     .into_iter()
     .chain(setup_samples().into_iter().map(Msg::Setup))
+    .chain(card_samples().into_iter().map(Msg::Cards))
     .collect()
 }
 
@@ -347,6 +350,7 @@ pub fn en(m: &Msg) -> String {
         Msg::NoticeFailed { agent } => format!("{agent} failed"),
         Msg::NoticeDone => "Finished".to_string(),
         Msg::Setup(m) => setup_en(m),
+        Msg::Cards(m) => card_text(UiLang::En, m),
     }
 }
 
@@ -444,6 +448,7 @@ pub fn id(m: &Msg) -> String {
         Msg::NoticeFailed { agent } => format!("{agent} gagal"),
         Msg::NoticeDone => "Selesai".to_string(),
         Msg::Setup(m) => setup_id(m),
+        Msg::Cards(m) => card_text(UiLang::Id, m),
     }
 }
 

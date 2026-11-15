@@ -24,7 +24,9 @@ pub fn notice_text(lang: UiLang, n: &Notice) -> (String, String) {
         NoticeKind::Failed => Msg::NoticeFailed { agent },
         NoticeKind::Done => Msg::NoticeDone,
         // These carry their finished copy in `agent`.
-        NoticeKind::RepoConsent | NoticeKind::HarnessInstalled => n.agent.clone(),
+        NoticeKind::RepoConsent | NoticeKind::HarnessInstalled | NoticeKind::CardsNotice => {
+            n.agent.clone()
+        }
     };
     let title = if n.repo.is_empty() {
         tr(lang, &Msg::UnknownRepo)
@@ -50,6 +52,8 @@ pub enum NoticeKind {
     /// Rocky was installed into a harness after the first approval; not tied
     /// to a session.
     HarnessInstalled,
+    /// One-time notice that change cards are enabled and stored locally.
+    CardsNotice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,12 +80,19 @@ impl NotifyCtx<'_> {
         }
         match kind {
             // Gated only by the active window, never by a toggle.
-            NoticeKind::RepoConsent | NoticeKind::HarnessInstalled => true,
+            NoticeKind::RepoConsent | NoticeKind::HarnessInstalled | NoticeKind::CardsNotice => {
+                true
+            }
             NoticeKind::NeedsYou => self.settings.notify_needs_you,
             NoticeKind::Failed => self.settings.notify_failed,
             NoticeKind::Done => self.settings.notify_done,
         }
     }
+}
+
+/// Whether a one-time notice should display a desktop toast given window focus.
+pub fn show_once_toast(kind: NoticeKind, window_active: bool) -> bool {
+    !window_active || kind == NoticeKind::CardsNotice
 }
 
 #[derive(Debug, Default)]
@@ -655,5 +666,15 @@ mod tests {
             n.on_message(&up(&b), &table(&[&old, &b]), &ctx(&s)).len(),
             1
         );
+    }
+
+    #[test]
+    fn show_once_toast_rules() {
+        assert!(!show_once_toast(NoticeKind::RepoConsent, true));
+        assert!(show_once_toast(NoticeKind::RepoConsent, false));
+        assert!(!show_once_toast(NoticeKind::HarnessInstalled, true));
+        assert!(show_once_toast(NoticeKind::HarnessInstalled, false));
+        assert!(show_once_toast(NoticeKind::CardsNotice, true));
+        assert!(show_once_toast(NoticeKind::CardsNotice, false));
     }
 }
