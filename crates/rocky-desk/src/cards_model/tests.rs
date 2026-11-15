@@ -352,7 +352,8 @@ fn three_edit_rows_then_more_counts_more_count() {
     model.on_cards(1, vec![card], None);
 
     let id_rows = model.rows(UiLang::Id);
-    assert_eq!(id_rows[0].meta, "desk \u{00b7} 8 edit \u{00b7} 1 penting");
+    assert_eq!(id_rows[0].meta, "desk \u{00b7} 8 edit");
+    assert_eq!(id_rows[0].meta_high.as_deref(), Some("1 penting"));
     assert_eq!(id_rows[0].edits.len(), 3);
     assert_eq!(id_rows[0].edits[0].file, "file_1.rs");
     assert_eq!(id_rows[0].edits[1].file, "file_2.rs");
@@ -362,10 +363,8 @@ fn three_edit_rows_then_more_counts_more_count() {
     assert_eq!(id_rows[0].more.as_deref(), Some("+5 edit lagi"));
 
     let en_rows = model.rows(UiLang::En);
-    assert_eq!(
-        en_rows[0].meta,
-        "desk \u{00b7} 8 edits \u{00b7} 1 important"
-    );
+    assert_eq!(en_rows[0].meta, "desk \u{00b7} 8 edits");
+    assert_eq!(en_rows[0].meta_high.as_deref(), Some("1 important"));
     assert_eq!(en_rows[0].more.as_deref(), Some("+5 more edits"));
 }
 
@@ -749,6 +748,7 @@ fn symbol_kinds_single_format_only_and_windows_paths() {
 
     let rows = model.rows(UiLang::En);
     assert_eq!(rows[0].meta, "MyApp \u{00b7} 4 edits");
+    assert_eq!(rows[0].meta_high, None);
     // A single format_only block collapses into the summary row.
     assert_eq!(rows[0].edits[0].symbol, None);
     assert_eq!(rows[0].edits[0].file, "");
@@ -778,4 +778,62 @@ fn symbol_kinds_single_format_only_and_windows_paths() {
     assert_eq!(refreshed.len(), 1);
     assert_eq!(refreshed[0].card_id, "c2");
     assert_eq!(refreshed[0].edits[0].symbol.as_deref(), Some("save()"));
+}
+
+#[test]
+fn meta_splits_high_importance_part_cleanly() {
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+
+    let mut with_high = sample_card("c-high", 2_000, Some(3_000));
+    with_high.main_root = Some("/work/web-shop".to_string());
+    let mut b1 = sample_block(1, "src/cart.ts", vec![Label::SymbolAdded {}]);
+    b1.importance = Importance::Medium;
+    let mut b2 = sample_block(
+        2,
+        "package.json",
+        vec![Label::DepAdded {
+            name: "dinero.js".to_string(),
+            version: "^1.9.1".to_string(),
+        }],
+    );
+    b2.importance = Importance::High;
+    let mut b3 = sample_block(
+        3,
+        "src/cart.test.ts",
+        vec![Label::TestSkipped {
+            name: "applies rate".to_string(),
+        }],
+    );
+    b3.importance = Importance::High;
+    with_high.blocks = vec![b1, b2, b3];
+
+    let mut without_repo = sample_card("c-norepo", 1_000, Some(2_000));
+    without_repo.main_root = None;
+    without_repo.root = "C:\\".to_string();
+    let mut b_only_high = sample_block(1, "auth.ts", vec![Label::BodyChanged {}]);
+    b_only_high.importance = Importance::High;
+    without_repo.blocks = vec![b_only_high];
+
+    let mut no_high_blocks = sample_card("c-none", 500, Some(1_000));
+    no_high_blocks.importance = Importance::High;
+    no_high_blocks.blocks = vec![sample_block(1, "state.rs", vec![Label::GuardAdded {}])];
+
+    model.on_cards(1, vec![with_high, without_repo, no_high_blocks], None);
+
+    let id_rows = model.rows(UiLang::Id);
+    assert_eq!(id_rows[0].meta, "web-shop \u{00b7} 3 edit");
+    assert_eq!(id_rows[0].meta_high.as_deref(), Some("2 penting"));
+    assert_eq!(id_rows[1].meta, "1 edit");
+    assert_eq!(id_rows[1].meta_high.as_deref(), Some("1 penting"));
+    assert_eq!(id_rows[2].meta, "rocky \u{00b7} 1 edit");
+    assert_eq!(id_rows[2].meta_high, None);
+
+    let en_rows = model.rows(UiLang::En);
+    assert_eq!(en_rows[0].meta, "web-shop \u{00b7} 3 edits");
+    assert_eq!(en_rows[0].meta_high.as_deref(), Some("2 important"));
+    assert_eq!(en_rows[1].meta, "1 edit");
+    assert_eq!(en_rows[1].meta_high.as_deref(), Some("1 important"));
+    assert_eq!(en_rows[2].meta, "rocky \u{00b7} 1 edit");
+    assert_eq!(en_rows[2].meta_high, None);
 }

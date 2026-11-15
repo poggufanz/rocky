@@ -1,21 +1,31 @@
 //! GPUI tooltip view and shared monospace font / snippet line helpers.
 
 use gpui::prelude::*;
-use gpui::{AnyView, App, Context, Div, SharedString, Stateful, Window, div, px, rgb};
+use gpui::{AnyView, App, Context, Div, FontWeight, SharedString, Stateful, Window, div, px, rgb};
 
 use crate::cards_model::TooltipLine;
 
-pub(crate) const TEXT_DARK: u32 = 0x1C1C1C;
-pub(crate) const TEXT_MUTED: u32 = 0x6B6B6B;
-pub(crate) const TEXT_DIM: u32 = 0x8A8A8A;
+pub(crate) const TEXT_DARK: u32 = 0x1C1917;
+pub(crate) const TEXT_MUTED: u32 = 0x78716C;
+pub(crate) const TEXT_DIM: u32 = 0xA8A29E;
 pub(crate) const CARD_BG: u32 = 0xFFFFFF;
-pub(crate) const SURFACE_SUBTLE: u32 = 0xEDEDEC;
-pub(crate) const BORDER_LIGHT: u32 = 0xD4D4D4;
-pub(crate) const BORDER_SUBTLE: u32 = 0xE5E5E3;
-pub(crate) const DIFF_ADD_BG: u32 = 0xEAF6ED;
+pub(crate) const SURFACE_SUBTLE: u32 = 0xF5F5F4;
+pub(crate) const ROW_HOVER_BG: u32 = 0xFAFAF9;
+pub(crate) const BORDER_LIGHT: u32 = 0xD6D3D1;
+pub(crate) const BORDER_SUBTLE: u32 = 0xE7E5E4;
+pub(crate) const CHIP_BG: u32 = 0xF0EFED;
+pub(crate) const CHIP_FG: u32 = 0x44403C;
+pub(crate) const CHIP_HIGH_BG: u32 = 0xFDE8E8;
+pub(crate) const CHIP_HIGH_FG: u32 = 0xDC2626;
+pub(crate) const DIFF_ADD_BG: u32 = 0xE8F6EC;
 pub(crate) const DIFF_ADD_FG: u32 = 0x166534;
-pub(crate) const DIFF_DEL_BG: u32 = 0xFCEEEE;
-pub(crate) const DIFF_DEL_FG: u32 = 0x991B1B;
+pub(crate) const DIFF_DEL_BG: u32 = 0xFDECEC;
+pub(crate) const DIFF_DEL_FG: u32 = 0xB42318;
+pub(crate) const LINK: u32 = 0x2563EB;
+/// Success green token reserved for passed status indicators.
+#[allow(dead_code)]
+pub(crate) const OK: u32 = 0x16A34A;
+pub(crate) const MATCH_BG: u32 = 0xEEF4FC;
 
 /// Monospace family name for diffs, code snippets, symbols, and timeline numbers.
 pub(crate) fn mono_font() -> &'static str {
@@ -103,19 +113,27 @@ pub(crate) fn back_button<T: 'static>(
 
 pub(crate) fn chip_badge(text: String, high: bool) -> Div {
     let (bg, fg) = if high {
-        (DIFF_DEL_BG, DIFF_DEL_FG)
+        (CHIP_HIGH_BG, CHIP_HIGH_FG)
     } else {
-        (SURFACE_SUBTLE, TEXT_MUTED)
+        (CHIP_BG, CHIP_FG)
     };
-    div()
-        .text_xs()
-        .px_1()
-        .rounded_sm()
+    let mut badge = div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .text_size(px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .py(px(2.0))
+        .px(px(6.0))
+        .rounded(px(4.0))
         .whitespace_nowrap()
         .flex_shrink_0()
         .bg(rgb(bg))
-        .text_color(rgb(fg))
-        .child(text)
+        .text_color(rgb(fg));
+    if high {
+        badge = badge.child(div().text_size(px(8.0)).child("\u{25b2}"));
+    }
+    badge.child(text)
 }
 
 /// Dim monospace sequence number shown at the start of edit rows and detail blocks.

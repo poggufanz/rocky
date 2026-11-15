@@ -1,4 +1,4 @@
-use rocky_proto::cards::{BashInfo, BlockSymbol, BlockVia, Label, Quote, SymbolKind};
+use rocky_proto::cards::{BashInfo, BlockSymbol, BlockVia, Importance, Label, Quote, SymbolKind};
 use rocky_proto::pipe::ClientMsg;
 
 use super::tests::{sample_block, sample_card};
@@ -274,6 +274,7 @@ fn single_line_fields_split_cr_and_replace_control_chars() {
         }],
     );
     blk2.via = BlockVia::Bash;
+    blk2.importance = Importance::High;
     blk2.bash = Some(BashInfo {
         cmd: "echo\thi\r\nls\x08".to_string(),
         candidates: 2,
@@ -299,6 +300,7 @@ fn single_line_fields_split_cr_and_replace_control_chars() {
     let r1 = &rows[0];
     assert_eq!(r1.title, "Ex plore  \u{203a} left");
     assert_eq!(r1.meta, "my repo \u{00b7} 2 edits");
+    assert_eq!(r1.meta_high.as_deref(), Some("1 important"));
     assert_eq!(r1.edits[0].file, "my file.rs");
     assert_eq!(r1.edits[0].symbol.as_deref(), Some("fn name ()"));
     assert_eq!(r1.edits[0].chip, "calls foo bar baz qux ");
@@ -315,6 +317,9 @@ fn single_line_fields_split_cr_and_replace_control_chars() {
         assert_no_control_chars("title", &row.title);
         assert_no_control_chars("time", &row.time);
         assert_no_control_chars("meta", &row.meta);
+        if let Some(meta_high) = &row.meta_high {
+            assert_no_control_chars("meta_high", meta_high);
+        }
         if let Some(more) = &row.more {
             assert_no_control_chars("more", more);
         }

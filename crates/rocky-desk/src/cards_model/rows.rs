@@ -36,7 +36,7 @@ pub(super) fn build_card_row(
     let title = cut_with_ellipsis(&raw_title, TITLE_MAX_CHARS);
 
     let time = sanitize_single_line(&local_hhmm(card_sort_key(card)));
-    let meta = build_meta(card, lang);
+    let (meta, meta_high) = build_meta(card, lang);
     let (edits, more) = build_edit_rows(card, query_lower, lang);
 
     CardRow {
@@ -45,6 +45,7 @@ pub(super) fn build_card_row(
         title,
         time,
         meta,
+        meta_high,
         edits,
         more,
     }
@@ -79,7 +80,7 @@ pub(crate) fn sanitize_single_line(text: &str) -> String {
     out
 }
 
-fn build_meta(card: &Card, lang: UiLang) -> String {
+fn build_meta(card: &Card, lang: UiLang) -> (String, Option<String>) {
     let mut parts = Vec::new();
     if let Some(name) = repo_name(card) {
         parts.push(name);
@@ -95,13 +96,9 @@ fn build_meta(card: &Card, lang: UiLang) -> String {
         .iter()
         .filter(|b| b.importance == Importance::High)
         .count();
-    if high_count > 0 {
-        parts.push(sanitize_single_line(&card_text(
-            lang,
-            &CardMsg::MetaImportant { n: high_count },
-        )));
-    }
-    parts.join(" \u{00b7} ")
+    let meta_high = (high_count > 0)
+        .then(|| sanitize_single_line(&card_text(lang, &CardMsg::MetaImportant { n: high_count })));
+    (parts.join(" \u{00b7} "), meta_high)
 }
 
 fn build_edit_rows(card: &Card, query_lower: &str, lang: UiLang) -> (Vec<EditRow>, Option<String>) {

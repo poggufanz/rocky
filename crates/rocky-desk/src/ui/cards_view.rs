@@ -2,22 +2,17 @@
 
 use gpui::prelude::*;
 use gpui::{
-    Context, Div, FocusHandle, FontWeight, KeyDownEvent, SharedString, Stateful, Window, div, rgb,
+    Context, Div, FocusHandle, FontWeight, HighlightStyle, KeyDownEvent, SharedString, Stateful,
+    StyledText, Window, div, px, rgb,
 };
 
 use crate::cards_model::{BashRow, CardRow, CardsModel, EditRow};
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::search_input::SearchInput;
 use crate::ui::tooltip::{
-    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, SURFACE_SUBTLE, TEXT_DARK, TEXT_DIM, TEXT_MUTED,
-    chip_badge, mono_font, seq_badge, tooltip_view,
+    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, CHIP_HIGH_FG, LINK, MATCH_BG, ROW_HOVER_BG,
+    SURFACE_SUBTLE, TEXT_DARK, TEXT_DIM, TEXT_MUTED, chip_badge, mono_font, tooltip_view,
 };
-
-const MATCH_BG: u32 = 0xEEF4FC;
-const HIGH_MARK_COLOR: u32 = 0xD92B2B;
-const FOCUS_BORDER: u32 = 0x2B7DD9;
-const BTN_ACTIVE_BG: u32 = 0xD4D4D4;
-const BTN_DISABLED_BG: u32 = 0xEDEDEC;
 
 /// User interactions emitted by the cards list, detail, and diff views.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,17 +47,19 @@ pub fn cards_section<T: 'static>(
     let mut section = div()
         .flex()
         .flex_col()
-        .gap_2()
         .pt_2()
         .border_t_1()
         .border_color(rgb(BORDER_SUBTLE));
 
     section = section.child(
         div()
-            .text_xs()
+            .mt(px(4.0))
+            .mb(px(6.0))
+            .mx(px(2.0))
+            .text_size(px(11.0))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_MUTED))
-            .child(card_text(lang, &CardMsg::SectionDone)),
+            .text_color(rgb(TEXT_DIM))
+            .child(card_text(lang, &CardMsg::SectionDone).to_uppercase()),
     );
 
     section = section.child(search_box(
@@ -86,9 +83,11 @@ pub fn cards_section<T: 'static>(
                 .child(card_text(lang, &copy)),
         );
     } else {
+        let mut list = div().flex().flex_col().gap(px(8.0));
         for row in rows {
-            section = section.child(card_item(row, cx, on_action));
+            list = list.child(card_item(row, cx, on_action));
         }
+        section = section.child(list);
     }
 
     if cards.has_more() {
@@ -103,24 +102,19 @@ pub fn cards_section<T: 'static>(
         );
         let mut btn = div()
             .id(SharedString::from("cards-load-more"))
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .text_xs()
-            .bg(rgb(if enabled {
-                BTN_ACTIVE_BG
-            } else {
-                BTN_DISABLED_BG
-            }))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(if enabled { LINK } else { TEXT_DIM }))
             .child(label);
         if enabled {
             btn = btn
                 .cursor_pointer()
+                .hover(|s| s.underline())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     on_action(this, CardAction::LoadMore, window, cx);
                 }));
         }
-        section = section.child(div().flex().child(btn));
+        section = section.child(div().flex().mt(px(8.0)).child(btn));
     }
 
     section
@@ -144,13 +138,14 @@ fn search_box<T: 'static>(
     div()
         .id(SharedString::from("cards-search"))
         .track_focus(search_focus)
-        .px_2()
-        .py_1()
-        .rounded_sm()
+        .py(px(6.0))
+        .px(px(10.0))
+        .mb(px(8.0))
+        .rounded(px(8.0))
         .bg(rgb(CARD_BG))
         .border_1()
-        .border_color(rgb(if focused { FOCUS_BORDER } else { BORDER_LIGHT }))
-        .text_xs()
+        .border_color(rgb(if focused { LINK } else { BORDER_SUBTLE }))
+        .text_size(px(12.5))
         .cursor_text()
         .on_click(cx.listener(move |this, _, window, cx| {
             on_action(this, CardAction::FocusSearch, window, cx);
@@ -173,14 +168,13 @@ fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAct
         .id(SharedString::from(format!("card:{}", row.card_id)))
         .flex()
         .flex_col()
-        .gap_1()
-        .p_2()
-        .rounded_sm()
+        .rounded(px(10.0))
+        .overflow_hidden()
         .bg(rgb(CARD_BG))
         .border_1()
         .border_color(rgb(BORDER_SUBTLE))
         .cursor_pointer()
-        .hover(|s| s.border_color(rgb(BORDER_LIGHT)))
+        .hover(|s| s.border_color(rgb(BORDER_LIGHT)).shadow_sm())
         .on_click(cx.listener(move |this, _, window, cx| {
             on_action(this, CardAction::OpenDetail(card_id.clone()), window, cx);
         }));
@@ -188,27 +182,38 @@ fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAct
     card = card.child(
         div()
             .flex()
-            .justify_between()
-            .items_center()
-            .gap_2()
+            .flex_col()
+            .gap(px(2.0))
+            .pt(px(10.0))
+            .px(px(12.0))
+            .pb(px(8.0))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT_DARK))
-                    .child(row.title),
+                    .flex()
+                    .justify_between()
+                    .items_start()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT_DARK))
+                            .child(row.title),
+                    )
+                    .child(
+                        div()
+                            .pt(px(2.0))
+                            .text_size(px(12.0))
+                            .text_color(rgb(TEXT_DIM))
+                            .whitespace_nowrap()
+                            .flex_shrink_0()
+                            .child(row.time),
+                    ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(TEXT_DIM))
-                    .whitespace_nowrap()
-                    .flex_shrink_0()
-                    .child(row.time),
-            ),
+            .child(card_meta_view(row.meta, row.meta_high)),
     );
 
     for (idx, edit) in row.edits.iter().enumerate() {
@@ -218,29 +223,50 @@ fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAct
     if let Some(more) = row.more {
         card = card.child(
             div()
-                .text_xs()
-                .text_color(rgb(TEXT_DIM))
+                .border_t_1()
+                .border_color(rgb(BORDER_SUBTLE))
+                .pt(px(6.0))
+                .px(px(12.0))
+                .pb(px(8.0))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(LINK))
                 .truncate()
                 .child(more),
         );
     }
 
-    card = card.child(
-        div()
-            .text_xs()
-            .text_color(rgb(TEXT_MUTED))
-            .truncate()
-            .child(row.meta),
-    );
-
     if row.indent {
         div()
-            .pl_3()
+            .pl(px(12.0))
             .border_l_2()
-            .border_color(rgb(BORDER_LIGHT))
+            .border_color(rgb(BORDER_SUBTLE))
             .child(card)
     } else {
         div().child(card)
+    }
+}
+
+fn card_meta_view(meta: String, meta_high: Option<String>) -> Div {
+    let container = div()
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.0))
+        .text_color(rgb(TEXT_MUTED));
+    match meta_high {
+        Some(high) => {
+            let sep = " \u{00b7} ";
+            let full = format!("{meta}{sep}{high}");
+            let start = meta.len() + sep.len();
+            let end = full.len();
+            let style = HighlightStyle {
+                color: Some(rgb(CHIP_HIGH_FG).into()),
+                font_weight: Some(FontWeight::SEMIBOLD),
+                ..Default::default()
+            };
+            container.child(StyledText::new(full).with_highlights([(start..end, style)]))
+        }
+        None => container.child(meta),
     }
 }
 
@@ -251,16 +277,30 @@ fn edit_row_view(card_id: &str, idx: usize, edit: &EditRow) -> Stateful<Div> {
             card_id, edit.seq
         )))
         .flex()
-        .justify_between()
         .items_center()
-        .gap_2()
-        .w_full();
+        .gap(px(6.0))
+        .w_full()
+        .py(px(5.0))
+        .px(px(12.0))
+        .border_t_1()
+        .border_color(rgb(BORDER_SUBTLE));
 
     if edit.matched {
-        row = row.bg(rgb(MATCH_BG)).rounded_sm().px_1();
+        row = row.bg(rgb(MATCH_BG));
+    } else {
+        row = row.hover(|s| s.bg(rgb(ROW_HOVER_BG)));
     }
 
-    row = row.child(seq_badge(edit.seq));
+    row = row.child(
+        div()
+            .w(px(18.0))
+            .flex_shrink_0()
+            .text_size(px(11.0))
+            .font_family(mono_font())
+            .text_color(rgb(TEXT_DIM))
+            .whitespace_nowrap()
+            .child(edit.seq.to_string()),
+    );
 
     let left = match &edit.bash {
         Some(bash) => bash_left(bash),
@@ -281,38 +321,28 @@ fn edit_row_view(card_id: &str, idx: usize, edit: &EditRow) -> Stateful<Div> {
 }
 
 fn file_left(edit: &EditRow) -> Div {
-    let mut left = div().flex().flex_1().min_w_0().items_center().gap_1();
-    if edit.high {
-        left = left.child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgb(HIGH_MARK_COLOR))
-                .flex_shrink_0()
-                .child("\u{25b2}"),
-        );
+    let container = div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.5))
+        .font_family(mono_font())
+        .text_color(rgb(TEXT_DARK));
+
+    match &edit.symbol {
+        Some(sym) if !sym.is_empty() => {
+            let sep = " \u{203a} ";
+            let full = format!("{}{sep}{sym}", edit.file);
+            let start = edit.file.len();
+            let end = full.len();
+            let style = HighlightStyle {
+                color: Some(rgb(TEXT_MUTED).into()),
+                ..Default::default()
+            };
+            container.child(StyledText::new(full).with_highlights([(start..end, style)]))
+        }
+        _ => container.child(edit.file.clone()),
     }
-    left = left.child(
-        div()
-            .min_w_0()
-            .truncate()
-            .text_xs()
-            .font_family(mono_font())
-            .text_color(rgb(TEXT_DARK))
-            .child(edit.file.clone()),
-    );
-    if let Some(sym) = &edit.symbol {
-        left = left.child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_xs()
-                .font_family(mono_font())
-                .text_color(rgb(TEXT_MUTED))
-                .child(sym.clone()),
-        );
-    }
-    left
 }
 
 fn bash_left(bash: &BashRow) -> Div {
@@ -322,10 +352,10 @@ fn bash_left(bash: &BashRow) -> Div {
         .min_w_0()
         .items_center()
         .gap_1()
-        .overflow_hidden();
+        .overflow_hidden()
+        .text_size(px(12.5));
     left = left.child(
         div()
-            .text_xs()
             .text_color(rgb(TEXT_MUTED))
             .whitespace_nowrap()
             .flex_shrink_0()
@@ -335,18 +365,16 @@ fn bash_left(bash: &BashRow) -> Div {
         div()
             .min_w_0()
             .truncate()
-            .text_xs()
             .font_family(mono_font())
             .bg(rgb(SURFACE_SUBTLE))
-            .px_1()
-            .rounded_sm()
+            .px(px(4.0))
+            .rounded(px(4.0))
             .text_color(rgb(TEXT_DARK))
             .child(bash.cmd.clone()),
     );
     if !bash.after.is_empty() {
         left = left.child(
             div()
-                .text_xs()
                 .text_color(rgb(TEXT_MUTED))
                 .whitespace_nowrap()
                 .child(bash.after.clone()),
@@ -355,7 +383,6 @@ fn bash_left(bash: &BashRow) -> Div {
     if let Some(uncertain) = &bash.uncertain {
         left = left.child(
             div()
-                .text_xs()
                 .text_color(rgb(TEXT_DIM))
                 .whitespace_nowrap()
                 .child(uncertain.clone()),

@@ -70,6 +70,7 @@ pub struct CardRow {
     pub title: String,
     pub time: String,
     pub meta: String,
+    pub meta_high: Option<String>,
     pub edits: Vec<EditRow>,
     pub more: Option<String>,
 }
