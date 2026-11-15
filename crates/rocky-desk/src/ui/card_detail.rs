@@ -8,6 +8,7 @@ use crate::card_detail_model::{
 };
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::ui::cards_view::{CardAction, OnCardAction};
+use crate::ui::motion;
 use crate::ui::tooltip::{
     BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, DIFF_DEL_FG, DiffLineTone, LINK, OK, TEXT_DARK, TEXT_DIM,
     TEXT_MUTED, back_button, card_container, card_header, chip_badge, code_block_container,
@@ -20,7 +21,8 @@ pub fn card_detail_view<T: 'static>(
     detail: Option<&DetailModel>,
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
-) -> Div {
+) -> impl IntoElement {
+    let card_id = detail.map(DetailModel::card_id).unwrap_or("none");
     let mut out = div().flex().flex_col().gap_2();
 
     out = out.child(back_button(
@@ -32,12 +34,14 @@ pub fn card_detail_view<T: 'static>(
 
     match detail.map(DetailModel::state) {
         None | Some(DetailState::Loading) => {
-            out = out.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(TEXT_DIM))
-                    .child(card_text(lang, &CardMsg::Loading)),
-            );
+            let loading = div()
+                .text_sm()
+                .text_color(rgb(TEXT_DIM))
+                .child(card_text(lang, &CardMsg::Loading));
+            out = out.child(motion::pulse(
+                loading,
+                SharedString::from(format!("detail-loading:{card_id}")),
+            ));
         }
         Some(DetailState::NotFound) => {
             out = out.child(
@@ -48,15 +52,16 @@ pub fn card_detail_view<T: 'static>(
             );
         }
         Some(DetailState::Ready(view)) => {
-            out = out.child(ready_card(lang, view, cx, on_action));
+            out = out.child(ready_card(lang, card_id, view, cx, on_action));
         }
     }
 
-    out
+    motion::slide_from_right(out, SharedString::from(format!("detail:{card_id}")))
 }
 
 fn ready_card<T: 'static>(
     lang: UiLang,
+    card_id: &str,
     view: &DetailView,
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
@@ -86,6 +91,7 @@ fn ready_card<T: 'static>(
     if !view.timeline.is_empty() || view.timeline_more.is_some() {
         card = card.child(timeline_section(
             lang,
+            card_id,
             &view.timeline,
             view.timeline_more.as_deref(),
         ));
@@ -243,7 +249,7 @@ fn snippet_line_view(line: &CodeLine) -> Div {
     diff_code_line(tone, text).min_w_0().truncate()
 }
 
-fn timeline_section(lang: UiLang, steps: &[Step], more: Option<&str>) -> Div {
+fn timeline_section(lang: UiLang, card_id: &str, steps: &[Step], more: Option<&str>) -> Div {
     let mut section = div()
         .flex()
         .flex_col()
@@ -265,31 +271,38 @@ fn timeline_section(lang: UiLang, steps: &[Step], more: Option<&str>) -> Div {
     let last_idx = steps.len().saturating_sub(1);
     for (idx, step) in steps.iter().enumerate() {
         let has_line = idx < last_idx || more.is_some();
-        section = section.child(timeline_step_row(step, has_line));
+        section = section.child(motion::timeline_enter(
+            timeline_step_row(step, has_line),
+            SharedString::from(format!("timeline-step:{card_id}:{idx}")),
+            idx,
+        ));
     }
 
     if let Some(more_text) = more {
-        section = section.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(16.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .justify_center()
-                        .items_center()
-                        .child(div().w(px(4.0)).h(px(4.0)).rounded_full().bg(rgb(TEXT_DIM))),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(TEXT_DIM))
-                        .child(more_text.to_string()),
-                ),
-        );
+        let more_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(16.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .child(div().w(px(4.0)).h(px(4.0)).rounded_full().bg(rgb(TEXT_DIM))),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(TEXT_DIM))
+                    .child(more_text.to_string()),
+            );
+        section = section.child(motion::timeline_enter(
+            more_row,
+            SharedString::from(format!("timeline-more:{card_id}")),
+            steps.len(),
+        ));
     }
 
     section

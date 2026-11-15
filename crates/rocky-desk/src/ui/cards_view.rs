@@ -9,6 +9,7 @@ use gpui::{
 use crate::cards_model::{BashRow, CardRow, CardsModel, EditRow};
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::search_input::SearchInput;
+use crate::ui::motion;
 use crate::ui::tooltip::{
     BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, CHIP_HIGH_FG, LINK, MATCH_BG, ROW_HOVER_BG,
     SURFACE_SUBTLE, TEXT_DARK, TEXT_DIM, TEXT_MUTED, card_container, card_header, chip_badge,
@@ -85,8 +86,8 @@ pub fn cards_section<T: 'static>(
         );
     } else {
         let mut list = div().flex().flex_col().gap(px(8.0));
-        for row in rows {
-            list = list.child(card_item(row, cx, on_action));
+        for (idx, row) in rows.into_iter().enumerate() {
+            list = list.child(card_item(row, idx, cx, on_action));
         }
         section = section.child(list);
     }
@@ -101,21 +102,23 @@ pub fn cards_section<T: 'static>(
                 &CardMsg::Loading
             },
         );
-        let mut btn = div()
+        let btn = div()
             .id(SharedString::from("cards-load-more"))
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(if enabled { LINK } else { TEXT_DIM }))
             .child(label);
-        if enabled {
-            btn = btn
-                .cursor_pointer()
+        let row_btn = if enabled {
+            btn.cursor_pointer()
                 .hover(|s| s.underline())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     on_action(this, CardAction::LoadMore, window, cx);
-                }));
-        }
-        section = section.child(div().flex().mt(px(8.0)).child(btn));
+                }))
+                .into_any_element()
+        } else {
+            motion::pulse(btn, SharedString::from("cards-load-more-pulse")).into_any_element()
+        };
+        section = section.child(div().flex().mt(px(8.0)).child(row_btn));
     }
 
     section
@@ -163,7 +166,13 @@ fn search_box<T: 'static>(
         )
 }
 
-fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAction<T>) -> Div {
+fn card_item<T: 'static>(
+    row: CardRow,
+    index: usize,
+    cx: &mut Context<T>,
+    on_action: OnCardAction<T>,
+) -> impl IntoElement {
+    let anim_id = SharedString::from(format!("card-enter:{}", row.card_id));
     let card_id = row.card_id.clone();
     let mut card = card_container()
         .id(SharedString::from(format!("card:{}", row.card_id)))
@@ -224,7 +233,7 @@ fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAct
         );
     }
 
-    if row.indent {
+    let wrapper = if row.indent {
         div()
             .pl(px(12.0))
             .border_l_2()
@@ -232,7 +241,8 @@ fn card_item<T: 'static>(row: CardRow, cx: &mut Context<T>, on_action: OnCardAct
             .child(card)
     } else {
         div().child(card)
-    }
+    };
+    motion::enter(wrapper, anim_id, index)
 }
 
 fn card_meta_view(meta: String, meta_high: Option<String>) -> Div {

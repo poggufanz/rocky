@@ -273,9 +273,19 @@ impl DiffModel {
         &self.state
     }
 
+    /// Identifier of the card targeted by this diff model.
+    pub fn card_id(&self) -> &str {
+        &self.card_id
+    }
+
     /// Block sequence number targeted by this diff model.
     pub fn seq(&self) -> u32 {
         self.seq
+    }
+
+    /// Zero-based page index currently requested or displayed by this diff model.
+    pub fn page(&self) -> u32 {
+        self.page
     }
 }
 

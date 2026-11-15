@@ -751,7 +751,9 @@ fn diff_pages_navigate_and_missing() {
             page: 0,
         }
     );
+    assert_eq!(model.card_id(), "card-1");
     assert_eq!(model.seq(), 3);
+    assert_eq!(model.page(), 0);
     assert_eq!(model.state(), &DiffState::Loading);
 
     // Cannot navigate before page count is known.
@@ -784,6 +786,7 @@ fn diff_pages_navigate_and_missing() {
             page: 1,
         })
     );
+    assert_eq!(model.page(), 1);
     assert_eq!(model.state(), &DiffState::Loading);
 
     let page1 = vec![DiffLine {

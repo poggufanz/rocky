@@ -7,6 +7,7 @@ use rocky_proto::pipe::{DiffLine, DiffLineKind};
 use crate::card_detail_model::{BlockView, DetailModel, DetailState, DiffModel, DiffState};
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::ui::cards_view::{CardAction, OnCardAction};
+use crate::ui::motion;
 use crate::ui::tooltip::{
     BORDER_SUBTLE, DiffLineTone, LINK, ROW_HOVER_BG, TEXT_DIM, TEXT_MUTED, back_button,
     card_container, card_header, code_block_container, diff_code_line, path_symbol_text,
@@ -19,7 +20,10 @@ pub fn block_diff_view<T: 'static>(
     diff: Option<&DiffModel>,
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
-) -> Div {
+) -> impl IntoElement {
+    let (card_id, seq, page) = diff
+        .map(|d| (d.card_id(), d.seq(), d.page()))
+        .unwrap_or(("none", 0, 0));
     let mut out = div().flex().flex_col().gap_2();
 
     out = out.child(back_button(
@@ -31,12 +35,14 @@ pub fn block_diff_view<T: 'static>(
 
     match diff.map(DiffModel::state) {
         None | Some(DiffState::Loading) => {
-            out = out.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(TEXT_DIM))
-                    .child(card_text(lang, &CardMsg::Loading)),
-            );
+            let loading = div()
+                .text_sm()
+                .text_color(rgb(TEXT_DIM))
+                .child(card_text(lang, &CardMsg::Loading));
+            out = out.child(motion::pulse(
+                loading,
+                SharedString::from(format!("diff-loading:{card_id}:{seq}:{page}")),
+            ));
         }
         Some(DiffState::Missing) => {
             out = out.child(
@@ -61,7 +67,10 @@ pub fn block_diff_view<T: 'static>(
         }
     }
 
-    out
+    motion::slide_from_right(
+        out,
+        SharedString::from(format!("diff:{card_id}:{seq}:{page}")),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
