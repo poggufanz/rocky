@@ -371,7 +371,7 @@ fn root_last_segment(root: &str) -> Option<String> {
     Some(sanitize_single_line(seg))
 }
 
-fn last_path_segment(path: &str) -> String {
+pub(crate) fn last_path_segment(path: &str) -> String {
     let clean = sanitize_single_line(path);
     clean
         .split(['/', '\\'])

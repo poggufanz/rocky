@@ -159,6 +159,10 @@ fn single_line_fields_sanitize_controls_while_detail_keeps_prompt_and_quote() {
     }
     assert_eq!(view.timeline[0].title, "echo hi ls -la");
     assert_no_control_chars("step.title", &view.timeline[0].title);
+    assert_eq!(
+        view.timeline[0].subs[0].1,
+        "my file.rs:10 \u{00b7} +3 \u{2212}1"
+    );
     for (chip, fact) in &view.timeline[0].subs {
         assert_no_control_chars("step.sub.chip", chip);
         assert_no_control_chars("step.sub.fact", fact);

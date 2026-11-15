@@ -505,7 +505,10 @@ fn timeline_steps_with_subs_and_facts() {
             title: "src/auth.rs \u{203a} login".to_string(),
             dur: "1m 5s".to_string(),
             subs: vec![
-                ("guard baru".to_string(), "src/auth.rs:42".to_string()),
+                (
+                    "guard baru".to_string(),
+                    "auth.rs:42 \u{00b7} +3 \u{2212}1".to_string(),
+                ),
                 ("return diubah".to_string(), "+3 \u{2212}1".to_string()),
                 ("isi diubah".to_string(), String::new()),
             ],
@@ -520,11 +523,115 @@ fn timeline_steps_with_subs_and_facts() {
     assert_eq!(
         en_view.timeline[1].subs,
         vec![
-            ("new guard".to_string(), "src/auth.rs:42".to_string()),
+            (
+                "new guard".to_string(),
+                "auth.rs:42 \u{00b7} +3 \u{2212}1".to_string(),
+            ),
             ("return changed".to_string(), "+3 \u{2212}1".to_string()),
             ("body changed".to_string(), String::new()),
         ]
     );
+}
+
+fn timeline_facts_for(blocks: Vec<Block>) -> Vec<String> {
+    let seqs: Vec<u32> = blocks.iter().map(|b| b.seq).collect();
+    let mut card = sample_card("c-facts", 1_000, Some(2_000));
+    card.blocks = blocks;
+    card.flow = seqs
+        .chunks(MAX_STEP_SUBS)
+        .map(|chunk| FlowStep {
+            kind: FlowKind::Edit,
+            text: "edit".to_string(),
+            ok: true,
+            dur_ms: 1_000,
+            seqs: chunk.to_vec(),
+        })
+        .collect();
+
+    let (mut model, _) = DetailModel::open("c-facts".to_string(), 1);
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    view.timeline
+        .iter()
+        .flat_map(|step| step.subs.iter().map(|(_, fact)| fact.clone()))
+        .collect()
+}
+
+fn block_with_fact(
+    seq: u32,
+    path: &str,
+    line: Option<u32>,
+    added: Option<u32>,
+    removed: Option<u32>,
+) -> Block {
+    let mut blk = sample_block(seq, path, vec![Label::BodyChanged {}]);
+    blk.line = line;
+    blk.added = added;
+    blk.removed = removed;
+    blk
+}
+
+#[test]
+fn timeline_fact_line_and_counts() {
+    let facts = timeline_facts_for(vec![
+        block_with_fact(1, "src/cart.ts", Some(12), Some(3), Some(1)),
+        block_with_fact(2, "C:\\work\\app\\src\\cart.ts", Some(12), Some(3), Some(0)),
+        block_with_fact(3, "src/my\ncart.ts", Some(12), Some(0), Some(1)),
+        block_with_fact(4, "cart.ts", Some(12), Some(3), None),
+        block_with_fact(5, "src\\cart.ts", Some(12), None, Some(1)),
+    ]);
+    assert_eq!(
+        facts,
+        vec![
+            "cart.ts:12 \u{00b7} +3 \u{2212}1",
+            "cart.ts:12 \u{00b7} +3",
+            "my cart.ts:12 \u{00b7} \u{2212}1",
+            "cart.ts:12 \u{00b7} +3",
+            "cart.ts:12 \u{00b7} \u{2212}1",
+        ]
+    );
+}
+
+#[test]
+fn timeline_fact_line_only() {
+    let facts = timeline_facts_for(vec![
+        block_with_fact(1, "src/cart.ts", Some(12), None, None),
+        block_with_fact(2, "C:\\repo\\cart.ts", Some(12), Some(0), Some(0)),
+        block_with_fact(3, "cart.ts", Some(7), Some(0), None),
+        block_with_fact(4, "src/my\tcart.ts", Some(5), None, Some(0)),
+    ]);
+    assert_eq!(
+        facts,
+        vec!["cart.ts:12", "cart.ts:12", "cart.ts:7", "my cart.ts:5"]
+    );
+}
+
+#[test]
+fn timeline_fact_counts_only() {
+    let facts = timeline_facts_for(vec![
+        block_with_fact(1, "src/cart.ts", None, Some(3), Some(1)),
+        block_with_fact(2, "src/cart.ts", None, Some(3), Some(0)),
+        block_with_fact(3, "src/cart.ts", None, Some(3), None),
+        block_with_fact(4, "src/cart.ts", None, Some(0), Some(1)),
+        block_with_fact(5, "src/cart.ts", None, None, Some(1)),
+    ]);
+    assert_eq!(
+        facts,
+        vec!["+3 \u{2212}1", "+3", "+3", "\u{2212}1", "\u{2212}1"]
+    );
+}
+
+#[test]
+fn timeline_fact_neither_or_zero_counts_is_empty() {
+    let facts = timeline_facts_for(vec![
+        block_with_fact(1, "src/cart.ts", None, None, None),
+        block_with_fact(2, "src/cart.ts", None, Some(0), Some(0)),
+        block_with_fact(3, "src/cart.ts", None, Some(0), None),
+        block_with_fact(4, "src/cart.ts", None, None, Some(0)),
+    ]);
+    assert_eq!(facts, vec!["", "", "", ""]);
 }
 
 #[test]

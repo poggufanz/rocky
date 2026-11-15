@@ -6,7 +6,8 @@ use rocky_proto::cards::{Block, Card, CoverageState, FlowKind, FlowStep, Importa
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, SnippetLine};
 
 use crate::cards_model::{
-    block_kind, block_status, format_symbol, repo_name, sanitize_single_line, status_chip,
+    block_kind, block_status, format_symbol, last_path_segment, repo_name, sanitize_single_line,
+    status_chip,
 };
 use crate::i18n::{CardMsg, UiLang, card_text, label_chip};
 
@@ -513,17 +514,21 @@ fn build_step_subs(
 }
 
 fn block_fact(block: &Block) -> String {
-    if let Some(line) = block.line {
-        return format!("{}:{line}", sanitize_single_line(&block.path));
-    }
-    match (block.added, block.removed) {
+    let location = block.line.and_then(|line| {
+        let file = last_path_segment(&block.path);
+        (!file.is_empty()).then(|| format!("{file}:{line}"))
+    });
+    let counts = match (block.added.unwrap_or(0), block.removed.unwrap_or(0)) {
+        (0, 0) => None,
+        (a, 0) => Some(format!("+{a}")),
+        (0, r) => Some(format!("\u{2212}{r}")),
+        (a, r) => Some(format!("+{a} \u{2212}{r}")),
+    };
+    match (location, counts) {
+        (Some(loc), Some(cnt)) => format!("{loc} \u{00b7} {cnt}"),
+        (Some(loc), None) => loc,
+        (None, Some(cnt)) => cnt,
         (None, None) => String::new(),
-        (added, removed) => match (added.unwrap_or(0), removed.unwrap_or(0)) {
-            (0, 0) => String::new(),
-            (a, 0) => format!("+{a}"),
-            (0, r) => format!("\u{2212}{r}"),
-            (a, r) => format!("+{a} \u{2212}{r}"),
-        },
     }
 }
 
