@@ -128,7 +128,7 @@ fn stale_reply_ignored() {
     );
     assert_eq!(detail.state(), &DetailState::Loading);
 
-    detail.on_ack(9, false, Some("not_found"));
+    detail.on_ack(9, false);
     assert_eq!(detail.state(), &DetailState::Loading);
 
     detail.on_detail(
@@ -140,7 +140,7 @@ fn stale_reply_ignored() {
     assert!(matches!(detail.state(), DetailState::Ready(_)));
 
     // Unsolicited reply after pending id cleared is also ignored.
-    detail.on_ack(10, false, Some("not_found"));
+    detail.on_ack(10, false);
     assert!(matches!(detail.state(), DetailState::Ready(_)));
     let mut replacement = sample_card("c1", 1_000, Some(2_000));
     replacement.prompt = "Should not overwrite".to_string();
@@ -154,7 +154,7 @@ fn stale_reply_ignored() {
     let (mut diff, _) = DiffModel::open("c1".to_string(), 1, 20);
     diff.on_diff(19, Vec::new(), 0, 3, true);
     assert_eq!(diff.state(), &DiffState::Loading);
-    diff.on_ack(19, false, Some("not_found"));
+    diff.on_ack(19, false);
     assert_eq!(diff.state(), &DiffState::Loading);
 
     diff.on_diff(
@@ -189,7 +189,7 @@ fn stale_reply_ignored() {
         false,
     );
     assert_eq!(diff.state(), &DiffState::Loading);
-    diff.on_ack(21, false, Some("not_found"));
+    diff.on_ack(21, false);
     assert_eq!(diff.state(), &DiffState::Loading);
 
     diff.on_diff(
@@ -219,28 +219,16 @@ fn stale_reply_ignored() {
 fn not_found_ack_ends_loading() {
     // ok == true leaves Loading state unchanged for both DetailModel and DiffModel.
     let (mut detail, _) = DetailModel::open("c1".to_string(), 1);
-    detail.on_ack(1, true, None);
+    detail.on_ack(1, true);
     assert_eq!(detail.state(), &DetailState::Loading);
-    detail.on_ack(1, false, Some("not_found"));
+    detail.on_ack(1, false);
     assert_eq!(detail.state(), &DetailState::NotFound);
-    assert_eq!(detail.error_count(), 0);
-
-    let (mut detail_err, _) = DetailModel::open("c2".to_string(), 2);
-    detail_err.on_ack(2, false, Some("too_large"));
-    assert_eq!(detail_err.state(), &DetailState::NotFound);
-    assert_eq!(detail_err.error_count(), 1);
 
     let (mut diff, _) = DiffModel::open("c1".to_string(), 4, 3);
-    diff.on_ack(3, true, None);
+    diff.on_ack(3, true);
     assert_eq!(diff.state(), &DiffState::Loading);
-    diff.on_ack(3, false, Some("not_found"));
+    diff.on_ack(3, false);
     assert_eq!(diff.state(), &DiffState::NotFound);
-    assert_eq!(diff.error_count(), 0);
-
-    let (mut diff_err, _) = DiffModel::open("c1".to_string(), 4, 4);
-    diff_err.on_ack(4, false, None);
-    assert_eq!(diff_err.state(), &DiffState::NotFound);
-    assert_eq!(diff_err.error_count(), 1);
 }
 
 #[test]
@@ -648,9 +636,7 @@ fn diff_pages_navigate_and_missing() {
             page: 0,
         }
     );
-    assert_eq!(model.card_id(), "card-1");
     assert_eq!(model.seq(), 3);
-    assert_eq!(model.page(), 0);
     assert_eq!(model.state(), &DiffState::Loading);
 
     // Cannot navigate before page count is known.
@@ -684,7 +670,6 @@ fn diff_pages_navigate_and_missing() {
         })
     );
     assert_eq!(model.state(), &DiffState::Loading);
-    assert_eq!(model.page(), 1);
 
     let page1 = vec![DiffLine {
         kind: DiffLineKind::Added,

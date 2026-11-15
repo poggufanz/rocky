@@ -105,11 +105,14 @@ pub fn route_card_msg(
             }
             false
         }
-        ServerMsg::Ack { id, ok, error, .. } => {
+        ServerMsg::Ack { id, ok, .. } => {
+            if cards.on_ack(*id, *ok) {
+                return true;
+            }
             if let Some(d) = detail.as_mut()
                 && d.pending_id() == Some(*id)
             {
-                d.on_ack(*id, *ok, error.as_deref());
+                d.on_ack(*id, *ok);
                 if d.reopened_not_found() {
                     close_to_list(view, detail, diff);
                 }
@@ -118,7 +121,7 @@ pub fn route_card_msg(
             if let Some(df) = diff.as_mut()
                 && df.pending_id() == Some(*id)
             {
-                df.on_ack(*id, *ok, error.as_deref());
+                df.on_ack(*id, *ok);
                 if df.reopened_not_found() {
                     close_to_list(view, detail, diff);
                 }
@@ -669,6 +672,90 @@ mod tests {
         assert_eq!(
             map_search_key(&s, "enter", None, false, false),
             SearchKeyAction::Ignored
+        );
+    }
+
+    #[test]
+    fn route_card_msg_handles_failed_cards_ack_first() {
+        let mut view = View::Agents;
+        let mut cards = CardsModel::new();
+        let mut detail = None;
+        let mut diff = None;
+
+        let _ = cards.request_first_page(10);
+        let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 11);
+
+        // Unrelated Ack leaves cards loading and detail untouched.
+        assert!(!route_card_msg(
+            &ServerMsg::Ack {
+                id: 999,
+                ok: false,
+                error: Some("internal".to_string()),
+                cleanup_errors: 0,
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+        assert!(cards.loading());
+
+        // Failed Ack for pending cards id clears loading without touching detail.
+        assert!(route_card_msg(
+            &ServerMsg::Ack {
+                id: 10,
+                ok: false,
+                error: Some("too_large".to_string()),
+                cleanup_errors: 0,
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+        assert!(!cards.loading());
+        assert_eq!(detail.as_ref().unwrap().state(), &DetailState::Loading);
+
+        // Populate page 1 with cursor, fail load-more via route_card_msg, then retry.
+        let _ = cards.request_first_page(12);
+        assert!(route_card_msg(
+            &ServerMsg::Cards {
+                id: 12,
+                items: vec![sample_card("c1")],
+                next: Some("cur1".to_string()),
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+        assert!(cards.request_more(13).is_some());
+        assert!(cards.loading());
+        assert!(route_card_msg(
+            &ServerMsg::Ack {
+                id: 13,
+                ok: false,
+                error: Some("internal".to_string()),
+                cleanup_errors: 0,
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+        assert!(!cards.loading());
+        assert_eq!(
+            cards.request_more(14),
+            Some(ClientMsg::Cards {
+                id: 14,
+                query: None,
+                before: Some("cur1".to_string()),
+                limit: PAGE_LIMIT,
+            })
         );
     }
 }

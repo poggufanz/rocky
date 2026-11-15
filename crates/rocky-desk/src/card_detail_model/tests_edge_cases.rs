@@ -225,7 +225,7 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
     // Reopen followed by NotFound Ack transitions Loading -> NotFound with reopened_not_found set.
     let _ = detail.reopen(3);
     assert_eq!(detail.state(), &DetailState::Loading);
-    detail.on_ack(3, false, Some("not_found"));
+    detail.on_ack(3, false);
     assert_eq!(detail.state(), &DetailState::NotFound);
     assert!(detail.reopened_not_found());
 
@@ -305,7 +305,7 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
     // Reopen followed by NotFound Ack transitions Loading -> NotFound with reopened_not_found set.
     let _ = diff.reopen(13);
     assert_eq!(diff.state(), &DiffState::Loading);
-    diff.on_ack(13, false, Some("not_found"));
+    diff.on_ack(13, false);
     assert_eq!(diff.state(), &DiffState::NotFound);
     assert!(diff.reopened_not_found());
 }

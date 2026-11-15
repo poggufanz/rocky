@@ -28,7 +28,6 @@ pub struct DetailModel {
     pending_id: Option<u64>,
     reopened: bool,
     state: DetailState,
-    error_count: u64,
 }
 
 impl DetailModel {
@@ -43,7 +42,6 @@ impl DetailModel {
             pending_id: Some(id),
             reopened: false,
             state: DetailState::Loading,
-            error_count: 0,
         };
         (model, msg)
     }
@@ -80,8 +78,8 @@ impl DetailModel {
     }
 
     /// Applies an `Ack` reply for the pending detail request; failures transition to `NotFound`.
-    pub fn on_ack(&mut self, id: u64, ok: bool, error: Option<&str>) {
-        if handle_ack(&mut self.pending_id, &mut self.error_count, id, ok, error) {
+    pub fn on_ack(&mut self, id: u64, ok: bool) {
+        if handle_ack(&mut self.pending_id, id, ok) {
             self.state = DetailState::NotFound;
         }
     }
@@ -94,13 +92,6 @@ impl DetailModel {
     /// Identifier of the card requested by this detail model.
     pub fn card_id(&self) -> &str {
         &self.card_id
-    }
-
-    /// Count of non-`not_found` Ack failures observed by this detail model.
-    // Exposed for diagnostics/tests verifying count-only handling of unexpected Ack errors.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn error_count(&self) -> u64 {
-        self.error_count
     }
 }
 
@@ -185,7 +176,6 @@ pub struct DiffModel {
     pending_id: Option<u64>,
     reopened: bool,
     state: DiffState,
-    error_count: u64,
 }
 
 impl DiffModel {
@@ -205,7 +195,6 @@ impl DiffModel {
             pending_id: Some(id),
             reopened: false,
             state: DiffState::Loading,
-            error_count: 0,
         };
         (model, msg)
     }
@@ -269,8 +258,8 @@ impl DiffModel {
     }
 
     /// Applies an `Ack` reply for the pending diff request; failures transition to `NotFound`.
-    pub fn on_ack(&mut self, id: u64, ok: bool, error: Option<&str>) {
-        if handle_ack(&mut self.pending_id, &mut self.error_count, id, ok, error) {
+    pub fn on_ack(&mut self, id: u64, ok: bool) {
+        if handle_ack(&mut self.pending_id, id, ok) {
             self.known_pages = None;
             self.state = DiffState::NotFound;
         }
@@ -281,47 +270,17 @@ impl DiffModel {
         &self.state
     }
 
-    /// Card identifier for this diff request.
-    // Used by the block diff view header and reconnect logic.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn card_id(&self) -> &str {
-        &self.card_id
-    }
-
     /// Block sequence number targeted by this diff model.
     pub fn seq(&self) -> u32 {
         self.seq
     }
-
-    /// Current requested or displayed 0-based page index.
-    // Used by the block diff view to track pagination controls.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn page(&self) -> u32 {
-        self.page
-    }
-
-    /// Count of non-`not_found` Ack failures observed by this diff model.
-    // Exposed for diagnostics/tests verifying count-only handling of unexpected Ack errors.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn error_count(&self) -> u64 {
-        self.error_count
-    }
 }
 
-fn handle_ack(
-    pending_id: &mut Option<u64>,
-    error_count: &mut u64,
-    id: u64,
-    ok: bool,
-    error: Option<&str>,
-) -> bool {
+fn handle_ack(pending_id: &mut Option<u64>, id: u64, ok: bool) -> bool {
     if *pending_id != Some(id) || ok {
         return false;
     }
     *pending_id = None;
-    if error != Some("not_found") {
-        *error_count = error_count.saturating_add(1);
-    }
     true
 }
 

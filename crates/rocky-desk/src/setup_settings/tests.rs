@@ -415,3 +415,56 @@ fn shell_request_asks_for_the_opposite_state() {
     assert_eq!(SetupSettings::shell_request(true), RequestKind::ShellOff);
     assert_eq!(SetupSettings::shell_request(false), RequestKind::ShellOn);
 }
+
+#[test]
+fn successful_repo_purge_requests_cards_refresh_while_failure_does_not() {
+    let mut model = SetupSettings::default();
+    let ok_purge = model.route(
+        RequestKind::RepoPurge("C:/work/app".into()),
+        Outcome::Done {
+            ok: true,
+            error: None,
+            cleanup_errors: 0,
+        },
+        "late",
+    );
+    assert!(ok_purge.send_repo_list);
+    assert!(ok_purge.refresh_cards);
+    assert!(!ok_purge.send_plan);
+
+    let failed_purge = model.route(
+        RequestKind::RepoPurge("C:/work/app".into()),
+        Outcome::Done {
+            ok: false,
+            error: Some("busy".into()),
+            cleanup_errors: 0,
+        },
+        "late",
+    );
+    assert!(failed_purge.send_repo_list);
+    assert!(!failed_purge.refresh_cards);
+    assert_eq!(
+        model.error(&Control::Purge("C:/work/app".into())),
+        Some("busy")
+    );
+
+    let expired_purge = model.route(
+        RequestKind::RepoPurge("C:/work/app".into()),
+        Outcome::Expired,
+        "timed out",
+    );
+    assert!(expired_purge.send_repo_list);
+    assert!(!expired_purge.refresh_cards);
+
+    let allow = model.route(
+        RequestKind::RepoAllow("C:/work/app".into()),
+        Outcome::Done {
+            ok: true,
+            error: None,
+            cleanup_errors: 0,
+        },
+        "late",
+    );
+    assert!(allow.send_repo_list);
+    assert!(!allow.refresh_cards);
+}

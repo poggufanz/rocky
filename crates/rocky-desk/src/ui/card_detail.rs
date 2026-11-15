@@ -2,7 +2,6 @@
 
 use gpui::prelude::*;
 use gpui::{Context, Div, FontWeight, SharedString, div, px, rgb};
-use rocky_proto::cards::FlowKind;
 
 use crate::card_detail_model::{
     BlockView, CodeLine, DetailModel, DetailState, DetailView, QuoteGroup, Step,
@@ -11,7 +10,7 @@ use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::ui::cards_view::{CardAction, OnCardAction};
 use crate::ui::tooltip::{
     BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, DIFF_ADD_BG, DIFF_ADD_FG, DIFF_DEL_BG, DIFF_DEL_FG,
-    TEXT_DARK, TEXT_DIM, TEXT_MUTED, back_button, chip_badge, mono_font,
+    TEXT_DARK, TEXT_DIM, TEXT_MUTED, back_button, chip_badge, mono_font, seq_badge,
 };
 
 const CODE_BG: u32 = 0xF8F8F7;
@@ -73,13 +72,7 @@ fn ready_body<T: 'static>(
             .flex()
             .flex_col()
             .gap_1()
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT_MUTED))
-                    .child(card_text(lang, &CardMsg::YouAsked)),
-            )
+            .child(section_label(card_text(lang, &CardMsg::YouAsked)))
             .child(
                 div()
                     .text_sm()
@@ -124,6 +117,14 @@ fn ready_body<T: 'static>(
     body
 }
 
+fn section_label(text: String) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(TEXT_MUTED))
+        .child(text)
+}
+
 fn quote_group_view<T: 'static>(
     lang: UiLang,
     group: &QuoteGroup,
@@ -140,12 +141,19 @@ fn quote_group_view<T: 'static>(
             .child(quote_line)
     } else {
         div()
-            .border_l_2()
-            .border_color(rgb(BORDER_LIGHT))
-            .pl_2()
-            .text_sm()
-            .text_color(rgb(TEXT_DARK))
-            .child(quote_line)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(section_label(card_text(lang, &CardMsg::AgentSaid)))
+            .child(
+                div()
+                    .border_l_2()
+                    .border_color(rgb(BORDER_LIGHT))
+                    .pl_2()
+                    .text_sm()
+                    .text_color(rgb(TEXT_DARK))
+                    .child(quote_line),
+            )
     };
     out = out.child(quote);
 
@@ -171,14 +179,20 @@ fn block_view<T: 'static>(
         .border_1()
         .border_color(rgb(BORDER_SUBTLE));
 
-    let mut header = div().flex().flex_wrap().items_center().gap_1().child(
-        div()
-            .text_xs()
-            .font_family(mono_font())
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_DARK))
-            .child(block.head.clone()),
-    );
+    let mut header = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .child(seq_badge(block.seq))
+        .child(
+            div()
+                .text_xs()
+                .font_family(mono_font())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(TEXT_DARK))
+                .child(block.head.clone()),
+        );
     for (chip, high) in &block.chips {
         header = header.child(chip_badge(chip.clone(), *high));
     }
@@ -319,16 +333,14 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
         rail = rail.child(div().w(px(1.0)).flex_1().bg(rgb(BORDER_LIGHT)));
     }
 
-    let mut title = div()
+    let title = div()
         .flex_1()
         .min_w_0()
         .truncate()
         .text_xs()
+        .font_family(mono_font())
         .text_color(rgb(TEXT_DARK))
         .child(step.title.clone());
-    if step.kind == FlowKind::Cmd {
-        title = title.font_family(mono_font());
-    }
 
     let mut content = div().flex().flex_col().flex_1().min_w_0().pb_2().child(
         div()
@@ -354,15 +366,22 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
             .justify_between()
             .items_center()
             .gap_2()
+            .min_w_0()
             .pl_2()
             .child(
                 div()
                     .flex()
-                    .flex_1()
+                    .flex_auto()
                     .min_w_0()
                     .items_center()
                     .gap_1()
-                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("\u{2022}"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .flex_shrink_0()
+                            .child("\u{2022}"),
+                    )
                     .child(
                         div()
                             .min_w_0()
@@ -375,11 +394,12 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
         if !fact.is_empty() {
             sub = sub.child(
                 div()
+                    .min_w_0()
+                    .truncate()
+                    .text_right()
                     .text_xs()
                     .font_family(mono_font())
                     .text_color(rgb(TEXT_DIM))
-                    .whitespace_nowrap()
-                    .flex_shrink_0()
                     .child(fact.clone()),
             );
         }

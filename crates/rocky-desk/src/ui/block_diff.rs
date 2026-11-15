@@ -27,7 +27,7 @@ pub fn block_diff_view<T: 'static>(
 
     let back_label = block_back_label(detail, diff);
     let mut header = div().flex().justify_between().items_center().gap_2().child(
-        div().min_w_0().flex_1().child(back_button(
+        div().flex().min_w_0().flex_1().child(back_button(
             "diff-back",
             back_label,
             move |this, window, cx| on_action(this, CardAction::BackFromDiff, window, cx),
@@ -86,7 +86,9 @@ pub fn block_diff_view<T: 'static>(
     out
 }
 
-fn block_back_label(detail: Option<&DetailModel>, diff: Option<&DiffModel>) -> String {
+fn block_back_label(detail: Option<&DetailModel>, diff: Option<&DiffModel>) -> Div {
+    let mut label = div().flex().items_center().gap_1().min_w_0();
+    label = label.child(div().flex_shrink_0().child("\u{2039}"));
     let seq = diff.map(DiffModel::seq);
     if let (Some(detail), Some(seq)) = (detail, seq)
         && let DetailState::Ready(view) = detail.state()
@@ -97,9 +99,15 @@ fn block_back_label(detail: Option<&DetailModel>, diff: Option<&DiffModel>) -> S
             .find(|b| b.seq == seq)
             .map(|b| b.head.as_str())
     {
-        return format!("\u{2039} {head}");
+        label = label.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_family(mono_font())
+                .child(head.to_string()),
+        );
     }
-    "\u{2039}".to_string()
+    label
 }
 
 fn pager<T: 'static>(

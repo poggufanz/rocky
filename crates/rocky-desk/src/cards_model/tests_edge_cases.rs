@@ -1,8 +1,9 @@
 use rocky_proto::cards::{BashInfo, BlockSymbol, BlockVia, Label, Quote, SymbolKind};
+use rocky_proto::pipe::ClientMsg;
 
 use super::tests::{sample_block, sample_card};
 use super::*;
-use crate::i18n::UiLang;
+use crate::i18n::{CardMsg, UiLang};
 
 fn assert_no_control_chars(label: &str, value: &str) {
     assert!(
@@ -384,4 +385,138 @@ fn single_format_only_block_collapses() {
 
     let en_rows = model.rows(UiLang::En);
     assert_eq!(en_rows[0].edits[0].chip, "1 files changed formatting only");
+}
+
+#[test]
+fn not_yet_requested_renders_loading_until_page_reply() {
+    let mut model = CardsModel::new();
+    assert!(!model.loading());
+    assert_eq!(model.empty_msg(), CardMsg::Loading);
+
+    // Unsolicited empty page does not exit the initial unrequested state.
+    model.on_cards(99, Vec::new(), None);
+    assert_eq!(model.empty_msg(), CardMsg::Loading);
+
+    let _ = model.request_first_page(1);
+    assert!(model.loading());
+    assert_eq!(model.empty_msg(), CardMsg::Loading);
+
+    model.on_cards(1, Vec::new(), None);
+    assert!(!model.loading());
+    assert_eq!(model.empty_msg(), CardMsg::Empty);
+
+    let _ = model.set_query("auth".to_string(), 2);
+    assert!(model.loading());
+    assert_eq!(model.empty_msg(), CardMsg::Loading);
+
+    model.on_cards(2, Vec::new(), None);
+    assert!(!model.loading());
+    assert_eq!(model.empty_msg(), CardMsg::Empty);
+}
+
+#[test]
+fn failed_ack_ends_first_page_loading_and_preserves_items() {
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+    assert!(model.loading());
+
+    // Ack for another id or ok=true changes nothing.
+    assert!(!model.on_ack(99, false));
+    assert!(model.loading());
+    assert!(!model.on_ack(1, true));
+    assert!(model.loading());
+
+    // Failed Ack on initial request ends loading without staying stuck.
+    assert!(model.on_ack(1, false));
+    assert!(!model.loading());
+    assert!(!model.has_more());
+    assert!(model.rows(UiLang::En).is_empty());
+    assert_eq!(model.empty_msg(), CardMsg::Empty);
+
+    // Populate first page, then fail a refresh: keep current items and clear pending replace.
+    let _ = model.request_first_page(2);
+    model.on_cards(
+        2,
+        vec![sample_card("c1", 1_000, Some(2_000))],
+        Some("cursor-1".to_string()),
+    );
+
+    let _ = model.request_first_page(3);
+    assert!(model.loading());
+    let pushed = sample_card("c2", 2_000, Some(3_000));
+    model.on_push(pushed);
+    assert!(model.on_ack(3, false));
+    assert!(!model.loading());
+
+    let ids: Vec<String> = model
+        .rows(UiLang::En)
+        .into_iter()
+        .map(|r| r.card_id)
+        .collect();
+    assert_eq!(ids, vec!["c2", "c1"]);
+
+    // Stale Cards reply for the aborted id 3 must be ignored.
+    model.on_cards(3, vec![sample_card("stale", 100, Some(200))], None);
+    let ids: Vec<String> = model
+        .rows(UiLang::En)
+        .into_iter()
+        .map(|r| r.card_id)
+        .collect();
+    assert_eq!(ids, vec!["c2", "c1"]);
+}
+
+#[test]
+fn failed_ack_re_enables_load_more_with_same_cursor() {
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+    model.on_cards(
+        1,
+        vec![sample_card("c2", 2_000, Some(3_000))],
+        Some("3000:c2".to_string()),
+    );
+
+    let req = model.request_more(2);
+    assert_eq!(
+        req,
+        Some(ClientMsg::Cards {
+            id: 2,
+            query: None,
+            before: Some("3000:c2".to_string()),
+            limit: PAGE_LIMIT,
+        })
+    );
+    assert!(model.loading());
+    assert!(model.request_more(3).is_none());
+
+    // Ack for another id changes nothing.
+    assert!(!model.on_ack(999, false));
+    assert!(model.loading());
+    assert!(model.request_more(3).is_none());
+
+    // Failed Ack for load-more clears loading and preserves the cursor.
+    assert!(model.on_ack(2, false));
+    assert!(!model.loading());
+    assert!(model.has_more());
+
+    let retry = model.request_more(4);
+    assert_eq!(
+        retry,
+        Some(ClientMsg::Cards {
+            id: 4,
+            query: None,
+            before: Some("3000:c2".to_string()),
+            limit: PAGE_LIMIT,
+        })
+    );
+    assert!(model.loading());
+
+    model.on_cards(4, vec![sample_card("c1", 1_000, Some(2_000))], None);
+    assert!(!model.loading());
+    assert!(!model.has_more());
+    let ids: Vec<String> = model
+        .rows(UiLang::En)
+        .into_iter()
+        .map(|r| r.card_id)
+        .collect();
+    assert_eq!(ids, vec!["c2", "c1"]);
 }

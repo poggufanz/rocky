@@ -102,6 +102,11 @@ impl DeskView {
         if step.send_repo_list {
             self.start_request(RequestKind::RepoList);
         }
+        if step.refresh_cards && self.ctl.outbox.is_some() {
+            for msg in self.cards_refresh_msgs() {
+                self.send_card_msg(msg);
+            }
+        }
         if step.show_removed {
             self.ctl.view = View::Removed;
         }

@@ -29,7 +29,7 @@ pub(crate) fn mono_font() -> &'static str {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        "monospace"
+        "DejaVu Sans Mono"
     }
 }
 
@@ -82,12 +82,16 @@ pub fn tooltip_view(lines: Vec<TooltipLine>, _window: &mut Window, cx: &mut App)
 
 pub(crate) fn back_button<T: 'static>(
     id: &'static str,
-    label: String,
+    label: impl IntoElement,
     handler: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
     cx: &mut Context<T>,
 ) -> Stateful<Div> {
     div()
         .id(SharedString::from(id))
+        .flex()
+        .items_center()
+        .min_w_0()
+        .max_w_full()
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(rgb(TEXT_MUTED))
@@ -112,4 +116,15 @@ pub(crate) fn chip_badge(text: String, high: bool) -> Div {
         .bg(rgb(bg))
         .text_color(rgb(fg))
         .child(text)
+}
+
+/// Dim monospace sequence number shown at the start of edit rows and detail blocks.
+pub(crate) fn seq_badge(seq: u32) -> Div {
+    div()
+        .text_xs()
+        .font_family(mono_font())
+        .text_color(rgb(TEXT_DIM))
+        .whitespace_nowrap()
+        .flex_shrink_0()
+        .child(seq.to_string())
 }

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use rocky_proto::cards::Card;
 use rocky_proto::pipe::ClientMsg;
 
-use crate::i18n::UiLang;
+use crate::i18n::{CardMsg, UiLang};
 pub(crate) use rows::{
     block_kind, block_status, format_symbol, repo_name, sanitize_single_line, status_chip,
 };
@@ -83,6 +83,7 @@ pub struct CardsModel {
     pending_replace: bool,
     pending_pushes: Vec<Card>,
     loading: bool,
+    requested: bool,
 }
 
 impl CardsModel {
@@ -94,6 +95,15 @@ impl CardsModel {
     /// True while a page request is awaiting its matching reply.
     pub fn loading(&self) -> bool {
         self.loading
+    }
+
+    /// Copy shown when the list has no visible rows.
+    pub fn empty_msg(&self) -> CardMsg {
+        if self.loading || !self.requested {
+            CardMsg::Loading
+        } else {
+            CardMsg::Empty
+        }
     }
 
     /// True when the daemon reported another page cursor after the loaded items.
@@ -112,6 +122,7 @@ impl CardsModel {
         self.pending_replace = true;
         self.pending_pushes.clear();
         self.loading = true;
+        self.requested = true;
         self.next = None;
         self.build_request(id, None)
     }
@@ -133,6 +144,18 @@ impl CardsModel {
         self.query = q;
         self.items.clear();
         self.request_first_page(id)
+    }
+
+    /// Clears pending state when a card request fails without discarding existing items or cursors.
+    pub fn on_ack(&mut self, id: u64, ok: bool) -> bool {
+        if self.pending_id != Some(id) || ok {
+            return false;
+        }
+        self.pending_id = None;
+        self.loading = false;
+        self.pending_replace = false;
+        self.pending_pushes.clear();
+        true
     }
 
     /// Applies a `ServerMsg::Cards` reply if its `id` matches the latest pending request.

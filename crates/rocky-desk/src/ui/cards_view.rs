@@ -10,7 +10,7 @@ use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::search_input::SearchInput;
 use crate::ui::tooltip::{
     BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, SURFACE_SUBTLE, TEXT_DARK, TEXT_DIM, TEXT_MUTED,
-    chip_badge, mono_font, tooltip_view,
+    chip_badge, mono_font, seq_badge, tooltip_view,
 };
 
 const MATCH_BG: u32 = 0xEEF4FC;
@@ -77,11 +77,7 @@ pub fn cards_section<T: 'static>(
 
     let rows = cards.rows(lang);
     if rows.is_empty() {
-        let copy = if cards.loading() {
-            CardMsg::Loading
-        } else {
-            CardMsg::Empty
-        };
+        let copy = cards.empty_msg();
         section = section.child(
             div()
                 .text_xs()
@@ -263,6 +259,8 @@ fn edit_row_view(card_id: &str, idx: usize, edit: &EditRow) -> Stateful<Div> {
     if edit.matched {
         row = row.bg(rgb(MATCH_BG)).rounded_sm().px_1();
     }
+
+    row = row.child(seq_badge(edit.seq));
 
     let left = match &edit.bash {
         Some(bash) => bash_left(bash),
