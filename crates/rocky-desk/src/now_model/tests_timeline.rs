@@ -342,6 +342,30 @@ fn step_titles_and_durations_format_for_tools_and_approval() {
                 None,
                 None,
             ),
+            step_entry(
+                17_000,
+                TimelineKind::NeedsYou,
+                Some("NotebookEdit"),
+                None,
+                None,
+                None,
+            ),
+            step_entry(
+                18_000,
+                TimelineKind::NeedsYou,
+                Some("mcp__filesystem__read_multiple_files"),
+                None,
+                None,
+                None,
+            ),
+            step_entry(
+                19_000,
+                TimelineKind::NeedsYou,
+                Some("Bash"),
+                Some("rm -rf tmp"),
+                None,
+                None,
+            ),
             step_entry(92_000, TimelineKind::NeedsYou, None, None, None, None),
         ],
     ));
@@ -374,15 +398,18 @@ fn step_titles_and_durations_format_for_tools_and_approval() {
             "read ~/.claude/CLAUDE.md",
             "/home/alice/run.sh",
             "read",
-            "Edit \u{00b7} waiting for approval",
+            "edit \u{00b7} waiting for approval",
+            "edit \u{00b7} waiting for approval",
+            "mcp__fil\u{2026} \u{00b7} waiting for approval",
+            "rm -rf tmp \u{00b7} waiting for approval",
             "waiting for approval",
         ]
     );
     assert_eq!(view_en.active[0].steps[0].dur, "0s");
     assert_eq!(view_en.active[0].steps[1].dur, "1m");
     assert_eq!(view_en.active[0].steps[2].dur, "");
-    assert_eq!(view_en.active[0].steps[14].dur, "8s");
-    assert_eq!(view_en.active[0].steps[14].mark, StepMark::Waiting);
+    assert_eq!(view_en.active[0].steps[17].dur, "8s");
+    assert_eq!(view_en.active[0].steps[17].mark, StepMark::Waiting);
 
     let view_id = now_view(
         &model,
@@ -393,9 +420,21 @@ fn step_titles_and_durations_format_for_tools_and_approval() {
     );
     assert_eq!(
         view_id.active[0].steps[13].title,
-        "Edit \u{00b7} menunggu izin"
+        "edit \u{00b7} menunggu izin"
     );
-    assert_eq!(view_id.active[0].steps[14].title, "menunggu izin");
+    assert_eq!(
+        view_id.active[0].steps[14].title,
+        "edit \u{00b7} menunggu izin"
+    );
+    assert_eq!(
+        view_id.active[0].steps[15].title,
+        "mcp__fil\u{2026} \u{00b7} menunggu izin"
+    );
+    assert_eq!(
+        view_id.active[0].steps[16].title,
+        "rm -rf tmp \u{00b7} menunggu izin"
+    );
+    assert_eq!(view_id.active[0].steps[17].title, "menunggu izin");
 }
 
 #[test]

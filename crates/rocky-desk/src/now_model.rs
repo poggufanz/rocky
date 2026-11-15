@@ -508,7 +508,7 @@ fn step_title(
     let text = clean_opt(entry.text.as_deref());
     if entry.kind == TimelineKind::NeedsYou {
         let label = card_text(lang, &CardMsg::WaitingApproval);
-        return match text.or(tool) {
+        return match text.or_else(|| tool.as_deref().map(tool_label)) {
             Some(detail) => format!("{detail} \u{00b7} {label}"),
             None => label,
         };
@@ -559,10 +559,23 @@ pub(crate) fn tool_label(tool_name: &str) -> String {
 /// Shortens a step path relative to `root`, or `~/` under `home`, using `/` separators.
 pub(crate) fn short_path(path: &str, root: Option<&str>, home: Option<&str>) -> String {
     let norm_path = normalize_path(path);
-    if let Some(rel) = root.and_then(|r| strip_path_prefix(&norm_path, r)) {
+    let norm_root = root.map(normalize_path).filter(|b| !b.is_empty());
+    let norm_home = home.map(normalize_path).filter(|b| !b.is_empty());
+    if norm_root.as_deref().is_some_and(|r| path_eq(&norm_path, r))
+        || norm_home.as_deref().is_some_and(|h| path_eq(&norm_path, h))
+    {
+        return path.to_string();
+    }
+    if let Some(rel) = norm_root
+        .as_deref()
+        .and_then(|r| strip_path_prefix(&norm_path, r))
+    {
         return rel;
     }
-    if let Some(rel) = home.and_then(|h| strip_path_prefix(&norm_path, h)) {
+    if let Some(rel) = norm_home
+        .as_deref()
+        .and_then(|h| strip_path_prefix(&norm_path, h))
+    {
         return format!("~/{rel}");
     }
     path.to_string()
@@ -588,8 +601,7 @@ fn normalize_path(raw: &str) -> String {
     }
 }
 
-fn strip_path_prefix(norm_path: &str, base: &str) -> Option<String> {
-    let norm_base = normalize_path(base);
+fn strip_path_prefix(norm_path: &str, norm_base: &str) -> Option<String> {
     if norm_base.is_empty() || norm_base == "/" {
         return None;
     }
@@ -601,7 +613,7 @@ fn strip_path_prefix(norm_path: &str, base: &str) -> Option<String> {
     let matches_base = path_segs
         .iter()
         .zip(base_segs.iter())
-        .all(|(p, b)| path_seg_eq(p, b));
+        .all(|(p, b)| path_eq(p, b));
     if !matches_base {
         return None;
     }
@@ -617,7 +629,7 @@ fn strip_path_prefix(norm_path: &str, base: &str) -> Option<String> {
     }
 }
 
-fn path_seg_eq(a: &str, b: &str) -> bool {
+fn path_eq(a: &str, b: &str) -> bool {
     if cfg!(windows) {
         a.to_lowercase() == b.to_lowercase()
     } else {

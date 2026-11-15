@@ -585,7 +585,7 @@ fn short_path_handles_root_home_windows_and_boundaries() {
         "src/cart.ts"
     );
 
-    // Root itself or path equal to home stays unchanged.
+    // Root itself or path equal to home stays unchanged, even when bases overlap.
     assert_eq!(
         short_path("C:/Repos/Rocky", Some("C:/Repos/Rocky/"), None),
         "C:/Repos/Rocky"
@@ -593,5 +593,72 @@ fn short_path_handles_root_home_windows_and_boundaries() {
     assert_eq!(
         short_path("/home/alice/", None, Some("/home/alice")),
         "/home/alice/"
+    );
+    assert_eq!(
+        short_path(
+            "C:/Users/alice/repo",
+            Some("C:/Users/alice/repo"),
+            Some("C:/Users/alice")
+        ),
+        "C:/Users/alice/repo"
+    );
+    assert_eq!(
+        short_path(
+            "/home/alice/repo/",
+            Some("/home/alice/repo"),
+            Some("/home/alice")
+        ),
+        "/home/alice/repo/"
+    );
+    assert_eq!(
+        short_path("/home/alice", Some("/home"), Some("/home/alice")),
+        "/home/alice"
+    );
+    assert_eq!(
+        short_path("C:/Users/alice/", Some("C:/Users"), Some("C:/Users/alice")),
+        "C:/Users/alice/"
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            short_path(
+                r"\\?\c:\users\alice\repo\",
+                Some(r"C:\Users\alice\repo"),
+                Some(r"C:\Users\alice")
+            ),
+            r"\\?\c:\users\alice\repo\"
+        );
+        assert_eq!(
+            short_path(
+                r"\\?\c:\users\alice\",
+                Some(r"C:\Users"),
+                Some(r"C:\Users\alice")
+            ),
+            r"\\?\c:\users\alice\"
+        );
+        assert_eq!(
+            short_path("/home/Alice", Some("/home"), Some("/home/alice")),
+            "/home/Alice"
+        );
+    } else {
+        assert_eq!(
+            short_path("/home/Alice", Some("/home"), Some("/home/alice")),
+            "Alice"
+        );
+    }
+    assert_eq!(
+        short_path(
+            "C:/Users/alice/repo/src/main.rs",
+            Some("C:/Users/alice/repo"),
+            Some("C:/Users/alice")
+        ),
+        "src/main.rs"
+    );
+    assert_eq!(
+        short_path(
+            "C:/Users/alice/.claude/CLAUDE.md",
+            Some("C:/Users/alice/repo"),
+            Some("C:/Users/alice")
+        ),
+        "~/.claude/CLAUDE.md"
     );
 }
