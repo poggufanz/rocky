@@ -244,6 +244,8 @@ struct DeskView {
     search_focus: FocusHandle,
     /// When the final screen gives up waiting for the daemon's quit broadcast.
     removed_quit_at: Option<u64>,
+    /// User home directory resolved once at startup for short Now step paths.
+    home_dir: Option<String>,
     /// The tray menu must be rebuilt for the new language. Done by the pump
     /// outside the view lease, since the builder reads this entity.
     menu_stale: bool,

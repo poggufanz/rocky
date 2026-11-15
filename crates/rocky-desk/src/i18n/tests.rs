@@ -631,6 +631,7 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::SettingCards
         | CardMsg::NoticeConsent
         | CardMsg::TaskNoticePrompt
+        | CardMsg::CrossSessionPrompt
         | CardMsg::WaitingApproval
         | CardMsg::SetupNotes { .. }
         | CardMsg::Show
@@ -645,7 +646,7 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::FailuresChip { .. } => {}
     };
     let _ = check;
-    51
+    52
 }
 
 #[test]

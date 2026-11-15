@@ -128,7 +128,7 @@ fn cards_with(items: Vec<Card>) -> CardsModel {
 fn empty_model_builds_empty_now_view() {
     let model = Model::new();
     let cards = CardsModel::new();
-    let view = now_view(&model, &cards, 100_000, UiLang::En);
+    let view = now_view(&model, &cards, 100_000, UiLang::En, None);
     assert_eq!(view.active_count, 0);
     assert_eq!(view.needs_count, 0);
     assert!(view.active.is_empty());
@@ -147,7 +147,7 @@ fn active_cards_sort_needs_you_first_then_newest_activity() {
     let need_new = agent("S4-need-new", "", Status::NeedsYou, 90_000);
 
     model.apply(snapshot(vec![work_old, need_old, work_new, need_new]));
-    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
 
     assert_eq!(view.active_count, 4);
     assert_eq!(view.needs_count, 2);
@@ -179,7 +179,7 @@ fn finished_and_idle_sessions_partition_and_sort_newest_first() {
     let ended_new = agent("ended98765", "", Status::Ended, 90_000);
 
     model.apply(snapshot(vec![done_old, ended_new, idle_old, failed_new]));
-    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
 
     assert_eq!(view.active_count, 0);
     assert_eq!(view.needs_count, 0);
@@ -204,7 +204,7 @@ fn finished_and_idle_sessions_partition_and_sort_newest_first() {
     assert_eq!(view.idle[1].branch, None);
     assert_eq!(view.idle[1].age, "50s");
 
-    let view_id = now_view(&model, &CardsModel::new(), 100_000, UiLang::Id);
+    let view_id = now_view(&model, &CardsModel::new(), 100_000, UiLang::Id, None);
     assert_eq!(view_id.idle[1].repo, "repo tidak dikenal");
 }
 
@@ -237,17 +237,24 @@ fn card_prompt_uses_first_non_empty_line_and_harness_envelopes() {
         truncated: false,
     });
 
-    let no_prompt = agent("S5", "", Status::Working, 50_000);
+    let mut cross_session = agent("S5", "", Status::Working, 55_000);
+    cross_session.prompt = Some(PromptText {
+        text: "  \n<cross-session-message from=\"other\" sender=\"lead\">\nrun tests\n</cross-session-message>".to_string(),
+        truncated: false,
+    });
+
+    let no_prompt = agent("S6", "", Status::Working, 50_000);
 
     model.apply(snapshot(vec![
         plain_multi,
         blank,
         task_notice,
         slash,
+        cross_session,
         no_prompt,
     ]));
 
-    let view_en = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let view_en = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
     assert_eq!(view_en.active[0].prompt.as_deref(), Some("Fix auth check"));
     assert_eq!(view_en.active[1].prompt, None);
     assert_eq!(
@@ -255,12 +262,20 @@ fn card_prompt_uses_first_non_empty_line_and_harness_envelopes() {
         Some("Background task notice")
     );
     assert_eq!(view_en.active[3].prompt.as_deref(), Some("/plan fix auth"));
-    assert_eq!(view_en.active[4].prompt, None);
+    assert_eq!(
+        view_en.active[4].prompt.as_deref(),
+        Some("Message from another session")
+    );
+    assert_eq!(view_en.active[5].prompt, None);
 
-    let view_id = now_view(&model, &CardsModel::new(), 100_000, UiLang::Id);
+    let view_id = now_view(&model, &CardsModel::new(), 100_000, UiLang::Id, None);
     assert_eq!(
         view_id.active[2].prompt.as_deref(),
         Some("Notifikasi task latar")
+    );
+    assert_eq!(
+        view_id.active[4].prompt.as_deref(),
+        Some("Pesan dari sesi lain")
     );
 }
 
@@ -304,21 +319,39 @@ fn card_tool_and_action_avoid_repeating_tool_name_and_relativize_paths() {
         command: Some("a".repeat(90)),
     });
 
+    let mut mcp_long = agent("S6", "", Status::Working, 40_000);
+    mcp_long.action = Some(Action {
+        tool_name: "mcp__filesystem__read_multiple_files".to_string(),
+        target_path: None,
+        tool_use_id: None,
+        command: None,
+    });
+
+    let mut grep = agent("S7", "", Status::Working, 30_000);
+    grep.action = Some(Action {
+        tool_name: "Grep".to_string(),
+        target_path: None,
+        tool_use_id: None,
+        command: None,
+    });
+
     model.apply(snapshot(vec![
         bash,
         edit_win,
         read_empty,
         summary_fallback,
         long_cmd,
+        mcp_long,
+        grep,
     ]));
-    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
 
     // S4 is NeedsYou so it sorts first.
     assert_eq!(view.active[0].key.session_id, "S4");
     assert_eq!(view.active[0].tool, "waiting");
     assert_eq!(view.active[0].action, None);
 
-    assert_eq!(view.active[1].tool, "bash");
+    assert_eq!(view.active[1].tool, "cmd");
     assert_eq!(
         view.active[1].action.as_deref(),
         Some("cargo test -p rocky-desk")
@@ -336,6 +369,9 @@ fn card_tool_and_action_avoid_repeating_tool_name_and_relativize_paths() {
     let trunc = view.active[4].action.as_deref().unwrap();
     assert_eq!(trunc.chars().count(), 80);
     assert!(trunc.ends_with('\u{2026}'));
+
+    assert_eq!(view.active[5].tool, "mcp__fil\u{2026}");
+    assert_eq!(view.active[6].tool, "find");
 }
 
 #[test]
@@ -363,7 +399,7 @@ fn subagents_respect_tree_setting_and_session_without_main_row() {
 
     model.apply(snapshot(vec![main, sub_b, sub_a, orphan_b, orphan_a]));
 
-    let tree_on = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let tree_on = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
     assert_eq!(tree_on.active.len(), 2);
 
     let s1 = &tree_on.active[0];
@@ -392,7 +428,7 @@ fn subagents_respect_tree_setting_and_session_without_main_row() {
     };
     model.apply(ServerMsg::Settings { settings: off });
 
-    let tree_off = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let tree_off = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
     assert!(tree_off.active[0].subs.is_empty());
     assert_eq!(
         tree_off.active[0].hidden_children,
@@ -420,10 +456,142 @@ fn finished_row_picks_latest_matching_main_card_id() {
         dummy_card("c-open", "S1", "", 40_000, None),
     ]);
 
-    let view = now_view(&model, &cards, 100_000, UiLang::En);
+    let view = now_view(&model, &cards, 100_000, UiLang::En, None);
     assert_eq!(view.finished.len(), 2);
     assert_eq!(view.finished[0].key, key("S1", ""));
     assert_eq!(view.finished[0].card_id.as_deref(), Some("c-new"));
     assert_eq!(view.finished[1].key, key("S2", ""));
     assert_eq!(view.finished[1].card_id, None);
+}
+
+#[test]
+fn tool_label_maps_known_tools_and_truncates_unknown_by_chars() {
+    for (input, expected) in [
+        ("Bash", "cmd"),
+        ("  PowerShell ", "cmd"),
+        ("NuShell", "cmd"),
+        ("mcp__shell__exec", "cmd"),
+        ("Edit", "edit"),
+        ("Write", "edit"),
+        ("MultiEdit", "edit"),
+        ("NotebookEdit", "edit"),
+        ("Read", "read"),
+        ("Grep", "find"),
+        ("Glob", "find"),
+        ("WebFetch", "web"),
+        ("WebSearch", "web"),
+        ("Task", "agent"),
+        ("Agent", "agent"),
+        ("EightChr", "eightchr"),
+        ("NineChars", "ninechar\u{2026}"),
+        ("mcp__filesystem__read_multiple_files", "mcp__fil\u{2026}"),
+        (
+            "\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}",
+            "\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{00e4}\u{2026}",
+        ),
+    ] {
+        let got = tool_label(input);
+        assert_eq!(got, expected, "tool_label({input:?})");
+        assert!(got.chars().count() <= 9);
+    }
+}
+
+#[test]
+fn short_path_handles_root_home_windows_and_boundaries() {
+    // Inside root with Windows backslashes and mixed case on Windows.
+    assert_eq!(
+        short_path(
+            r"C:\Repos\Rocky\src\cart.ts",
+            Some(r"C:\Repos\Rocky"),
+            Some(r"C:\Users\alice")
+        ),
+        "src/cart.ts"
+    );
+    assert_eq!(
+        short_path(
+            r"\\?\C:\Repos\Rocky\src\cart.ts",
+            Some(r"C:\Repos\Rocky"),
+            None
+        ),
+        "src/cart.ts"
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            short_path(r"c:\repos\rocky\src\cart.ts", Some(r"C:\Repos\Rocky"), None),
+            "src/cart.ts"
+        );
+    } else {
+        assert_eq!(
+            short_path(r"c:\repos\rocky\src\cart.ts", Some(r"C:\Repos\Rocky"), None),
+            r"c:\repos\rocky\src\cart.ts"
+        );
+    }
+
+    // Sibling dir with the same prefix stays untouched.
+    assert_eq!(
+        short_path("C:/repo-other/x", Some("C:/repo"), None),
+        "C:/repo-other/x"
+    );
+    assert_eq!(
+        short_path(
+            "/home/alice-other/x",
+            Some("/repos/rocky"),
+            Some("/home/alice")
+        ),
+        "/home/alice-other/x"
+    );
+
+    // Under home (when outside root, and when root is None).
+    assert_eq!(
+        short_path(
+            "/home/alice/.claude/CLAUDE.md",
+            Some("/repos/rocky"),
+            Some("/home/alice")
+        ),
+        "~/.claude/CLAUDE.md"
+    );
+    assert_eq!(
+        short_path(
+            r"C:\Users\alice\.cargo\config.toml",
+            None,
+            Some(r"C:\Users\alice")
+        ),
+        "~/.cargo/config.toml"
+    );
+
+    // Outside both root and home stays unchanged.
+    assert_eq!(
+        short_path(
+            r"D:\data\notes.txt",
+            Some(r"C:\Repos\Rocky"),
+            Some(r"C:\Users\alice")
+        ),
+        r"D:\data\notes.txt"
+    );
+
+    // None root, outside home stays unchanged.
+    assert_eq!(
+        short_path("/var/log/rocky.log", None, Some("/home/alice")),
+        "/var/log/rocky.log"
+    );
+
+    // Root given with a trailing slash.
+    assert_eq!(
+        short_path(
+            r"C:\Repos\Rocky\src\cart.ts",
+            Some(r"C:\Repos\Rocky\"),
+            None
+        ),
+        "src/cart.ts"
+    );
+
+    // Root itself or path equal to home stays unchanged.
+    assert_eq!(
+        short_path("C:/Repos/Rocky", Some("C:/Repos/Rocky/"), None),
+        "C:/Repos/Rocky"
+    );
+    assert_eq!(
+        short_path("/home/alice/", None, Some("/home/alice")),
+        "/home/alice/"
+    );
 }

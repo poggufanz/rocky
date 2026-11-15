@@ -78,6 +78,7 @@ pub enum CardMsg {
     SettingCards,
     NoticeConsent,
     TaskNoticePrompt,
+    CrossSessionPrompt,
     WaitingApproval,
     SetupNotes {
         n: usize,
@@ -152,6 +153,7 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::SettingCards,
         CardMsg::NoticeConsent,
         CardMsg::TaskNoticePrompt,
+        CardMsg::CrossSessionPrompt,
         CardMsg::WaitingApproval,
         CardMsg::SetupNotes { n: 1 },
         CardMsg::SetupNotes { n: 3 },
@@ -235,6 +237,7 @@ fn card_en(msg: &CardMsg) -> String {
                 .to_string()
         }
         CardMsg::TaskNoticePrompt => "Background task notice".to_string(),
+        CardMsg::CrossSessionPrompt => "Message from another session".to_string(),
         CardMsg::WaitingApproval => "waiting for approval".to_string(),
         CardMsg::SetupNotes { n } => {
             format!("{n} {}", plural(*n as u64, "setup note", "setup notes"))
@@ -312,6 +315,7 @@ fn card_id(msg: &CardMsg) -> String {
                 .to_string()
         }
         CardMsg::TaskNoticePrompt => "Notifikasi task latar".to_string(),
+        CardMsg::CrossSessionPrompt => "Pesan dari sesi lain".to_string(),
         CardMsg::WaitingApproval => "menunggu izin".to_string(),
         CardMsg::SetupNotes { n } => format!("{n} catatan setup"),
         CardMsg::Show => "Lihat".to_string(),

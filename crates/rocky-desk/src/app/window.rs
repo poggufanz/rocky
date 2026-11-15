@@ -233,6 +233,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             search_debounce: Debounce::default(),
             search_focus: cx.focus_handle(),
             removed_quit_at: None,
+            home_dir: std::env::home_dir().map(|p| p.to_string_lossy().into_owned()),
             menu_stale: false,
             #[cfg(not(windows))]
             user_shown: false,

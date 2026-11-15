@@ -322,3 +322,37 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
     assert_eq!(diff.state(), &DiffState::NotFound);
     assert!(diff.reopened_not_found());
 }
+
+#[test]
+fn detail_treats_cross_session_prompt_as_notice_in_both_languages() {
+    let open_prompt = |id: &str, prompt: &str, lang: UiLang| -> DetailView {
+        let (mut model, _) = DetailModel::open(id.to_string(), 1);
+        let mut card = sample_card(id, 1_000, Some(2_000));
+        card.prompt = prompt.to_string();
+        model.on_detail(1, card, Vec::new(), lang);
+        match model.state() {
+            DetailState::Ready(view) => view.clone(),
+            other => panic!("expected Ready state, got {other:?}"),
+        }
+    };
+
+    let cross_prompt = " \n<cross-session-message from=\"s0\" sender=\"lead\">\ncheck tests\n</cross-session-message>";
+    let en = open_prompt("c-cross-en", cross_prompt, UiLang::En);
+    assert_eq!(en.prompt, "Message from another session");
+    assert!(en.prompt_is_notice);
+
+    let id = open_prompt("c-cross-id", cross_prompt, UiLang::Id);
+    assert_eq!(id.prompt, "Pesan dari sesi lain");
+    assert!(id.prompt_is_notice);
+
+    let mid = open_prompt(
+        "c-cross-mid",
+        "docs mention <cross-session-message from=\"s0\"> here",
+        UiLang::En,
+    );
+    assert_eq!(
+        mid.prompt,
+        "docs mention <cross-session-message from=\"s0\"> here"
+    );
+    assert!(!mid.prompt_is_notice);
+}

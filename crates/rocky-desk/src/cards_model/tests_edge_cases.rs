@@ -525,3 +525,43 @@ fn failed_ack_re_enables_load_more_with_same_cursor() {
         .collect();
     assert_eq!(ids, vec!["c2", "c1"]);
 }
+
+#[test]
+fn row_titles_format_cross_session_prompts_in_both_languages() {
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+
+    let mut main_cross = sample_card("c-cross", 3_000, Some(4_000));
+    main_cross.prompt =
+        "<cross-session-message from=\"sess-0\" sender=\"coord\">hi</cross-session-message>"
+            .to_string();
+
+    let mut sub_cross = sample_card("c-sub-cross", 2_000, Some(3_000));
+    sub_cross.agent_id = "sub-1".to_string();
+    sub_cross.agent_type = "Explore".to_string();
+    sub_cross.prompt = "  \n<cross-session-message from=\"sess-0\">hi".to_string();
+
+    let mut mid_mention = sample_card("c-mid-cross", 1_000, Some(2_000));
+    mid_mention.prompt = "Explain <cross-session-message from=\"x\"> tag".to_string();
+
+    model.on_cards(1, vec![main_cross, sub_cross, mid_mention], None);
+
+    let en_rows = model.rows(UiLang::En);
+    assert_eq!(en_rows[0].title, "Message from another session");
+    assert_eq!(
+        en_rows[1].title,
+        "Explore \u{203a} Message from another session"
+    );
+    assert_eq!(
+        en_rows[2].title,
+        "Explain <cross-session-message from=\"x\"> tag"
+    );
+
+    let id_rows = model.rows(UiLang::Id);
+    assert_eq!(id_rows[0].title, "Pesan dari sesi lain");
+    assert_eq!(id_rows[1].title, "Explore \u{203a} Pesan dari sesi lain");
+    assert_eq!(
+        id_rows[2].title,
+        "Explain <cross-session-message from=\"x\"> tag"
+    );
+}

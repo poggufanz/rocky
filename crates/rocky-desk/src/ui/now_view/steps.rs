@@ -76,18 +76,26 @@ pub(super) fn steps_list(
     let last_idx = steps.len().saturating_sub(1);
     for (idx, step) in steps.iter().enumerate() {
         let abs_idx = offset + idx;
-        let step_id = SharedString::from(format!(
-            "now-step:{}:{}:{}",
-            key.session_id, key.agent_id, abs_idx
-        ));
-        let run_id = SharedString::from(format!(
-            "now-run:{}:{}:{}",
-            key.session_id, key.agent_id, abs_idx
-        ));
+        let step_id = step_anim_id(key, step.ms, abs_idx);
+        let run_id = run_anim_id(key, step.ms, abs_idx);
         let row = step_row(step, idx < last_idx, run_id);
         out = out.child(motion::timeline_enter(row, step_id, idx));
     }
     out
+}
+
+fn step_anim_id(key: &AgentKey, ms: u64, abs_idx: usize) -> SharedString {
+    SharedString::from(format!(
+        "now-step:{}:{}:{}:{}",
+        key.session_id, key.agent_id, ms, abs_idx
+    ))
+}
+
+fn run_anim_id(key: &AgentKey, ms: u64, abs_idx: usize) -> SharedString {
+    SharedString::from(format!(
+        "now-run:{}:{}:{}:{}",
+        key.session_id, key.agent_id, ms, abs_idx
+    ))
 }
 
 fn step_duration(dur: String) -> Div {
@@ -191,13 +199,15 @@ fn settled_step_marker(glyph: &'static str, bg: u32) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use gpui::{DefiniteLength, Display, Length, Styled, px};
+    use rocky_proto::pipe::AgentKey;
 
-    use super::{step_duration, step_row_content};
+    use super::{run_anim_id, step_anim_id, step_duration, step_row_content};
     use crate::now_model::{LiveStep, StepMark};
 
     #[test]
     fn step_row_content_keeps_8px_gap_without_auto_margin() {
         let step = LiveStep {
+            ms: 12_000,
             mark: StepMark::Running,
             title: "cargo test -p rocky-desk".to_string(),
             dur: "12s".to_string(),
@@ -214,5 +224,23 @@ mod tests {
         let dur_style = dur.style();
         assert_eq!(dur_style.margin.left, None);
         assert_eq!(dur_style.flex_shrink, Some(0.0));
+    }
+
+    #[test]
+    fn step_and_ring_animation_ids_include_ms_and_differ_across_turns() {
+        let key = AgentKey {
+            session_id: "sess-1".to_string(),
+            agent_id: "sub-2".to_string(),
+        };
+        assert_eq!(
+            step_anim_id(&key, 42_000, 0).as_ref(),
+            "now-step:sess-1:sub-2:42000:0"
+        );
+        assert_eq!(
+            run_anim_id(&key, 42_000, 0).as_ref(),
+            "now-run:sess-1:sub-2:42000:0"
+        );
+        assert_ne!(step_anim_id(&key, 10_000, 0), step_anim_id(&key, 42_000, 0));
+        assert_ne!(run_anim_id(&key, 10_000, 0), run_anim_id(&key, 42_000, 0));
     }
 }

@@ -71,6 +71,7 @@ pub(super) fn card_matches_query(card: &Card, needle_lower: &str) -> bool {
 pub(crate) fn prompt_display(prompt: &str, lang: UiLang) -> (String, bool) {
     match classify_prompt(prompt) {
         PromptKind::Plain => (prompt.to_string(), false),
+        PromptKind::CrossSession => (card_text(lang, &CardMsg::CrossSessionPrompt), true),
         PromptKind::TaskNotification => (card_text(lang, &CardMsg::TaskNoticePrompt), true),
         PromptKind::SlashCommand { name, args } => {
             let text = if args.is_empty() {

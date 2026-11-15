@@ -393,9 +393,9 @@ fn action_row(lang: UiLang, card: &SessionCard) -> Div {
 
 fn action_tool_column(tool: String) -> Div {
     div()
-        .w(px(34.0))
+        .min_w(px(34.0))
         .flex_shrink_0()
-        .truncate()
+        .whitespace_nowrap()
         .text_size(px(11.0))
         .text_color(rgb(TEXT_MUTED))
         .child(tool)
@@ -564,7 +564,7 @@ fn timer_color(status: Status) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{DefiniteLength, Display, Length, Overflow, Styled, TextOverflow, WhiteSpace, px};
+    use gpui::{DefiniteLength, Display, Length, Overflow, Styled, WhiteSpace, px};
     use rocky_proto::pipe::{AgentKey, Status};
 
     use super::{
@@ -598,47 +598,38 @@ mod tests {
     }
 
     #[test]
-    fn action_tool_column_is_fixed_34px_non_shrinking_single_line_truncated() {
-        for label in [
-            "mcp__filesystem__read_multiple_files",
-            "menunggu persetujuan pengguna",
-        ] {
+    fn action_tool_column_sizes_to_content_min_34px_non_shrinking_single_line_untruncated() {
+        for label in ["cmd", "edit", "mcp__fil\u{2026}", "permissi\u{2026}"] {
             let mut col = action_tool_column(label.to_string());
             let style = col.style();
-            assert_eq!(style.size.width, Some(Length::from(px(34.0))));
-            assert_eq!(style.min_size.width, None);
+            assert_eq!(style.size.width, None);
+            assert_eq!(style.min_size.width, Some(Length::from(px(34.0))));
             assert_eq!(style.flex_shrink, Some(0.0));
-            assert_eq!(style.overflow.x, Some(Overflow::Hidden));
-            assert_eq!(style.overflow.y, Some(Overflow::Hidden));
-            let text = style.text.as_ref().expect("truncate sets text style");
+            assert_eq!(style.overflow.x, None);
+            assert_eq!(style.overflow.y, None);
+            assert_eq!(style.margin.left, None);
+            let text = style
+                .text
+                .as_ref()
+                .expect("whitespace_nowrap sets text style");
             assert_eq!(text.white_space, Some(WhiteSpace::Nowrap));
-            assert!(
-                matches!(
-                    text.text_overflow.as_ref(),
-                    Some(TextOverflow::Truncate(s)) if s.as_ref() == "\u{2026}"
-                ),
-                "expected ellipsis truncation for {label}"
-            );
+            assert_eq!(text.text_overflow, None);
         }
     }
 
     #[test]
     fn action_row_handles_long_tool_and_indonesian_fallback_with_action_and_failures() {
-        let long_tool = sample_card(
-            "mcp__filesystem__read_multiple_files",
-            Some("cargo test -p rocky-desk"),
-            2,
-        );
+        let long_tool = sample_card("mcp__fil\u{2026}", Some("cargo test -p rocky-desk"), 2);
         let mut long_row = action_row(UiLang::En, &long_tool);
-        assert_eq!(long_row.style().display, Some(Display::Flex));
+        let long_style = long_row.style();
+        assert_eq!(long_style.display, Some(Display::Flex));
+        assert_eq!(long_style.gap.width, Some(DefiniteLength::from(px(8.0))));
 
-        let id_fallback = sample_card(
-            "menunggu persetujuan pengguna",
-            Some("git status --short"),
-            3,
-        );
+        let id_fallback = sample_card("permissi\u{2026}", Some("git status --short"), 3);
         let mut id_row = action_row(UiLang::Id, &id_fallback);
-        assert_eq!(id_row.style().display, Some(Display::Flex));
+        let id_style = id_row.style();
+        assert_eq!(id_style.display, Some(Display::Flex));
+        assert_eq!(id_style.gap.width, Some(DefiniteLength::from(px(8.0))));
     }
 
     #[test]

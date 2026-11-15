@@ -126,7 +126,13 @@ impl Render for DeskView {
         for banner in top_banners {
             root = root.child(banner);
         }
-        let view = now_view(&self.ctl.model, &self.cards, now_ms(), lang);
+        let view = now_view(
+            &self.ctl.model,
+            &self.cards,
+            now_ms(),
+            lang,
+            self.home_dir.as_deref(),
+        );
         root = root.child(now_section(
             lang,
             &view,

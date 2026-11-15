@@ -279,6 +279,8 @@ pub enum PromptKind {
     Plain,
     /// A background task notification envelope.
     TaskNotification,
+    /// A cross-session message envelope.
+    CrossSession,
     /// A slash command envelope: the command name (with its leading `/`) and its arguments.
     SlashCommand { name: String, args: String },
 }
@@ -286,6 +288,9 @@ pub enum PromptKind {
 /// Classifies a card prompt as plain user text or a Claude Code harness envelope.
 pub fn classify_prompt(prompt: &str) -> PromptKind {
     let trimmed = prompt.trim_start();
+    if trimmed.starts_with("<cross-session-message") {
+        return PromptKind::CrossSession;
+    }
     if trimmed.starts_with("<task-notification>") {
         return PromptKind::TaskNotification;
     }
@@ -422,6 +427,21 @@ mod tests {
         );
         assert_eq!(
             classify_prompt("see <command-name>/x</command-name>"),
+            PromptKind::Plain
+        );
+
+        assert_eq!(
+            classify_prompt(
+                "  \n\t<cross-session-message from=\"sess-1\" sender=\"coordinator\">\nhello\n</cross-session-message>"
+            ),
+            PromptKind::CrossSession
+        );
+        assert_eq!(
+            classify_prompt("<cross-session-message from=\"other\">ping"),
+            PromptKind::CrossSession
+        );
+        assert_eq!(
+            classify_prompt("Please explain <cross-session-message from=\"x\">"),
             PromptKind::Plain
         );
     }

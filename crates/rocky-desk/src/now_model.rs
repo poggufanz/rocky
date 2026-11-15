@@ -50,6 +50,7 @@ pub struct SessionCard {
 /// Single step row rendered inside a [`SessionCard`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveStep {
+    pub ms: u64,
     pub mark: StepMark,
     pub title: String,
     pub dur: String,
@@ -223,7 +224,13 @@ impl TimelineFetch {
 }
 
 /// Projects the live daemon agent state and loaded cards into a [`NowView`].
-pub fn now_view(model: &Model, cards: &CardsModel, now_ms: u64, lang: UiLang) -> NowView {
+pub fn now_view(
+    model: &Model,
+    cards: &CardsModel,
+    now_ms: u64,
+    lang: UiLang,
+    home: Option<&str>,
+) -> NowView {
     let mut by_session: BTreeMap<&str, Vec<&AgentStatus>> = BTreeMap::new();
     for agent in model.agents().values() {
         by_session
@@ -247,7 +254,7 @@ pub fn now_view(model: &Model, cards: &CardsModel, now_ms: u64, lang: UiLang) ->
             Status::NeedsYou | Status::Working => {
                 active_items.push((
                     primary.last_event_ms,
-                    build_session_card(model, primary, children, now_ms, lang),
+                    build_session_card(model, primary, children, now_ms, lang, home),
                 ));
             }
             Status::Done | Status::Failed => {
@@ -323,12 +330,21 @@ fn build_session_card(
     children: &[&AgentStatus],
     now_ms: u64,
     lang: UiLang,
+    home: Option<&str>,
 ) -> SessionCard {
     let expanded = model.is_open(&primary.key);
     let entries = model.timeline(&primary.key).unwrap_or(&[]);
-    let (steps, hidden_steps) = build_steps(entries, primary.status, expanded, now_ms, lang);
+    let (steps, hidden_steps) = build_steps(
+        entries,
+        primary.status,
+        expanded,
+        now_ms,
+        primary.repo.root.as_deref(),
+        home,
+        lang,
+    );
     let (tool, action) = format_tool_and_action(primary);
-    let (subs, hidden_children) = build_subrows(model, children, now_ms, lang);
+    let (subs, hidden_children) = build_subrows(model, children, now_ms, home, lang);
 
     SessionCard {
         key: primary.key.clone(),
@@ -353,6 +369,7 @@ fn build_subrows(
     model: &Model,
     children: &[&AgentStatus],
     now_ms: u64,
+    home: Option<&str>,
     lang: UiLang,
 ) -> (Vec<SubRow>, Option<Msg>) {
     if model.subagent_tree_enabled() {
@@ -362,7 +379,16 @@ fn build_subrows(
                 let expanded = model.is_open(&sub.key);
                 let steps = if expanded {
                     let entries = model.timeline(&sub.key).unwrap_or(&[]);
-                    build_steps(entries, sub.status, true, now_ms, lang).0
+                    build_steps(
+                        entries,
+                        sub.status,
+                        true,
+                        now_ms,
+                        sub.repo.root.as_deref(),
+                        home,
+                        lang,
+                    )
+                    .0
                 } else {
                     Vec::new()
                 };
@@ -408,6 +434,8 @@ fn build_steps(
     agent_status: Status,
     expanded: bool,
     now_ms: u64,
+    root: Option<&str>,
+    home: Option<&str>,
     lang: UiLang,
 ) -> (Vec<LiveStep>, usize) {
     let turn_start = entries
@@ -425,7 +453,7 @@ fn build_steps(
         .filter(|(_, e)| matches!(e.kind, TimelineKind::Tool | TimelineKind::NeedsYou))
         .map(|(idx, entry)| {
             let mark = step_mark(entry, idx == turn_last, agent_status);
-            let title = step_title(entry, lang);
+            let title = step_title(entry, root, home, lang);
             let dur = match mark {
                 StepMark::Running | StepMark::Waiting => {
                     format_step_dur(now_ms.saturating_sub(entry.ms))
@@ -434,7 +462,12 @@ fn build_steps(
                     entry.dur_ms.map(format_step_dur).unwrap_or_default()
                 }
             };
-            LiveStep { mark, title, dur }
+            LiveStep {
+                ms: entry.ms,
+                mark,
+                title,
+                dur,
+            }
         })
         .collect();
 
@@ -465,7 +498,12 @@ fn step_mark(entry: &TimelineEntry, is_latest: bool, agent_status: Status) -> St
     }
 }
 
-fn step_title(entry: &TimelineEntry, lang: UiLang) -> String {
+fn step_title(
+    entry: &TimelineEntry,
+    root: Option<&str>,
+    home: Option<&str>,
+    lang: UiLang,
+) -> String {
     let tool = clean_opt(entry.tool_name.as_deref());
     let text = clean_opt(entry.text.as_deref());
     if entry.kind == TimelineKind::NeedsYou {
@@ -476,26 +514,115 @@ fn step_title(entry: &TimelineEntry, lang: UiLang) -> String {
         };
     }
 
-    let lower = tool.as_deref().map(str::to_lowercase).unwrap_or_default();
-    if is_edit_tool(&lower) {
-        match text {
-            Some(path) => format!("edit {path}"),
-            None => "edit".to_string(),
-        }
-    } else if lower == "bash" {
-        text.unwrap_or_else(|| "bash".to_string())
-    } else {
-        match (lower.is_empty(), text) {
-            (false, Some(detail)) => format!("{lower} {detail}"),
-            (false, None) => lower,
-            (true, Some(detail)) => detail,
-            (true, None) => String::new(),
+    let label = tool.as_deref().map(tool_label).unwrap_or_default();
+    if label == "cmd" {
+        return text.unwrap_or(label);
+    }
+    let detail = text.map(|t| short_path(&t, root, home));
+    match (label.is_empty(), detail) {
+        (false, Some(detail)) => format!("{label} {detail}"),
+        (false, None) => label,
+        (true, Some(detail)) => detail,
+        (true, None) => String::new(),
+    }
+}
+
+/// Maps a tool name to its short display label (at most 9 chars).
+pub(crate) fn tool_label(tool_name: &str) -> String {
+    let clean = sanitize_single_line(tool_name);
+    let trimmed = clean.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_lowercase();
+    if lower == "bash" || lower == "powershell" || lower.contains("shell") {
+        return "cmd".to_string();
+    }
+    match lower.as_str() {
+        "edit" | "write" | "multiedit" | "notebookedit" => "edit".to_string(),
+        "read" => "read".to_string(),
+        "grep" | "glob" => "find".to_string(),
+        "webfetch" | "websearch" => "web".to_string(),
+        "task" | "agent" => "agent".to_string(),
+        _ => {
+            let mut chars = lower.chars();
+            let head: String = chars.by_ref().take(8).collect();
+            if chars.next().is_some() {
+                format!("{head}\u{2026}")
+            } else {
+                lower
+            }
         }
     }
 }
 
-fn is_edit_tool(lower_name: &str) -> bool {
-    matches!(lower_name, "edit" | "write" | "multiedit" | "notebookedit")
+/// Shortens a step path relative to `root`, or `~/` under `home`, using `/` separators.
+pub(crate) fn short_path(path: &str, root: Option<&str>, home: Option<&str>) -> String {
+    let norm_path = normalize_path(path);
+    if let Some(rel) = root.and_then(|r| strip_path_prefix(&norm_path, r)) {
+        return rel;
+    }
+    if let Some(rel) = home.and_then(|h| strip_path_prefix(&norm_path, h)) {
+        return format!("~/{rel}");
+    }
+    path.to_string()
+}
+
+fn normalize_path(raw: &str) -> String {
+    let replaced = raw.replace('\\', "/");
+    let unprefixed = if let Some(rest) = replaced
+        .strip_prefix("//?/UNC/")
+        .or_else(|| replaced.strip_prefix("//?/unc/"))
+    {
+        format!("//{rest}")
+    } else if let Some(rest) = replaced.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        replaced
+    };
+    let trimmed = unprefixed.trim_end_matches('/');
+    if trimmed.is_empty() && !unprefixed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn strip_path_prefix(norm_path: &str, base: &str) -> Option<String> {
+    let norm_base = normalize_path(base);
+    if norm_base.is_empty() || norm_base == "/" {
+        return None;
+    }
+    let path_segs: Vec<&str> = norm_path.split('/').collect();
+    let base_segs: Vec<&str> = norm_base.split('/').collect();
+    if path_segs.len() <= base_segs.len() {
+        return None;
+    }
+    let matches_base = path_segs
+        .iter()
+        .zip(base_segs.iter())
+        .all(|(p, b)| path_seg_eq(p, b));
+    if !matches_base {
+        return None;
+    }
+    let rel: Vec<&str> = path_segs[base_segs.len()..]
+        .iter()
+        .copied()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if rel.is_empty() {
+        None
+    } else {
+        Some(rel.join("/"))
+    }
+}
+
+fn path_seg_eq(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.to_lowercase() == b.to_lowercase()
+    } else {
+        a == b
+    }
 }
 
 fn format_repo(repo_name: &str, lang: UiLang) -> String {
@@ -531,14 +658,14 @@ fn format_prompt(primary: &AgentStatus, lang: UiLang) -> Option<String> {
 fn format_tool_and_action(primary: &AgentStatus) -> (String, Option<String>) {
     match primary.action.as_ref() {
         Some(act) => (
-            sanitize_single_line(&act.tool_name).trim().to_lowercase(),
+            tool_label(&act.tool_name),
             action_target(act, primary.repo.root.as_deref()),
         ),
         None => (
             primary
                 .summary
                 .as_deref()
-                .map(|s| sanitize_single_line(s).trim().to_lowercase())
+                .map(tool_label)
                 .unwrap_or_default(),
             None,
         ),

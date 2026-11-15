@@ -149,17 +149,19 @@ fn turn_steps_slice_after_last_turn_start_and_compute_marks() {
         ],
     ));
 
-    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let view = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
     // Order: S2 (NeedsYou, 95s), S3 (NeedsYou, 85s), S5 (NeedsYou, 75s), S1 (Working, 90s), S4 (Working, 82s)
     assert_eq!(
         view.active[0].steps,
         vec![
             LiveStep {
+                ms: 50_000,
                 mark: StepMark::Failed,
                 title: "git diff".to_string(),
                 dur: "1m 5s".to_string(),
             },
             LiveStep {
+                ms: 92_000,
                 mark: StepMark::Waiting,
                 title: "rm -rf tmp \u{00b7} waiting for approval".to_string(),
                 dur: "8s".to_string(),
@@ -169,6 +171,7 @@ fn turn_steps_slice_after_last_turn_start_and_compute_marks() {
     assert_eq!(
         view.active[1].steps,
         vec![LiveStep {
+            ms: 80_000,
             mark: StepMark::Ok,
             title: "ls".to_string(),
             dur: "".to_string(),
@@ -177,6 +180,7 @@ fn turn_steps_slice_after_last_turn_start_and_compute_marks() {
     assert_eq!(
         view.active[2].steps,
         vec![LiveStep {
+            ms: 72_000,
             mark: StepMark::Ok,
             title: "git push \u{00b7} waiting for approval".to_string(),
             dur: "".to_string(),
@@ -187,16 +191,19 @@ fn turn_steps_slice_after_last_turn_start_and_compute_marks() {
         view.active[3].steps,
         vec![
             LiveStep {
+                ms: 12_000,
                 mark: StepMark::Ok,
                 title: "edit src/a.rs".to_string(),
                 dur: "2s".to_string(),
             },
             LiveStep {
+                ms: 15_000,
                 mark: StepMark::Ok,
                 title: "cargo check".to_string(),
                 dur: "".to_string(),
             },
             LiveStep {
+                ms: 20_000,
                 mark: StepMark::Running,
                 title: "cargo test".to_string(),
                 dur: "1m 20s".to_string(),
@@ -206,6 +213,7 @@ fn turn_steps_slice_after_last_turn_start_and_compute_marks() {
     assert_eq!(
         view.active[4].steps,
         vec![LiveStep {
+            ms: 70_000,
             mark: StepMark::Ok,
             title: "cargo build".to_string(),
             dur: "".to_string(),
@@ -255,10 +263,66 @@ fn step_titles_and_durations_format_for_tools_and_approval() {
                 Some(5_000),
             ),
             step_entry(
+                13_500,
+                TimelineKind::Tool,
+                Some("PowerShell"),
+                Some("Get-ChildItem"),
+                Some(Outcome::Ok),
+                Some(1_000),
+            ),
+            step_entry(
                 14_000,
                 TimelineKind::Tool,
                 Some("Grep"),
                 Some("SessionCard"),
+                Some(Outcome::Ok),
+                Some(1_000),
+            ),
+            step_entry(
+                14_200,
+                TimelineKind::Tool,
+                Some("WebFetch"),
+                Some("https://example.com"),
+                Some(Outcome::Ok),
+                Some(1_000),
+            ),
+            step_entry(
+                14_400,
+                TimelineKind::Tool,
+                Some("Task"),
+                Some("review"),
+                Some(Outcome::Ok),
+                Some(1_000),
+            ),
+            step_entry(
+                14_600,
+                TimelineKind::Tool,
+                Some("mcp__filesystem__read_multiple_files"),
+                Some("/repos/rocky/src/lib.rs"),
+                Some(Outcome::Ok),
+                Some(1_000),
+            ),
+            step_entry(
+                14_800,
+                TimelineKind::Tool,
+                Some("Edit"),
+                Some("/repos/rocky/src/main.rs"),
+                Some(Outcome::Ok),
+                Some(1_000),
+            ),
+            step_entry(
+                14_900,
+                TimelineKind::Tool,
+                Some("Read"),
+                Some("/home/alice/.claude/CLAUDE.md"),
+                Some(Outcome::Ok),
+                Some(1_000),
+            ),
+            step_entry(
+                14_950,
+                TimelineKind::Tool,
+                Some("Bash"),
+                Some("/home/alice/run.sh"),
                 Some(Outcome::Ok),
                 Some(1_000),
             ),
@@ -282,7 +346,13 @@ fn step_titles_and_durations_format_for_tools_and_approval() {
         ],
     ));
 
-    let view_en = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let view_en = now_view(
+        &model,
+        &CardsModel::new(),
+        100_000,
+        UiLang::En,
+        Some("/home/alice"),
+    );
     let titles: Vec<&str> = view_en.active[0]
         .steps
         .iter()
@@ -294,8 +364,15 @@ fn step_titles_and_durations_format_for_tools_and_approval() {
             "edit a.rs next",
             "edit",
             "edit nb.ipynb",
-            "bash",
-            "grep SessionCard",
+            "cmd",
+            "Get-ChildItem",
+            "find SessionCard",
+            "web https://example.com",
+            "agent review",
+            "mcp__fil\u{2026} src/lib.rs",
+            "edit src/main.rs",
+            "read ~/.claude/CLAUDE.md",
+            "/home/alice/run.sh",
             "read",
             "Edit \u{00b7} waiting for approval",
             "waiting for approval",
@@ -304,15 +381,21 @@ fn step_titles_and_durations_format_for_tools_and_approval() {
     assert_eq!(view_en.active[0].steps[0].dur, "0s");
     assert_eq!(view_en.active[0].steps[1].dur, "1m");
     assert_eq!(view_en.active[0].steps[2].dur, "");
-    assert_eq!(view_en.active[0].steps[7].dur, "8s");
-    assert_eq!(view_en.active[0].steps[7].mark, StepMark::Waiting);
+    assert_eq!(view_en.active[0].steps[14].dur, "8s");
+    assert_eq!(view_en.active[0].steps[14].mark, StepMark::Waiting);
 
-    let view_id = now_view(&model, &CardsModel::new(), 100_000, UiLang::Id);
+    let view_id = now_view(
+        &model,
+        &CardsModel::new(),
+        100_000,
+        UiLang::Id,
+        Some("/home/alice"),
+    );
     assert_eq!(
-        view_id.active[0].steps[6].title,
+        view_id.active[0].steps[13].title,
         "Edit \u{00b7} menunggu izin"
     );
-    assert_eq!(view_id.active[0].steps[7].title, "menunggu izin");
+    assert_eq!(view_id.active[0].steps[14].title, "menunggu izin");
 }
 
 #[test]
@@ -337,7 +420,7 @@ fn step_list_folds_to_last_three_unless_expanded() {
     // Even before toggle_open, active main key timeline is cached.
     model.apply(timeline_msg(k.clone(), entries));
 
-    let collapsed = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let collapsed = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
     assert!(!collapsed.active[0].expanded);
     assert_eq!(collapsed.active[0].hidden_steps, 2);
     let collapsed_titles: Vec<&str> = collapsed.active[0]
@@ -348,7 +431,7 @@ fn step_list_folds_to_last_three_unless_expanded() {
     assert_eq!(collapsed_titles, vec!["cmd-3", "cmd-4", "cmd-5"]);
 
     model.toggle_open(&k);
-    let expanded = now_view(&model, &CardsModel::new(), 100_000, UiLang::En);
+    let expanded = now_view(&model, &CardsModel::new(), 100_000, UiLang::En, None);
     assert!(expanded.active[0].expanded);
     assert_eq!(expanded.active[0].hidden_steps, 0);
     assert_eq!(expanded.active[0].steps.len(), 5);
@@ -561,7 +644,7 @@ fn timeline_fetch_debounces_expansion_after_automatic_fetch() {
     // Expanding at t = 1_100 must not send another request inside 500 ms, while cached steps remain visible.
     let opened = model.toggle_open(&k1).expect("row should open");
     assert!(!fetch.on_open(&opened, &model.active_primary_keys(), 1_100));
-    let view = now_view(&model, &CardsModel::new(), 1_100, UiLang::En);
+    let view = now_view(&model, &CardsModel::new(), 1_100, UiLang::En, None);
     assert!(view.active[0].expanded);
     assert_eq!(view.active[0].hidden_steps, 0);
     assert_eq!(view.active[0].steps.len(), 4);
@@ -647,20 +730,22 @@ fn subrow_expands_and_formats_all_current_turn_steps_when_open() {
         })
         .collect();
 
-    let collapsed = now_view(&model, &CardsModel::new(), 10_000, UiLang::En);
+    let collapsed = now_view(&model, &CardsModel::new(), 10_000, UiLang::En, None);
     assert!(!collapsed.active[0].subs[0].expanded);
     assert!(collapsed.active[0].subs[0].steps.is_empty());
 
     model.toggle_open(&k_child);
     model.apply(timeline_msg(k_child, entries));
 
-    let expanded = now_view(&model, &CardsModel::new(), 10_000, UiLang::En);
+    let expanded = now_view(&model, &CardsModel::new(), 10_000, UiLang::En, None);
     let sub = &expanded.active[0].subs[0];
     assert!(sub.expanded);
     assert_eq!(sub.steps.len(), 4);
+    assert_eq!(sub.steps[0].ms, 1_000);
     assert_eq!(sub.steps[0].mark, StepMark::Ok);
     assert_eq!(sub.steps[0].title, "read file-1.rs");
     assert_eq!(sub.steps[0].dur, "1s");
+    assert_eq!(sub.steps[3].ms, 4_000);
     assert_eq!(sub.steps[3].mark, StepMark::Running);
     assert_eq!(sub.steps[3].title, "read file-4.rs");
     assert_eq!(sub.steps[3].dur, "6s");
