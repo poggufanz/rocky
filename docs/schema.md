@@ -117,11 +117,16 @@ Only these fields are kept from a hook payload: `session_id`, `cwd`,
 `hook_event_name`, `agent_id`, `agent_type`, `tool_name`, `tool_use_id`,
 `transcript_path`, `agent_transcript_path`, `notification_type`,
 `tool_input.file_path` / `tool_input.notebook_path` (merged into
-`target_path`), and `tool_input.command` / `tool_input.description` (kept as
-`command` and `description`: redacted, then controls mapped to spaces, ≤200
-chars, absent when `desk/tool-text-off` exists). Ids and names cap at 256
-bytes, paths at 4 KiB; truncation cuts at a char boundary and sets
-`truncated: true`.
+`target_path`), `tool_input.command` / `tool_input.description` (kept as
+`command` and `description`: cut to scan cap, redacted, then controls mapped to
+spaces, ≤200 chars, absent when `desk/tool-text-off` exists), and `prompt`
+(only when `hook_event_name` is `UserPromptSubmit` and the value is a string,
+absent when `desk/cards-off` exists: cut to `16 KiB` at a char boundary,
+redacted with prefix-fragment scrubbing when cut, then controls `<= 0x1f` and
+`0x7f..=0x9f` other than `\n` and `\t` mapped to spaces, then ≤1,000 Unicode
+scalar chars). Ids and names cap at 256 bytes, paths at 4 KiB; truncation cuts
+at a char boundary (or char limit on `prompt`) and sets `truncated: true`.
+The daemon removes `prompt` before writing desk history or status snapshots.
 
 A `shell_env` record keeps only the five variable names listed under Record
 shapes, and `config_dir` only the value of `CLAUDE_CONFIG_DIR`. No other
@@ -141,8 +146,8 @@ Defaults:
 
 ```json
 {"v":1,"subagent_tree":true,"history":true,"tool_text":true,
- "notify_needs_you":true,"notify_failed":true,"notify_done":true,
- "lang":"auto","autostart_asked":false}
+ "cards":true,"notify_needs_you":true,"notify_failed":true,
+ "notify_done":true,"lang":"auto","autostart_asked":false}
 ```
 
 `lang` is `auto`, `en`, or `id`. `v` is the file version and is not settable.
@@ -152,26 +157,29 @@ read, does not parse, has a field of the wrong type, or carries a `v` other
 than 1 gives defaults in memory and sets `health.settings_unreadable`; the
 file is left byte-identical until a later `set` succeeds.
 
-`set` accepts the seven boolean names and `lang` (a JSON bool, or one of the
+`set` accepts the eight boolean names and `lang` (a JSON bool, or one of the
 three strings). It replies with `ack`: `ok: false` plus `error` `unknown
 setting` (a name that is not settable, including `v`), `invalid value`
 (a wrong JSON type, or a `lang` string other than the three), or `save
 failed` (the file write failed). A successful `set` saves the file,
 broadcasts a full `settings` message, clears `settings_unreadable`, and
 pushes fresh `status` rows when `tool_text` changed. When the save succeeds
-and `tool_text` changed, it also syncs the `desk/tool-text-off` marker. It
-also broadcasts `health` when it changed, which the first successful `set`
-after an unreadable file does.
+and `tool_text` or `cards` changed, it also syncs `desk/tool-text-off` and
+`desk/cards-off`. It also broadcasts `health` when it changed, which the
+first successful `set` after an unreadable file does.
 
 The marker `desk/tool-text-off` is present while `tool_text` is off and
-absent while it is on. At start the daemon syncs it from the settings it
-loaded (defaults when the file is missing or unreadable), and a `set` of
-`tool_text` syncs it again, so it matches the settings in use. Turning
-`tool_text` off also drops the command text and subagent descriptions from
-agents already in memory, and clears the text of timeline entries that came
-from a tool input (a command, or a subagent description). Path text stays.
-Every `settings` broadcast makes the desk re-request its open timelines, so
-cleared text disappears there too.
+absent while it is on; `desk/cards-off` follows `cards` the same way. At start
+the daemon syncs both markers from the settings it loaded (defaults when the
+file is missing or unreadable), and a `set` of `tool_text` or `cards` syncs
+them again, so they match the settings in use. Turning `tool_text` off also
+drops the command text and subagent descriptions from agents already in
+memory, and clears the text of timeline entries that came from a tool input
+(a command, or a subagent description). Path text stays. Every `settings`
+broadcast makes the desk re-request its open timelines, so cleared text
+disappears there too. While `cards` is off, the hook omits `prompt`, the
+daemon stops building new change cards and does not retain live prompts in
+memory; existing card files stay on disk until purged or removed.
 
 ## Desk history v1
 
@@ -539,10 +547,185 @@ stdout carries only these two kinds:
 The process exits 0 when stdin ends or its stdout closes, after it releases its
 leases. It exits 1 when the collector fails and 2 on any other arguments.
 
+## Change card v1
+
+### Storage layout and rotation
+
+Change cards are append-only UTF-8 JSONL stored under
+`<ROCKY_HOME>/desk/cards/`: `<repo_id>.jsonl` for edits in a repository and
+`_none.jsonl` when `repo_id` is empty or `"_none"` (edits outside any Git
+repository). A linked Git worktree stores cards under its own worktree
+`repo_id`, while `main_root` points to the main repository. On Unix,
+`desk/cards/` is created with mode `0700` and card files with `0600`; opens
+refuse symlinks (`O_NOFOLLOW`) and Windows reparse points on directories,
+card files, and temporary files.
+
+`rockyd` is the only writer. Updates to a turn append a full `Card` object
+with the same `card_id` and a higher `rev`. Readers keep the latest revision
+per `card_id` (highest `rev`; equal `rev` prefers the later line in a file,
+or the higher `ended_ms` across files). CLI and MCP readers inspect up to the
+trailing `16 MiB` of a card file and skip lines larger than `1 MiB`.
+
+When an append leaves a card file larger than `8 MiB`, `rockyd` compacts it
+via a sibling `.tmp` file and atomic rename: it keeps only the latest
+revision per `card_id`, sorts newest-first (`ended_ms ?? started_ms`
+descending, file line index descending, `card_id` ascending), retains entries
+from newest downward until the next would exceed `6 MiB` (always keeping at
+least the single newest card), and writes the kept entries in original file
+order.
+
+### Card record
+
+One JSON object per line:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `v` | integer | Schema version (`1`). |
+| `card_id` | string | First 32 lowercase hex chars of `SHA-256(session_id \|\| \0 \|\| agent_id \|\| \0 \|\| started_ms)`. |
+| `rev` | integer | Revision counter within `card_id`. |
+| `repo_id` | string | Repository id, or `"_none"` outside Git. |
+| `root` | string | Workspace or worktree root path (`""` outside Git). |
+| `main_root` | string \| null | Main repository root for linked worktrees; else `null`. |
+| `branch` | string \| null | Branch name, or `null`. |
+| `session_id` | string | Session identifier. |
+| `agent_id` | string | Subagent identifier (`""` for the main agent). |
+| `agent_type` | string | Agent type string (`""` if omitted). |
+| `parent_card_id` | string \| null | Parent turn `card_id` for subagent cards; else `null`. |
+| `started_ms` | integer | Turn start timestamp in epoch milliseconds. |
+| `ended_ms` | integer \| null | Turn end timestamp in epoch milliseconds, or `null` while open. |
+| `status` | string | `"open"`, `"done"`, or `"failed"`. |
+| `prompt` | string | Main agent prompt from `UserPromptSubmit`, or subagent's first user message (≤1,000 chars); stored raw. |
+| `prompt_truncated` | boolean | `true` if `prompt` was cut at scan or character bounds. |
+| `importance` | string | Maximum block importance on the card: `"none"`, `"low"`, `"medium"`, or `"high"`. |
+| `blocks` | `Block[]` | Attributed file/symbol changes, capped at `30` entries per card. |
+| `more_count` | integer | Number of overflow blocks omitted beyond `30` (`#[serde(default)]`). |
+| `flow` | `FlowStep[]` | Chronological Bash and edit steps, capped at `100` entries per card. |
+| `flow_more` | integer | Number of overflow steps omitted beyond `100` (`#[serde(default)]`). |
+| `outside_count` | integer | Observed repo edits during the turn not attributed to agent tools. |
+| `coverage` | `Coverage` | Capture and attribution completeness summary. |
+
+#### `Block`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `seq` | integer | Block sequence number within the card. |
+| `path` | string | Changed file path (repo-relative when inside a repo). |
+| `symbol` | `BlockSymbol \| null` | `{ kind, name, container: string \| null, exported: bool, nth?: u32 }`; `nth` is omitted when `0`. `kind` is one of `function`, `method`, `class`, `struct`, `enum`, `trait`, `interface`, `type`, `const`, `test`, `key`. |
+| `labels` | `Label[]` | Up to `12` structured labels `{ "id": string, "args": object }`, sorted by importance descending then catalog order. |
+| `importance` | string | `"none"`, `"low"`, `"medium"`, or `"high"`. |
+| `via` | string | `"edit"` or `"bash"`. |
+| `tool_use_ids` | string[] | Matching tool call ids. |
+| `bash` | `BashInfo \| null` | `{ cmd: string, candidates: u32 }` when `via` is `"bash"`. |
+| `before` | string \| null | Listening object SHA-256 hash before the change, or `null`. Source bytes stay in Listening storage, not in card files. |
+| `after` | string \| null | Listening object SHA-256 hash after the change, or `null`. |
+| `recorded` | boolean | `true` when Listening captured the repo versions; `false` when only paths/tools were observed. |
+| `line` | integer \| null | 1-based start line in `after` (see line/diff semantics below). |
+| `added` | integer \| null | Added line count attributed to this block. |
+| `removed` | integer \| null | Removed line count attributed to this block. |
+| `quote` | `Quote \| null` | `{ text: string, shared: bool }` — redacted agent transcript excerpt (≤500 chars); `shared: true` when multiple tool calls share the same text. |
+
+#### `line`, `added`, and `removed` semantics
+
+Inputs use `\r\n`→`\n` normalized lines and Myers line diffing up to `10,000`
+lines per side (files over `1 MiB` receive `too_large` instead).
+
+- **Parsed syntax blocks (`ts`, `tsx`, `js`, `rs`)**: `line` is the 1-based
+  start line of the symbol in `after` (`null` when the symbol was removed);
+  `added` and `removed` count inserted/deleted lines mapped to the innermost
+  containing `after`/`before` symbol region (`null` if either side exceeds
+  `10,000` lines). For unattributed changes outside symbol regions, `line` is
+  the first inserted line outside all symbols (`null` if none).
+- **Whole-file cases**: `file_new` sets `line` to `1` when non-empty (`null`
+  when empty), `added` to the line count, and `removed` to `0`. `file_deleted`
+  sets `line` to `null`, `added` to `0`, and `removed` to the prior line count.
+- **Unresolved or non-line cases**: `line`, `added`, and `removed` are all
+  `null` for `format_only`, `too_large`, `not_captured`, unrecorded edits
+  (`recorded: false`), and multi-change JSON/TOML config files (`changes > 1`;
+  single-change config, lockfiles, and fallback `lines_changed` populate them
+  from the file line diff).
+- **Grouped `via: "bash"` blocks**: when multiple files or changes collapse
+  into one bash block (`symbol: null`), `line` is `null` while `added` and
+  `removed` sum the underlying counts (or become `null` if any underlying count
+  is `null`).
+
+#### `FlowStep`
+
+`{ "kind": "cmd" \| "edit", "text": string, "ok": bool, "dur_ms": u64, "seqs": u32[] }`
+
+#### `Coverage`
+
+`{ "state": "full" \| "partial", "reasons": CoverageReason[] }` where each
+reason is one of `"daemon_gap"`, `"capture_late"`, `"capture_off"`,
+`"too_large"`, `"transcript_unreadable"`, or `"turn_unclosed"`.
+
+### Prompt kinds
+
+Stored `Card.prompt` strings remain raw on disk. Display readers trim leading
+whitespace and classify prompts purely at presentation time:
+
+| Stored prefix (after leading trim) | Classification | Presentation title |
+| --- | --- | --- |
+| `<cross-session-message` | `cross_session` | `Message from another session` |
+| `<task-notification>` | `task_notification` | `Background task notice` |
+| `<command-name>` or `<command-message>` (with non-empty `<command-name>…</command-name>`) | `slash_command` | `<name> <args>` (`/`-prefixed `name` plus optional `<command-args>`, single line trimmed; falls back to `plain` if `<command-name>` is empty or absent) |
+| Anything else | `plain` | First non-empty trimmed line (for list/why headings) |
+
+### Label catalog
+
+Labels sort by `importance` descending (`high` > `medium` > `low` > `none`),
+breaking ties by the catalog declaration order below, and cap at `12` per
+change. On `params_changed`, `return_type_changed`, and `symbol_removed`,
+`importance` is `high` when `symbol.exported` is `true` and `medium` when
+`false`. On `symbol_removed`, `symbol_added`, and `symbol_renamed`, `<kind>`
+is `symbol.kind` (or `"file"` when `symbol` is `null`).
+
+| # | `id` | `args` | `importance` | English chip text |
+| --- | --- | --- | --- | --- |
+| 1 | `params_changed` | `{"added":u32,"removed":u32,"changed":u32}` | `high` (exported) / `medium` | `parameters changed` |
+| 2 | `return_type_changed` | `{}` | `high` (exported) / `medium` | `return type changed` |
+| 3 | `symbol_removed` | `{}` | `high` (exported) / `medium` | `<kind> removed` |
+| 4 | `symbol_added` | `{}` | `medium` | `new <kind>` |
+| 5 | `symbol_renamed` | `{"from":string}` | `medium` | `<kind> renamed` |
+| 6 | `guard_added` | `{}` | `medium` | `new guard` |
+| 7 | `condition_changed` | `{}` | `medium` | `condition changed` |
+| 8 | `branch_added` | `{}` | `medium` | `new branch` |
+| 9 | `branch_removed` | `{}` | `medium` | `branch removed` |
+| 10 | `error_handling_added` | `{}` | `medium` | `error handling added` |
+| 11 | `error_handling_removed` | `{}` | `high` | `error handling removed` |
+| 12 | `loop_added` | `{}` | `medium` | `new loop` |
+| 13 | `loop_removed` | `{}` | `medium` | `loop removed` |
+| 14 | `return_changed` | `{}` | `medium` | `return changed` |
+| 15 | `call_added` | `{"name":string}` | `low` | `calls <name>` |
+| 16 | `call_removed` | `{"name":string}` | `low` | `no longer calls <name>` |
+| 17 | `await_changed` | `{"added":u32,"removed":u32}` | `low` | `await changed` |
+| 18 | `body_changed` | `{}` | `low` | `body changed` |
+| 19 | `value_changed` | `{"name":string,"before":string,"after":string}` | `medium` | `value changed` |
+| 20 | `config_changed` | `{"key":string,"before":string\|null,"after":string\|null}` | `medium` | `config changed` |
+| 21 | `dep_added` | `{"name":string,"version":string}` | `high` | `new dependency` |
+| 22 | `dep_removed` | `{"name":string}` | `high` | `dependency removed` |
+| 23 | `dep_version` | `{"name":string,"before":string,"after":string}` | `high` | `dependency version` |
+| 24 | `import_added` | `{"module":string}` | `low` | `new import` |
+| 25 | `import_removed` | `{"module":string}` | `low` | `import removed` |
+| 26 | `test_added` | `{"name":string}` | `low` | `new test` |
+| 27 | `test_removed` | `{"name":string}` | `high` | `test removed` |
+| 28 | `test_skipped` | `{"name":string}` | `high` | `test skipped` |
+| 29 | `test_only` | `{"name":string}` | `high` | `test .only` |
+| 30 | `file_new` | `{}` | `medium` | `new file` |
+| 31 | `file_deleted` | `{}` | `medium` | `file deleted` |
+| 32 | `file_renamed` | `{"from":string}` | `medium` | `file renamed` |
+| 33 | `format_only` | `{}` | `none` | `format only` |
+| 34 | `rewrite` | `{"pct":u32}` | `low` | `rewritten` |
+| 35 | `lockfile_changed` | `{}` | `low` | `lockfile changed` |
+| 36 | `lines_changed` | `{"added":u32,"removed":u32}` | `low` | `lines changed` |
+| 37 | `too_large` | `{}` | `low` | `too large` |
+| 38 | `not_captured` | `{}` | `low` | `not captured` |
+
 ## Pipe v3
 
+> Superseded by [Pipe v4](#pipe-v4) below; peers sending another major version receive one `error` (`code: "version"`) and the connection closes.
+
 One JSON object per line over the daemon pipe. Every message carries `v`
-(major) first and `type`. This build speaks v3; a peer that sends another
+(major) first and `type`. Historically this build spoke v3; a peer that sends another
 major version gets one `error` with `code: "version"` and the connection
 closes. Minor additions are additive; readers must ignore unknown fields. A
 client line longer than 64 KiB gets the client disconnected. Each client has
@@ -763,4 +946,48 @@ Example:
 
 ```json
 {"v":3,"type":"subscribe"}
+```
+
+## Pipe v4
+
+Current wire protocol between `rockyd` and `rocky-desk`. Shares v3's newline-delimited JSON framing, `64 KiB` (`LINE_CAP`) per-line cap, `1024`-message outbound queue per client, and `"version"` error close behavior, with the changes below.
+
+### Version and additive fields
+
+- Every frame uses `"v": 4`.
+- `AgentStatus.prompt` (optional, omitted when unset): `{"text": string, "truncated": bool}` carrying the main agent's live `UserPromptSubmit` prompt. Held in memory only while change cards are enabled (`desk/cards-off` absent), never persisted to `desk/history/` or spool, and unset after a daemon restart until the next prompt.
+- `TimelineEntry.dur_ms` (optional, omitted when pending): unsigned millisecond duration filled when the matching tool outcome arrives.
+- `RepoInfo.main_root` (optional, omitted when unset): main repository root path for linked Git worktrees.
+- `Ack.cleanup_errors` (`u32`, defaults to `0`): count of cleanup errors during `setup` removal.
+
+### New card query and push messages
+
+Client → Daemon:
+
+- `cards`: `{"v":4,"type":"cards","id":u64,"query":string?,"before":string?,"limit":u32}` — lists newest-first change cards; `limit` caps at `20`, `query` matches file or repo, and `before` passes the opaque pagination cursor `"<key_ms>:<card_id>"`.
+- `card_detail`: `{"v":4,"type":"card_detail","id":u64,"card_id":string}` — requests full card metadata and inline code snippets.
+- `block_diff`: `{"v":4,"type":"block_diff","id":u64,"card_id":string,"seq":u32,"page":u32}` — requests a 0-based page of the unified diff for one block.
+
+Daemon → Client:
+
+- `cards`: `{"v":4,"type":"cards","id":u64,"items":Card[],"next":string?}` — page of list cards (block `quote.text` capped to `200` Unicode scalar chars; no code snippets). When more cards may follow, `next` holds `"<key_ms>:<card_id>"` where `key_ms` is `ended_ms ?? started_ms`.
+- `card`: `{"v":4,"type":"card","item":Card}` — live broadcast when a card is created or revised (uses the same `200`-char quote cap; dropped rather than overflowing `64 KiB` if shrinking cannot fit it).
+- `card_detail`: `{"v":4,"type":"card_detail","id":u64,"card":Card,"snippets":BlockSnippet[]}` — `BlockSnippet` is `{"seq":u32,"lines":SnippetLine[]}` with `"t"`-tagged lines: `"context"|"added"|"removed"` (`{"t":..., "text":string}`) and `"fold"|"more"` (`{"t":..., "lines":u32}`). Code snippets are assembled only for recorded blocks in capture-consented repos (`card.root` in owned roots), capped at `20` codable blocks; unowned repos or missing/oversized objects omit snippets and add `capture_off` / `too_large` coverage reasons.
+- `block_diff`: `{"v":4,"type":"block_diff","id":u64,"lines":DiffLine[],"page":u32,"pages":u32,"missing":bool}` — `DiffLine` is `{"kind":"context"|"added"|"removed","text":string}`, paginated to at most `48 KiB` of serialized lines per page. Missing/evicted Listening objects, unrecorded blocks, or unowned repo cards return `missing: true` with `lines: []`, `pages: 0`.
+
+### Frame shrinking and card query errors
+
+`cards`, `card`, and `card_detail` progressively trim optional detail (flow steps, overflow blocks/snippets, and list prompts) to fit within `64 KiB`. When a card or block `seq` is missing, or a detail/diff reply still exceeds `64 KiB` after shrinking, `rockyd` responds with `ack` (`ok: false`):
+
+| `error` | Meaning |
+| --- | --- |
+| `not_found` | Unknown `card_id`, or unknown block `seq` in `block_diff`. |
+| `too_large` | Shrunk `card_detail` or serialized `block_diff` frame still exceeds `64 KiB`. |
+| `internal` | Card query worker panicked while handling the request. |
+| `query worker unavailable` | Card query worker channel is closed. |
+
+Example (`cards` request):
+
+```json
+{"v":4,"type":"cards","id":1,"limit":20}
 ```

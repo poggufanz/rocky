@@ -136,6 +136,8 @@ Stated-rationale evidence arrives through four lanes, ranked by fidelity:
 
 An unlinked file has no rationale evidence yet; that is a first-class honest state, not a gap Rocky papers over. The DSH log adapter needs Node 22.15 or newer at runtime for built-in zstd support — on an older Node it feature-detects the gap, skips DSH logs, and discloses that instead of guessing. `rocky setup --agent-hooks` installs a PreToolUse rationale gate by default (`rocky hook gate-event claude-code`): it denies once per session per file when no rationale evidence exists yet, then fails open for that file every time after. Opt out at install with `--no-rationale-gate`, or at runtime with `ROCKY_RATIONALE_GATE=off`. Codex and other non-Claude-Code agents have no deny hook at all; they reach the `notify` lane only.
 
+Change cards record one summary per agent turn or subagent (`file › symbol` blocks, logic labels, the agent's own words, and a step timeline), shown in the desktop app's "Done" list, `rocky why`, and MCP `why_file`. Labels come from AST/syntax-tree and file analysis, not AI; the stated "why" is always a quote of the agent, recorded and not verified; and code appears only in the desktop app for repositories with capture consent. Turn change cards off anytime with the **Change cards** switch in desk Settings.
+
 ## Privacy and local state
 
 Persistent state lives under `ROCKY_HOME`; the default is `~/.rocky`. The main record is append-only JSONL at `memory.jsonl`. Depending on the features you use, that directory can also hold config, watch logs, a transient agent spool, labels, and guard rules.

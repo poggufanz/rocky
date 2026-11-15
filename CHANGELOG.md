@@ -4,11 +4,13 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
-The desktop app shows change cards: a list under the live sessions with search by file or repo, a detail view with each edit's code, labels, the agent's own words and a step timeline, and a full diff. Settings has a Change cards switch.
+The desktop app redesigns the "Now" section and adds change cards: "Now" folds setup notes into a collapsible card, groups active sessions into live cards with the active prompt, the three latest timeline steps (with expandable earlier steps), and nested subagents, links finished turns directly via "View card", and collapses idle sessions. Underneath it, the "Done" list shows live-updating change cards with file or repo search, a detail view with each edit's code snippet, logic labels, the agent's own words, and a step timeline, a paged full diff, subtle entrance, slide, and pulse motion, and a **Change cards** switch in Settings.
 
-The desk hook records the prompt you submit to Claude Code (redacted, at most 1,000 characters) for change cards. The background process removes it before writing history or status. While `<ROCKY_HOME>/desk/cards-off` exists, the hook records no prompt. Purging a repo's capture also deletes that repo's change cards.
+On `UserPromptSubmit`, the desk hook records the prompt you submit to Claude Code (cut to 16 KiB, redacted before control characters other than newline and tab map to spaces, then cut to at most 1,000 characters) for change cards. The background process removes it before writing history or status snapshots. While `<ROCKY_HOME>/desk/cards-off` exists, the hook records no prompt and the daemon builds no new cards. Purging a repo's capture (`rocky setup --repo <path> --purge-capture` or Settings) also deletes that repo's change cards.
 
-The daemon builds change cards after each agent turn and serves them—along with card details and block diffs—over desk protocol 4 (older desks see a version mismatch); the cards cursor is an opaque string. Remove Rocky (and `rocky setup --auto remove --json`) also deletes change cards and spool files (`<ROCKY_HOME>/desk/cards/`, top-level `*.json` in `<ROCKY_HOME>/desk/spool/`, and `<ROCKY_HOME>/desk/spool/bad/`).
+The daemon builds change cards after each agent turn and serves them—along with live card pushes, card details, and paged block diffs—over desk protocol 4 (older desks see a version mismatch); the cards cursor is an opaque string. Protocol 4 also adds optional live `AgentStatus.prompt` (held in memory only, never written to `desk/history/`) and `TimelineEntry.dur_ms` (populated when a tool outcome arrives). Remove Rocky (and `rocky setup --auto remove --json`) also deletes change cards and spool files (`<ROCKY_HOME>/desk/cards/`, top-level `*.json` in `<ROCKY_HOME>/desk/spool/`, and `<ROCKY_HOME>/desk/spool/bad/`).
+
+`rocky why <file>` now appends an "Agent changes to `<file>` (newest first)" section reading up to the 5 newest local change cards for that file (derived prompt title, matching symbols, logic labels, quoted agent words recorded as unverified, and Bash attribution, without source code). MCP `why_file` also returns bounded, code-free `cards[]` and `cardsCoverage` alongside `items` and `rationales`.
 
 With `CLAUDE_CONFIG_DIR` set, the desktop app's setup also keeps Rocky's hooks in `~/.claude/settings.json` when that folder holds Claude Code config. Some terminal hosts copy that file over the profile on every new terminal, so hooks written only to the profile were gone before the session read them.
 
@@ -30,7 +32,7 @@ Windows x64 and Linux x64 installs now carry the desktop app through an optional
 
 The experimental desk daemon keeps 24 hours of desk history in `desk/history/` and restores agents and timelines from it after a restart. It places subagents under their main agent and shows the task description supplied when they start. Desk settings live in `desk/settings.json`.
 
-Breaking: the desk and daemon pipe protocol is now version 3. A desk and a daemon from different versions refuse each other.
+Breaking: the desk and daemon pipe protocol was bumped to version 3 (now version 4 above). A desk and a daemon from different versions refuse each other.
 
 Hidden `rocky setup --desk-hooks <path>` / `--uninstall-desk-hooks` for the experimental desk.
 
