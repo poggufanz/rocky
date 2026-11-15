@@ -28,6 +28,21 @@ pub(crate) const LINK: u32 = 0x2563EB;
 /// Success green token for passed timeline markers.
 pub(crate) const OK: u32 = 0x16A34A;
 pub(crate) const MATCH_BG: u32 = 0xEEF4FC;
+pub(crate) const TEXT_BODY: u32 = 0x44403C;
+pub(crate) const TEXT_SUBTLE: u32 = 0x57534E;
+pub(crate) const NOTICE_DOT: u32 = 0xD97706;
+pub(crate) const BORDER_NEEDS_YOU: u32 = 0xFDBA74;
+pub(crate) const STATUS_NEEDS_YOU: u32 = 0xEA580C;
+pub(crate) const STATUS_WORKING: u32 = LINK;
+pub(crate) const STATUS_DONE: u32 = OK;
+pub(crate) const STATUS_FAILED: u32 = DIFF_DEL_FG;
+pub(crate) const STATUS_IDLE: u32 = TEXT_DIM;
+pub(crate) const CHIP_NEEDS_YOU_BG: u32 = 0xFFEDD5;
+pub(crate) const CHIP_NEEDS_YOU_FG: u32 = 0x9A3412;
+pub(crate) const CHIP_WORKING_BG: u32 = 0xDBEAFE;
+pub(crate) const CHIP_WORKING_FG: u32 = 0x1E40AF;
+pub(crate) const TIMER_NEEDS_YOU: u32 = 0xC2410C;
+pub(crate) const TIMER_WORKING: u32 = 0x1D4ED8;
 
 /// Monospace family name for diffs, code snippets, symbols, and timeline numbers.
 pub(crate) fn mono_font() -> &'static str {

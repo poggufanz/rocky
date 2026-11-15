@@ -1,5 +1,5 @@
 use super::*;
-use crate::i18n::{Msg, UiLang, en, id};
+use crate::i18n::{Msg, UiLang, en, id, tr};
 use rocky_proto::pipe::{
     Action, AgentKey, AgentStatus, Gap, GapReason, Health, Outcome, RepoInfo, ServerMsg, Status,
     TimelineEntry, TimelineKind,
@@ -42,74 +42,6 @@ fn snapshot(agents: Vec<AgentStatus>) -> ServerMsg {
         settings: Settings::default(),
         repo_pending: Vec::new(),
     }
-}
-
-#[test]
-fn unknown_repo_label_is_translated() {
-    assert_eq!(en(&Msg::UnknownRepo), "unknown repo");
-    let mut a = agent("S1", "", Status::Idle);
-    a.repo.name = String::new();
-    a.repo.branch = Some("main".into());
-    let mut m = Model::new();
-    m.apply(snapshot(vec![a]));
-    let groups = m.groups(2_000);
-    assert_eq!(groups[0].name, "");
-    assert_eq!(groups[0].label(UiLang::En), "unknown repo @ main");
-    assert_eq!(groups[0].label(UiLang::Id), "repo tidak dikenal @ main");
-}
-
-#[test]
-fn two_sessions_same_repo_are_separate_rows() {
-    let mut m = Model::new();
-    m.apply(snapshot(vec![
-        agent("S1", "", Status::Working),
-        agent("S2", "", Status::Idle),
-    ]));
-    let groups = m.groups(2_000);
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].name, "r");
-    assert_eq!(groups[0].branch.as_deref(), Some("main"));
-    assert_eq!(groups[0].label(UiLang::En), "r @ main");
-    assert_eq!(groups[0].sessions.len(), 2);
-    assert_ne!(
-        groups[0].sessions[0].session_short,
-        groups[0].sessions[1].session_short
-    );
-}
-
-#[test]
-fn main_agent_first_then_subagents() {
-    let mut m = Model::new();
-    m.apply(snapshot(vec![
-        agent("S1", "bbbbbbbb-2", Status::Working),
-        agent("S1", "aaaaaaaa-1", Status::Working),
-        agent("S1", "", Status::Working),
-    ]));
-    let groups = m.groups(2_000);
-    assert_eq!(groups.len(), 1);
-    let rows = &groups[0].sessions[0].rows;
-    assert_eq!(rows.len(), 3);
-    assert_eq!(tr(UiLang::En, &rows[0].label), "main");
-    assert_eq!(tr(UiLang::Id, &rows[0].label), "utama");
-    assert_eq!(tr(UiLang::En, &rows[1].label), "Explore aaaaaaaa");
-    assert_eq!(tr(UiLang::En, &rows[2].label), "Explore bbbbbbbb");
-}
-
-#[test]
-fn ended_agents_hidden() {
-    let mut m = Model::new();
-    m.apply(snapshot(vec![agent("S1", "", Status::Ended)]));
-    assert!(m.groups(2_000).is_empty());
-    let mut m = Model::new();
-    m.apply(snapshot(vec![
-        agent("S1", "", Status::Working),
-        agent("S1", "aaaaaaaa-1", Status::Ended),
-    ]));
-    let groups = m.groups(2_000);
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].sessions.len(), 1);
-    assert_eq!(groups[0].sessions[0].rows.len(), 1);
-    assert_eq!(tr(UiLang::En, &groups[0].sessions[0].rows[0].label), "main");
 }
 
 #[test]
@@ -186,12 +118,12 @@ fn action_text_relative_and_capped() {
 fn status_remove_deletes_row() {
     let mut m = Model::new();
     m.apply(snapshot(vec![agent("S1", "", Status::Working)]));
-    assert_eq!(m.groups(2_000).len(), 1);
+    assert_eq!(m.agents().len(), 1);
     m.apply(ServerMsg::Status {
         op: StatusOp::Remove,
         agent: agent("S1", "", Status::Working),
     });
-    assert!(m.groups(2_000).is_empty());
+    assert!(m.agents().is_empty());
 }
 
 #[test]
@@ -278,91 +210,16 @@ fn aggregate_priority_ignores_snapshot() {
 
 #[test]
 fn age_boundaries() {
-    let mut live = agent("S1", "", Status::Working);
-    live.last_event_ms = 130_000;
-    let mut old = agent("S2", "", Status::Idle);
-    old.last_event_ms = 10_000;
-    let mut m = Model::new();
-    m.apply(snapshot(vec![live, old]));
-    let groups = m.groups(130_000);
-    let live_age = &groups[0].sessions[0].rows[0].age;
-    assert_eq!(*live_age, Msg::Age { secs: 0 });
-    assert_eq!(en(live_age), "now");
-    let old_age = &groups[0].sessions[1].rows[0].age;
-    assert_eq!(*old_age, Msg::Age { secs: 120 });
-    assert_eq!(en(old_age), "2m");
-}
-
-#[test]
-fn child_rows_follow_main_with_description() {
-    let mut child = agent("S1", "aaaaaaaa-1", Status::Working);
-    child.description = Some("Review the diff".into());
-    let mut m = Model::new();
-    m.apply(snapshot(vec![child, agent("S1", "", Status::Working)]));
-    let rows = &m.groups(2_000)[0].sessions[0].rows;
-    assert_eq!(
-        (rows[0].child, tr(UiLang::En, &rows[0].label).as_str()),
-        (false, "main")
-    );
-    assert_eq!(
-        (rows[1].child, tr(UiLang::En, &rows[1].label).as_str()),
-        (true, "Explore aaaaaaaa")
-    );
-    assert_eq!(rows[1].description.as_deref(), Some("Review the diff"));
-}
-
-#[test]
-fn main_done_with_working_children_says_still_working() {
-    let mut m = Model::new();
-    m.apply(snapshot(vec![
-        agent("S1", "", Status::Done),
-        agent("S1", "aaaaaaaa-1", Status::Working),
-        agent("S1", "bbbbbbbb-2", Status::Working),
-        agent("S1", "cccccccc-3", Status::Done),
-    ]));
-    let rows = &m.groups(2_000)[0].sessions[0].rows;
-    assert_eq!(
-        rows[0].note.as_ref(),
-        Some(&Msg::SubagentsStillWorking { n: 2 })
-    );
-    assert_eq!(
-        en(&Msg::SubagentsStillWorking { n: 2 }),
-        "2 subagents still working"
-    );
-    for row in &rows[1..] {
-        assert_eq!(row.note, None);
-    }
-}
-
-#[test]
-fn tree_off_hides_children_and_counts_them() {
-    let mut m = Model::new();
-    m.apply(ServerMsg::Snapshot {
-        agents: vec![
-            agent("S1", "", Status::Working),
-            agent("S1", "aaaaaaaa-1", Status::NeedsYou),
-            agent("S1", "bbbbbbbb-2", Status::Working),
-            agent("S1", "cccccccc-3", Status::Done),
-        ],
-        aggregate: Status::Idle,
-        health: Health::default(),
-        repo_pending: Vec::new(),
-        settings: Settings {
-            subagent_tree: false,
-            ..Settings::default()
-        },
-    });
-    let session = &m.groups(2_000)[0].sessions[0];
-    assert_eq!(session.rows.len(), 1);
-    assert_eq!(
-        session.hidden_children.as_ref(),
-        Some(&Msg::SubagentsHidden { n: 3, working: 1 })
-    );
-    assert_eq!(
-        en(&Msg::SubagentsHidden { n: 3, working: 1 }),
-        "+3 subagents (1 working)"
-    );
-    assert_eq!(m.aggregate(), Status::NeedsYou);
+    let live_age = Msg::Age {
+        secs: age_secs(130_000, 130_000),
+    };
+    assert_eq!(live_age, Msg::Age { secs: 0 });
+    assert_eq!(en(&live_age), "now");
+    let old_age = Msg::Age {
+        secs: age_secs(130_000, 10_000),
+    };
+    assert_eq!(old_age, Msg::Age { secs: 120 });
+    assert_eq!(en(&old_age), "2m");
 }
 
 #[test]

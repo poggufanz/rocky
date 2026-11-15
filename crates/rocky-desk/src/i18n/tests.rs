@@ -631,10 +631,21 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::SettingCards
         | CardMsg::NoticeConsent
         | CardMsg::TaskNoticePrompt
-        | CardMsg::WaitingApproval => {}
+        | CardMsg::WaitingApproval
+        | CardMsg::SetupNotes { .. }
+        | CardMsg::Show
+        | CardMsg::Hide
+        | CardMsg::ActiveCount { .. }
+        | CardMsg::NeedYouCount { .. }
+        | CardMsg::EarlierSteps { .. }
+        | CardMsg::Collapse
+        | CardMsg::DoneAge { .. }
+        | CardMsg::ViewCard
+        | CardMsg::IdleSessions { .. }
+        | CardMsg::FailuresChip { .. } => {}
     };
     let _ = check;
-    40
+    51
 }
 
 #[test]

@@ -73,6 +73,8 @@ pub struct SubRow {
     pub description: Option<String>,
     pub timer: String,
     pub action: Option<String>,
+    pub expanded: bool,
+    pub steps: Vec<LiveStep>,
 }
 
 /// Compact row for a recently completed or failed session.
@@ -356,19 +358,31 @@ fn build_subrows(
     if model.subagent_tree_enabled() {
         let rows = children
             .iter()
-            .map(|sub| SubRow {
-                key: sub.key.clone(),
-                status: sub.status,
-                agent_type: clean_opt(sub.agent_type.as_deref())
-                    .unwrap_or_else(|| short8(&sub.key.agent_id)),
-                description: clean_opt(sub.description.as_deref()),
-                timer: format_age(now_ms, sub.last_event_ms, lang),
-                action: sub.action.as_ref().and_then(|act| {
-                    let clean = sanitize_single_line(&action_text(act, sub.repo.root.as_deref()))
-                        .trim()
-                        .to_string();
-                    (!clean.is_empty()).then_some(clean)
-                }),
+            .map(|sub| {
+                let expanded = model.is_open(&sub.key);
+                let steps = if expanded {
+                    let entries = model.timeline(&sub.key).unwrap_or(&[]);
+                    build_steps(entries, sub.status, true, now_ms, lang).0
+                } else {
+                    Vec::new()
+                };
+                SubRow {
+                    key: sub.key.clone(),
+                    status: sub.status,
+                    agent_type: clean_opt(sub.agent_type.as_deref())
+                        .unwrap_or_else(|| short8(&sub.key.agent_id)),
+                    description: clean_opt(sub.description.as_deref()),
+                    timer: format_age(now_ms, sub.last_event_ms, lang),
+                    action: sub.action.as_ref().and_then(|act| {
+                        let clean =
+                            sanitize_single_line(&action_text(act, sub.repo.root.as_deref()))
+                                .trim()
+                                .to_string();
+                        (!clean.is_empty()).then_some(clean)
+                    }),
+                    expanded,
+                    steps,
+                }
             })
             .collect();
         (rows, None)

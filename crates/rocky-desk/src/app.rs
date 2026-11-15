@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{Context, FocusHandle, WindowHandle};
+use gpui::{Context, FocusHandle, Window, WindowHandle};
 use gpui_tray::Tray;
 use rocky_proto::pipe::{AgentKey, ClientMsg, ServerMsg, Status};
 use rocky_proto::settings::Lang;
@@ -33,6 +33,8 @@ use crate::search_input::{Debounce, SearchInput};
 use crate::settings_view::{SettingId, View, set_bool, set_lang};
 use crate::setup_settings::SetupSettings;
 use crate::spawn::daemon_exe_name;
+use crate::ui::cards_view::CardAction;
+use crate::ui::now_view::NowAction;
 use crate::view::{Conn, Model};
 
 mod autostart_wiring;
@@ -230,6 +232,10 @@ struct DeskView {
     card_detail: Option<DetailModel>,
     /// Open paged unified diff view-model, when viewing a block diff.
     block_diff: Option<DiffModel>,
+    /// Whether the Notices collapsible card is expanded.
+    notices_open: bool,
+    /// Whether the idle sessions disclosure inside Now is expanded.
+    idle_open: bool,
     /// Current query text inside the change cards search box.
     search: SearchInput,
     /// 300 ms debounce state driving card search requests.
@@ -313,6 +319,26 @@ impl DeskView {
         self.ctl.last_tooltip = Msg::NoAgents;
         self.menu_stale = true;
         cx.notify();
+    }
+
+    fn on_now_action(&mut self, action: NowAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            NowAction::ToggleNotices => {
+                self.notices_open = !self.notices_open;
+                cx.notify();
+            }
+            NowAction::ToggleAgent(key) => {
+                self.ctl.toggle_open(&key, now_ms());
+                cx.notify();
+            }
+            NowAction::ToggleIdle => {
+                self.idle_open = !self.idle_open;
+                cx.notify();
+            }
+            NowAction::OpenCard(card_id) => {
+                self.on_card_action(CardAction::OpenDetail(card_id), window, cx);
+            }
+        }
     }
 }
 

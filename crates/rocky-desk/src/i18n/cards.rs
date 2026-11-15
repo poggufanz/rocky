@@ -79,6 +79,31 @@ pub enum CardMsg {
     NoticeConsent,
     TaskNoticePrompt,
     WaitingApproval,
+    SetupNotes {
+        n: usize,
+    },
+    Show,
+    Hide,
+    ActiveCount {
+        n: usize,
+    },
+    NeedYouCount {
+        n: usize,
+    },
+    EarlierSteps {
+        n: usize,
+    },
+    Collapse,
+    DoneAge {
+        age: String,
+    },
+    ViewCard,
+    IdleSessions {
+        n: usize,
+    },
+    FailuresChip {
+        n: u32,
+    },
 }
 
 /// Every [`CardMsg`] variant with sample arguments for parity and text scans.
@@ -128,6 +153,23 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::NoticeConsent,
         CardMsg::TaskNoticePrompt,
         CardMsg::WaitingApproval,
+        CardMsg::SetupNotes { n: 1 },
+        CardMsg::SetupNotes { n: 3 },
+        CardMsg::Show,
+        CardMsg::Hide,
+        CardMsg::ActiveCount { n: 3 },
+        CardMsg::NeedYouCount { n: 1 },
+        CardMsg::NeedYouCount { n: 2 },
+        CardMsg::EarlierSteps { n: 1 },
+        CardMsg::EarlierSteps { n: 4 },
+        CardMsg::Collapse,
+        CardMsg::DoneAge {
+            age: "46s".to_string(),
+        },
+        CardMsg::ViewCard,
+        CardMsg::IdleSessions { n: 1 },
+        CardMsg::IdleSessions { n: 2 },
+        CardMsg::FailuresChip { n: 2 },
     ]
 }
 
@@ -194,6 +236,25 @@ fn card_en(msg: &CardMsg) -> String {
         }
         CardMsg::TaskNoticePrompt => "Background task notice".to_string(),
         CardMsg::WaitingApproval => "waiting for approval".to_string(),
+        CardMsg::SetupNotes { n } => {
+            format!("{n} {}", plural(*n as u64, "setup note", "setup notes"))
+        }
+        CardMsg::Show => "Show".to_string(),
+        CardMsg::Hide => "Hide".to_string(),
+        CardMsg::ActiveCount { n } => format!("{n} active"),
+        CardMsg::NeedYouCount { n } => {
+            format!("{n} {}", plural(*n as u64, "needs you", "need you"))
+        }
+        CardMsg::EarlierSteps { n } => {
+            format!("+{n} earlier {}", plural(*n as u64, "step", "steps"))
+        }
+        CardMsg::Collapse => "Collapse".to_string(),
+        CardMsg::DoneAge { age } => format!("done {age}"),
+        CardMsg::ViewCard => "View card \u{203a}".to_string(),
+        CardMsg::IdleSessions { n } => {
+            format!("{n} idle {}", plural(*n as u64, "session", "sessions"))
+        }
+        CardMsg::FailuresChip { n } => format!("{n} failed"),
     }
 }
 
@@ -252,6 +313,17 @@ fn card_id(msg: &CardMsg) -> String {
         }
         CardMsg::TaskNoticePrompt => "Notifikasi task latar".to_string(),
         CardMsg::WaitingApproval => "menunggu izin".to_string(),
+        CardMsg::SetupNotes { n } => format!("{n} catatan setup"),
+        CardMsg::Show => "Lihat".to_string(),
+        CardMsg::Hide => "Tutup".to_string(),
+        CardMsg::ActiveCount { n } => format!("{n} aktif"),
+        CardMsg::NeedYouCount { n } => format!("{n} butuh kamu"),
+        CardMsg::EarlierSteps { n } => format!("+{n} langkah sebelumnya"),
+        CardMsg::Collapse => "Ringkas".to_string(),
+        CardMsg::DoneAge { age } => format!("selesai {age}"),
+        CardMsg::ViewCard => "Lihat kartu \u{203a}".to_string(),
+        CardMsg::IdleSessions { n } => format!("{n} sesi idle"),
+        CardMsg::FailuresChip { n } => format!("{n} gagal"),
     }
 }
 

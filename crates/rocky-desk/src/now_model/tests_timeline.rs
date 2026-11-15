@@ -620,3 +620,48 @@ fn timeline_fetch_leaves_non_primary_child_expansions_unthrottled() {
         vec![k_main]
     );
 }
+
+#[test]
+fn subrow_expands_and_formats_all_current_turn_steps_when_open() {
+    let mut model = Model::new();
+    let k_child = key("S1", "sub-1");
+    model.apply(snapshot(vec![
+        agent("S1", "", Status::Working, 90_000),
+        agent("S1", "sub-1", Status::Working, 95_000),
+    ]));
+
+    let entries: Vec<TimelineEntry> = (1..=4)
+        .map(|i| {
+            step_entry(
+                i * 1_000,
+                TimelineKind::Tool,
+                Some("Read"),
+                Some(&format!("file-{i}.rs")),
+                if i == 4 {
+                    Some(Outcome::Pending)
+                } else {
+                    Some(Outcome::Ok)
+                },
+                (i < 4).then_some(1_000),
+            )
+        })
+        .collect();
+
+    let collapsed = now_view(&model, &CardsModel::new(), 10_000, UiLang::En);
+    assert!(!collapsed.active[0].subs[0].expanded);
+    assert!(collapsed.active[0].subs[0].steps.is_empty());
+
+    model.toggle_open(&k_child);
+    model.apply(timeline_msg(k_child, entries));
+
+    let expanded = now_view(&model, &CardsModel::new(), 10_000, UiLang::En);
+    let sub = &expanded.active[0].subs[0];
+    assert!(sub.expanded);
+    assert_eq!(sub.steps.len(), 4);
+    assert_eq!(sub.steps[0].mark, StepMark::Ok);
+    assert_eq!(sub.steps[0].title, "read file-1.rs");
+    assert_eq!(sub.steps[0].dur, "1s");
+    assert_eq!(sub.steps[3].mark, StepMark::Running);
+    assert_eq!(sub.steps[3].title, "read file-4.rs");
+    assert_eq!(sub.steps[3].dur, "6s");
+}

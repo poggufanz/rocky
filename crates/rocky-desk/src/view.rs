@@ -7,7 +7,7 @@ use rocky_proto::settings::Settings;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capture_lines::capture_lines;
-use crate::i18n::{Msg, UiLang, tr};
+use crate::i18n::Msg;
 use crate::setup_lines::setup_lines;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,48 +30,6 @@ pub struct RepoGroup {
     pub branch: Option<String>,
     /// Distinct repo roots the group's live agents reported, in first-seen order.
     pub roots: Vec<String>,
-    pub sessions: Vec<SessionRow>,
-}
-
-impl RepoGroup {
-    /// Header text: the repo name is never translated; only the missing-name
-    /// placeholder and the branch suffix are composed here.
-    pub fn label(&self, lang: UiLang) -> String {
-        let name = if self.name.is_empty() {
-            tr(lang, &Msg::UnknownRepo)
-        } else {
-            self.name.clone()
-        };
-        match &self.branch {
-            Some(b) if !b.is_empty() => format!("{name} @ {b}"),
-            _ => name,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionRow {
-    pub session_short: String,
-    /// Main row first, then children by `agent_id` when the tree is on.
-    pub rows: Vec<AgentRow>,
-    /// Children the tree setting hides, with a count of the working ones.
-    pub hidden_children: Option<Msg>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentRow {
-    pub key: AgentKey,
-    /// True for a row under a main agent.
-    pub child: bool,
-    /// Catalog label: the main agent is translated, subagent names are not.
-    pub label: Msg,
-    pub description: Option<String>,
-    pub status: Status,
-    pub action_text: Option<String>,
-    pub age: Msg,
-    pub failures: u32,
-    /// Main-row detail for the session's remaining activity.
-    pub note: Option<Msg>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,9 +53,6 @@ pub struct Model {
     /// Error from the last failed `set`, shown until the next settings broadcast.
     set_error: Option<String>,
 }
-
-/// Agents bucketed by `(repo name, branch)`, then by session id.
-type GroupMap<'a> = BTreeMap<(String, Option<String>), BTreeMap<String, Vec<&'a AgentStatus>>>;
 
 impl Model {
     pub fn new() -> Self {
@@ -314,96 +269,6 @@ impl Model {
             .collect()
     }
 
-    pub fn groups(&self, now_ms: u64) -> Vec<RepoGroup> {
-        let mut by_group: GroupMap<'_> = BTreeMap::new();
-        for a in self.agents.values() {
-            if a.status == Status::Ended {
-                continue;
-            }
-            by_group
-                .entry((
-                    a.repo.name.clone(),
-                    a.repo.branch.clone().filter(|b| !b.is_empty()),
-                ))
-                .or_default()
-                .entry(a.key.session_id.clone())
-                .or_default()
-                .push(a);
-        }
-        let tree = self.settings.as_ref().is_none_or(|s| s.subagent_tree);
-        by_group
-            .into_iter()
-            .map(|((name, branch), sessions)| RepoGroup {
-                name,
-                branch,
-                roots: distinct_roots(&sessions),
-                sessions: sessions
-                    .into_iter()
-                    .map(|(session_id, mut agents)| {
-                        agents.sort_by(|a, b| {
-                            (!a.key.agent_id.is_empty(), &a.key.agent_id)
-                                .cmp(&(!b.key.agent_id.is_empty(), &b.key.agent_id))
-                        });
-                        let children: Vec<&AgentStatus> = agents
-                            .iter()
-                            .copied()
-                            .filter(|a| !a.key.agent_id.is_empty())
-                            .collect();
-                        let working_children = children
-                            .iter()
-                            .filter(|a| a.status == Status::Working)
-                            .count() as u64;
-                        let note = agents
-                            .iter()
-                            .find(|a| a.key.agent_id.is_empty())
-                            .filter(|a| a.status == Status::Done)
-                            .and_then(|_| {
-                                (working_children > 0).then_some(Msg::SubagentsStillWorking {
-                                    n: working_children,
-                                })
-                            });
-                        let hidden_children = if tree || children.is_empty() {
-                            None
-                        } else {
-                            Some(Msg::SubagentsHidden {
-                                n: children.len() as u64,
-                                working: working_children,
-                            })
-                        };
-                        SessionRow {
-                            session_short: short8(&session_id),
-                            rows: agents
-                                .iter()
-                                .filter(|a| tree || a.key.agent_id.is_empty())
-                                .map(|a| AgentRow {
-                                    key: a.key.clone(),
-                                    child: !a.key.agent_id.is_empty(),
-                                    label: agent_label(a),
-                                    description: a.description.clone(),
-                                    status: a.status,
-                                    action_text: a
-                                        .action
-                                        .as_ref()
-                                        .map(|act| action_text(act, a.repo.root.as_deref())),
-                                    age: Msg::Age {
-                                        secs: age_secs(now_ms, a.last_event_ms),
-                                    },
-                                    failures: a.failures,
-                                    note: if a.key.agent_id.is_empty() {
-                                        note.clone()
-                                    } else {
-                                        None
-                                    },
-                                })
-                                .collect(),
-                            hidden_children,
-                        }
-                    })
-                    .collect(),
-            })
-            .collect()
-    }
-
     pub fn aggregate(&self) -> Status {
         self.agents
             .values()
@@ -507,22 +372,6 @@ fn priority(s: Status) -> u8 {
         Status::Idle => 1,
         Status::Ended => 0,
     }
-}
-
-/// Distinct non-empty repo roots across a group's agents, first-seen order.
-fn distinct_roots(sessions: &BTreeMap<String, Vec<&AgentStatus>>) -> Vec<String> {
-    let mut roots: Vec<String> = Vec::new();
-    for root in sessions
-        .values()
-        .flatten()
-        .filter_map(|a| a.repo.root.as_deref())
-        .filter(|r| !r.is_empty())
-    {
-        if !roots.iter().any(|seen| seen == root) {
-            roots.push(root.to_string());
-        }
-    }
-    roots
 }
 
 /// First 8 chars, char-safe.
