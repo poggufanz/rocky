@@ -289,6 +289,7 @@ mod tests {
                 name: "r".into(),
                 branch: Some("main".into()),
             },
+            prompt: None,
         }
     }
 

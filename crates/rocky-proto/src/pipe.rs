@@ -46,6 +46,14 @@ pub struct RepoInfo {
     pub branch: Option<String>,
 }
 
+/// Live prompt text carried on a main agent's status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptText {
+    pub text: String,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentStatus {
     pub key: AgentKey,
@@ -59,6 +67,8 @@ pub struct AgentStatus {
     pub last_event_ms: u64,
     pub quiet_10m: bool,
     pub repo: RepoInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<PromptText>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -112,6 +122,8 @@ pub struct TimelineEntry {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dur_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -656,6 +668,7 @@ mod tests {
                 name: "rocky".into(),
                 branch: None,
             },
+            prompt: None,
         };
         let health = Health::default();
         let msgs = [
@@ -707,6 +720,7 @@ mod tests {
                     tool_name: Some("Bash".into()),
                     text: Some("npm test".into()),
                     outcome: Some(Outcome::Pending),
+                    dur_ms: None,
                 }],
             },
             ServerMsg::Show,
@@ -1108,6 +1122,74 @@ mod tests {
             assert!(wire.starts_with("{\"v\":4,"), "bad wire: {wire}");
             let back: ServerMsg = decode(&wire).unwrap();
             assert_eq!(&back, msg);
+        }
+    }
+
+    #[test]
+    fn agent_status_prompt_round_trips_and_omits_when_none() {
+        use crate::pipe::PromptText;
+
+        let legacy = r#"{"v":4,"type":"status","op":"upsert","agent":{"key":{"session_id":"s1","agent_id":""},"agent_type":null,"status":"working","action":null,"summary":null,"failures":0,"last_event_ms":10,"quiet_10m":false,"repo":{"root":null,"name":"rocky","branch":null}}}"#;
+        let ServerMsg::Status { agent: decoded, .. } = decode::<ServerMsg>(legacy).unwrap() else {
+            panic!("expected status frame");
+        };
+        assert_eq!(decoded.prompt, None);
+
+        let encoded_none = encode(&ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent: decoded.clone(),
+        });
+        assert!(
+            !encoded_none.contains("\"prompt\""),
+            "unexpected prompt key: {encoded_none}"
+        );
+
+        for truncated in [false, true] {
+            let mut with_prompt = decoded.clone();
+            with_prompt.prompt = Some(PromptText {
+                text: "fix the cart".into(),
+                truncated,
+            });
+            let msg = ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent: with_prompt,
+            };
+            let wire = encode(&msg);
+            assert!(wire.contains("\"prompt\""), "missing prompt: {wire}");
+            assert_eq!(decode::<ServerMsg>(wire.trim_end()).unwrap(), msg);
+        }
+    }
+
+    #[test]
+    fn timeline_entry_dur_ms_round_trips_and_omits_when_none() {
+        let legacy = r#"{"v":4,"type":"timeline","id":1,"key":{"session_id":"s1","agent_id":""},"entries":[{"ms":100,"kind":"tool","tool_name":"Read","text":"a.rs","outcome":"ok"}]}"#;
+        let ServerMsg::Timeline { entries, .. } = decode::<ServerMsg>(legacy).unwrap() else {
+            panic!("expected timeline frame");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].dur_ms, None);
+
+        let encoded_none = encode(&ServerMsg::Timeline {
+            id: 1,
+            key: key(),
+            entries: entries.clone(),
+        });
+        assert!(
+            !encoded_none.contains("\"dur_ms\""),
+            "unexpected dur_ms key: {encoded_none}"
+        );
+
+        for dur in [0, 1234] {
+            let mut entry_with_dur = entries[0].clone();
+            entry_with_dur.dur_ms = Some(dur);
+            let msg = ServerMsg::Timeline {
+                id: 1,
+                key: key(),
+                entries: vec![entry_with_dur],
+            };
+            let wire = encode(&msg);
+            assert!(wire.contains("\"dur_ms\""), "missing dur_ms: {wire}");
+            assert_eq!(decode::<ServerMsg>(wire.trim_end()).unwrap(), msg);
         }
     }
 }

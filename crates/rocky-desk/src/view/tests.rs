@@ -30,6 +30,7 @@ fn agent(session: &str, agent_id: &str, status: Status) -> AgentStatus {
             name: "r".into(),
             branch: Some("main".into()),
         },
+        prompt: None,
     }
 }
 
@@ -499,6 +500,7 @@ fn entry(
         tool_name: tool.map(str::to_string),
         text: text.map(str::to_string),
         outcome,
+        dur_ms: None,
     }
 }
 

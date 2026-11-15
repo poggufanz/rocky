@@ -462,6 +462,7 @@ mod tests {
                 name: "n".repeat(name_len),
                 branch: None,
             },
+            prompt: None,
         }
     }
 

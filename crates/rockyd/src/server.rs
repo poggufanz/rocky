@@ -169,6 +169,18 @@ impl Hub {
         self.broadcast_except(0, msg);
     }
 
+    /// Subscribes a raw receiver for in-process tests without opening a pipe.
+    #[doc(hidden)]
+    pub fn subscribe_for_test(&self) -> Receiver<String> {
+        let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAP);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.clients
+            .lock()
+            .unwrap()
+            .insert(id, Client { tx, close: None });
+        rx
+    }
+
     /// Queues one message to every subscribed client except `skip`. Client
     /// ids start at 1, so 0 means everyone.
     fn broadcast_except(&self, skip: u64, msg: &ServerMsg) {
