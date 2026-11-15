@@ -2067,7 +2067,7 @@ test("why_file returns change cards when present or absent and strips stored cod
     ...(idx === 1 ? { via: "bash", bash: { cmd: "git mv old.ts src/a.ts", candidates: 1 }, quote: null } : {}),
   }));
   const unrelatedBlock = sampleStoredBlock(99, { path: "src/other.ts" });
-  const cardMain = sampleStoredCard("550e8400-e29b-41d4-a716-446655440000", {
+  const cardMain = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
     ended_ms: null,
     prompt: `${"word ".repeat(55)} trailing details`,
     blocks: [...twelveMatching, unrelatedBlock],
@@ -2096,6 +2096,7 @@ test("why_file returns change cards when present or absent and strips stored cod
   assert.deepEqual(seenCalls, [{ path: "src/a.ts", limit: 3 }]);
   assert.equal(res.isError, undefined);
   assert.deepEqual(res.structuredContent.cardsCoverage, { complete: false, reason: "line-cap", skipped: 2 });
+  assert.equal(res.structuredContent.truncated, true);
 
   const cards = res.structuredContent.cards as ProjectedCard[];
   assert.equal(cards.length, 2);
@@ -2196,6 +2197,79 @@ test("why_file projects card strings according to exposure (sanitized vs raw)", 
   assert.ok(rCard?.blocks[0]?.bash_cmd?.includes(secret));
 });
 
+test("why_file preserves 32-hex card_id and redacts other opaque card_id strings under sanitized exposure", async () => {
+  const hex32 = "4e5e1a6d22cea72d7a8b3985c9c27fcf";
+  const mixed41 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDE";
+  const upper32 = "4E5E1A6D22CEA72D7A8B3985C9C27FCF";
+  const uuid36 = "550e8400-e29b-41d4-a716-446655440000";
+  const cards = [
+    sampleStoredCard(hex32),
+    sampleStoredCard(mixed41),
+    sampleStoredCard(upper32),
+    sampleStoredCard(uuid36),
+  ];
+  const provider = (): CardsForFile => ({
+    cards,
+    matched: new Map(cards.map((card) => [card.card_id, card.blocks])),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  const sanitized = (await cardRegistry(provider, "sanitized").call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal)).structuredContent;
+  assert.deepEqual((sanitized.cards as ProjectedCard[]).map((c) => c.card_id), [
+    hex32,
+    "[redacted]",
+    "[redacted]",
+    "[redacted]",
+  ]);
+
+  const raw = (await cardRegistry(provider, "raw").call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal)).structuredContent;
+  assert.deepEqual((raw.cards as ProjectedCard[]).map((c) => c.card_id), [
+    hex32,
+    mixed41,
+    upper32,
+    uuid36,
+  ]);
+});
+
+test("why_file sets truncated when card prompt or quote exceeds character limit below 16 KiB", async () => {
+  const promptClipped = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    prompt: `${"w ".repeat(112)}z`,
+    blocks: [sampleStoredBlock(1, { quote: { text: "short quote", shared: false } })],
+  });
+  const promptRes = (await cardRegistry(() => ({
+    cards: [promptClipped],
+    matched: new Map([[promptClipped.card_id, promptClipped.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.equal(Array.from((promptRes.cards as ProjectedCard[])[0]?.prompt ?? "").length, 200);
+  assert.equal(promptRes.truncated, true);
+
+  const quoteClipped = sampleStoredCard("97394ac43381e6ac7a3b66cb264cd2b9", {
+    prompt: "short prompt",
+    blocks: [sampleStoredBlock(1, { quote: { text: `${"w ".repeat(299)}zz`, shared: false } })],
+  });
+  const quoteRes = (await cardRegistry(() => ({
+    cards: [quoteClipped],
+    matched: new Map([[quoteClipped.card_id, quoteClipped.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.equal(Array.from((quoteRes.cards as ProjectedCard[])[0]?.blocks[0]?.quote ?? "").length, 500);
+  assert.equal(quoteRes.truncated, true);
+
+  const exactBounds = sampleStoredCard("085fd43e5e4c84caf8d98e99af9d6ff2", {
+    prompt: "🙂".repeat(200),
+    blocks: [sampleStoredBlock(1, { quote: { text: "🙂".repeat(500), shared: false } })],
+  });
+  const exactRes = (await cardRegistry(() => ({
+    cards: [exactBounds],
+    matched: new Map([[exactBounds.card_id, exactBounds.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.equal(Array.from((exactRes.cards as ProjectedCard[])[0]?.prompt ?? "").length, 200);
+  assert.equal(Array.from((exactRes.cards as ProjectedCard[])[0]?.blocks[0]?.quote ?? "").length, 500);
+  assert.equal(exactRes.truncated, false);
+});
+
 test("why_file handles cards reader failure without failing tool or altering existing fields", async () => {
   const reason = statedReason("keep-1", Date.now() - 1_000, "retry limit stays three", ["src/a.ts"]);
   const content = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
@@ -2212,7 +2286,21 @@ test("why_file handles cards reader failure without failing tool or altering exi
   assert.equal(content.truncated, false);
 });
 
-test("why_file drops oldest change cards first when response size cap is exceeded", async () => {
+test("why_file drops oldest change cards first when response size cap is exceeded and preserves existing evidence", async () => {
+  const existingItem: TripleRecord = {
+    ...triple,
+    id: "existing-item-1",
+    ts: 1_700_000_000_000,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/a.ts", plusMinus: [2, 1], props: ["retry-cap"], provenance: "tool-observed" }],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+  const memoryWithItem = createMemoryQueries(() => [existingItem]);
   const bigCmd = `node script.mjs ${"arg ".repeat(3_500)}`;
   const cards = Array.from({ length: 10 }, (_, idx) => sampleStoredCard(`card-${idx}`, {
     started_ms: 1_700_000_100_000 - idx * 1_000,
@@ -2229,14 +2317,63 @@ test("why_file drops oldest change cards first when response size cap is exceede
     cards,
     matched,
     coverage: { complete: true, skipped: 0 },
-  })).call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal);
+  }), "sanitized", memoryWithItem).call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal);
 
   assert.equal(res.isError, undefined);
   assert.ok(Buffer.byteLength(JSON.stringify(res), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+  const keptItems = res.structuredContent.items as Array<{ id: string }>;
+  assert.equal(keptItems.length, 1);
+  assert.equal(keptItems[0]?.id, "existing-item-1");
   const kept = res.structuredContent.cards as ProjectedCard[];
   assert.ok(kept.length > 0 && kept.length < 10);
   assert.deepEqual(kept.map((c) => c.card_id), cards.slice(0, kept.length).map((c) => c.card_id));
   assert.equal(res.structuredContent.truncated, true);
+
+  // Even when a single oversized card would exceed the cap alongside large existing evidence,
+  // all cards drop before existing items or possible evidence are evicted.
+  const largeProps = Array.from({ length: 4 }, (_, idx) => `${idx}-${"p ".repeat(7_000).trim()}`);
+  const largeExistingItem: TripleRecord = {
+    ...existingItem,
+    id: "existing-large-item",
+    mechanism: {
+      files: [
+        { path: "src/a.ts", plusMinus: [2, 1], props: largeProps, provenance: "tool-observed" },
+        { path: "src/b.ts", plusMinus: [1, 0], props: largeProps, provenance: "tool-observed" },
+        { path: "src/c.ts", plusMinus: [1, 0], props: largeProps, provenance: "tool-observed" },
+      ],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+  const oneHugeCard = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    blocks: Array.from({ length: 10 }, (_, seq) => sampleStoredBlock(seq + 1, {
+      via: "bash",
+      bash: { cmd: bigCmd, candidates: 1 },
+      quote: null,
+    })),
+  });
+  const heavyMemory: MemoryQueries = {
+    ...createMemoryQueries(() => [largeExistingItem]),
+    whyFileEvidence: () => ({
+      matches: [largeExistingItem],
+      possible: [{ id: "possible-keep-1", ts: 10, source: "agent-hook", reason: "path_may_be_omitted" }],
+      coverage: { status: "complete", complete: true, filesCovered: 1, truncatedFiles: 0 },
+      coverageIncomplete: false,
+    }),
+  };
+  const dropAllCardsRes = await cardRegistry(() => ({
+    cards: [oneHugeCard],
+    matched: new Map([[oneHugeCard.card_id, oneHugeCard.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  }), "sanitized", heavyMemory).call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal);
+
+  assert.equal(dropAllCardsRes.isError, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(dropAllCardsRes), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+  assert.equal((dropAllCardsRes.structuredContent.cards as ProjectedCard[]).length, 0);
+  assert.equal((dropAllCardsRes.structuredContent.items as Array<{ id: string }>).length, 1);
+  assert.equal((dropAllCardsRes.structuredContent.possible as Array<{ id: string }>).length, 1);
+  assert.equal(dropAllCardsRes.structuredContent.truncated, true);
 });
 
 test("why_file reads change cards end-to-end through default reader under temp ROCKY_HOME and repo", async () => {

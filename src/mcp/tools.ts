@@ -423,7 +423,11 @@ function validEvidenceRefs(
   });
 }
 
-function cappedResult(payload: object, isError = false): ToolCallResult {
+function cappedResult(
+  payload: object,
+  isError = false,
+  trimFirst: readonly string[] = [],
+): ToolCallResult {
   const source = payload as Record<string, unknown>;
   const copy: Record<string, unknown> = { ...source };
   for (const [key, value] of Object.entries(source)) {
@@ -456,9 +460,12 @@ function cappedResult(payload: object, isError = false): ToolCallResult {
     }
     return total;
   };
-  const arrayPriority = Array.isArray(copy.possible) && copy.possible.length > 0
+  const basePriority = Array.isArray(copy.possible) && copy.possible.length > 0
     ? ["possible", "items", "rankedCandidateIds", "evidenceRefs"]
     : ["items", "possible", "rankedCandidateIds", "evidenceRefs"];
+  const arrayPriority = trimFirst.length === 0
+    ? basePriority
+    : [...trimFirst, ...basePriority.filter((key) => !trimFirst.includes(key))];
   const arrayKeys = [
     ...arrayPriority.filter((key) => Array.isArray(copy[key])),
     ...Object.keys(copy).filter((key) => Array.isArray(copy[key]) && !arrayPriority.includes(key)).sort(),
@@ -1900,6 +1907,19 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 : cardsForFile(input.path, { cwd: process.cwd(), limit: input.limit });
               return projectWhyCards(readCards, options.exposure, input.limit);
             }, fallbackCards);
+            const fallbackPayload = {
+              exposure: options.exposure,
+              ...memoryCoveragePayload(memoryScan),
+              items: [],
+              possible: [],
+              rationales: [],
+              cards: [],
+              cardsCoverage: { complete: false, skipped: 0 },
+              coverage: { status: "unknown" as const, complete: false, filesCovered: 0, truncatedFiles: 0 },
+              coverageStatus: "unknown" as const,
+              coverageIncomplete: true,
+              truncated: true,
+            };
             const projected = safeProjection(() => {
               const reasons = projectWhyRationales(stated.reasons, options.exposure);
               return {
@@ -1916,8 +1936,11 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 ...(evidence.ambiguousPath ? { ambiguousPath: true } : {}),
                 truncated: reasons.truncated || cardProjection.truncated,
               };
-            }, { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], cards: [], cardsCoverage: { complete: false, skipped: 0 }, coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
-            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], cards: [], cardsCoverage: { complete: false, skipped: 0 }, coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
+            }, fallbackPayload);
+            return safeProjection(
+              () => cappedResult(projected, false, ["cards"]),
+              cappedResult(fallbackPayload, false, ["cards"]),
+            );
           }
           case "teach_lookup": {
             const input = parseTeachLookupArgs(args);

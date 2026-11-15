@@ -638,6 +638,7 @@ const MAX_CARD_PROMPT_CHARS = 200;
 const MAX_CARD_QUOTE_CHARS = 500;
 const MAX_BLOCKS_PER_CARD = 10;
 const MAX_CARDS_PER_FILE = 10;
+const CARD_ID_HEX_32 = /^[0-9a-f]{32}$/;
 
 export interface ProjectedWhyCardSymbol {
   kind: string;
@@ -691,10 +692,38 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sliceCodePoints(value: string, maxChars: number): string {
+function sliceCodePoints(
+  value: string,
+  maxChars: number,
+  path: string,
+  truncation: Truncation,
+): string {
   if (value.length <= maxChars) return value;
   const chars = Array.from(value);
-  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
+  if (chars.length <= maxChars) return value;
+  truncation.fields.push(path);
+  return chars.slice(0, maxChars).join("");
+}
+
+function projectClippedCardText(
+  value: string,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+  maxChars: number,
+): string {
+  return sliceCodePoints(projectText(value, exposure, path, truncation), maxChars, path, truncation);
+}
+
+function projectCardId(
+  value: string,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): string {
+  return CARD_ID_HEX_32.test(value)
+    ? value
+    : projectText(value, exposure, path, truncation);
 }
 
 function lastPathSegment(rootPath: string): string {
@@ -873,7 +902,7 @@ function projectCardBlock(
     removed,
     quote: rawQuoteText === null
       ? null
-      : sliceCodePoints(projectText(rawQuoteText, exposure, `${path}.quote`, truncation), MAX_CARD_QUOTE_CHARS),
+      : projectClippedCardText(rawQuoteText, exposure, `${path}.quote`, truncation, MAX_CARD_QUOTE_CHARS),
     bash_cmd: rawBashCmd === null
       ? null
       : projectText(rawBashCmd, exposure, `${path}.bash_cmd`, truncation),
@@ -882,9 +911,10 @@ function projectCardBlock(
 
 /**
  * Project Desk change cards returned for one file through MCP boundaries:
- * strings run through `projectText` (with `card_id` validated as an opaque ID),
- * stored code shas/tool IDs/flow are never included, prompts and quotes are
- * bounded, and invalid or hostile values cannot throw out of the projection.
+ * strings run through `projectText` (passing through only 32-lowercase-hex
+ * `card_id` values unchanged), stored code shas/tool IDs/flow are never
+ * included, prompts and quotes are bounded with truncation recorded, and
+ * invalid or hostile values cannot throw out of the projection.
  */
 export function projectWhyCards(
   result: CardsForFile,
@@ -907,29 +937,36 @@ export function projectWhyCards(
     try {
       const rawCard = rawCards[cardIndex];
       if (!isPlainRecord(rawCard)) continue;
-      if (typeof rawCard.card_id !== "string" || rawCard.card_id.length === 0) continue;
-      if (!isSafeNonNegativeInteger(rawCard.started_ms)) continue;
-      if (rawCard.ended_ms !== undefined && rawCard.ended_ms !== null && !isSafeNonNegativeInteger(rawCard.ended_ms)) continue;
-      if (typeof rawCard.root !== "string") continue;
-      if (rawCard.main_root !== undefined && rawCard.main_root !== null && typeof rawCard.main_root !== "string") continue;
-      if (rawCard.agent_type !== undefined && typeof rawCard.agent_type !== "string") continue;
-      if (typeof rawCard.prompt !== "string") continue;
+      const rawCardId = rawCard.card_id;
+      const rawStartedMs = rawCard.started_ms;
+      const rawEndedMs = rawCard.ended_ms;
+      const rawCardRoot = rawCard.root;
+      const rawCardMainRoot = rawCard.main_root;
+      const rawCardAgentType = rawCard.agent_type;
+      const rawCardPrompt = rawCard.prompt;
+      if (typeof rawCardId !== "string" || rawCardId.length === 0) continue;
+      if (!isSafeNonNegativeInteger(rawStartedMs)) continue;
+      if (rawEndedMs !== undefined && rawEndedMs !== null && !isSafeNonNegativeInteger(rawEndedMs)) continue;
+      if (typeof rawCardRoot !== "string") continue;
+      if (rawCardMainRoot !== undefined && rawCardMainRoot !== null && typeof rawCardMainRoot !== "string") continue;
+      if (rawCardAgentType !== undefined && typeof rawCardAgentType !== "string") continue;
+      if (typeof rawCardPrompt !== "string") continue;
 
       const at = `cards[${cards.length}]`;
-      const rawRoot = typeof rawCard.main_root === "string" && rawCard.main_root.length > 0
-        ? rawCard.main_root
-        : rawCard.root;
-      const rawAgentType = typeof rawCard.agent_type === "string" ? rawCard.agent_type : "";
+      const rawRoot = typeof rawCardMainRoot === "string" && rawCardMainRoot.length > 0
+        ? rawCardMainRoot
+        : rawCardRoot;
+      const rawAgentType = typeof rawCardAgentType === "string" ? rawCardAgentType : "";
 
-      const promptInput = rawCard.prompt.length > MAX_NESTED_BYTES
-        ? rawCard.prompt.slice(0, MAX_NESTED_BYTES)
-        : rawCard.prompt;
-      if (promptInput.length !== rawCard.prompt.length) truncation.fields.push(`${at}.prompt`);
+      const promptInput = rawCardPrompt.length > MAX_NESTED_BYTES
+        ? rawCardPrompt.slice(0, MAX_NESTED_BYTES)
+        : rawCardPrompt;
+      if (promptInput.length !== rawCardPrompt.length) truncation.fields.push(`${at}.prompt`);
       const promptKind = classifyPrompt(promptInput);
       const title = promptTitle(promptInput);
 
       const blocks: ProjectedWhyCardBlock[] = [];
-      const matchingBlocks = matchedMap?.get(rawCard.card_id);
+      const matchingBlocks = matchedMap?.get(rawCardId);
       if (Array.isArray(matchingBlocks)) {
         const blockScanBound = Math.min(matchingBlocks.length, MAX_NESTED_ITEMS);
         for (let blockIndex = 0; blockIndex < blockScanBound && blocks.length < MAX_BLOCKS_PER_CARD; blockIndex += 1) {
@@ -944,11 +981,11 @@ export function projectWhyCards(
       }
 
       cards.push({
-        card_id: projectOpaqueId(rawCard.card_id, `${at}.card_id`, truncation, exposure === "sanitized"),
-        ended_ms: rawCard.ended_ms === undefined || rawCard.ended_ms === null ? null : rawCard.ended_ms,
-        started_ms: rawCard.started_ms,
+        card_id: projectCardId(rawCardId, exposure, `${at}.card_id`, truncation),
+        ended_ms: rawEndedMs === undefined || rawEndedMs === null ? null : rawEndedMs,
+        started_ms: rawStartedMs,
         repo: projectText(lastPathSegment(rawRoot), exposure, `${at}.repo`, truncation),
-        prompt: sliceCodePoints(projectText(title, exposure, `${at}.prompt`, truncation), MAX_CARD_PROMPT_CHARS),
+        prompt: projectClippedCardText(title, exposure, `${at}.prompt`, truncation, MAX_CARD_PROMPT_CHARS),
         prompt_kind: projectPromptKind(promptKind, exposure, `${at}.prompt_kind`, truncation),
         agent_type: projectText(rawAgentType, exposure, `${at}.agent_type`, truncation),
         blocks,

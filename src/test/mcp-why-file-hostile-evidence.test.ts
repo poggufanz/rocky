@@ -692,3 +692,78 @@ test("MCP why_file skips forged card file lines with wrong types and handles hos
   assert.deepEqual(fallbackRes.structuredContent.cards, []);
   assert.deepEqual(fallbackRes.structuredContent.cardsCoverage, { complete: false, skipped: 0 });
 });
+
+test("MCP why_file redacts non-32-hex forged card_id and flags sub-16KiB character clipping", async () => {
+  const validHexId = "4e5e1a6d22cea72d7a8b3985c9c27fcf";
+  const secretLikeId = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDE";
+  const cards: StoredCard[] = [
+    {
+      v: 1,
+      card_id: validHexId,
+      rev: 1,
+      root: "/tmp/wt/repo",
+      main_root: null,
+      started_ms: 2000,
+      ended_ms: 3000,
+      prompt: `${"w ".repeat(112)}z`,
+      blocks: [{
+        seq: 1,
+        path: "src/app.ts",
+        symbol: null,
+        labels: [{ id: "file_edited" }],
+        importance: "normal",
+        via: "edit",
+        line: 1,
+        added: 1,
+        removed: 0,
+        quote: { text: `${"w ".repeat(299)}zz`, shared: false },
+      }],
+    },
+    {
+      v: 1,
+      card_id: secretLikeId,
+      rev: 1,
+      root: "/tmp/wt/repo",
+      main_root: null,
+      started_ms: 1000,
+      ended_ms: 2000,
+      prompt: "normal prompt",
+      blocks: [{
+        seq: 1,
+        path: "src/app.ts",
+        symbol: null,
+        labels: [{ id: "file_edited" }],
+        importance: "normal",
+        via: "edit",
+        line: 1,
+        added: 1,
+        removed: 0,
+        quote: { text: "short quote", shared: false },
+      }],
+    },
+  ];
+
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: memoryWith({}),
+    recallWithAi: disabledRecallWithAi,
+    cards: (): CardsForFile => ({
+      cards,
+      matched: new Map(cards.map((c) => [c.card_id, c.blocks])),
+      coverage: { complete: true, skipped: 0 },
+    }),
+  });
+
+  const res = await registry.call("why_file", { path: "src/app.ts", limit: 5 }, new AbortController().signal);
+  assert.equal(res.isError, undefined);
+  const payload = res.structuredContent as {
+    cards: Array<{ card_id: string; prompt: string; blocks: Array<{ quote: string | null }> }>;
+    truncated: boolean;
+  };
+  assert.equal(payload.truncated, true);
+  assert.equal(payload.cards.length, 2);
+  assert.equal(payload.cards[0]?.card_id, validHexId);
+  assert.equal(payload.cards[0]?.prompt.length, 200);
+  assert.equal(payload.cards[0]?.blocks[0]?.quote?.length, 500);
+  assert.equal(payload.cards[1]?.card_id, "[redacted]");
+});
