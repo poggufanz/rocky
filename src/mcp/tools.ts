@@ -10,6 +10,7 @@ import { teachLookup } from "../core/teach.js";
 import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
 import { gapRungFor, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
 import { projectExplain } from "./privacy.js";
+import { cardsForFile, type CardsForFile } from "../desk/cards-read.js";
 import { readListeningTail } from "../listening/event-log-read.js";
 import { projectGraph } from "../listening/graph-store.js";
 import { isRepoCaptureAllowed } from "../listening/repo-consent-read.js";
@@ -24,11 +25,13 @@ import {
   projectRecallHitsForAi,
   projectRecentFailures,
   projectText,
+  projectWhyCards,
   projectWhyPossible,
   projectWhyRationales,
   projectTriple,
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
+  type ProjectedWhyCard,
 } from "./privacy.js";
 import { gitProvenanceChain, resolveGitDiff } from "../core/git-diff.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
@@ -104,6 +107,7 @@ export interface CreateToolRegistryOptions {
   exposure: Exposure;
   memory: MemoryQueries;
   recallWithAi: RecallWithAiPort;
+  cards?: (path: string, limit: number) => CardsForFile;
 }
 
 const ANNOTATIONS = {
@@ -292,7 +296,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
     {
       name: "why_file", title: "Why file changed",
-      description: "Remembered triples that touched one file (items, plus possible ones whose path may be omitted) and the reasons a human or agent stated for it (rationales), newest first, with separate incomplete-coverage disclosure. A relative path resolves against the server's working directory. Example: {\"path\": \"src/app.css\"}. Reasons are quotes recorded from a human or agent, not verified facts.",
+      description: "Remembered triples that touched one file (items, plus possible ones whose path may be omitted) and the reasons a human or agent stated for it (rationales), newest first, with separate incomplete-coverage disclosure. It also returns recorded agent change cards, read-only, with no code. A relative path resolves against the server's working directory. Example: {\"path\": \"src/app.css\"}. Reasons are quotes recorded from a human or agent, not verified facts.",
       inputSchema: schema({
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         limit: { type: "integer", minimum: 1, maximum: 10 },
@@ -1885,6 +1889,17 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               .filter((scan): scan is MemoryCoverage => scan !== undefined);
             const memoryScan = memoryScans.find(memoryScanIncomplete) ?? memoryScans[0];
             pairedCoverage = memoryScan;
+            const fallbackCards = {
+              cards: [] as ProjectedWhyCard[],
+              cardsCoverage: { complete: false, skipped: 0 },
+              truncated: false,
+            };
+            const cardProjection = safeProjection(() => {
+              const readCards = options.cards
+                ? options.cards(input.path, input.limit)
+                : cardsForFile(input.path, { cwd: process.cwd(), limit: input.limit });
+              return projectWhyCards(readCards, options.exposure, input.limit);
+            }, fallbackCards);
             const projected = safeProjection(() => {
               const reasons = projectWhyRationales(stated.reasons, options.exposure);
               return {
@@ -1893,14 +1908,16 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 items: projectedItems,
                 possible: projectWhyPossible(evidence.possible, input.limit, options.exposure),
                 rationales: reasons.rationales,
+                cards: cardProjection.cards,
+                cardsCoverage: cardProjection.cardsCoverage,
                 coverage: evidence.coverage,
                 coverageStatus: evidence.coverage.status,
                 coverageIncomplete: evidence.coverageIncomplete,
                 ...(evidence.ambiguousPath ? { ambiguousPath: true } : {}),
-                truncated: reasons.truncated,
+                truncated: reasons.truncated || cardProjection.truncated,
               };
-            }, { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
-            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
+            }, { exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], cards: [], cardsCoverage: { complete: false, skipped: 0 }, coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true });
+            return safeProjection(() => cappedResult(projected), cappedResult({ exposure: options.exposure, ...memoryCoveragePayload(memoryScan), items: [], possible: [], rationales: [], cards: [], cardsCoverage: { complete: false, skipped: 0 }, coverage: { status: "unknown", complete: false, filesCovered: 0, truncatedFiles: 0 }, coverageStatus: "unknown", coverageIncomplete: true, truncated: true }));
           }
           case "teach_lookup": {
             const input = parseTeachLookupArgs(args);

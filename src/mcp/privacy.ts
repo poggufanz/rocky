@@ -9,6 +9,8 @@ import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible }
 import type { ExplainRecord } from "../core/memory-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { configuredRockyHome } from "../core/state-paths.js";
+import { classifyPrompt, promptTitle, type PromptKind } from "../desk/card-text.js";
+import type { CardsForFile, CardsReadCoverage } from "../desk/cards-read.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -630,6 +632,333 @@ export function projectWhyRationales(
     });
   }
   return { rationales, truncated: truncation.fields.length > 0 };
+}
+
+const MAX_CARD_PROMPT_CHARS = 200;
+const MAX_CARD_QUOTE_CHARS = 500;
+const MAX_BLOCKS_PER_CARD = 10;
+const MAX_CARDS_PER_FILE = 10;
+
+export interface ProjectedWhyCardSymbol {
+  kind: string;
+  name: string;
+  container: string | null;
+}
+
+export interface ProjectedWhyCardLabel {
+  id: string;
+  args: Record<string, unknown>;
+}
+
+export interface ProjectedWhyCardBlock {
+  seq: number;
+  path: string;
+  symbol: ProjectedWhyCardSymbol | null;
+  labels: ProjectedWhyCardLabel[];
+  importance: string;
+  via: "edit" | "bash";
+  line: number | null;
+  added: number | null;
+  removed: number | null;
+  quote: string | null;
+  bash_cmd: string | null;
+}
+
+export type ProjectedPromptKind =
+  | { kind: "plain" }
+  | { kind: "task_notification" }
+  | { kind: "cross_session" }
+  | { kind: "slash_command"; name: string; args: string };
+
+export interface ProjectedWhyCard {
+  card_id: string;
+  ended_ms: number | null;
+  started_ms: number;
+  repo: string;
+  prompt: string;
+  prompt_kind: ProjectedPromptKind;
+  agent_type: string;
+  blocks: ProjectedWhyCardBlock[];
+}
+
+export interface ProjectedWhyCardsResult {
+  cards: ProjectedWhyCard[];
+  cardsCoverage: CardsReadCoverage;
+  truncated: boolean;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sliceCodePoints(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const chars = Array.from(value);
+  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
+}
+
+function lastPathSegment(rootPath: string): string {
+  const normalized = rootPath.replace(/\\/g, "/").replace(/\/+$/u, "");
+  if (normalized.length === 0) return "";
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+}
+
+function validateCardCoverage(coverage: unknown): CardsReadCoverage {
+  try {
+    if (!isPlainRecord(coverage)) return { complete: false, skipped: 0 };
+    const reason = coverage.reason === "file-size-cap" || coverage.reason === "line-cap" || coverage.reason === "read-race"
+      ? coverage.reason
+      : undefined;
+    const complete = coverage.complete === true;
+    const skipped = isSafeNonNegativeInteger(coverage.skipped) ? coverage.skipped : 0;
+    return reason === undefined ? { complete, skipped } : { complete, reason, skipped };
+  } catch {
+    return { complete: false, skipped: 0 };
+  }
+}
+
+function projectPromptKind(
+  kind: PromptKind,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedPromptKind {
+  if (kind.kind === "slash_command") {
+    return {
+      kind: "slash_command",
+      name: projectText(kind.name, exposure, `${path}.name`, truncation),
+      args: projectText(kind.args, exposure, `${path}.args`, truncation),
+    };
+  }
+  return { kind: kind.kind };
+}
+
+function projectCardLabelValue(
+  value: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+  depth: number,
+): unknown {
+  if (typeof value === "string") return projectText(value, exposure, path, truncation);
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "boolean" || value === null) return value;
+  if (depth >= 2) return undefined;
+  if (Array.isArray(value)) {
+    const bound = Math.min(value.length, MAX_NESTED_ITEMS);
+    if (value.length > bound) truncation.fields.push(path);
+    const out: unknown[] = [];
+    for (let index = 0; index < bound; index += 1) {
+      const projected = projectCardLabelValue(value[index], exposure, `${path}[${index}]`, truncation, depth + 1);
+      if (projected !== undefined) out.push(projected);
+    }
+    return out;
+  }
+  if (isPlainRecord(value)) {
+    const entries = Object.entries(value);
+    const bound = Math.min(entries.length, MAX_NESTED_ITEMS);
+    if (entries.length > bound) truncation.fields.push(path);
+    const out: Record<string, unknown> = {};
+    for (let index = 0; index < bound; index += 1) {
+      const [key, entryValue] = entries[index]!;
+      const projectedKey = projectText(key, exposure, `${path}.key`, truncation);
+      const projectedVal = projectCardLabelValue(entryValue, exposure, `${path}.${projectedKey}`, truncation, depth + 1);
+      if (projectedVal !== undefined) out[projectedKey] = projectedVal;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function projectCardLabels(
+  rawLabels: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardLabel[] | undefined {
+  if (!Array.isArray(rawLabels)) return undefined;
+  const bound = Math.min(rawLabels.length, MAX_NESTED_ITEMS);
+  if (rawLabels.length > bound) truncation.fields.push(path);
+  const projected: ProjectedWhyCardLabel[] = [];
+  for (let index = 0; index < bound; index += 1) {
+    const entry = rawLabels[index];
+    if (!isPlainRecord(entry) || typeof entry.id !== "string") return undefined;
+    const labelPath = `${path}[${index}]`;
+    let args: Record<string, unknown> = {};
+    if (entry.args !== undefined && entry.args !== null) {
+      if (!isPlainRecord(entry.args)) return undefined;
+      args = projectCardLabelValue(entry.args, exposure, `${labelPath}.args`, truncation, 0) as Record<string, unknown>;
+    }
+    projected.push({
+      id: projectText(entry.id, exposure, `${labelPath}.id`, truncation),
+      args,
+    });
+  }
+  return projected;
+}
+
+function projectCardSymbol(
+  rawSymbol: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardSymbol | null | undefined {
+  if (rawSymbol === undefined || rawSymbol === null) return null;
+  if (!isPlainRecord(rawSymbol) || typeof rawSymbol.kind !== "string" || typeof rawSymbol.name !== "string") {
+    return undefined;
+  }
+  if (rawSymbol.container !== undefined && rawSymbol.container !== null && typeof rawSymbol.container !== "string") {
+    return undefined;
+  }
+  return {
+    kind: projectText(rawSymbol.kind, exposure, `${path}.kind`, truncation),
+    name: projectText(rawSymbol.name, exposure, `${path}.name`, truncation),
+    container: rawSymbol.container === undefined || rawSymbol.container === null
+      ? null
+      : projectText(rawSymbol.container, exposure, `${path}.container`, truncation),
+  };
+}
+
+function optionalSafeCardInt(value: unknown): number | null | undefined {
+  if (value === undefined || value === null) return null;
+  return isSafeNonNegativeInteger(value) ? value : undefined;
+}
+
+function projectCardBlock(
+  rawBlock: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardBlock | undefined {
+  if (!isPlainRecord(rawBlock)) return undefined;
+  if (!isSafeNonNegativeInteger(rawBlock.seq)) return undefined;
+  if (typeof rawBlock.path !== "string" || rawBlock.path.length === 0) return undefined;
+  if (typeof rawBlock.importance !== "string") return undefined;
+  if (rawBlock.via !== undefined && rawBlock.via !== "edit" && rawBlock.via !== "bash") return undefined;
+
+  const line = optionalSafeCardInt(rawBlock.line);
+  const added = optionalSafeCardInt(rawBlock.added);
+  const removed = optionalSafeCardInt(rawBlock.removed);
+  if (line === undefined || added === undefined || removed === undefined) return undefined;
+
+  let rawQuoteText: string | null = null;
+  if (rawBlock.quote !== undefined && rawBlock.quote !== null) {
+    if (!isPlainRecord(rawBlock.quote) || typeof rawBlock.quote.text !== "string") return undefined;
+    rawQuoteText = rawBlock.quote.text;
+  }
+
+  let rawBashCmd: string | null = null;
+  if (rawBlock.bash !== undefined && rawBlock.bash !== null) {
+    if (!isPlainRecord(rawBlock.bash) || typeof rawBlock.bash.cmd !== "string") return undefined;
+    rawBashCmd = rawBlock.bash.cmd;
+  }
+
+  const symbol = projectCardSymbol(rawBlock.symbol, exposure, `${path}.symbol`, truncation);
+  if (symbol === undefined) return undefined;
+
+  const labels = projectCardLabels(rawBlock.labels, exposure, `${path}.labels`, truncation);
+  if (labels === undefined) return undefined;
+
+  const via = rawBlock.via === "bash" ? "bash" : "edit";
+  return {
+    seq: rawBlock.seq,
+    path: projectText(rawBlock.path, exposure, `${path}.path`, truncation),
+    symbol,
+    labels,
+    importance: projectText(rawBlock.importance, exposure, `${path}.importance`, truncation),
+    via,
+    line,
+    added,
+    removed,
+    quote: rawQuoteText === null
+      ? null
+      : sliceCodePoints(projectText(rawQuoteText, exposure, `${path}.quote`, truncation), MAX_CARD_QUOTE_CHARS),
+    bash_cmd: rawBashCmd === null
+      ? null
+      : projectText(rawBashCmd, exposure, `${path}.bash_cmd`, truncation),
+  };
+}
+
+/**
+ * Project Desk change cards returned for one file through MCP boundaries:
+ * strings run through `projectText` (with `card_id` validated as an opaque ID),
+ * stored code shas/tool IDs/flow are never included, prompts and quotes are
+ * bounded, and invalid or hostile values cannot throw out of the projection.
+ */
+export function projectWhyCards(
+  result: CardsForFile,
+  exposure: Exposure,
+  limit: number,
+): ProjectedWhyCardsResult {
+  const truncation: Truncation = { fields: [] };
+  const cards: ProjectedWhyCard[] = [];
+  const cardsCoverage = validateCardCoverage(result.coverage);
+  const maxCards = Math.min(MAX_CARDS_PER_FILE, Math.max(0, isSafeNonNegativeInteger(limit) ? limit : 0));
+
+  const rawCards = result.cards;
+  const matchedMap = result.matched instanceof Map ? result.matched : undefined;
+  if (!Array.isArray(rawCards)) {
+    return { cards, cardsCoverage, truncated: false };
+  }
+
+  const cardBound = Math.min(rawCards.length, MAX_NESTED_ITEMS);
+  for (let cardIndex = 0; cardIndex < cardBound && cards.length < maxCards; cardIndex += 1) {
+    try {
+      const rawCard = rawCards[cardIndex];
+      if (!isPlainRecord(rawCard)) continue;
+      if (typeof rawCard.card_id !== "string" || rawCard.card_id.length === 0) continue;
+      if (!isSafeNonNegativeInteger(rawCard.started_ms)) continue;
+      if (rawCard.ended_ms !== undefined && rawCard.ended_ms !== null && !isSafeNonNegativeInteger(rawCard.ended_ms)) continue;
+      if (typeof rawCard.root !== "string") continue;
+      if (rawCard.main_root !== undefined && rawCard.main_root !== null && typeof rawCard.main_root !== "string") continue;
+      if (rawCard.agent_type !== undefined && typeof rawCard.agent_type !== "string") continue;
+      if (typeof rawCard.prompt !== "string") continue;
+
+      const at = `cards[${cards.length}]`;
+      const rawRoot = typeof rawCard.main_root === "string" && rawCard.main_root.length > 0
+        ? rawCard.main_root
+        : rawCard.root;
+      const rawAgentType = typeof rawCard.agent_type === "string" ? rawCard.agent_type : "";
+
+      const promptInput = rawCard.prompt.length > MAX_NESTED_BYTES
+        ? rawCard.prompt.slice(0, MAX_NESTED_BYTES)
+        : rawCard.prompt;
+      if (promptInput.length !== rawCard.prompt.length) truncation.fields.push(`${at}.prompt`);
+      const promptKind = classifyPrompt(promptInput);
+      const title = promptTitle(promptInput);
+
+      const blocks: ProjectedWhyCardBlock[] = [];
+      const matchingBlocks = matchedMap?.get(rawCard.card_id);
+      if (Array.isArray(matchingBlocks)) {
+        const blockScanBound = Math.min(matchingBlocks.length, MAX_NESTED_ITEMS);
+        for (let blockIndex = 0; blockIndex < blockScanBound && blocks.length < MAX_BLOCKS_PER_CARD; blockIndex += 1) {
+          const projectedBlock = projectCardBlock(
+            matchingBlocks[blockIndex],
+            exposure,
+            `${at}.blocks[${blocks.length}]`,
+            truncation,
+          );
+          if (projectedBlock !== undefined) blocks.push(projectedBlock);
+        }
+      }
+
+      cards.push({
+        card_id: projectOpaqueId(rawCard.card_id, `${at}.card_id`, truncation, exposure === "sanitized"),
+        ended_ms: rawCard.ended_ms === undefined || rawCard.ended_ms === null ? null : rawCard.ended_ms,
+        started_ms: rawCard.started_ms,
+        repo: projectText(lastPathSegment(rawRoot), exposure, `${at}.repo`, truncation),
+        prompt: sliceCodePoints(projectText(title, exposure, `${at}.prompt`, truncation), MAX_CARD_PROMPT_CHARS),
+        prompt_kind: projectPromptKind(promptKind, exposure, `${at}.prompt_kind`, truncation),
+        agent_type: projectText(rawAgentType, exposure, `${at}.agent_type`, truncation),
+        blocks,
+      });
+    } catch {
+      // A hostile card object cannot break MCP projection.
+    }
+  }
+
+  return { cards, cardsCoverage, truncated: truncation.fields.length > 0 };
 }
 
 function safeKnowledgeString(value: unknown, maximum = MAX_FIELD_BYTES): string | undefined {

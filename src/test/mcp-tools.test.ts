@@ -1,14 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExplainRecord, FailureRecord, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import type { MemoryQueries } from "../core/memory-query.js";
-import { pathIdentityHash } from "../core/memory-read.js";
+import { canonicalPath, pathIdentityHash } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import type { CardsForFile, StoredBlock, StoredCard } from "../desk/cards-read.js";
+import { cardsFilePath } from "../listening/cards-path.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
 import { MAX_FIELD_BYTES, MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
@@ -1952,4 +1954,361 @@ test("why_file flags a stated reason the projection had to clip", async () => {
   const [reason] = content.rationales as WhyReason[];
   assert.ok(reason !== undefined && Buffer.byteLength(reason.text, "utf8") <= MAX_FIELD_BYTES);
   assert.equal(content.truncated, true);
+});
+
+interface ProjectedCardBlock {
+  seq: number;
+  path: string;
+  symbol: { kind: string; name: string; container: string | null } | null;
+  labels: Array<{ id: string; args: Record<string, unknown> }>;
+  importance: string;
+  via: "edit" | "bash";
+  line: number | null;
+  added: number | null;
+  removed: number | null;
+  quote: string | null;
+  bash_cmd: string | null;
+}
+
+interface ProjectedCard {
+  card_id: string;
+  ended_ms: number | null;
+  started_ms: number;
+  repo: string;
+  prompt: string;
+  prompt_kind: { kind: string; name?: string; args?: string };
+  agent_type: string;
+  blocks: ProjectedCardBlock[];
+}
+
+function sampleStoredBlock(seq: number, overrides: Partial<StoredBlock> = {}): StoredBlock {
+  return {
+    seq,
+    path: "src/a.ts",
+    symbol: { kind: "function", name: `fn${seq}`, container: "Svc", exported: true, nth: 2 },
+    labels: [{ id: "symbol_added", args: { kind: "function" } }],
+    importance: "medium",
+    via: "edit",
+    tool_use_ids: ["tu-secret-1"],
+    before: "deadbeef".repeat(5),
+    after: "cafebabe".repeat(5),
+    recorded: true,
+    line: 10 + seq,
+    added: 3,
+    removed: 1,
+    quote: { text: `Reason ${seq}`, shared: false },
+    bash: null,
+    ...overrides,
+  };
+}
+
+function sampleStoredCard(cardId: string, overrides: Partial<StoredCard> = {}): StoredCard {
+  const blocks = overrides.blocks ?? [sampleStoredBlock(1)];
+  return {
+    v: 1,
+    card_id: cardId,
+    rev: 1,
+    repo_id: "repo-1",
+    root: "/tmp/wt-feature",
+    main_root: "C:\\Users\\dev\\work\\rocky\\",
+    branch: "feat/cards",
+    session_id: "sess-1",
+    agent_id: "agent-1",
+    agent_type: "",
+    parent_card_id: null,
+    started_ms: 1_700_000_000_000,
+    ended_ms: 1_700_000_010_000,
+    status: "done",
+    prompt: "Tighten validation on the config loader",
+    prompt_truncated: false,
+    importance: "high",
+    blocks,
+    more_count: 0,
+    flow: [{ kind: "cmd", text: "npm test", ok: true, dur_ms: 100, seqs: [1] }],
+    flow_more: 0,
+    outside_count: 0,
+    coverage: { state: "full", reasons: [] },
+    ...overrides,
+  };
+}
+
+function cardRegistry(
+  cards: (path: string, limit: number) => CardsForFile,
+  exposure: "sanitized" | "raw" = "sanitized",
+  memory: MemoryQueries = createMemoryQueries(() => []),
+) {
+  return createToolRegistry({
+    exposure,
+    memory,
+    recallWithAi: disabledRecallWithAi,
+    cards,
+  });
+}
+
+test("why_file description notes recorded agent change cards, read-only, with no code", () => {
+  const why = registry().list().find((tool) => tool.name === "why_file");
+  assert.ok(why !== undefined);
+  assert.match(why.description, /recorded agent change cards, read-only, with no code/i);
+});
+
+test("why_file returns change cards when present or absent and strips stored code fields", async () => {
+  const signal = new AbortController().signal;
+  const empty = await cardRegistry(
+    () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  ).call("why_file", { path: "src/a.ts" }, signal);
+  assert.equal(empty.isError, undefined);
+  assert.deepEqual(empty.structuredContent.cards, []);
+  assert.deepEqual(empty.structuredContent.cardsCoverage, { complete: true, skipped: 0 });
+  assert.equal(empty.structuredContent.truncated, false);
+
+  const seenCalls: Array<{ path: string; limit: number }> = [];
+  const twelveMatching = Array.from({ length: 12 }, (_, idx) => sampleStoredBlock(idx + 1, {
+    quote: idx === 0 ? { text: "word ".repeat(140), shared: true } : { text: `q-${idx + 1}`, shared: false },
+    ...(idx === 1 ? { via: "bash", bash: { cmd: "git mv old.ts src/a.ts", candidates: 1 }, quote: null } : {}),
+  }));
+  const unrelatedBlock = sampleStoredBlock(99, { path: "src/other.ts" });
+  const cardMain = sampleStoredCard("550e8400-e29b-41d4-a716-446655440000", {
+    ended_ms: null,
+    prompt: `${"word ".repeat(55)} trailing details`,
+    blocks: [...twelveMatching, unrelatedBlock],
+  });
+  const cardSub = sampleStoredCard("card-sub-2", {
+    main_root: null,
+    root: "/Users/dev/src/alpha-service/",
+    agent_type: "Explore",
+    prompt: "<command-name>/review</command-name><command-args>src/a.ts --strict</command-args>",
+    blocks: [sampleStoredBlock(1, { symbol: null, labels: [{ id: "file_edited" }], line: null, added: null, removed: null, quote: null })],
+  });
+
+  const matched = new Map<string, StoredBlock[]>([
+    [cardMain.card_id, twelveMatching],
+    [cardSub.card_id, cardSub.blocks],
+  ]);
+  const res = await cardRegistry((path, limit) => {
+    seenCalls.push({ path, limit });
+    return {
+      cards: [cardMain, cardSub],
+      matched,
+      coverage: { complete: false, reason: "line-cap", skipped: 2 },
+    };
+  }).call("why_file", { path: "src/a.ts", limit: 3 }, signal);
+
+  assert.deepEqual(seenCalls, [{ path: "src/a.ts", limit: 3 }]);
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(res.structuredContent.cardsCoverage, { complete: false, reason: "line-cap", skipped: 2 });
+
+  const cards = res.structuredContent.cards as ProjectedCard[];
+  assert.equal(cards.length, 2);
+
+  const [first, second] = cards;
+  assert.ok(first && second);
+  assert.equal(first.card_id, cardMain.card_id);
+  assert.equal(first.ended_ms, null);
+  assert.equal(first.started_ms, cardMain.started_ms);
+  assert.equal(first.repo, "rocky");
+  assert.equal(first.agent_type, "");
+  assert.deepEqual(first.prompt_kind, { kind: "plain" });
+  assert.equal(Array.from(first.prompt).length, 200);
+  assert.equal(first.blocks.length, 10);
+
+  const [b0, b1] = first.blocks;
+  assert.ok(b0 && b1);
+  assert.deepEqual(b0.symbol, { kind: "function", name: "fn1", container: "Svc" });
+  assert.equal("exported" in (b0.symbol as object), false);
+  assert.equal("nth" in (b0.symbol as object), false);
+  assert.equal(b0.via, "edit");
+  assert.equal(b0.bash_cmd, null);
+  assert.equal(Array.from(b0.quote ?? "").length, 500);
+  assert.equal(b1.via, "bash");
+  assert.equal(b1.bash_cmd, "git mv old.ts src/a.ts");
+  assert.equal(b1.quote, null);
+
+  for (const forbidden of ["before", "after", "tool_use_ids", "flow"]) {
+    assert.equal(JSON.stringify(cards).includes(`"${forbidden}"`), false, `must not serialize ${forbidden}`);
+  }
+
+  assert.equal(second.repo, "alpha-service");
+  assert.equal(second.agent_type, "Explore");
+  assert.equal(second.prompt, "[redacted] src/a.ts --strict");
+  assert.deepEqual(second.prompt_kind, { kind: "slash_command", name: "[redacted]", args: "src/a.ts --strict" });
+  assert.deepEqual(second.blocks[0]?.labels, [{ id: "file_edited", args: {} }]);
+  assert.equal(second.blocks[0]?.symbol, null);
+  assert.equal(second.blocks[0]?.line, null);
+  assert.equal(second.blocks[0]?.added, null);
+  assert.equal(second.blocks[0]?.removed, null);
+
+  const rawSlash = await cardRegistry(
+    () => ({ cards: [cardSub], matched: new Map([[cardSub.card_id, cardSub.blocks]]), coverage: { complete: true, skipped: 0 } }),
+    "raw",
+  ).call("why_file", { path: "src/a.ts", limit: 3 }, signal);
+  const [rawSecond] = rawSlash.structuredContent.cards as ProjectedCard[];
+  assert.equal(rawSecond?.prompt, "/review src/a.ts --strict");
+  assert.deepEqual(rawSecond?.prompt_kind, { kind: "slash_command", name: "/review", args: "src/a.ts --strict" });
+});
+
+test("why_file passes default limit 5 to cards reader and keeps working with diff enabled", async () => {
+  const calls: number[] = [];
+  const res = await cardRegistry((_path, limit) => {
+    calls.push(limit);
+    return {
+      cards: [sampleStoredCard("card-diff-1")],
+      matched: new Map([["card-diff-1", [sampleStoredBlock(1)]]]),
+      coverage: { complete: true, skipped: 0 },
+    };
+  }).call("why_file", { path: "src/a.ts", diff: true }, new AbortController().signal);
+  assert.deepEqual(calls, [5]);
+  assert.equal(res.isError, undefined);
+  assert.equal((res.structuredContent.cards as ProjectedCard[]).length, 1);
+});
+
+test("why_file projects card strings according to exposure (sanitized vs raw)", async () => {
+  const secret = "sk-LIVEKEY0123456789ABCDEFGHIJKLMNO";
+  const secretCard = sampleStoredCard("card-sec", {
+    main_root: null,
+    root: `/home/zed/work/repo-${secret}`,
+    prompt: `<command-name>/deploy</command-name><command-args>token=${secret}</command-args>`,
+    blocks: [
+      sampleStoredBlock(1, {
+        path: `/home/zed/repo/src/a.ts`,
+        symbol: { kind: "function", name: `use_${secret}`, container: `/home/zed` },
+        labels: [{ id: "note", args: { detail: `key=${secret}` } }],
+        via: "bash",
+        bash: { cmd: `curl -H "Authorization: Bearer ${secret}" https://x.example`, candidates: 1 },
+        quote: { text: `rotate ${secret} at /home/zed/app`, shared: true },
+      }),
+    ],
+  });
+  const provider = (): CardsForFile => ({
+    cards: [secretCard],
+    matched: new Map([[secretCard.card_id, secretCard.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  const sanitized = (await cardRegistry(provider, "sanitized").call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.doesNotMatch(JSON.stringify(sanitized.cards), /sk-LIVEKEY|\/home\/zed/u);
+  const [sCard] = sanitized.cards as ProjectedCard[];
+  assert.ok(sCard?.blocks[0]?.quote?.includes("[redacted]"));
+  assert.ok(sCard?.blocks[0]?.bash_cmd?.includes("[redacted]"));
+
+  const raw = (await cardRegistry(provider, "raw").call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  const [rCard] = raw.cards as ProjectedCard[];
+  assert.ok(rCard?.blocks[0]?.quote?.includes(secret));
+  assert.ok(rCard?.blocks[0]?.bash_cmd?.includes(secret));
+});
+
+test("why_file handles cards reader failure without failing tool or altering existing fields", async () => {
+  const reason = statedReason("keep-1", Date.now() - 1_000, "retry limit stays three", ["src/a.ts"]);
+  const content = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
+    const res = await cardRegistry(() => {
+      throw new Error("cards store unreadable");
+    }, "sanitized", memory).call("why_file", { path: "src/a.ts" }, new AbortController().signal);
+    assert.equal(res.isError, undefined);
+    return res.structuredContent;
+  });
+
+  assert.deepEqual(content.cards, []);
+  assert.deepEqual(content.cardsCoverage, { complete: false, skipped: 0 });
+  assert.equal((content.rationales as WhyReason[]).length, 1);
+  assert.equal(content.truncated, false);
+});
+
+test("why_file drops oldest change cards first when response size cap is exceeded", async () => {
+  const bigCmd = `node script.mjs ${"arg ".repeat(3_500)}`;
+  const cards = Array.from({ length: 10 }, (_, idx) => sampleStoredCard(`card-${idx}`, {
+    started_ms: 1_700_000_100_000 - idx * 1_000,
+    ended_ms: 1_700_000_110_000 - idx * 1_000,
+    blocks: Array.from({ length: 10 }, (__, seq) => sampleStoredBlock(seq + 1, {
+      via: "bash",
+      bash: { cmd: bigCmd, candidates: 1 },
+      quote: null,
+    })),
+  }));
+  const matched = new Map(cards.map((card) => [card.card_id, card.blocks]));
+
+  const res = await cardRegistry(() => ({
+    cards,
+    matched,
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal);
+
+  assert.equal(res.isError, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(res), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+  const kept = res.structuredContent.cards as ProjectedCard[];
+  assert.ok(kept.length > 0 && kept.length < 10);
+  assert.deepEqual(kept.map((c) => c.card_id), cards.slice(0, kept.length).map((c) => c.card_id));
+  assert.equal(res.structuredContent.truncated, true);
+});
+
+test("why_file reads change cards end-to-end through default reader under temp ROCKY_HOME and repo", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-mcp-cards-e2e-home-"));
+  const rawRepo = mkdtempSync(join(tmpdir(), "rocky-mcp-cards-e2e-repo-"));
+  const prevHome = process.env.ROCKY_HOME;
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(rawRepo, ".git"), { recursive: true });
+    mkdirSync(join(rawRepo, "src"), { recursive: true });
+    const repo = realpathSync(rawRepo);
+    process.env.ROCKY_HOME = home;
+    process.chdir(repo);
+
+    const cardsPath = cardsFilePath(canonicalPath(repo), home);
+    mkdirSync(dirname(cardsPath), { recursive: true });
+
+    const rev1 = sampleStoredCard("e2e-card-new", {
+      rev: 1,
+      root: repo,
+      main_root: null,
+      ended_ms: 2_000_000,
+      started_ms: 1_999_000,
+      prompt: "Draft change",
+      blocks: [sampleStoredBlock(1, { path: "src/target.ts" })],
+    });
+    const rev2 = sampleStoredCard("e2e-card-new", {
+      rev: 2,
+      root: repo,
+      main_root: null,
+      ended_ms: 2_000_000,
+      started_ms: 1_999_000,
+      prompt: "Refine timeout guard in src/target.ts",
+      blocks: [
+        sampleStoredBlock(1, { path: "src/target.ts", quote: { text: "Guard prevents hanging socket", shared: true } }),
+        sampleStoredBlock(2, { path: "src/unrelated.ts", quote: { text: "Should not appear", shared: true } }),
+      ],
+    });
+    const older = sampleStoredCard("e2e-card-old", {
+      rev: 1,
+      root: repo,
+      main_root: null,
+      ended_ms: 1_000_000,
+      started_ms: 999_000,
+      prompt: "Initial scaffold",
+      blocks: [sampleStoredBlock(1, { path: "src/target.ts", symbol: null, quote: null })],
+    });
+
+    writeFileSync(cardsPath, `${[rev1, older, rev2].map((c) => JSON.stringify(c)).join("\n")}\n`, "utf8");
+
+    const memoryPath = resolveRockyPaths({ ROCKY_HOME: home }).memory;
+    writeFileSync(memoryPath, "", "utf8");
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory: createMemoryQueries(),
+      recallWithAi: disabledRecallWithAi,
+    });
+    const res = await reg.call("why_file", { path: "src/target.ts", limit: 5 }, new AbortController().signal);
+    assert.equal(res.isError, undefined);
+    assert.deepEqual(res.structuredContent.cardsCoverage, { complete: true, skipped: 0 });
+    const cards = res.structuredContent.cards as ProjectedCard[];
+    assert.equal(cards.length, 2);
+    assert.equal(cards[0]?.card_id, "e2e-card-new");
+    assert.equal(cards[0]?.prompt, "Refine timeout guard in src/target.ts");
+    assert.equal(cards[0]?.blocks.length, 1);
+    assert.equal(cards[0]?.blocks[0]?.quote, "Guard prevents hanging socket");
+    assert.equal(cards[1]?.card_id, "e2e-card-old");
+  } finally {
+    process.chdir(prevCwd);
+    if (prevHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(rawRepo, { recursive: true, force: true });
+  }
 });
