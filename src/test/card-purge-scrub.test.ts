@@ -7,7 +7,7 @@ import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 import { beforeEach, describe, it, mock } from "node:test";
 import { cardsForFile } from "../desk/cards-read.js";
-import { setup, type SetupDependencies } from "../commands/setup.js";
+import { quoteRepoArgument, setup, type SetupDependencies } from "../commands/setup.js";
 import { cardsFilePath } from "../listening/cards-path.js";
 import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import { useTempRockyHome } from "./temp-rocky-home.js";
@@ -213,5 +213,24 @@ describe("purge scrubs change cards from every log", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
+  });
+});
+
+describe("quoteRepoArgument", () => {
+  it("leaves a normal path byte-identical inside double quotes", () => {
+    assert.equal(quoteRepoArgument("/work/my repo"), '"/work/my repo"');
+    assert.equal(quoteRepoArgument("C:\work\repo"), '"C:\work\repo"');
+  });
+
+  it("doubles the backslash of a drive root", () => {
+    assert.equal(quoteRepoArgument("C:\\"), '"C:\\\\"');
+  });
+
+  it("doubles every trailing backslash and only those", () => {
+    assert.equal(quoteRepoArgument("D:\a\b\\\\"), '"D:\a\b\\\\\\\\"');
+  });
+
+  it("still escapes an embedded double quote", () => {
+    assert.equal(quoteRepoArgument('/a"b'), '"/a\\"b"');
   });
 });

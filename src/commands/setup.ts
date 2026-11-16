@@ -440,12 +440,22 @@ function reportStoreUsage(root: string, allowed: boolean, home: string | undefin
 }
 
 /**
+ * Double-quote one path for a copied command. An embedded quote is
+ * backslash-escaped; trailing backslashes are doubled so they cannot escape
+ * the closing quote under Windows argv parsing.
+ */
+export function quoteRepoArgument(path: string): string {
+  const escaped = path.replace(/"/g, "\\\"").replace(/\\+$/, (run) => run + run);
+  return `"${escaped}"`;
+}
+
+/**
  * Name the card logs a purge could not scrub. Per-log entries are counted; a
  * directory entry stands for an unknown number of logs, so it gets no count.
  */
 function detailCardsIncomplete(entries: string[], repo: string): void {
   if (entries.length === 0) return;
-  const retry = `Run rocky setup --repo "${safeTerminalLine(repo).replace(/"/g, '\\"')}" --purge-capture again.`;
+  const retry = `Run rocky setup --repo ${quoteRepoArgument(safeTerminalLine(repo))} --purge-capture again.`;
   const perLog = entries.every((entry) => entry.endsWith(".jsonl"));
   const subject = "Some change cards about this repo could not be removed";
   detail(perLog
