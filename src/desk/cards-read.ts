@@ -1,11 +1,19 @@
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { gitRootFor } from "../core/compare-data.js";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { canonicalPath } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { cardsFilePath } from "../listening/cards-path.js";
+import {
+  expandTilde,
+  isAbsOrTildeBlockPath,
+  normalizeAbsForPlatform,
+  normalizeRepoBlockPath,
+  parseCardLine,
+  type StoredBlock,
+  type StoredCard,
+} from "./cards-record.js";
 
 const MAX_CARDS_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_EXTRA_LOG_FILES = 64;
@@ -13,87 +21,17 @@ const MAX_TOTAL_CARDS_BYTES = 64 * 1024 * 1024;
 const MAX_CARDS_LINE_BYTES = 1024 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const DEFAULT_LIMIT = 5;
-const UTF8_FATAL_DECODER = new TextDecoder("utf-8", { fatal: true });
 
-export interface StoredLabel {
-  id: string;
-  args?: Record<string, unknown>;
-}
-
-export interface StoredBlockSymbol {
-  kind: string;
-  name: string;
-  container?: string | null;
-  exported?: boolean;
-  nth?: number;
-}
-
-export interface StoredBashInfo {
-  cmd: string;
-  candidates: number;
-}
-
-export interface StoredQuote {
-  text: string;
-  shared: boolean;
-}
-
-export interface StoredBlock {
-  seq: number;
-  path: string;
-  symbol?: StoredBlockSymbol | null;
-  labels: StoredLabel[];
-  importance: string;
-  via?: string;
-  tool_use_ids?: string[];
-  bash?: StoredBashInfo | null;
-  before?: string | null;
-  after?: string | null;
-  recorded?: boolean;
-  line?: number | null;
-  added?: number | null;
-  removed?: number | null;
-  quote?: StoredQuote | null;
-}
-
-export interface StoredFlowStep {
-  kind: string;
-  text: string;
-  ok: boolean;
-  dur_ms: number;
-  seqs: number[];
-}
-
-export interface StoredCoverage {
-  state: string;
-  reasons: string[];
-}
-
-export interface StoredCard {
-  v: 1;
-  card_id: string;
-  rev: number;
-  repo_id?: string;
-  root: string;
-  main_root?: string | null;
-  branch?: string | null;
-  session_id?: string;
-  agent_id?: string;
-  agent_type?: string;
-  parent_card_id?: string | null;
-  started_ms: number;
-  ended_ms: number | null;
-  status?: string;
-  prompt: string;
-  prompt_truncated?: boolean;
-  importance?: string;
-  blocks: StoredBlock[];
-  more_count?: number;
-  flow?: StoredFlowStep[];
-  flow_more?: number;
-  outside_count?: number;
-  coverage?: StoredCoverage;
-}
+export type {
+  StoredBashInfo,
+  StoredBlock,
+  StoredBlockSymbol,
+  StoredCard,
+  StoredCoverage,
+  StoredFlowStep,
+  StoredLabel,
+  StoredQuote,
+} from "./cards-record.js";
 
 export interface CardsReadCoverage {
   complete: boolean;
@@ -127,174 +65,7 @@ function emptyResult(coverage: CardsReadCoverage): CardsForFile {
   return { cards: [], matched: new Map(), coverage };
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
-function isSafeNonNegInt(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-function isValidLabel(value: unknown): value is StoredLabel {
-  if (!isPlainObject(value)) return false;
-  if (typeof value.id !== "string" || value.id.length === 0) return false;
-  if (value.args !== undefined && !isPlainObject(value.args)) return false;
-  return true;
-}
-
-function isValidSymbol(value: unknown): value is StoredBlockSymbol {
-  if (!isPlainObject(value)) return false;
-  if (typeof value.kind !== "string" || value.kind.length === 0) return false;
-  if (typeof value.name !== "string") return false;
-  if (value.container !== undefined && value.container !== null && typeof value.container !== "string") return false;
-  if (value.exported !== undefined && typeof value.exported !== "boolean") return false;
-  if (value.nth !== undefined && !isSafeNonNegInt(value.nth)) return false;
-  return true;
-}
-
-function isValidBashInfo(value: unknown): value is StoredBashInfo {
-  if (!isPlainObject(value)) return false;
-  return typeof value.cmd === "string" && isSafeNonNegInt(value.candidates);
-}
-
-function isValidQuote(value: unknown): value is StoredQuote {
-  if (!isPlainObject(value)) return false;
-  return typeof value.text === "string" && typeof value.shared === "boolean";
-}
-
-function isValidBlock(value: unknown): value is StoredBlock {
-  if (!isPlainObject(value)) return false;
-  if (!isSafeNonNegInt(value.seq)) return false;
-  if (typeof value.path !== "string" || value.path.length === 0) return false;
-  if (!Array.isArray(value.labels) || !value.labels.every(isValidLabel)) return false;
-  if (typeof value.importance !== "string") return false;
-  if (value.symbol !== undefined && value.symbol !== null && !isValidSymbol(value.symbol)) return false;
-  if (value.via !== undefined && typeof value.via !== "string") return false;
-  if (value.tool_use_ids !== undefined && !isStringArray(value.tool_use_ids)) return false;
-  if (value.bash !== undefined && value.bash !== null && !isValidBashInfo(value.bash)) return false;
-  if (value.before !== undefined && value.before !== null && typeof value.before !== "string") return false;
-  if (value.after !== undefined && value.after !== null && typeof value.after !== "string") return false;
-  if (value.recorded !== undefined && typeof value.recorded !== "boolean") return false;
-  if (value.line !== undefined && value.line !== null && !isSafeNonNegInt(value.line)) return false;
-  if (value.added !== undefined && value.added !== null && !isSafeNonNegInt(value.added)) return false;
-  if (value.removed !== undefined && value.removed !== null && !isSafeNonNegInt(value.removed)) return false;
-  if (value.quote !== undefined && value.quote !== null && !isValidQuote(value.quote)) return false;
-  return true;
-}
-
-function isValidFlowStep(value: unknown): value is StoredFlowStep {
-  if (!isPlainObject(value)) return false;
-  return (
-    typeof value.kind === "string" &&
-    typeof value.text === "string" &&
-    typeof value.ok === "boolean" &&
-    isSafeNonNegInt(value.dur_ms) &&
-    Array.isArray(value.seqs) &&
-    value.seqs.every(isSafeNonNegInt)
-  );
-}
-
-function isValidCoverageField(value: unknown): value is StoredCoverage {
-  if (!isPlainObject(value)) return false;
-  return typeof value.state === "string" && isStringArray(value.reasons);
-}
-
-function validateCard(value: unknown): value is StoredCard {
-  if (!isPlainObject(value)) return false;
-  if (value.v !== 1) return false;
-  if (typeof value.card_id !== "string" || value.card_id.length === 0) return false;
-  if (!isSafeNonNegInt(value.rev)) return false;
-  if (typeof value.root !== "string") return false;
-  if (!isSafeNonNegInt(value.started_ms)) return false;
-  if (value.ended_ms !== null && !isSafeNonNegInt(value.ended_ms)) return false;
-  if (typeof value.prompt !== "string") return false;
-  if (!Array.isArray(value.blocks) || !value.blocks.every(isValidBlock)) return false;
-
-  if (value.repo_id !== undefined && typeof value.repo_id !== "string") return false;
-  if (value.main_root !== undefined && value.main_root !== null && typeof value.main_root !== "string") return false;
-  if (value.branch !== undefined && value.branch !== null && typeof value.branch !== "string") return false;
-  if (value.session_id !== undefined && typeof value.session_id !== "string") return false;
-  if (value.agent_id !== undefined && typeof value.agent_id !== "string") return false;
-  if (value.agent_type !== undefined && typeof value.agent_type !== "string") return false;
-  if (
-    value.parent_card_id !== undefined &&
-    value.parent_card_id !== null &&
-    typeof value.parent_card_id !== "string"
-  ) {
-    return false;
-  }
-  if (value.status !== undefined && typeof value.status !== "string") return false;
-  if (value.prompt_truncated !== undefined && typeof value.prompt_truncated !== "boolean") return false;
-  if (value.importance !== undefined && typeof value.importance !== "string") return false;
-  if (value.more_count !== undefined && !isSafeNonNegInt(value.more_count)) return false;
-  if (value.flow !== undefined && (!Array.isArray(value.flow) || !value.flow.every(isValidFlowStep))) return false;
-  if (value.flow_more !== undefined && !isSafeNonNegInt(value.flow_more)) return false;
-  if (value.outside_count !== undefined && !isSafeNonNegInt(value.outside_count)) return false;
-  if (value.coverage !== undefined && !isValidCoverageField(value.coverage)) return false;
-  return true;
-}
-
-function expandTilde(pathValue: string): string {
-  if (pathValue === "~") return homedir();
-  if (pathValue.startsWith("~/") || pathValue.startsWith("~\\")) {
-    const home = homedir().replace(/[\\/]+$/, "");
-    return `${home}/${pathValue.slice(2)}`;
-  }
-  return pathValue;
-}
-
-function collapseDotSegments(rawPath: string): { prefix: string; segments: string[]; hadEscape: boolean } {
-  const forward = rawPath.replace(/\\/g, "/");
-  let prefix = "";
-  let rest = forward;
-
-  const unc = forward.match(/^(\/\/[^/]+\/[^/]+)(?:\/(.*))?$/);
-  if (unc) {
-    prefix = `${unc[1]}/`;
-    rest = unc[2] ?? "";
-  } else {
-    const drive = forward.match(/^([a-zA-Z]:)(?:\/(.*))?$/);
-    if (drive) {
-      prefix = `${drive[1]}/`;
-      rest = drive[2] ?? "";
-    } else if (forward.startsWith("/")) {
-      prefix = "/";
-      rest = forward.slice(1);
-    }
-  }
-
-  const segments: string[] = [];
-  let hadEscape = false;
-  for (const part of rest.split("/")) {
-    if (part === "" || part === ".") continue;
-    if (part === "..") {
-      if (segments.length > 0) {
-        segments.pop();
-      } else {
-        hadEscape = true;
-      }
-      continue;
-    }
-    segments.push(part);
-  }
-  return { prefix, segments, hadEscape };
-}
-
-function normalizeAbsForPlatform(rawAbs: string, platform: NodeJS.Platform): string {
-  const { prefix, segments } = collapseDotSegments(rawAbs);
-  return canonicalPath(`${prefix}${segments.join("/")}`, { platform });
-}
-
-function normalizeRepoBlockPath(rawPath: string, platform: NodeJS.Platform): string | undefined {
-  const { prefix, segments, hadEscape } = collapseDotSegments(rawPath);
-  if (prefix !== "" || hadEscape || segments.length === 0) return undefined;
-  const joined = segments.join("/");
-  return platform === "win32" ? joined.toLowerCase() : joined;
-}
 
 function resolveInputPath(rawFile: string, cwd: string, platform: NodeJS.Platform): string {
   const expanded = expandTilde(rawFile);
@@ -461,25 +232,10 @@ function parseJsonlLine(
   lineBuf: Buffer,
   cardsById: Map<string, StoredCard>,
 ): boolean {
-  const end = lineBuf.length > 0 && lineBuf[lineBuf.length - 1] === 0x0d ? lineBuf.length - 1 : lineBuf.length;
-  let text: string;
-  try {
-    text = UTF8_FATAL_DECODER.decode(lineBuf.subarray(0, end));
-  } catch {
-    return false;
-  }
-
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return true;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    return false;
-  }
-  if (!validateCard(parsed)) return false;
-
+  const line = parseCardLine(lineBuf);
+  if (line.kind === "blank") return true;
+  if (line.kind === "invalid") return false;
+  const parsed = line.card;
   const existing = cardsById.get(parsed.card_id);
   if (!existing || parsed.rev >= existing.rev) {
     cardsById.set(parsed.card_id, parsed);
@@ -723,16 +479,6 @@ function buildTargetKeysForNone(absFile: string, platform: NodeJS.Platform): Set
   return keys;
 }
 
-function isAbsOrTildeBlockPath(blockPath: string): boolean {
-  return (
-    blockPath === "~" ||
-    blockPath.startsWith("~/") ||
-    blockPath.startsWith("~\\") ||
-    /^[a-zA-Z]:[\\/]/.test(blockPath) ||
-    blockPath.startsWith("/") ||
-    blockPath.startsWith("\\")
-  );
-}
 
 function blockMatches(
   blockPath: string,
