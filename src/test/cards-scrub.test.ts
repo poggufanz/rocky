@@ -1,13 +1,16 @@
 import { strict as assert } from "node:assert";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -276,5 +279,178 @@ describe("scrubRepoCards", () => {
     const result = scrubRepoCards(["/work/app"], { home: home.dir(), platform: "linux" });
     assert.equal(result.logsChanged, 0);
     assert.equal(readFileSync(own, "utf8"), content);
+  });
+});
+
+describe("scrubRepoCards failure handling", () => {
+  beforeEach(() => {
+    rmSync(cardsDir(), { recursive: true, force: true });
+    mkdirSync(cardsDir(), { recursive: true });
+  });
+
+  function busy(): NodeJS.ErrnoException {
+    return Object.assign(new Error("busy"), { code: "EBUSY" });
+  }
+
+  it("does not overwrite a line appended while a rename retry waits", () => {
+    const first = card("c", [block(0, "/work/app/a.ts"), block(1, "/work/other/b.ts")], []);
+    const appended = card("late", [block(0, "/work/other/late.ts")], []);
+    const path = write("x.jsonl", `${first}\n`);
+    let renames = 0;
+    const result = scrubRepoCards(["/work/app"], {
+      home: home.dir(),
+      platform: "linux",
+      hooks: {
+        fsOps: {
+          renameSync: (from, to) => {
+            renames += 1;
+            if (renames === 1) {
+              appendFileSync(path, `${appended}\n`);
+              throw busy();
+            }
+            renameSync(from, to);
+          },
+        },
+      },
+    });
+    assert.deepEqual(result.incomplete, []);
+    const lines = readFileSync(path, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2);
+    assert.equal(lines[1], appended);
+    assert.equal(JSON.parse(lines[0] as string).blocks.length, 1);
+    assert.deepEqual(tempFiles(), []);
+  });
+
+  it("does not delete a log that gained a line while an unlink retry waits", () => {
+    const gone = card("gone", [block(0, "/work/app/a.ts")], []);
+    const appended = card("late", [block(0, "/work/other/late.ts")], []);
+    const path = write("x.jsonl", `${gone}\n`);
+    let unlinks = 0;
+    const result = scrubRepoCards(["/work/app"], {
+      home: home.dir(),
+      platform: "linux",
+      hooks: {
+        fsOps: {
+          unlinkSync: (target) => {
+            unlinks += 1;
+            if (unlinks === 1) {
+              appendFileSync(path, `${appended}\n`);
+              throw busy();
+            }
+            unlinkSync(target);
+          },
+        },
+      },
+    });
+    assert.deepEqual(result.incomplete, []);
+    assert.equal(readFileSync(path, "utf8"), `${appended}\n`);
+  });
+
+  it("removes the temp file when the temp write fails", () => {
+    const first = card("c", [block(0, "/work/app/a.ts"), block(1, "/work/other/b.ts")], []);
+    const path = write("x.jsonl", `${first}\n`);
+    const result = scrubRepoCards(["/work/app"], {
+      home: home.dir(),
+      platform: "linux",
+      hooks: {
+        fsOps: {
+          writeSync: () => {
+            throw Object.assign(new Error("full"), { code: "ENOSPC" });
+          },
+        },
+      },
+    });
+    assert.deepEqual(result.incomplete, [path]);
+    assert.deepEqual(tempFiles(), []);
+    assert.equal(readFileSync(path, "utf8"), `${first}\n`);
+  });
+
+  it("removes the temp file when closing the temp fails", () => {
+    const first = card("c", [block(0, "/work/app/a.ts"), block(1, "/work/other/b.ts")], []);
+    const path = write("x.jsonl", `${first}\n`);
+    const result = scrubRepoCards(["/work/app"], {
+      home: home.dir(),
+      platform: "linux",
+      hooks: {
+        fsOps: {
+          closeSync: (fd) => {
+            closeSync(fd);
+            throw Object.assign(new Error("io"), { code: "EIO" });
+          },
+        },
+      },
+    });
+    assert.deepEqual(result.incomplete, [path]);
+    assert.deepEqual(tempFiles(), []);
+  });
+
+  it("retries a transient temp cleanup failure", () => {
+    const first = card("c", [block(0, "/work/app/a.ts"), block(1, "/work/other/b.ts")], []);
+    const path = write("x.jsonl", `${first}\n`);
+    let failures = 0;
+    const result = scrubRepoCards(["/work/app"], {
+      home: home.dir(),
+      platform: "linux",
+      hooks: {
+        beforeReplace: () => {
+          throw new Error("boom");
+        },
+        fsOps: {
+          unlinkSync: (target) => {
+            if (failures < 1) {
+              failures += 1;
+              throw Object.assign(new Error("denied"), { code: "EACCES" });
+            }
+            unlinkSync(target);
+          },
+        },
+      },
+    });
+    assert.deepEqual(result.incomplete, [path]);
+    assert.deepEqual(tempFiles(), []);
+  });
+
+  it("lists the log in incomplete when temp cleanup keeps failing, even if a later attempt succeeds", () => {
+    const first = card("c", [block(0, "/work/app/a.ts"), block(1, "/work/other/b.ts")], []);
+    const appended = card("late", [block(0, "/work/other/late.ts")], []);
+    const path = write("x.jsonl", `${first}\n`);
+    let hookCalls = 0;
+    const result = scrubRepoCards(["/work/app"], {
+      home: home.dir(),
+      platform: "linux",
+      hooks: {
+        beforeReplace: (target) => {
+          hookCalls += 1;
+          if (hookCalls === 1) appendFileSync(target, `${appended}\n`);
+        },
+        fsOps: {
+          unlinkSync: (target) => {
+            if (String(target).endsWith(".tmp") && hookCalls === 1) {
+              throw Object.assign(new Error("denied"), { code: "EACCES" });
+            }
+            unlinkSync(target);
+          },
+        },
+      },
+    });
+    assert.ok(result.incomplete.includes(path));
+    assert.equal(tempFiles().length, 1);
+  });
+
+  it("keeps a log whose only surviving line is opaque non-UTF-8 bytes", () => {
+    const gone = card("gone", [block(0, "/work/app/a.ts")], []);
+    const path = logPath("x.jsonl");
+    writeFileSync(path, Buffer.concat([Buffer.from(`${gone}\n`), Buffer.from([0xa0, 0x0a])]));
+    const result = scrubRepoCards(["/work/app"], { home: home.dir(), platform: "linux" });
+    assert.equal(result.cardsRemoved, 1);
+    assert.deepEqual(readFileSync(path), Buffer.from([0xa0, 0x0a]));
+  });
+
+  it("keeps a log whose only surviving line is whitespace", () => {
+    const gone = card("gone", [block(0, "/work/app/a.ts")], []);
+    const path = logPath("x.jsonl");
+    writeFileSync(path, Buffer.from(`${gone}\n \t\n`));
+    scrubRepoCards(["/work/app"], { home: home.dir(), platform: "linux" });
+    assert.deepEqual(readFileSync(path), Buffer.from(" \t\n"));
   });
 });

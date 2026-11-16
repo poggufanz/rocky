@@ -54,8 +54,22 @@ export interface ScrubOptions {
   home?: string;
   platform?: NodeJS.Platform;
   /** Test seam: runs after the temp file is written and before the log is re-stat'ed. */
-  hooks?: { beforeReplace?: (path: string) => void };
+  hooks?: {
+    beforeReplace?: (path: string) => void;
+    /** Test seam: replaces the file operations used to write, replace and clean up. */
+    fsOps?: Partial<ScrubFsOps>;
+  };
 }
+
+export interface ScrubFsOps {
+  openSync: typeof openSync;
+  writeSync: typeof writeSync;
+  closeSync: typeof closeSync;
+  unlinkSync: typeof unlinkSync;
+  renameSync: typeof renameSync;
+}
+
+const REAL_FS_OPS: ScrubFsOps = { openSync, writeSync, closeSync, unlinkSync, renameSync };
 
 const MAX_LOG_BYTES = 64 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -71,6 +85,7 @@ interface ScrubContext {
   platform: NodeJS.Platform;
   pathHome: string;
   hooks: ScrubOptions["hooks"];
+  fsOps: ScrubFsOps;
 }
 
 interface FileStamp {
@@ -177,45 +192,81 @@ function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | undefined)?.code;
 }
 
-/** Run a replace step, retrying a few times on Windows-style sharing errors. */
-function withReplaceRetry(step: () => void): void {
+function stampOrUndefined(path: string): FileStamp | undefined {
+  try {
+    return statStamp(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function isUnchanged(path: string, before: FileStamp): boolean {
+  const now = stampOrUndefined(path);
+  return now !== undefined && sameStamp(now, before);
+}
+
+/**
+ * Run a replace step, retrying a few times on Windows-style sharing errors.
+ * The log is re-stat'ed after every wait, so a retry never acts on a stale snapshot:
+ * returns "stale" when the log changed and the caller must read it again.
+ */
+function replaceWithRetry(step: () => void, logPath: string, before: FileStamp): "done" | "stale" {
   for (let retry = 0; ; retry += 1) {
     try {
       step();
-      return;
+      return "done";
     } catch (error) {
       const code = errorCode(error);
       if (retry >= MAX_RENAME_RETRIES || code === undefined || !RETRYABLE_REPLACE_CODES.has(code)) throw error;
+      sleepSync(RENAME_WAIT_MS);
+      if (!isUnchanged(logPath, before)) return "stale";
+    }
+  }
+}
+
+function tempName(logPath: string): string {
+  return `${logPath}.scrub-${process.pid}-${randomBytes(6).toString("hex")}.tmp`;
+}
+
+/** Create the temp file and write it. `onCreated` hands over ownership of the name as soon as it exists. */
+function writeTemp(tmpPath: string, content: Buffer, ops: ScrubFsOps, onCreated: () => void): void {
+  const fd = ops.openSync(tmpPath, "wx", 0o600);
+  onCreated();
+  try {
+    let offset = 0;
+    while (offset < content.length) offset += ops.writeSync(fd, content, offset, content.length - offset);
+  } finally {
+    ops.closeSync(fd);
+  }
+}
+
+/** Remove a temp file, retrying transient errors. Returns false when it may still exist. */
+function removeTemp(path: string, ops: ScrubFsOps): boolean {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      ops.unlinkSync(path);
+      return true;
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "ENOENT") return true;
+      if (retry >= MAX_RENAME_RETRIES || code === undefined || !RETRYABLE_REPLACE_CODES.has(code)) return false;
       sleepSync(RENAME_WAIT_MS);
     }
   }
 }
 
-function writeTemp(logPath: string, content: Buffer): string {
-  const tmpPath = `${logPath}.scrub-${process.pid}-${randomBytes(6).toString("hex")}.tmp`;
-  const fd = openSync(tmpPath, "wx", 0o600);
-  try {
-    let offset = 0;
-    while (offset < content.length) offset += writeSync(fd, content, offset, content.length - offset);
-  } finally {
-    closeSync(fd);
-  }
-  return tmpPath;
-}
-
-function removeQuietly(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch {
-    // Best effort: the temp file may never have been created.
-  }
-}
-
+/** A log is empty only when every kept line has zero bytes; opaque lines are never judged by content. */
 function hasContent(bytes: Buffer): boolean {
-  return /\S/.test(bytes.toString("latin1"));
+  return bytes.some((byte) => byte !== NEWLINE);
 }
 
-function scrubLogOnce(logPath: string, ctx: ScrubContext): LogOutcome {
+interface LogState {
+  /** Set when a temp file could not be removed and may still hold superseded data. */
+  leakedTemp: boolean;
+}
+
+function scrubLogOnce(logPath: string, ctx: ScrubContext, state: LogState): LogOutcome {
   let before: FileStamp;
   let data: Buffer;
   try {
@@ -249,25 +300,26 @@ function scrubLogOnce(logPath: string, ctx: ScrubContext): LogOutcome {
   const freedBytes = Math.max(0, data.length - (deleteLog ? 0 : output.length));
   let tmpPath: string | undefined;
   try {
-    if (!deleteLog) tmpPath = writeTemp(logPath, output);
-    ctx.hooks?.beforeReplace?.(logPath);
-    let now: FileStamp | undefined;
-    try {
-      now = statStamp(logPath);
-    } catch (error) {
-      if (errorCode(error) !== "ENOENT") throw error;
+    if (!deleteLog) {
+      const name = tempName(logPath);
+      writeTemp(name, output, ctx.fsOps, () => {
+        tmpPath = name;
+      });
     }
-    if (now === undefined || !sameStamp(now, before) || data.length !== before.size) return { kind: "stale" };
+    ctx.hooks?.beforeReplace?.(logPath);
+    if (!isUnchanged(logPath, before) || data.length !== before.size) return { kind: "stale" };
+    let replaced: "done" | "stale";
     if (deleteLog) {
-      withReplaceRetry(() => unlinkSync(logPath));
+      replaced = replaceWithRetry(() => ctx.fsOps.unlinkSync(logPath), logPath, before);
     } else {
       const source = tmpPath as string;
-      withReplaceRetry(() => renameSync(source, logPath));
-      tmpPath = undefined;
+      replaced = replaceWithRetry(() => ctx.fsOps.renameSync(source, logPath), logPath, before);
+      if (replaced === "done") tmpPath = undefined;
     }
+    if (replaced === "stale") return { kind: "stale" };
     return { kind: "replaced", blocksRemoved, cardsRemoved, freedBytes };
   } finally {
-    if (tmpPath !== undefined) removeQuietly(tmpPath);
+    if (tmpPath !== undefined && !removeTemp(tmpPath, ctx.fsOps)) state.leakedTemp = true;
   }
 }
 
@@ -285,6 +337,7 @@ export function scrubRepoCards(rootSpellings: readonly string[], options: ScrubO
     platform,
     pathHome,
     hooks: options.hooks,
+    fsOps: { ...REAL_FS_OPS, ...options.hooks?.fsOps },
   };
   const result: ScrubResult = { ok: true, logsChanged: 0, blocksRemoved: 0, cardsRemoved: 0, freedBytes: 0, incomplete: [] };
   const cardsDir = join(rockyHome, "desk", "cards");
@@ -315,13 +368,20 @@ export function scrubRepoCards(rootSpellings: readonly string[], options: ScrubO
 }
 
 function scrubLogWithRetry(logPath: string, ctx: ScrubContext, result: ScrubResult): void {
+  const state: LogState = { leakedTemp: false };
+  const finished = runScrubAttempts(logPath, ctx, result, state);
+  // A temp that could not be removed may hold superseded data: never report that as clean.
+  if (!finished || state.leakedTemp) result.incomplete.push(logPath);
+}
+
+/** Returns false when the log could not be scrubbed completely. */
+function runScrubAttempts(logPath: string, ctx: ScrubContext, result: ScrubResult, state: LogState): boolean {
   for (let attempt = 0; attempt < MAX_READ_ATTEMPTS; attempt += 1) {
     let outcome: LogOutcome;
     try {
-      outcome = scrubLogOnce(logPath, ctx);
+      outcome = scrubLogOnce(logPath, ctx, state);
     } catch {
-      result.incomplete.push(logPath);
-      return;
+      return false;
     }
     if (outcome.kind === "stale") continue;
     if (outcome.kind === "replaced") {
@@ -330,7 +390,7 @@ function scrubLogWithRetry(logPath: string, ctx: ScrubContext, result: ScrubResu
       result.cardsRemoved += outcome.cardsRemoved;
       result.freedBytes += outcome.freedBytes;
     }
-    return;
+    return true;
   }
-  result.incomplete.push(logPath);
+  return false;
 }
