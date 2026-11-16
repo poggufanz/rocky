@@ -1690,6 +1690,11 @@ mod tests {
         }
         assert_eq!(cards.outstanding_builds(), 0, "old jobs must finish");
         service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        assert_eq!(
+            cards.stale_cards_received(),
+            0,
+            "no stale card may enter the result channel"
+        );
         assert!(
             card_broadcasts().is_empty(),
             "old build must not be broadcast"

@@ -24,7 +24,9 @@ use rocky_proto::pipe::{AgentKey, CaptureHealth, CaptureState, Gap, RepoInfo};
 use sha2::{Digest, Sha256};
 
 use crate::capture::CaptureResult;
-use crate::cards::attribute::{BuildInput, build_card, collect_edit_windows_for_turn};
+use crate::cards::attribute::{
+    BuildInput, build_card, collect_edit_windows_for_turn, select_prompt,
+};
 use crate::cards::store::{ObjectRead, StoreReader, Version, read_object};
 use crate::cards::transcript::{TranscriptRead, read_quotes, validate_transcript_path};
 use crate::cards::windows::{PromptIn, ToolKind, ToolWindow, Tracker, TrackerSignal, Turn};
@@ -295,6 +297,7 @@ struct WorkerPool {
     hook: Option<BuildHook>,
     generation: Arc<AtomicU64>,
     outstanding: usize,
+    stale_cards: usize,
     pool_workers: BoundedWorkers,
     panics: Arc<AtomicU64>,
 }
@@ -314,6 +317,7 @@ impl WorkerPool {
             hook,
             generation: Arc::new(AtomicU64::new(0)),
             outstanding: 0,
+            stale_cards: 0,
             pool_workers: BoundedWorkers::new(),
             panics: Arc::new(AtomicU64::new(0)),
         }
@@ -355,6 +359,9 @@ impl WorkerPool {
     fn try_recv(&mut self) -> Option<BuildDone> {
         let done = self.res_rx.try_recv().ok()?;
         self.outstanding = self.outstanding.saturating_sub(1);
+        if done.card.is_some() && done.generation != self.generation.load(Ordering::Acquire) {
+            self.stale_cards += 1;
+        }
         Some(done)
     }
 }
@@ -463,6 +470,12 @@ impl Engine {
     #[doc(hidden)]
     pub fn outstanding_builds(&self) -> usize {
         self.pool.outstanding
+    }
+
+    /// Counts old-generation results that carried a card into the result channel (test seam).
+    #[doc(hidden)]
+    pub fn stale_cards_received(&self) -> usize {
+        self.pool.stale_cards
     }
 
     /// Returns the number of build worker threads configured for this engine.
@@ -1158,6 +1171,11 @@ fn worker_loop(
             panic::catch_unwind(AssertUnwindSafe(|| run_job(job, &stores, hook.as_deref())));
         match outcome {
             Ok(card) => {
+                let card = if job_generation == generation.load(Ordering::Acquire) {
+                    card
+                } else {
+                    None
+                };
                 let _ = tx.send(BuildDone {
                     generation: job_generation,
                     turn_id: tid,
@@ -1205,7 +1223,7 @@ fn run_job(
 
     let quotes = read_turn_quotes(&job.turn, &job.config_dirs);
 
-    let mut input = BuildInput {
+    let input = BuildInput {
         turn: job.turn,
         card_id: job.card_id,
         rev: job.rev,
@@ -1225,19 +1243,8 @@ fn run_job(
         parent_card_id: job.parent_card_id,
     };
 
-    if let Some(cb) = hook {
-        cb(&input);
-    }
-
-    if job.had_prompt {
-        match lock_slot(&job.prompt).take() {
-            Some(prompt) => input.turn.prompt = Some(prompt),
-            None => return None,
-        }
-    }
-
     let store_ref = input.recorded.then_some(job.store_dir.as_deref()).flatten();
-    let card = build_card(
+    let mut card = build_card(
         &input,
         &|sha| match store_ref {
             Some(dir) => read_object(dir, sha),
@@ -1251,6 +1258,20 @@ fn run_job(
             }
         },
     );
+
+    if let Some(cb) = hook {
+        cb(&input);
+    }
+
+    // The prompt is read from its clearable slot only now, after every read above.
+    // The only window where this build owns the prompt is the in-memory copy below,
+    // up to the generation check in `worker_loop` before the result is sent.
+    if job.had_prompt {
+        let prompt = lock_slot(&job.prompt).take()?;
+        let mut with_prompt = input;
+        with_prompt.turn.prompt = Some(prompt);
+        (card.prompt, card.prompt_truncated) = select_prompt(&with_prompt);
+    }
 
     if card.blocks.is_empty() {
         None
