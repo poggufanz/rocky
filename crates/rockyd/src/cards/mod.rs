@@ -57,6 +57,12 @@ pub struct EngineCtx {
 
 type TurnId = (AgentKey, u64);
 type BuildHook = Arc<dyn Fn(&BuildInput) + Send + Sync>;
+/// Prompt owned by one build job; the engine can clear it while the job is queued or running.
+type PromptSlot = Arc<Mutex<Option<PromptIn>>>;
+
+fn lock_slot(slot: &PromptSlot) -> std::sync::MutexGuard<'_, Option<PromptIn>> {
+    slot.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 struct PendingBuild {
     turn: Turn,
@@ -171,6 +177,8 @@ impl CachedStore {
 
 struct BuildJob {
     generation: u64,
+    prompt: PromptSlot,
+    had_prompt: bool,
     turn_id: TurnId,
     turn: Turn,
     card_id: String,
@@ -286,6 +294,7 @@ struct WorkerPool {
     stores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<CachedStore>>>>>,
     hook: Option<BuildHook>,
     generation: Arc<AtomicU64>,
+    outstanding: usize,
     pool_workers: BoundedWorkers,
     panics: Arc<AtomicU64>,
 }
@@ -304,6 +313,7 @@ impl WorkerPool {
             stores: Arc::new(Mutex::new(HashMap::new())),
             hook,
             generation: Arc::new(AtomicU64::new(0)),
+            outstanding: 0,
             pool_workers: BoundedWorkers::new(),
             panics: Arc::new(AtomicU64::new(0)),
         }
@@ -336,13 +346,16 @@ impl WorkerPool {
 
     fn submit(&mut self, job: BuildJob) {
         self.ensure_started();
+        self.outstanding += 1;
         if let Some(tx) = &self.job_tx {
             let _ = tx.send(job);
         }
     }
 
-    fn try_recv(&self) -> Option<BuildDone> {
-        self.res_rx.try_recv().ok()
+    fn try_recv(&mut self) -> Option<BuildDone> {
+        let done = self.res_rx.try_recv().ok()?;
+        self.outstanding = self.outstanding.saturating_sub(1);
+        Some(done)
     }
 }
 
@@ -368,6 +381,7 @@ pub struct Engine {
     turn_states: HashMap<TurnId, TurnBuildState>,
     captures_by_root: HashMap<String, Vec<CaptureResult>>,
     latest_valid_capture: HashMap<String, u64>,
+    prompt_slots: Vec<std::sync::Weak<Mutex<Option<PromptIn>>>>,
     pool: WorkerPool,
 }
 
@@ -397,6 +411,7 @@ impl Engine {
             turn_states: HashMap::new(),
             captures_by_root: HashMap::new(),
             latest_valid_capture: HashMap::new(),
+            prompt_slots: Vec::new(),
             pool: WorkerPool::new(workers, hook),
         }
     }
@@ -435,7 +450,19 @@ impl Engine {
             .values()
             .filter(|p| p.turn.prompt.is_some())
             .count();
-        tracked + pending
+        let slots = self
+            .prompt_slots
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .filter(|slot| lock_slot(slot).is_some())
+            .count();
+        tracked + pending + slots
+    }
+
+    /// Counts builds submitted whose result has not been collected (test seam).
+    #[doc(hidden)]
+    pub fn outstanding_builds(&self) -> usize {
+        self.pool.outstanding
     }
 
     /// Returns the number of build worker threads configured for this engine.
@@ -695,6 +722,10 @@ impl Engine {
         // no turn (and so no prompt) stays tracked across an off switch.
         self.pool.generation.fetch_add(1, Ordering::AcqRel);
         self.turn_states.clear();
+        for slot in self.prompt_slots.drain(..).filter_map(|w| w.upgrade()) {
+            lock_slot(&slot).take();
+        }
+        while self.pool.try_recv().is_some() {}
     }
 
     /// Seeds a session's cached repository when cards have not seen the session yet.
@@ -1004,8 +1035,16 @@ impl Engine {
         );
         let gaps: Vec<(u64, u64)> = ctx.gaps.iter().map(|g| (g.from_ms, g.to_ms)).collect();
 
+        let mut turn = turn;
+        let had_prompt = turn.prompt.is_some();
+        let prompt: PromptSlot = Arc::new(Mutex::new(turn.prompt.take()));
+        self.prompt_slots.retain(|w| w.strong_count() > 0);
+        self.prompt_slots.push(Arc::downgrade(&prompt));
+
         self.pool.submit(BuildJob {
             generation: self.pool.generation.load(Ordering::Acquire),
+            prompt,
+            had_prompt,
             turn_id: tid.clone(),
             turn,
             card_id: cid,
@@ -1166,7 +1205,7 @@ fn run_job(
 
     let quotes = read_turn_quotes(&job.turn, &job.config_dirs);
 
-    let input = BuildInput {
+    let mut input = BuildInput {
         turn: job.turn,
         card_id: job.card_id,
         rev: job.rev,
@@ -1188,6 +1227,13 @@ fn run_job(
 
     if let Some(cb) = hook {
         cb(&input);
+    }
+
+    if job.had_prompt {
+        match lock_slot(&job.prompt).take() {
+            Some(prompt) => input.turn.prompt = Some(prompt),
+            None => return None,
+        }
     }
 
     let store_ref = input.recorded.then_some(job.store_dir.as_deref()).flatten();
@@ -1453,6 +1499,8 @@ mod tests {
         };
         let job = BuildJob {
             generation: 0,
+            prompt: Arc::new(Mutex::new(None)),
+            had_prompt: false,
             turn_id: (agent.clone(), 1_000),
             turn: Turn {
                 agent,

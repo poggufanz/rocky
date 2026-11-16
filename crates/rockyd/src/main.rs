@@ -1552,6 +1552,8 @@ mod tests {
         let entered_tx = Mutex::new(entered_tx);
         let release_rx = Mutex::new(release_rx);
         let hook_once = AtomicBool::new(false);
+        let hook_saw_prompt = Arc::new(AtomicBool::new(false));
+        let hook_saw_prompt_ref = Arc::clone(&hook_saw_prompt);
 
         let log = RotatingLog::new(&log_path(&home));
         let hub = Hub::new();
@@ -1562,8 +1564,9 @@ mod tests {
         let mut cards = Engine::new_with_build_hook(
             home.clone(),
             1,
-            Arc::new(move |_| {
+            Arc::new(move |input| {
                 if !hook_once.swap(true, Ordering::SeqCst) {
+                    hook_saw_prompt_ref.store(input.turn.prompt.is_some(), Ordering::SeqCst);
                     let _ = entered_tx.lock().unwrap().send(());
                     let _ = release_rx
                         .lock()
@@ -1620,11 +1623,15 @@ mod tests {
         let card_broadcasts = || {
             drain_server_msgs(&rx)
                 .into_iter()
-                .filter(|m| matches!(m, ServerMsg::Card { .. }))
-                .count()
+                .filter_map(|m| match m {
+                    ServerMsg::Card { item } => Some(item.session_id),
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
         };
 
         write_turn(1, "sess-before-off", 1_000);
+        write_turn(3, "sess-queued", 1_100);
         rescan(
             &spool,
             &shared,
@@ -1640,8 +1647,12 @@ mod tests {
             .recv_timeout(Duration::from_secs(3))
             .expect("first turn card build should start in worker");
         assert!(
-            cards.held_prompt_count() > 0,
-            "turn holds its prompt while building"
+            !hook_saw_prompt.load(Ordering::SeqCst),
+            "a running build input must not own the prompt"
+        );
+        assert!(
+            cards.held_prompt_count() >= 2,
+            "running and queued builds hold their prompts only in clearable slots"
         );
 
         for (id, on) in [(1_u64, false), (2_u64, true)] {
@@ -1672,12 +1683,17 @@ mod tests {
         }
 
         release_tx.send(()).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cards.outstanding_builds() > 0 && Instant::now() < deadline {
             service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(card_broadcasts(), 0, "old build must not be broadcast");
+        assert_eq!(cards.outstanding_builds(), 0, "old jobs must finish");
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        assert!(
+            card_broadcasts().is_empty(),
+            "old build must not be broadcast"
+        );
         assert!(
             !cards_dir(&home).exists(),
             "old build must not be persisted"
@@ -1696,13 +1712,17 @@ mod tests {
             None,
         );
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut fresh = 0;
-        while Instant::now() < deadline && fresh == 0 {
+        let mut fresh = Vec::new();
+        while Instant::now() < deadline && fresh.is_empty() {
             service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
-            fresh += card_broadcasts();
+            fresh.extend(card_broadcasts());
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(fresh, 1, "a fresh prompt must produce a card normally");
+        assert_eq!(
+            fresh,
+            vec!["sess-after-on".to_string()],
+            "a fresh prompt must produce a card for the fresh turn only"
+        );
     }
 
     #[test]
