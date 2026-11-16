@@ -1511,7 +1511,7 @@ mod tests {
     #[test]
     fn resolve_session_repo_caches_non_git_sessions_after_first_resolution() {
         let dir = tempfile::tempdir().unwrap();
-        let mut engine = Engine::new(dir.path().to_path_buf(), 1);
+        let mut engine = Engine::new(dir.path().to_path_buf(), 1).with_user_home(None);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let mut repo_of = |cwd: &str| {
             calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
