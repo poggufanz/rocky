@@ -73,6 +73,22 @@ pub struct CardRow {
     pub meta_high: Option<String>,
     pub edits: Vec<EditRow>,
     pub more: Option<String>,
+    /// One chip per distinct file, in first-edit order, for the compact list.
+    pub files: Vec<FileChip>,
+    /// Distinct files beyond `files`.
+    pub files_more: usize,
+}
+
+/// One changed file in the compact Done list: name, how many edits, and
+/// whether any of them is important or matches the search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChip {
+    pub name: String,
+    pub edits: u32,
+    pub high: bool,
+    pub matched: bool,
+    /// Full path first, then the labels and words of its edits.
+    pub tooltip: Vec<TooltipLine>,
 }
 
 /// Pure state machine for the desk's paginated, searchable change-card list.

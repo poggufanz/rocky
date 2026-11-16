@@ -149,7 +149,7 @@ impl DeskView {
         }
 
         let warnings = self.ctl.model.warnings(&clock::local_hhmm);
-        let mut page = div().flex().flex_col().gap_2().p_3().size_full();
+        let mut page = div().flex().flex_col().gap_2().w_full();
         if let Some(banner) = self.banner(cx) {
             page = page.child(banner);
         }
@@ -166,9 +166,7 @@ impl DeskView {
         if self.ctl.view == View::Settings {
             // Outside the panel, which returns early while settings are
             // unknown: Quit must stay reachable when the daemon is down.
-            return page
-                .id(SharedString::from("settings"))
-                .overflow_y_scroll()
+            let page = page
                 .child(self.settings_panel(cx))
                 .child(self.setup_panel(cx))
                 .child(
@@ -178,8 +176,8 @@ impl DeskView {
                         .cursor_pointer()
                         .child(tr(lang, &Msg::MenuQuit))
                         .on_click(cx.listener(|this, _, _, cx| this.quit(cx))),
-                )
-                .into_any_element();
+                );
+            return scroll_page("settings", page);
         }
 
         let (top_banners, _) = self.repo_banners(&[], cx);
@@ -215,10 +213,7 @@ impl DeskView {
                 Self::on_card_action,
                 Self::on_flow_hover,
             ));
-            return page
-                .id(SharedString::from("flow"))
-                .overflow_y_scroll()
-                .into_any_element();
+            return scroll_page("flow", page);
         }
 
         let view = now_view(
@@ -245,8 +240,21 @@ impl DeskView {
             Self::on_card_action,
             Self::on_search_key,
         ));
-        page.id(SharedString::from("agents"))
-            .overflow_y_scroll()
-            .into_any_element()
+        scroll_page("agents", page)
     }
+}
+
+/// Widest the content column grows. Past it, lines of a card run so long
+/// that the time, title, and files at either end stop reading as one row.
+const MAX_CONTENT_W: f32 = 880.0;
+
+/// A scrolling page whose content column stays centered and capped.
+fn scroll_page(id: &'static str, content: gpui::Div) -> AnyElement {
+    div()
+        .id(SharedString::from(id))
+        .size_full()
+        .overflow_y_scroll()
+        .p_3()
+        .child(content.max_w(gpui::px(MAX_CONTENT_W)).mx_auto())
+        .into_any_element()
 }

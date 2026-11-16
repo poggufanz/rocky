@@ -936,3 +936,54 @@ fn mixed_single_or_important_chips_stay_on_rows() {
     assert_eq!(rows::hoist_shared_chip(&mut high), None);
     assert_eq!(high[1].chip, "public API");
 }
+
+#[test]
+fn file_chips_merge_repeat_edits_and_cap_at_four() {
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    card.blocks = vec![
+        sample_block(1, "src/a.rs", Vec::new()),
+        sample_block(2, "src/a.rs", Vec::new()),
+        sample_block(3, "src/b.rs", Vec::new()),
+        sample_block(4, "src/c.rs", Vec::new()),
+        sample_block(5, "src/d.rs", Vec::new()),
+        sample_block(6, "src/e.rs", Vec::new()),
+        sample_block(7, "src/f.rs", Vec::new()),
+    ];
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+    model.on_cards(1, vec![card], None);
+    let rows = model.rows(UiLang::En);
+    let names: Vec<(&str, u32)> = rows[0]
+        .files
+        .iter()
+        .map(|f| (f.name.as_str(), f.edits))
+        .collect();
+    assert_eq!(
+        names,
+        vec![("a.rs", 2), ("b.rs", 1), ("c.rs", 1), ("d.rs", 1)]
+    );
+    assert_eq!(rows[0].files_more, 2);
+    assert_eq!(rows[0].files[0].tooltip[0].text, "src/a.rs");
+}
+
+#[test]
+fn file_chips_with_one_name_keep_their_folder() {
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    card.blocks = vec![
+        sample_block(1, "~/.claude/settings.json", Vec::new()),
+        sample_block(2, "~/profile/home/settings.json", Vec::new()),
+        sample_block(3, "src/a.rs", Vec::new()),
+    ];
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+    model.on_cards(1, vec![card], None);
+    let names: Vec<String> = model.rows(UiLang::En)[0]
+        .files
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec![".claude/settings.json", "home/settings.json", "a.rs"]
+    );
+}

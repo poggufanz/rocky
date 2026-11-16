@@ -1,4 +1,8 @@
 //! Render tree for the "Selesai"/"Done" change cards section and search input.
+//!
+//! The list is a log, not a stack of cards: one surface, one row per turn.
+//! Each row reads left to right as when, what was asked, and which files
+//! changed, so the eye can run down the time column and stop on a file name.
 
 use gpui::prelude::*;
 use gpui::{
@@ -6,14 +10,13 @@ use gpui::{
     StyledText, Window, div, px, rgb,
 };
 
-use crate::cards_model::{BashRow, CardRow, CardsModel, EditRow};
+use crate::cards_model::{CardRow, CardsModel, FileChip};
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::search_input::SearchInput;
 use crate::ui::motion;
 use crate::ui::tooltip::{
-    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, CHIP_HIGH_FG, LINK, MATCH_BG, ROW_HOVER_BG,
-    SURFACE_SUBTLE, TEXT_DARK, TEXT_DIM, TEXT_MUTED, card_container, card_header, chip_badge,
-    mono_font, path_symbol_text, seq_badge, tooltip_view,
+    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, CHIP_BG, CHIP_HIGH_FG, DIFF_DEL_FG, LINK, MATCH_BG,
+    ROW_HOVER_BG, TEXT_BODY, TEXT_DARK, TEXT_DIM, TEXT_MUTED, TEXT_SUBTLE, mono_font, tooltip_view,
 };
 
 /// User interactions emitted by the cards list, detail, and diff views.
@@ -34,6 +37,18 @@ pub type OnCardAction<T> = fn(&mut T, CardAction, &mut Window, &mut Context<T>);
 /// Callback invoked when key presses reach the focused search box.
 pub type OnSearchKey<T> = fn(&mut T, &KeyDownEvent, &mut Context<T>);
 
+/// Width of the time column; holds `HH:MM` in the monospace font.
+const TIME_W: f32 = 40.0;
+
+/// Section title shared by Now and Done: sentence case, quiet, no tracking.
+pub(crate) fn section_title(text: String) -> Div {
+    div()
+        .text_size(px(13.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(TEXT_SUBTLE))
+        .child(text)
+}
+
 /// Renders the "Selesai"/"Done" change cards section below live agents.
 #[allow(clippy::too_many_arguments)]
 pub fn cards_section<T: 'static>(
@@ -46,48 +61,57 @@ pub fn cards_section<T: 'static>(
     on_action: OnCardAction<T>,
     on_search_key: OnSearchKey<T>,
 ) -> Div {
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .pt_2()
-        .border_t_1()
-        .border_color(rgb(BORDER_SUBTLE));
+    let mut section = div().flex().flex_col().gap(px(8.0)).pt(px(10.0));
 
     section = section.child(
         div()
-            .mt(px(4.0))
-            .mb(px(6.0))
-            .mx(px(2.0))
-            .text_size(px(11.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_DIM))
-            .child(card_text(lang, &CardMsg::SectionDone).to_uppercase()),
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .px(px(2.0))
+            .child(section_title(card_text(lang, &CardMsg::SectionDone)))
+            .child(search_box(
+                lang,
+                search,
+                search_focus,
+                window,
+                cx,
+                on_action,
+                on_search_key,
+            )),
     );
-
-    section = section.child(search_box(
-        lang,
-        search,
-        search_focus,
-        window,
-        cx,
-        on_action,
-        on_search_key,
-    ));
 
     let rows = cards.rows(lang);
     if rows.is_empty() {
         let copy = cards.empty_msg();
         section = section.child(
             div()
-                .text_xs()
-                .text_color(rgb(TEXT_DIM))
-                .py_1()
+                .px(px(14.0))
+                .py(px(14.0))
+                .rounded(px(8.0))
+                .bg(rgb(CARD_BG))
+                .border_1()
+                .border_color(rgb(BORDER_SUBTLE))
+                .text_size(px(12.5))
+                .text_color(rgb(TEXT_MUTED))
                 .child(card_text(lang, &copy)),
         );
     } else {
-        let mut list = div().flex().flex_col().gap(px(8.0));
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .bg(rgb(CARD_BG))
+            .border_1()
+            .border_color(rgb(BORDER_SUBTLE))
+            .rounded(px(8.0))
+            .overflow_hidden();
         for (idx, row) in rows.into_iter().enumerate() {
-            list = list.child(card_item(row, idx, cx, on_action));
+            if idx > 0 {
+                list = list.child(div().h(px(1.0)).bg(rgb(BORDER_SUBTLE)));
+            }
+            list = list.child(log_row(lang, row, idx, cx, on_action));
         }
         section = section.child(list);
     }
@@ -118,7 +142,7 @@ pub fn cards_section<T: 'static>(
         } else {
             motion::pulse(btn, SharedString::from("cards-load-more-pulse")).into_any_element()
         };
-        section = section.child(div().flex().mt(px(8.0)).child(row_btn));
+        section = section.child(div().flex().px(px(2.0)).child(row_btn));
     }
 
     section
@@ -142,10 +166,10 @@ fn search_box<T: 'static>(
     div()
         .id(SharedString::from("cards-search"))
         .track_focus(search_focus)
-        .py(px(6.0))
+        .w(px(240.0))
+        .py(px(5.0))
         .px(px(10.0))
-        .mb(px(8.0))
-        .rounded(px(8.0))
+        .rounded(px(6.0))
         .bg(rgb(CARD_BG))
         .border_1()
         .border_color(rgb(if focused { LINK } else { BORDER_SUBTLE }))
@@ -166,7 +190,9 @@ fn search_box<T: 'static>(
         )
 }
 
-fn card_item<T: 'static>(
+/// One turn: time, what was asked, then meta and the files it changed.
+fn log_row<T: 'static>(
+    lang: UiLang,
     row: CardRow,
     index: usize,
     cx: &mut Context<T>,
@@ -174,84 +200,85 @@ fn card_item<T: 'static>(
 ) -> impl IntoElement {
     let anim_id = SharedString::from(format!("card-enter:{}", row.card_id));
     let card_id = row.card_id.clone();
-    let mut card = card_container()
+
+    let mut detail = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(6.0))
+        .child(meta_view(row.meta, row.meta_high));
+    for (i, chip) in row.files.iter().enumerate() {
+        detail = detail.child(file_chip(&row.card_id, i, chip));
+    }
+    if row.files_more > 0 {
+        detail = detail.child(div().text_size(px(12.0)).text_color(rgb(TEXT_MUTED)).child(
+            card_text(lang, &CardMsg::FlowMoreFiles { n: row.files_more }),
+        ));
+    }
+
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .gap(px(5.0))
+        .child(
+            // The truncating title sits in a row with flex_1: placed straight
+            // in the column, gpui measures it at min-content and leaves only
+            // the ellipsis.
+            div().flex().w_full().min_w_0().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(TEXT_DARK))
+                    .child(row.title),
+            ),
+        )
+        .child(detail);
+    // A subagent's turn hangs off its parent's row with a thin rail.
+    if row.indent {
+        body = body
+            .pl(px(12.0))
+            .border_l_1()
+            .border_color(rgb(BORDER_LIGHT));
+    }
+
+    let el = div()
         .id(SharedString::from(format!("card:{}", row.card_id)))
-        // A tab stop, so Tab reaches the card and Enter opens its modal.
+        // A tab stop, so Tab reaches the turn and Enter opens its modal.
         .tab_index(0)
+        .flex()
+        .gap(px(12.0))
+        .px(px(14.0))
+        .py(px(10.0))
+        .border_1()
+        .border_color(gpui::transparent_black())
         .cursor_pointer()
-        .hover(|s| s.border_color(rgb(BORDER_LIGHT)).shadow_sm())
+        .hover(|s| s.bg(rgb(ROW_HOVER_BG)))
         .focus(|s| s.border_color(rgb(LINK)))
         .on_click(cx.listener(move |this, _, window, cx| {
             on_action(this, CardAction::OpenDetail(card_id.clone()), window, cx);
-        }));
-
-    card = card.child(
-        card_header()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_start()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(14.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT_DARK))
-                            .child(row.title),
-                    )
-                    .child(
-                        div()
-                            .pt(px(2.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(TEXT_DIM))
-                            .whitespace_nowrap()
-                            .flex_shrink_0()
-                            .child(row.time),
-                    ),
-            )
-            .child(card_meta_view(row.meta, row.meta_high)),
-    );
-
-    for (idx, edit) in row.edits.iter().enumerate() {
-        card = card.child(edit_row_view(&row.card_id, idx, edit));
-    }
-
-    if let Some(more) = row.more {
-        card = card.child(
+        }))
+        .child(
             div()
-                .border_t_1()
-                .border_color(rgb(BORDER_SUBTLE))
-                .pt(px(6.0))
-                .px(px(12.0))
-                .pb(px(8.0))
+                .flex_none()
+                .w(px(TIME_W))
+                .pt(px(2.0))
+                .font_family(mono_font())
                 .text_size(px(12.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(LINK))
-                .truncate()
-                .child(more),
-        );
-    }
-
-    let wrapper = if row.indent {
-        div()
-            .pl(px(12.0))
-            .border_l_2()
-            .border_color(rgb(BORDER_SUBTLE))
-            .child(card)
-    } else {
-        div().child(card)
-    };
-    motion::enter(wrapper, anim_id, index)
+                .text_color(rgb(TEXT_MUTED))
+                .child(row.time),
+        )
+        .child(body);
+    motion::enter(el, anim_id, index)
 }
 
-fn card_meta_view(meta: String, meta_high: Option<String>) -> Div {
+fn meta_view(meta: String, meta_high: Option<String>) -> Div {
     let container = div()
-        .min_w_0()
-        .truncate()
+        .flex_none()
         .text_size(px(12.0))
         .text_color(rgb(TEXT_MUTED));
     match meta_high {
@@ -271,95 +298,36 @@ fn card_meta_view(meta: String, meta_high: Option<String>) -> Div {
     }
 }
 
-fn edit_row_view(card_id: &str, idx: usize, edit: &EditRow) -> Stateful<Div> {
-    let mut row = div()
-        .id(SharedString::from(format!(
-            "card-edit:{}:{}:{idx}",
-            card_id, edit.seq
-        )))
+/// A changed file: its name, `×n` when edited more than once, red with ▲
+/// when an edit is important, and blue-tinted when it matches the search.
+fn file_chip(card_id: &str, idx: usize, chip: &FileChip) -> Stateful<Div> {
+    let mut el = div()
+        .id(SharedString::from(format!("card-file:{card_id}:{idx}")))
         .flex()
         .items_center()
-        .gap(px(6.0))
-        .w_full()
-        .py(px(5.0))
-        .px(px(12.0))
-        .border_t_1()
-        .border_color(rgb(BORDER_SUBTLE));
-
-    if edit.matched {
-        row = row.bg(rgb(MATCH_BG));
-    } else {
-        row = row.hover(|s| s.bg(rgb(ROW_HOVER_BG)));
+        .gap(px(4.0))
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(4.0))
+        .bg(rgb(if chip.matched { MATCH_BG } else { CHIP_BG }))
+        .font_family(mono_font())
+        .text_size(px(12.0))
+        // The darker diff red: plain CHIP_HIGH_FG is 4.2:1 on the chip, this is 5.7:1.
+        .text_color(rgb(if chip.high { DIFF_DEL_FG } else { TEXT_BODY }));
+    if chip.high {
+        el = el.child("\u{25b2}");
     }
-
-    row = row.child(seq_badge(edit.seq));
-
-    let left = match &edit.bash {
-        Some(bash) => bash_left(bash),
-        None => file_left(edit),
-    };
-    row = row.child(left);
-
-    if !edit.chip.is_empty() {
-        row = row.child(chip_badge(edit.chip.clone(), edit.high));
-    }
-
-    if !edit.tooltip.is_empty() {
-        let lines = edit.tooltip.clone();
-        row = row.tooltip(move |window, cx| tooltip_view(lines.clone(), window, cx));
-    }
-
-    row
-}
-
-fn file_left(edit: &EditRow) -> Div {
-    path_symbol_text(&edit.file, edit.symbol.as_deref())
-        .flex_1()
-        .truncate()
-}
-
-fn bash_left(bash: &BashRow) -> Div {
-    let mut left = div()
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .items_center()
-        .gap_1()
-        .overflow_hidden()
-        .text_size(px(12.5));
-    left = left.child(
-        div()
-            .text_color(rgb(TEXT_MUTED))
-            .whitespace_nowrap()
-            .flex_shrink_0()
-            .child(bash.before.clone()),
-    );
-    left = left.child(
-        div()
-            .min_w_0()
-            .truncate()
-            .font_family(mono_font())
-            .bg(rgb(SURFACE_SUBTLE))
-            .px(px(4.0))
-            .rounded(px(4.0))
-            .text_color(rgb(TEXT_DARK))
-            .child(bash.cmd.clone()),
-    );
-    if !bash.after.is_empty() {
-        left = left.child(
+    el = el.child(chip.name.clone());
+    if chip.edits > 1 {
+        el = el.child(
             div()
                 .text_color(rgb(TEXT_MUTED))
-                .whitespace_nowrap()
-                .child(bash.after.clone()),
+                .child(format!("\u{00d7}{}", chip.edits)),
         );
     }
-    if let Some(uncertain) = &bash.uncertain {
-        left = left.child(
-            div()
-                .text_color(rgb(TEXT_DIM))
-                .whitespace_nowrap()
-                .child(uncertain.clone()),
-        );
+    if !chip.tooltip.is_empty() {
+        let lines = chip.tooltip.clone();
+        el = el.tooltip(move |window, cx| tooltip_view(lines.clone(), window, cx));
     }
-    left
+    el
 }

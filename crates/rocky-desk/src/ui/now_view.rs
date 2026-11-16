@@ -6,13 +6,14 @@ use rocky_proto::pipe::{AgentKey, Status};
 
 use crate::i18n::{CardMsg, Msg, UiLang, card_text, tr};
 use crate::now_model::{NowView, SessionCard, SubRow};
+use crate::ui::cards_view::section_title;
 use crate::ui::motion;
 use crate::ui::tooltip::{
     BORDER_NEEDS_YOU, BORDER_SUBTLE, CHIP_BG, CHIP_FG, CHIP_HIGH_BG, CHIP_HIGH_FG,
     CHIP_NEEDS_YOU_BG, CHIP_NEEDS_YOU_FG, CHIP_WORKING_BG, CHIP_WORKING_FG, NOTICE_DOT,
     ROW_HOVER_BG, STATUS_DONE, STATUS_FAILED, STATUS_IDLE, STATUS_NEEDS_YOU, STATUS_WORKING,
-    TEXT_BODY, TEXT_DARK, TEXT_DIM, TEXT_MUTED, TEXT_SUBTLE, TIMER_NEEDS_YOU, TIMER_WORKING,
-    card_container, mono_font,
+    TEXT_BODY, TEXT_DARK, TEXT_MUTED, TEXT_SUBTLE, TIMER_NEEDS_YOU, TIMER_WORKING, card_container,
+    mono_font,
 };
 
 mod finished;
@@ -158,17 +159,13 @@ fn section_header(lang: UiLang, view: &NowView, show_counts: bool) -> Div {
         .flex()
         .items_baseline()
         .justify_between()
-        .mt(px(6.0))
+        .mt(px(2.0))
         .mx(px(2.0))
-        .child(
-            div()
-                .text_size(px(11.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT_DIM))
-                .child(card_text(lang, &CardMsg::SectionNow).to_uppercase()),
-        );
+        .child(section_title(card_text(lang, &CardMsg::SectionNow)));
 
-    if show_counts {
+    // "0 active" beside a session that just finished reads as a contradiction;
+    // the counts show only when something is running or waiting.
+    if show_counts && (view.active_count > 0 || view.needs_count > 0) {
         let mut right = div()
             .flex()
             .items_baseline()
