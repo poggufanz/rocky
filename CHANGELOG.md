@@ -12,6 +12,8 @@ The daemon builds change cards after each agent turn and serves them—along wit
 
 `rocky why <file>` now appends an "Agent changes to `<file>` (newest first)" section reading up to the 5 newest local change cards for that file (derived prompt title, matching symbols, logic labels, quoted agent words recorded as unverified, and Bash attribution, without source code). MCP `why_file` also returns bounded, code-free `cards[]` and `cardsCoverage` alongside `items` and `rationales`.
 
+Change cards now shorten paths outside the repo to `~/` against your OS user home, so `rocky why <file>` finds edits under your home folder; before this the daemon measured against the Rocky home. When the daemon cannot find your home folder, such paths stay absolute.
+
 With `CLAUDE_CONFIG_DIR` set, the desktop app's setup also keeps Rocky's hooks in `~/.claude/settings.json` when that folder holds Claude Code config. Some terminal hosts copy that file over the profile on every new terminal, so hooks written only to the profile were gone before the session read them.
 
 - Automatic setup reads MCP JSON configs that contain `//` or `/* */` comments. After Rocky writes such a file, it is plain JSON and the comments are gone.

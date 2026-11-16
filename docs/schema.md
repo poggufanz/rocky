@@ -566,7 +566,7 @@ Change cards are append-only UTF-8 JSONL stored under
 repository and `_none.jsonl` when `repo_id` is empty or `"_none"` (sessions
 outside any Git repository). A linked Git worktree stores cards under its own
 worktree `repo_id`, while `main_root` points to the main repository. Edits
-outside the card's session root are stored with absolute or `~/…` block paths
+outside the card's session root are stored with absolute or `~/…` (relative to the OS user home, not the Rocky home) block paths
 inside that session's log file. On Unix,
 `desk/cards/` is created with mode `0700` and card files with `0600`; opens
 refuse symlinks (`O_NOFOLLOW`) and Windows reparse points on directories,
@@ -580,7 +580,7 @@ the trailing `16 MiB` of a card file (advancing to the next line boundary when a
 cut lands mid-line) and skip lines larger than `1 MiB`. When querying one target
 file, readers inspect the target repo's log (and sibling worktree/repo logs
 under the same main repository) plus `_none.jsonl` and other `*.jsonl` card logs
-for matching absolute or `~/…` block paths (ignoring foreign-repo relative
+for matching absolute or `~/…` (OS user home) block paths (ignoring foreign-repo relative
 paths), bounded at `64` extra logs and `64 MiB` total bytes read across all card
 logs (`16 MiB` per file).
 
@@ -649,7 +649,7 @@ One JSON object per line:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `seq` | integer | Block sequence number within the card. |
-| `path` | string | Changed file path (repo-relative when inside the card's session root; absolute or `~/…` when outside). |
+| `path` | string | Changed file path (repo-relative when inside the card's session root; absolute or `~/…` relative to the OS user home when outside). |
 | `symbol` | `BlockSymbol \| null` | `{ kind, name, container: string \| null, exported: bool, nth?: u32 }`; `nth` is omitted when `0`. `kind` is one of `function`, `method`, `class`, `struct`, `enum`, `trait`, `interface`, `type`, `const`, `test`, `key`. |
 | `labels` | `Label[]` | Up to `12` structured labels `{ "id": string, "args": object }`, sorted by importance descending then catalog order. |
 | `importance` | string | `"none"`, `"low"`, `"medium"`, or `"high"`. |

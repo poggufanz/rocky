@@ -44,7 +44,8 @@ pub struct BuildInput {
     pub capture_state: Option<CaptureState>,
     pub store_error: bool,
     pub tail_cut: bool,
-    pub home_dir: PathBuf,
+    /// OS user home for `~/` shortening of paths outside the repo; `None` keeps them absolute.
+    pub user_home: Option<PathBuf>,
     pub parent_card_id: Option<String>,
 }
 
@@ -196,8 +197,8 @@ impl AbsPath {
         }
     }
 
-    fn format_tilde(&self, home: Option<&AbsPath>) -> String {
-        if let Some(h) = home
+    fn format_tilde(&self, user_home: Option<&AbsPath>) -> String {
+        if let Some(h) = user_home
             && let Some(rest) = self.strip_prefix(h)
         {
             return if rest.is_empty() {
@@ -321,8 +322,10 @@ pub fn build_card(
         .map(|s| canonical_path(s, cfg!(windows)));
 
     let session_root_abs = session_root_raw.and_then(AbsPath::parse_abs);
-    let home_str = input.home_dir.to_string_lossy();
-    let home_abs = AbsPath::parse_abs(home_str.as_ref());
+    let user_home_abs = input
+        .user_home
+        .as_deref()
+        .and_then(|h| AbsPath::parse_abs(h.to_string_lossy().as_ref()));
     let cwd = input.turn.cwd.as_deref();
 
     let (edits, bashes) = collect_windows(
@@ -330,7 +333,7 @@ pub fn build_card(
         input.turn.ended_ms,
         session_root_raw,
         session_root_abs.as_ref(),
-        home_abs.as_ref(),
+        user_home_abs.as_ref(),
         cwd,
         &input.results,
     );
@@ -371,7 +374,7 @@ pub fn build_card(
         &input.turn.windows,
         &card_blocks,
         session_root_abs.as_ref(),
-        home_abs.as_ref(),
+        user_home_abs.as_ref(),
         cwd,
     );
     let (prompt, prompt_truncated) = select_prompt(input);
@@ -426,7 +429,7 @@ fn collect_windows(
     turn_ended_ms: Option<u64>,
     session_root_raw: Option<&str>,
     session_root_abs: Option<&AbsPath>,
-    home_abs: Option<&AbsPath>,
+    user_home_abs: Option<&AbsPath>,
     cwd: Option<&str>,
     results: &[CaptureResult],
 ) -> (Vec<EditInfo>, Vec<BashInfoWin>) {
@@ -446,7 +449,7 @@ fn collect_windows(
                     win.target_path.as_deref(),
                     &win.tool,
                     session_root_abs,
-                    home_abs,
+                    user_home_abs,
                     cwd,
                 );
                 let repo_rel_key = repo_rel.as_deref().map(normalize_rel_key);
@@ -487,7 +490,7 @@ fn collect_windows(
 pub(crate) fn collect_edit_windows_for_turn(
     turn: &Turn,
     session_root_raw: Option<&str>,
-    home_dir: &Path,
+    user_home: Option<&Path>,
     results: &[CaptureResult],
 ) -> Vec<(String, u64, u64)> {
     let Some(root_raw) = session_root_raw.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -496,8 +499,7 @@ pub(crate) fn collect_edit_windows_for_turn(
     let Some(session_root_abs) = AbsPath::parse_abs(root_raw) else {
         return Vec::new();
     };
-    let home_str = home_dir.to_string_lossy();
-    let home_abs = AbsPath::parse_abs(home_str.as_ref());
+    let user_home_abs = user_home.and_then(|h| AbsPath::parse_abs(h.to_string_lossy().as_ref()));
     let root_cmp = canonical_path(root_raw, cfg!(windows));
     let cwd = turn.cwd.as_deref();
     let mut out = Vec::new();
@@ -509,7 +511,7 @@ pub(crate) fn collect_edit_windows_for_turn(
             win.target_path.as_deref(),
             &win.tool,
             Some(&session_root_abs),
-            home_abs.as_ref(),
+            user_home_abs.as_ref(),
             cwd,
         );
         if let Some(rel) = repo_rel {
@@ -552,7 +554,7 @@ fn classify_target_path(
     target_path: Option<&str>,
     fallback: &str,
     session_root_abs: Option<&AbsPath>,
-    home_abs: Option<&AbsPath>,
+    user_home_abs: Option<&AbsPath>,
     cwd: Option<&str>,
 ) -> (Option<String>, Option<String>, String) {
     let Some(raw) = target_path.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -571,7 +573,7 @@ fn classify_target_path(
         return (Some(resolved_str), Some(rel.clone()), rel);
     }
 
-    let display = abs.format_tilde(home_abs);
+    let display = abs.format_tilde(user_home_abs);
     (Some(resolved_str), None, display)
 }
 
@@ -1008,7 +1010,7 @@ fn build_flow(
     windows: &[ToolWindow],
     blocks: &[Block],
     session_root_abs: Option<&AbsPath>,
-    home_abs: Option<&AbsPath>,
+    user_home_abs: Option<&AbsPath>,
     cwd: Option<&str>,
 ) -> (Vec<FlowStep>, u32) {
     let mut indexed: Vec<(usize, &ToolWindow)> = windows
@@ -1046,7 +1048,7 @@ fn build_flow(
                         win.target_path.as_deref(),
                         &win.tool,
                         session_root_abs,
-                        home_abs,
+                        user_home_abs,
                         cwd,
                     );
                     let display_path = matching
@@ -1446,7 +1448,7 @@ mod tests {
             capture_state: Some(CaptureState::Ok),
             store_error: false,
             tail_cut: false,
-            home_dir: test_home(),
+            user_home: Some(test_home()),
             parent_card_id: None,
         }
     }

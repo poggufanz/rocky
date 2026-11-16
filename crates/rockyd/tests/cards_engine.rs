@@ -3470,3 +3470,121 @@ fn run_command_with_timeout(cmd: &mut Command, timeout: Duration) -> std::proces
         stderr,
     }
 }
+
+/// Runs one turn that edits `target` (outside the repo) and returns the built card.
+fn outside_edit_card(
+    fx: &Fixture,
+    session_id: &str,
+    user_home: Option<PathBuf>,
+    target: &str,
+) -> Card {
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(user_home);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            session_id,
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Edit outside",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        session_id,
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-o1",
+                        target,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        session_id,
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-o1",
+                        target,
+                    ),
+                    1_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        session_id,
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+    let mut cards = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    cards.remove(0)
+}
+
+fn outside_target(dir: &Path, rel: &str) -> String {
+    let path = dir.join(rel);
+    fs::create_dir_all(path.parent().expect("parent")).expect("create target dir");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn outside_edit_under_user_home_shows_tilde() {
+    let fx = Fixture::new("sess-tilde");
+    let user_home = fx.home.parent().expect("root").join("userhome");
+    let target = outside_target(&user_home, "notes/a.md");
+    let card = outside_edit_card(&fx, "sess-tilde", Some(user_home), &target);
+    assert_eq!(card.blocks[0].path, "~/notes/a.md");
+    assert!(
+        card.flow.iter().any(|s| s.text.contains("~/notes/a.md")),
+        "flow: {:?}",
+        card.flow
+    );
+}
+
+#[test]
+fn outside_edit_under_rocky_home_stays_absolute() {
+    let fx = Fixture::new("sess-rocky-home");
+    let user_home = fx.home.parent().expect("root").join("userhome");
+    fs::create_dir_all(&user_home).expect("create user home");
+    let target = outside_target(&fx.home, "x.md");
+    let card = outside_edit_card(&fx, "sess-rocky-home", Some(user_home), &target);
+    assert!(
+        !card.blocks[0].path.starts_with("~/"),
+        "{}",
+        card.blocks[0].path
+    );
+    assert!(card.blocks[0].path.ends_with("x.md"));
+}
+
+#[test]
+fn outside_edit_without_user_home_stays_absolute() {
+    let fx = Fixture::new("sess-no-home");
+    let user_home = fx.home.parent().expect("root").join("userhome");
+    let target = outside_target(&user_home, "notes/a.md");
+    let card = outside_edit_card(&fx, "sess-no-home", None, &target);
+    assert!(
+        !card.blocks[0].path.starts_with("~/"),
+        "{}",
+        card.blocks[0].path
+    );
+    assert!(card.blocks[0].path.ends_with("a.md"));
+}
