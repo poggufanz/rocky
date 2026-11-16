@@ -3,7 +3,9 @@ import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, ftruncateSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, it } from "node:test";
+import { syncBuiltinESMExports } from "node:module";
+import fs from "node:fs";
+import { beforeEach, describe, it, mock } from "node:test";
 import { cardsForFile } from "../desk/cards-read.js";
 import { setup, type SetupDependencies } from "../commands/setup.js";
 import { cardsFilePath } from "../listening/cards-path.js";
@@ -147,7 +149,9 @@ describe("purge scrubs change cards from every log", () => {
       const out = await captureStderr(() => setup(["--repo", repo, "--purge-capture", "--yes"], deps()));
       assert.equal(out.code, 0);
       assert.match(out.stderr, /history purged:/);
-      assert.match(out.stderr, /Some change cards about this repo could not be removed from 1 log\. Run the purge again\./);
+      const lines = out.stderr.split("\n");
+      const notice = lines.find((line) => line.includes("could not be removed"));
+      assert.equal(notice, `  Some change cards about this repo could not be removed from 1 log. Run rocky setup --repo ${repo} --purge-capture again.`);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -161,6 +165,27 @@ describe("purge scrubs change cards from every log", () => {
       assert.equal(out.code, 0);
       assert.doesNotMatch(out.stderr, /change cards/);
     } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("the CLI gives a count-free notice when the cards directory cannot be read", async () => {
+    const repo = gitRepo();
+    assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli", onRevoke: "delete" }, home.dir()).ok, true);
+    const original = fs.readdirSync;
+    mock.method(fs, "readdirSync", ((path: fs.PathLike, ...rest: unknown[]) => {
+      if (String(path) === cardsDir()) throw Object.assign(new Error("denied"), { code: "EACCES" });
+      return (original as (...args: unknown[]) => unknown)(path, ...rest);
+    }) as typeof fs.readdirSync);
+    syncBuiltinESMExports();
+    try {
+      const out = await captureStderr(() => setup(["--repo", repo, "--purge-capture", "--yes"], deps()));
+      assert.equal(out.code, 0);
+      const notice = out.stderr.split("\n").find((line) => line.includes("could not be removed"));
+      assert.equal(notice, `  Some change cards about this repo could not be removed. Run rocky setup --repo ${repo} --purge-capture again.`);
+    } finally {
+      mock.restoreAll();
+      syncBuiltinESMExports();
       rmSync(repo, { recursive: true, force: true });
     }
   });

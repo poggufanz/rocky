@@ -439,6 +439,20 @@ function reportStoreUsage(root: string, allowed: boolean, home: string | undefin
   if (!allowed && held > 0) detail(`History is still held. Delete it with: rocky setup --repo ${root} --purge-capture`);
 }
 
+/**
+ * Name the card logs a purge could not scrub. Per-log entries are counted; a
+ * directory entry stands for an unknown number of logs, so it gets no count.
+ */
+function detailCardsIncomplete(entries: string[], repo: string): void {
+  if (entries.length === 0) return;
+  const retry = `Run rocky setup --repo ${safeTerminalLine(repo)} --purge-capture again.`;
+  const perLog = entries.every((entry) => entry.endsWith(".jsonl"));
+  const subject = "Some change cards about this repo could not be removed";
+  detail(perLog
+    ? `  ${subject} from ${entries.length} log${entries.length === 1 ? "" : "s"}. ${retry}`
+    : `  ${subject}. ${retry}`);
+}
+
 async function runPurgeCapture(
   repo: string,
   probe: { allowed: boolean; root: string },
@@ -463,10 +477,7 @@ async function runPurgeCapture(
   }
   if (probe.allowed) detail(`capture revoked: ${purged.root ?? probe.root}`);
   detail(`history purged: ${mib(purged.freedBytes)} freed`);
-  const remaining = purged.cardsIncomplete?.length ?? 0;
-  if (remaining > 0) {
-    detail(`Some change cards about this repo could not be removed from ${remaining} log${remaining === 1 ? "" : "s"}. Run the purge again.`);
-  }
+  detailCardsIncomplete(purged.cardsIncomplete ?? [], repo);
   return 0;
 }
 
