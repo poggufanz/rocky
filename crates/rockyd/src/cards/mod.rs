@@ -170,6 +170,7 @@ impl CachedStore {
 }
 
 struct BuildJob {
+    generation: u64,
     turn_id: TurnId,
     turn: Turn,
     card_id: String,
@@ -190,6 +191,7 @@ struct BuildJob {
 }
 
 struct BuildDone {
+    generation: u64,
     turn_id: TurnId,
     card: Option<Card>,
     panicked: bool,
@@ -283,6 +285,7 @@ struct WorkerPool {
     res_rx: mpsc::Receiver<BuildDone>,
     stores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<CachedStore>>>>>,
     hook: Option<BuildHook>,
+    generation: Arc<AtomicU64>,
     pool_workers: BoundedWorkers,
     panics: Arc<AtomicU64>,
 }
@@ -300,6 +303,7 @@ impl WorkerPool {
             res_rx,
             stores: Arc::new(Mutex::new(HashMap::new())),
             hook,
+            generation: Arc::new(AtomicU64::new(0)),
             pool_workers: BoundedWorkers::new(),
             panics: Arc::new(AtomicU64::new(0)),
         }
@@ -315,6 +319,7 @@ impl WorkerPool {
             let stores_ref = Arc::clone(&self.stores);
             let panics_ref = Arc::clone(&self.panics);
             let hook_ref = self.hook.clone();
+            let generation_ref = Arc::clone(&self.generation);
             let exit_guard = self.pool_workers.prepare_spawn();
             let finished = exit_guard.finished_flag();
             let name = format!("{CARD_WORKER_THREAD_PREFIX}{idx}");
@@ -322,7 +327,7 @@ impl WorkerPool {
                 .name(name)
                 .spawn(move || {
                     let _exit_guard = exit_guard;
-                    worker_loop(rx, tx, stores_ref, panics_ref, hook_ref);
+                    worker_loop(rx, tx, stores_ref, panics_ref, hook_ref, generation_ref);
                 })
                 .expect("spawn card worker thread");
             self.pool_workers.push(handle, finished);
@@ -415,6 +420,22 @@ impl Engine {
             self.reset_tracking();
         }
         self.enabled = enabled;
+    }
+
+    /// Counts prompts still held by engine tracking (test seam for the off switch).
+    #[doc(hidden)]
+    pub fn held_prompt_count(&self) -> usize {
+        let tracked = self
+            .turn_states
+            .values()
+            .filter(|s| s.latest_turn.prompt.is_some())
+            .count();
+        let pending = self
+            .pending_builds
+            .values()
+            .filter(|p| p.turn.prompt.is_some())
+            .count();
+        tracked + pending
     }
 
     /// Returns the number of build worker threads configured for this engine.
@@ -588,6 +609,9 @@ impl Engine {
     pub fn poll(&mut self, now_ms: u64, ctx: &EngineCtx) -> Vec<Card> {
         let mut ready_cards = Vec::new();
         while let Some(done) = self.pool.try_recv() {
+            if done.generation != self.pool.generation.load(Ordering::Acquire) {
+                continue;
+            }
             if let Some(state) = self.turn_states.get_mut(&done.turn_id) {
                 state.in_flight = false;
                 if !self.removed
@@ -667,10 +691,10 @@ impl Engine {
         self.bash_by_turn.clear();
         self.awaited_roots.clear();
         self.pending_builds.clear();
-        for state in self.turn_states.values_mut() {
-            state.dirty = false;
-        }
-        self.turn_states.retain(|_, s| s.in_flight);
+        // Invalidate queued and running builds: their results are discarded and
+        // no turn (and so no prompt) stays tracked across an off switch.
+        self.pool.generation.fetch_add(1, Ordering::AcqRel);
+        self.turn_states.clear();
     }
 
     /// Seeds a session's cached repository when cards have not seen the session yet.
@@ -981,6 +1005,7 @@ impl Engine {
         let gaps: Vec<(u64, u64)> = ctx.gaps.iter().map(|g| (g.from_ms, g.to_ms)).collect();
 
         self.pool.submit(BuildJob {
+            generation: self.pool.generation.load(Ordering::Acquire),
             turn_id: tid.clone(),
             turn,
             card_id: cid,
@@ -1069,6 +1094,7 @@ fn worker_loop(
     stores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<CachedStore>>>>>,
     panics: Arc<AtomicU64>,
     hook: Option<BuildHook>,
+    generation: Arc<AtomicU64>,
 ) {
     loop {
         let job = {
@@ -1079,11 +1105,22 @@ fn worker_loop(
             break;
         };
         let tid = job.turn_id.clone();
+        let job_generation = job.generation;
+        if job_generation != generation.load(Ordering::Acquire) {
+            let _ = tx.send(BuildDone {
+                generation: job_generation,
+                turn_id: tid,
+                card: None,
+                panicked: false,
+            });
+            continue;
+        }
         let outcome =
             panic::catch_unwind(AssertUnwindSafe(|| run_job(job, &stores, hook.as_deref())));
         match outcome {
             Ok(card) => {
                 let _ = tx.send(BuildDone {
+                    generation: job_generation,
                     turn_id: tid,
                     card,
                     panicked: false,
@@ -1092,6 +1129,7 @@ fn worker_loop(
             Err(_) => {
                 panics.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(BuildDone {
+                    generation: job_generation,
                     turn_id: tid,
                     card: None,
                     panicked: true,
@@ -1414,6 +1452,7 @@ mod tests {
             agent_id: String::new(),
         };
         let job = BuildJob {
+            generation: 0,
             turn_id: (agent.clone(), 1_000),
             turn: Turn {
                 agent,
