@@ -439,6 +439,39 @@ function reportStoreUsage(root: string, allowed: boolean, home: string | undefin
   if (!allowed && held > 0) detail(`History is still held. Delete it with: rocky setup --repo ${root} --purge-capture`);
 }
 
+/**
+ * Double-quote one path for a copied command. An embedded quote is
+ * backslash-escaped; trailing backslashes are doubled so they cannot escape
+ * the closing quote under Windows argv parsing.
+ */
+export function quoteRepoArgument(path: string): string {
+  const escaped = path.replace(/"/g, "\\\"").replace(/\\+$/, (run) => run + run);
+  return `"${escaped}"`;
+}
+
+/**
+ * Name the card logs a purge could not scrub. Per-log entries are counted; a
+ * directory entry stands for an unknown number of logs, so it gets no count.
+ */
+function detailCardsIncomplete(entries: string[], repo: string): void {
+  if (entries.length === 0) return;
+  const retry = `Run rocky setup --repo ${quoteRepoArgument(safeTerminalLine(repo))} --purge-capture again.`;
+  const perLog = entries.every((entry) => entry.endsWith(".jsonl"));
+  const subject = "Some change cards about this repo could not be removed";
+  detail(perLog
+    ? `  ${subject} from ${entries.length} log${entries.length === 1 ? "" : "s"}. ${retry}`
+    : `  ${subject}. ${retry}`);
+}
+
+/** Say why change cards in other logs were not touched; silent when they were scrubbed. */
+function detailCardsScrubSkipped(skipped: "unsafe-root" | "unknown-repo" | undefined): void {
+  if (skipped === undefined) return;
+  const why = skipped === "unsafe-root"
+    ? "this path is a drive or folder root, or it holds your home folder"
+    : "Rocky did not know this path as a repo";
+  detail(`  Change cards in other logs were left alone: ${why}.`);
+}
+
 async function runPurgeCapture(
   repo: string,
   probe: { allowed: boolean; root: string },
@@ -448,6 +481,7 @@ async function runPurgeCapture(
 ): Promise<number> {
   const held = listeningStoreUsage(probe.root, home);
   say(`Purge deletes the listening history for this repo (${mib(held.eventsBytes + held.objectsBytes)}). There is no undo.`);
+  say("Change cards about this repo are also removed from other card logs.");
   if (!yes && !(await confirmation.confirm("Purge the listening history for this repo now?"))) {
     say("Consent withheld. Setup stopped and nothing changed.");
     return 1;
@@ -463,6 +497,8 @@ async function runPurgeCapture(
   }
   if (probe.allowed) detail(`capture revoked: ${purged.root ?? probe.root}`);
   detail(`history purged: ${mib(purged.freedBytes)} freed`);
+  detailCardsIncomplete(purged.cardsIncomplete ?? [], repo);
+  detailCardsScrubSkipped(purged.cardsScrubSkipped);
   return 0;
 }
 

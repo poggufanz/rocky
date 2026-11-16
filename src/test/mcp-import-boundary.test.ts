@@ -173,6 +173,8 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     // Audited Desk read-only change-card reader & pure text classifier.
     "desk/card-text.ts",
     "desk/cards-read.ts",
+    // Audited pure record parsing, validation, and path matching split out of cards-read.
+    "desk/cards-record.ts",
     "ai/ollama.ts",
     "ai/port.ts",
     "ai/recall-ai.ts",

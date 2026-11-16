@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -273,6 +273,40 @@ test("GUI purge needs explicit yes, then stops capture and deletes history", asy
   const app = readFileSync(join(packageRoot, "assets", "gui", "app.js"), "utf8");
   assert.match(app, /Delete history/);
   assert.match(app, /no undo/);
+});
+
+test("GUI purge reports how many card logs are incomplete, never their paths", async (t) => {
+  const home = freshHome();
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  });
+  const root = grantedRepo(home);
+  const cards = dirname(cardsFilePath(root, home));
+  mkdirSync(cards, { recursive: true });
+  const huge = join(cards, "huge.jsonl");
+  writeFileSync(huge, "{}");
+  const fd = openSync(huge, "r+");
+  try {
+    ftruncateSync(fd, 65 * 1024 * 1024);
+  } finally {
+    closeSync(fd);
+  }
+  const handle = await startGui({ port: 0, root });
+  t.after(() => handle.close());
+  const response = await fetch(`http://127.0.0.1:${handle.port}/api/listening/consent`, {
+    method: "POST",
+    headers: { "X-Rocky-Token": handle.token, "Content-Type": "application/json" },
+    body: JSON.stringify({ repo: root, action: "purge", yes: true }),
+  });
+  const text = await response.text();
+  const body = JSON.parse(text);
+  assert.equal(body.ok, true);
+  assert.equal(body.cardsIncompleteCount, 1);
+  assert.equal(body.cardsIncomplete, undefined);
+  assert.ok(!text.includes("huge.jsonl") && !text.includes(home), text);
 });
 
 test("purge-capture explains a change card file it cannot delete", async () => {
