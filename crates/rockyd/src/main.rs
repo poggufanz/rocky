@@ -192,6 +192,7 @@ fn main() {
         s.settings = settings.clone();
         s.settings_unreadable = loaded.unreadable;
         s.state.set_tool_text(settings.tool_text);
+        s.state.set_prompts_enabled(settings.cards);
     }
 
     // 2. Prune the spool; keep its gap for the startup gap record.
@@ -457,6 +458,25 @@ fn rescan(
     );
 }
 
+fn push_status_upserts(
+    s: &mut Shared,
+    keys: impl IntoIterator<Item = AgentKey>,
+    msgs: &mut Vec<ServerMsg>,
+) -> usize {
+    let mut pushed = 0;
+    for key in keys {
+        if let Some(agent) = s.state.get(&key) {
+            s.last_known.insert(key, agent.clone());
+            msgs.push(ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent,
+            });
+            pushed += 1;
+        }
+    }
+    pushed
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rescan_with(
     spool: &Path,
@@ -482,7 +502,7 @@ fn rescan_with(
     let (msgs, health, upserts, health_changed, out, cards_enabled) = {
         let mut guard = shared.lock().unwrap();
         let s = &mut *guard;
-        let out = ingest.ingest_once(
+        let mut out = ingest.ingest_once(
             spool,
             &mut s.state,
             &mut cached_resolve,
@@ -493,34 +513,35 @@ fn rescan_with(
             s.gaps.push(*gap);
             s.state.record_gap(gap);
         }
+        let cards_enabled = s.settings.cards && !s.cards_removed;
         let mut prompt_upserts = Vec::new();
-        for prompt in &out.prompts {
-            let live_prompt = PromptText {
-                text: prompt.text.clone(),
-                truncated: prompt.truncated,
-            };
-            if let Some(key) = s
-                .state
-                .set_prompt(&prompt.session_id, prompt.recv_ms, live_prompt)
-                && !out.changes.upserted.contains(&key)
-                && !prompt_upserts.contains(&key)
-            {
-                prompt_upserts.push(key);
+        if cards_enabled {
+            for prompt in &out.prompts {
+                let live_prompt = PromptText {
+                    text: prompt.text.clone(),
+                    truncated: prompt.truncated,
+                };
+                if let Some(key) =
+                    s.state
+                        .set_prompt(&prompt.session_id, prompt.recv_ms, live_prompt)
+                    && !out.changes.upserted.contains(&key)
+                    && !prompt_upserts.contains(&key)
+                {
+                    prompt_upserts.push(key);
+                }
             }
+        } else {
+            out.prompts.clear();
         }
         guards.rescanned(&out.config_locations, &s.state.session_roots());
         let mut msgs = Vec::with_capacity(
             out.changes.upserted.len() + prompt_upserts.len() + out.changes.removed.len() + 1,
         );
-        for key in out.changes.upserted.iter().chain(prompt_upserts.iter()) {
-            if let Some(agent) = s.state.get(key) {
-                s.last_known.insert(key.clone(), agent.clone());
-                msgs.push(ServerMsg::Status {
-                    op: StatusOp::Upsert,
-                    agent,
-                });
-            }
-        }
+        let upserts = push_status_upserts(
+            s,
+            out.changes.upserted.iter().cloned().chain(prompt_upserts),
+            &mut msgs,
+        );
         for key in &out.changes.removed {
             push_removal(s, &mut msgs, key);
         }
@@ -531,8 +552,6 @@ fn rescan_with(
                 health: health.clone(),
             });
         }
-        let upserts = out.changes.upserted.len() + prompt_upserts.len();
-        let cards_enabled = s.settings.cards && !s.cards_removed;
         if cards_enabled {
             let sessions_starting: HashSet<&str> = out
                 .events
@@ -720,15 +739,13 @@ fn handle_set(
                         log.line(&format!("marker sync failed: {e}"));
                     }
                     if next.tool_text != current.tool_text {
-                        for key in s.state.set_tool_text(next.tool_text) {
-                            if let Some(agent) = s.state.get(&key) {
-                                s.last_known.insert(key.clone(), agent.clone());
-                                msgs.push(ServerMsg::Status {
-                                    op: StatusOp::Upsert,
-                                    agent,
-                                });
-                            }
-                        }
+                        let keys = s.state.set_tool_text(next.tool_text);
+                        push_status_upserts(&mut s, keys, &mut msgs);
+                    }
+                    if next.cards != current.cards {
+                        let cards_on = next.cards && !s.cards_removed;
+                        let keys = s.state.set_prompts_enabled(cards_on);
+                        push_status_upserts(&mut s, keys, &mut msgs);
                     }
                     if next.history != current.history
                         && let Err(e) = s.history.set_enabled(next.history)
@@ -816,10 +833,16 @@ fn handle_control(
         }
         Control::Setup { id, action, reply } => {
             if matches!(action, SetupAction::Remove) {
+                let mut msgs = Vec::new();
                 {
                     let mut s = shared.lock().unwrap();
                     s.cards_removed = true;
                     s.cards.set_removed();
+                    let keys = s.state.set_prompts_enabled(false);
+                    push_status_upserts(&mut s, keys, &mut msgs);
+                }
+                for m in &msgs {
+                    hub.broadcast(m);
                 }
                 cards.set_removed();
             }
@@ -1827,6 +1850,562 @@ mod tests {
         assert!(!history_text.contains("FIRST_PROMPT"), "{history_text}");
         assert!(!history_text.contains("SECOND_PROMPT"), "{history_text}");
         assert!(!history_text.contains(r#""prompt""#), "{history_text}");
+    }
+
+    #[test]
+    fn cards_off_drops_spooled_prompt_and_skips_card_engine() {
+        use rocky_proto::paths::cards_dir;
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        let repo = home.join("repo");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        settings::save(&settings_path(&home), &Settings::default()).unwrap();
+
+        let log = RotatingLog::new(&log_path(&home));
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().history =
+            History::open(&history_dir(&home), HISTORY_CAP_BYTES, true);
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let builds_ref = Arc::clone(&builds);
+        let mut cards = Engine::new_with_build_hook(
+            home.clone(),
+            1,
+            Arc::new(move |_| {
+                builds_ref.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+        let owned = BTreeSet::new();
+        let mut resolver = stub_repo_resolver;
+
+        let (tx, reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Set {
+                id: 1,
+                name: "cards".into(),
+                value: Value::Bool(false),
+                reply: tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+        assert!(matches!(
+            reply_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(ServerMsg::Ack {
+                id: 1,
+                ok: true,
+                ..
+            })
+        ));
+        let _ = drain_server_msgs(&rx);
+
+        let cwd = repo.to_string_lossy().into_owned();
+        let target = repo.join("src").join("a.rs").to_string_lossy().into_owned();
+        let events = [
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 1_000,
+                "kind": "event",
+                "event": { "hook_event_name": "SessionStart", "session_id": "sess-off", "cwd": cwd }
+            }),
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 1_001,
+                "kind": "event",
+                "event": { "hook_event_name": "UserPromptSubmit", "session_id": "sess-off", "cwd": cwd, "prompt": "DROPPED_PROMPT" }
+            }),
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 1_002,
+                "kind": "event",
+                "event": { "hook_event_name": "PreToolUse", "session_id": "sess-off", "cwd": cwd, "tool_name": "Edit", "tool_use_id": "tu-off", "target_path": target }
+            }),
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 1_003,
+                "kind": "event",
+                "event": { "hook_event_name": "PostToolUse", "session_id": "sess-off", "cwd": cwd, "tool_name": "Edit", "tool_use_id": "tu-off", "target_path": target }
+            }),
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 1_004,
+                "kind": "event",
+                "event": { "hook_event_name": "Stop", "session_id": "sess-off", "cwd": cwd }
+            }),
+        ];
+        for (idx, ev) in events.iter().enumerate() {
+            let name = format!("{:013}-1-{idx}.json", 1_000 + idx as u64);
+            std::fs::write(spool.join(name), serde_json::to_vec(ev).unwrap()).unwrap();
+        }
+
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < deadline {
+            service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let main_key = AgentKey {
+            session_id: "sess-off".into(),
+            agent_id: String::new(),
+        };
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.state.get(&main_key).unwrap().prompt, None);
+            assert_eq!(s.last_known.get(&main_key).unwrap().prompt, None);
+        }
+        let msgs = drain_server_msgs(&rx);
+        assert!(
+            !msgs.iter().any(|msg| matches!(
+                msg,
+                ServerMsg::Status { agent, .. } if agent.prompt.is_some()
+            )),
+            "expected no status broadcast with a prompt, got: {msgs:?}"
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 0);
+        assert!(!cards_dir(&home).exists());
+
+        let history_text = read_history_text(&home);
+        assert!(history_text.contains("UserPromptSubmit"), "{history_text}");
+        assert!(!history_text.contains("DROPPED_PROMPT"), "{history_text}");
+        assert!(!history_text.contains(r#""prompt""#), "{history_text}");
+    }
+
+    #[test]
+    fn cards_on_to_off_clears_held_prompts_and_broadcasts_and_off_to_on_accepts_next() {
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        let repo = home.join("repo");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        settings::save(&settings_path(&home), &Settings::default()).unwrap();
+
+        let log = RotatingLog::new(&log_path(&home));
+        let shared = make_test_shared(&home);
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let builds_ref = Arc::clone(&builds);
+        let mut cards = Engine::new_with_build_hook(
+            home.clone(),
+            1,
+            Arc::new(move |_| {
+                builds_ref.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+        let owned = BTreeSet::new();
+        let mut resolver = stub_repo_resolver;
+
+        let cwd = repo.to_string_lossy().into_owned();
+        let target = repo.join("src").join("a.rs").to_string_lossy().into_owned();
+        for (seq, (sess, ts, prompt)) in [
+            ("sess-1", 1_000_u64, "LIVE_PROMPT_1"),
+            ("sess-2", 1_100_u64, "LIVE_PROMPT_2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let s_ev = serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": ts,
+                "kind": "event",
+                "event": { "hook_event_name": "SessionStart", "session_id": sess, "cwd": cwd }
+            });
+            let p_ev = serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": ts + 1,
+                "kind": "event",
+                "event": { "hook_event_name": "UserPromptSubmit", "session_id": sess, "cwd": cwd, "prompt": prompt }
+            });
+            std::fs::write(
+                spool.join(format!("{ts:013}-{}-0.json", seq + 1)),
+                serde_json::to_vec(&s_ev).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                spool.join(format!("{:013}-{}-1.json", ts + 1, seq + 1)),
+                serde_json::to_vec(&p_ev).unwrap(),
+            )
+            .unwrap();
+        }
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+
+        let k1 = AgentKey {
+            session_id: "sess-1".into(),
+            agent_id: String::new(),
+        };
+        let k2 = AgentKey {
+            session_id: "sess-2".into(),
+            agent_id: String::new(),
+        };
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(
+                s.state
+                    .get(&k1)
+                    .unwrap()
+                    .prompt
+                    .as_ref()
+                    .map(|p| p.text.as_str()),
+                Some("LIVE_PROMPT_1")
+            );
+            assert_eq!(
+                s.state
+                    .get(&k2)
+                    .unwrap()
+                    .prompt
+                    .as_ref()
+                    .map(|p| p.text.as_str()),
+                Some("LIVE_PROMPT_2")
+            );
+        }
+        let _ = drain_server_msgs(&rx);
+
+        // Flip on -> off: clears held prompts in state & last_known and broadcasts Status upserts before Settings.
+        let (tx, reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Set {
+                id: 1,
+                name: "cards".into(),
+                value: Value::Bool(false),
+                reply: tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+        assert!(matches!(
+            reply_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(ServerMsg::Ack {
+                id: 1,
+                ok: true,
+                ..
+            })
+        ));
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.state.get(&k1).unwrap().prompt, None);
+            assert_eq!(s.state.get(&k2).unwrap().prompt, None);
+            assert_eq!(s.last_known.get(&k1).unwrap().prompt, None);
+            assert_eq!(s.last_known.get(&k2).unwrap().prompt, None);
+        }
+        let off_msgs = drain_server_msgs(&rx);
+        let settings_idx = off_msgs
+            .iter()
+            .position(|m| matches!(m, ServerMsg::Settings { settings } if !settings.cards))
+            .expect("expected Settings broadcast with cards=false");
+        for key in [&k1, &k2] {
+            let status_idx = off_msgs
+                .iter()
+                .position(|m| {
+                    matches!(
+                        m,
+                        ServerMsg::Status { op: StatusOp::Upsert, agent }
+                            if &agent.key == key && agent.prompt.is_none()
+                    )
+                })
+                .unwrap_or_else(|| {
+                    panic!("expected cleared Status broadcast for {key:?}, got: {off_msgs:?}")
+                });
+            assert!(
+                status_idx < settings_idx,
+                "expected Status broadcast before Settings broadcast, got: {off_msgs:?}"
+            );
+        }
+
+        // Spooled prompt arriving while off is consumed but dropped.
+        std::fs::write(
+            spool.join("0000000002000-3-0.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 2_000,
+                "kind": "event",
+                "event": { "hook_event_name": "UserPromptSubmit", "session_id": "sess-1", "cwd": cwd, "prompt": "IGNORED_WHILE_OFF" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert!(std::fs::read_dir(&spool).unwrap().next().is_none());
+        assert_eq!(shared.lock().unwrap().state.get(&k1).unwrap().prompt, None);
+        let while_off_msgs = drain_server_msgs(&rx);
+        assert!(
+            !while_off_msgs.iter().any(|m| matches!(
+                m,
+                ServerMsg::Status { agent, .. } if agent.prompt.is_some()
+            )),
+            "prompt leaked while off: {while_off_msgs:?}"
+        );
+
+        // Flip off -> on: dropped prompt does NOT reappear; next prompt is accepted and feeds card engine.
+        let (tx, reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Set {
+                id: 2,
+                name: "cards".into(),
+                value: Value::Bool(true),
+                reply: tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+        assert!(matches!(
+            reply_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(ServerMsg::Ack {
+                id: 2,
+                ok: true,
+                ..
+            })
+        ));
+        assert_eq!(shared.lock().unwrap().state.get(&k1).unwrap().prompt, None);
+        assert_eq!(shared.lock().unwrap().state.get(&k2).unwrap().prompt, None);
+        let _ = drain_server_msgs(&rx);
+
+        let turn_on = [
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 3_000,
+                "kind": "event",
+                "event": { "hook_event_name": "UserPromptSubmit", "session_id": "sess-1", "cwd": cwd, "prompt": "ACCEPTED_AFTER_ON" }
+            }),
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 3_001,
+                "kind": "event",
+                "event": { "hook_event_name": "PreToolUse", "session_id": "sess-1", "cwd": cwd, "tool_name": "Edit", "tool_use_id": "tu-on", "target_path": target }
+            }),
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 3_002,
+                "kind": "event",
+                "event": { "hook_event_name": "PostToolUse", "session_id": "sess-1", "cwd": cwd, "tool_name": "Edit", "tool_use_id": "tu-on", "target_path": target }
+            }),
+            serde_json::json!({
+                "v": 1, "harness": "claude-code", "recv_ms": 3_003,
+                "kind": "event",
+                "event": { "hook_event_name": "Stop", "session_id": "sess-1", "cwd": cwd }
+            }),
+        ];
+        for (idx, ev) in turn_on.iter().enumerate() {
+            std::fs::write(
+                spool.join(format!("{:013}-4-{idx}.json", 3_000 + idx as u64)),
+                serde_json::to_vec(ev).unwrap(),
+            )
+            .unwrap();
+        }
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && builds.load(Ordering::SeqCst) == 0 {
+            service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let want = PromptText {
+            text: "ACCEPTED_AFTER_ON".into(),
+            truncated: false,
+        };
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .state
+                .get(&k1)
+                .unwrap()
+                .prompt
+                .as_ref(),
+            Some(&want)
+        );
+        let after_on_msgs = drain_server_msgs(&rx);
+        assert!(
+            after_on_msgs.iter().any(|m| matches!(
+                m,
+                ServerMsg::Status { op: StatusOp::Upsert, agent }
+                    if agent.key == k1 && agent.prompt.as_ref() == Some(&want)
+            )),
+            "expected broadcast for ACCEPTED_AFTER_ON, got: {after_on_msgs:?}"
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn remove_clears_held_prompts_and_broadcasts_and_drops_future_prompts() {
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        std::fs::create_dir_all(&spool).unwrap();
+        settings::save(&settings_path(&home), &Settings::default()).unwrap();
+
+        let log = RotatingLog::new(&log_path(&home));
+        let shared = make_test_shared(&home);
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let builds_ref = Arc::clone(&builds);
+        let mut cards = Engine::new_with_build_hook(
+            home.clone(),
+            1,
+            Arc::new(move |_| {
+                builds_ref.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+        let owned = BTreeSet::new();
+        let mut resolver = stub_repo_resolver;
+
+        std::fs::write(
+            spool.join("0000000001000-1-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1000,"kind":"event","event":{"hook_event_name":"SessionStart","session_id":"sess-rem","cwd":"/tmp/r"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spool.join("0000000001001-1-1.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":1001,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"sess-rem","cwd":"/tmp/r","prompt":"BEFORE_REMOVE"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        let key = AgentKey {
+            session_id: "sess-rem".into(),
+            agent_id: String::new(),
+        };
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .state
+                .get(&key)
+                .unwrap()
+                .prompt
+                .is_some()
+        );
+        let _ = drain_server_msgs(&rx);
+
+        let (reply_tx, _reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Setup {
+                id: 99,
+                action: SetupAction::Remove,
+                reply: reply_tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+        );
+
+        {
+            let s = shared.lock().unwrap();
+            assert_eq!(s.state.get(&key).unwrap().prompt, None);
+            assert_eq!(s.last_known.get(&key).unwrap().prompt, None);
+        }
+        let rem_msgs = drain_server_msgs(&rx);
+        assert!(
+            rem_msgs.iter().any(|m| matches!(
+                m,
+                ServerMsg::Status { op: StatusOp::Upsert, agent }
+                    if agent.key == key && agent.prompt.is_none()
+            )),
+            "expected prompt-cleared broadcast on Remove, got: {rem_msgs:?}"
+        );
+
+        std::fs::write(
+            spool.join("0000000002000-2-0.json"),
+            r#"{"v":1,"harness":"claude-code","recv_ms":2000,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"sess-rem","cwd":"/tmp/r","prompt":"AFTER_REMOVE"}}"#,
+        )
+        .unwrap();
+        rescan_with(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+            &mut resolver,
+        );
+        assert_eq!(shared.lock().unwrap().state.get(&key).unwrap().prompt, None);
+        assert_eq!(builds.load(Ordering::SeqCst), 0);
     }
 
     fn run_command_with_timeout(

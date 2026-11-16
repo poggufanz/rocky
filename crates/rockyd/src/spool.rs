@@ -175,7 +175,9 @@ impl Ingestor {
                             if let Some(dir) = config_dir {
                                 config_locations.push(("claude-code".to_string(), dir.to_string()));
                             }
-                            let prompt_text = if event.hook_event_name == "UserPromptSubmit" {
+                            let prompt_text = if state.prompts_enabled()
+                                && event.hook_event_name == "UserPromptSubmit"
+                            {
                                 event.prompt.take()
                             } else {
                                 None
@@ -578,6 +580,47 @@ mod tests {
         let history_text = String::from_utf8_lossy(&history_bytes);
         assert!(
             !history_text.contains("SECRET_PROMPT_TEXT"),
+            "{history_text}"
+        );
+        assert!(!history_text.contains(r#""prompt""#), "{history_text}");
+    }
+
+    #[test]
+    fn prompt_dropped_from_ingest_output_when_prompts_disabled() {
+        let spool = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(history_dir.path(), HISTORY_CAP_BYTES, true);
+        let mut state = StatusState::new();
+        state.set_prompts_enabled(false);
+        let mut ingestor = Ingestor::new();
+        let record = r#"{"v":1,"harness":"claude-code","recv_ms":42,"kind":"event","event":{"hook_event_name":"UserPromptSubmit","session_id":"S1","prompt":"DROPPED_PROMPT_TEXT"}}"#;
+        fs::write(spool.path().join("0000000000042-1.json"), record).unwrap();
+
+        let out = ingestor.ingest_once(
+            spool.path(),
+            &mut state,
+            &mut |_: &str| RepoInfo {
+                root: None,
+                main_root: None,
+                name: "repo".into(),
+                branch: None,
+            },
+            &mut history,
+            1_700_000_000_000,
+        );
+
+        assert!(out.prompts.is_empty(), "{:?}", out.prompts);
+        assert_eq!(out.events.len(), 1);
+        assert_eq!(out.events[0].0.prompt, None);
+        assert!(fs::read_dir(spool.path()).unwrap().next().is_none());
+
+        let mut history_bytes = Vec::new();
+        for entry in fs::read_dir(history_dir.path()).unwrap().flatten() {
+            history_bytes.extend(fs::read(entry.path()).unwrap());
+        }
+        let history_text = String::from_utf8_lossy(&history_bytes);
+        assert!(
+            !history_text.contains("DROPPED_PROMPT_TEXT"),
             "{history_text}"
         );
         assert!(!history_text.contains(r#""prompt""#), "{history_text}");

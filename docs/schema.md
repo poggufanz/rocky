@@ -126,11 +126,13 @@ redacted with prefix-fragment scrubbing when cut, then controls `<= 0x1f` and
 `0x7f..=0x9f` other than `\n` and `\t` mapped to spaces, then ≤1,000 Unicode
 scalar chars). Ids and names cap at 256 bytes, paths at 4 KiB; truncation cuts
 at a char boundary (or char limit on `prompt`) and sets `truncated: true`.
-When ingesting a spool record, the daemon extracts `prompt` for live in-memory
-`AgentStatus` and card building, and removes it from the event before writing
-`desk/history/` (so `AgentStatus.prompt` is never written to `desk/history/` or
-restored from history replay, though its source text passes through the spool
-file and may be stored in a change card).
+When ingesting a spool record while `cards` is on, the daemon extracts `prompt`
+for live in-memory `AgentStatus` and card building, and removes it from the
+event before writing `desk/history/` (so `AgentStatus.prompt` is never written
+to `desk/history/` or restored from history replay, though its source text
+passes through the spool file and may be stored in a change card). While
+`cards` is off, the daemon drops incoming and already-spooled `prompt` values
+on ingest too, and removes `prompt` before writing `desk/history/`.
 
 A `shell_env` record keeps only the five variable names listed under Record
 shapes, and `config_dir` only the value of `CLAUDE_CONFIG_DIR`. No other
@@ -167,7 +169,7 @@ setting` (a name that is not settable, including `v`), `invalid value`
 (a wrong JSON type, or a `lang` string other than the three), or `save
 failed` (the file write failed). A successful `set` saves the file,
 broadcasts a full `settings` message, clears `settings_unreadable`, and
-pushes fresh `status` rows when `tool_text` changed. When the save succeeds
+pushes fresh `status` rows when `tool_text` or `cards` changed. When the save succeeds
 and `tool_text` or `cards` changed, it also syncs `desk/tool-text-off` and
 `desk/cards-off`. It also broadcasts `health` when it changed, which the
 first successful `set` after an unreadable file does.
@@ -181,12 +183,13 @@ drops the command text and subagent descriptions from agents already in
 memory, and clears the text of timeline entries that came from a tool input
 (a command, or a subagent description). Path text stays. Every `settings`
 broadcast makes the desk re-request its open timelines, so cleared text
-disappears there too. Turning `cards` off creates `desk/cards-off` so the hook stops recording new
-`prompt` values, and disables new change card building in the daemon (resetting
-card-engine turn tracking); unlike `tool_text`, it does not clear any
-`AgentStatus.prompt` already held in daemon memory, and on ingest the daemon
-still applies prompts from already-spooled files without checking `cards`.
-Existing card files stay on disk until purged or removed.
+disappears there too. Turning `cards` off creates `desk/cards-off` so the hook
+stops recording new `prompt` values, clears every `AgentStatus.prompt` held in
+daemon memory (and pushes fresh `status` rows so connected desks stop showing
+them), drops any incoming or already-spooled prompts on ingest, and disables
+new change card building in the daemon (resetting card-engine turn tracking):
+while switched off, no prompt is kept or shown. Existing card files stay on
+disk until purged or removed.
 
 ## Desk history v1
 
@@ -1001,7 +1004,7 @@ Current wire protocol between `rockyd` and `rocky-desk`. Shares v3's newline-del
 ### Version and additive fields
 
 - Every frame uses `"v": 4`.
-- `AgentStatus.prompt` (optional, omitted when unset): `{"text": string, "truncated": bool}` carrying the main agent's live `UserPromptSubmit` prompt in daemon memory. Never written to `desk/history/` or persisted status files (and unset after a daemon restart until a new prompt arrives), though its source text passes through `<ROCKY_HOME>/desk/spool/` when recorded by the hook and may be stored on disk in a change card. Switching `cards` off stops new prompt recording by the hook (`desk/cards-off`) and stops new card building, without clearing an `AgentStatus.prompt` already held in memory; on ingest, the daemon still applies prompts from already-spooled files without checking `cards`.
+- `AgentStatus.prompt` (optional, omitted when unset): `{"text": string, "truncated": bool}` carrying the main agent's live `UserPromptSubmit` prompt in daemon memory. Never written to `desk/history/` or persisted status files (and unset after a daemon restart until a new prompt arrives), though its source text passes through `<ROCKY_HOME>/desk/spool/` when recorded by the hook and may be stored on disk in a change card while change cards are on. Switching `cards` off stops new prompt recording by the hook (`desk/cards-off`), clears every `AgentStatus.prompt` held in memory (broadcasting fresh `status` rows), drops incoming or already-spooled prompts on ingest, and stops new card building: while switched off, no prompt is kept or shown.
 - `TimelineEntry.dur_ms` (optional, omitted when pending): unsigned millisecond duration filled when the matching tool outcome arrives.
 - `RepoInfo.main_root` (optional, omitted when unset): main repository root path for any resolved Git repository (equal to `root` in the main checkout, different in a linked Git worktree); omitted only when it cannot be resolved (such as outside Git).
 - `Ack.cleanup_errors` (`u32`, defaults to `0`): count of cleanup errors during `setup` removal.

@@ -1072,3 +1072,236 @@ fn cards_setting_syncs_marker_at_start_and_on_set() {
     assert!(marker.is_file(), "cards marker not recreated at start");
     assert!(!tool_marker.exists());
 }
+
+#[test]
+fn cards_switch_clears_live_prompts_drops_spooled_while_off_and_accepts_next_when_on() {
+    let home = home();
+    let mut daemon = spawn_daemon(home.path());
+    wait_pipe(home.path(), &mut daemon);
+    let mut client = connect(&pipe_name(home.path()));
+    let _ = client.hello_subscribe();
+
+    let key = AgentKey {
+        session_id: "cards-live".into(),
+        agent_id: String::new(),
+    };
+
+    // 1. While cards is on, a hook-submitted prompt lands on AgentStatus.
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"SessionStart","session_id":"cards-live","cwd":"C:\\r"}"#,
+    );
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"cards-live","cwd":"C:\\r","prompt":"LIVE_BEFORE_OFF"}"#,
+    );
+    let start = Instant::now();
+    loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if let ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent,
+        } = msg
+            && agent.key == key
+            && agent
+                .prompt
+                .as_ref()
+                .is_some_and(|p| p.text == "LIVE_BEFORE_OFF")
+        {
+            break;
+        }
+        assert!(start.elapsed() < GUARD, "initial live prompt never arrived");
+    }
+
+    // 2. Flipping cards on -> off clears held prompt and broadcasts the Status upsert.
+    client.send(&encode(&ClientMsg::Set {
+        id: 10,
+        name: "cards".into(),
+        value: serde_json::json!(false),
+    }));
+    let start = Instant::now();
+    let (mut cleared_seen, mut settings_seen, mut ack_seen) = (false, false, false);
+    while !(cleared_seen && settings_seen && ack_seen) {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        match msg {
+            ServerMsg::Status {
+                op: StatusOp::Upsert,
+                agent,
+            } if agent.key == key && agent.prompt.is_none() => {
+                cleared_seen = true;
+            }
+            ServerMsg::Settings { settings } => {
+                assert!(!settings.cards, "{settings:?}");
+                settings_seen = true;
+            }
+            ServerMsg::Ack {
+                id: 10, ok, error, ..
+            } => {
+                assert!(ok, "{error:?}");
+                ack_seen = true;
+            }
+            _ => {}
+        }
+        assert!(
+            start.elapsed() < GUARD,
+            "cards off broadcast/ack incomplete: cleared={cleared_seen} settings={settings_seen} ack={ack_seen}"
+        );
+    }
+
+    // 3. A prompt-bearing spool file processed while off is dropped; following Status keeps prompt None.
+    thread::sleep(Duration::from_millis(20));
+    let t_off = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    write_spool(
+        home.path(),
+        &format!("{t_off:013}-1.json"),
+        &serde_json::json!({
+            "v": 1, "harness": "claude-code", "recv_ms": t_off,
+            "kind": "event",
+            "event": { "hook_event_name": "UserPromptSubmit", "session_id": "cards-live", "cwd": "C:\\r", "prompt": "SPOOLED_WHILE_OFF" }
+        })
+        .to_string(),
+    );
+    write_spool(
+        home.path(),
+        &format!("{:013}-2.json", t_off + 1),
+        &serde_json::json!({
+            "v": 1, "harness": "claude-code", "recv_ms": t_off + 1,
+            "kind": "event",
+            "event": { "hook_event_name": "PreToolUse", "session_id": "cards-live", "cwd": "C:\\r", "tool_name": "Bash", "tool_use_id": "tu-off" }
+        })
+        .to_string(),
+    );
+    let start = Instant::now();
+    loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if let ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent,
+        } = msg
+            && agent.key == key
+        {
+            assert_eq!(agent.prompt, None, "prompt leaked while cards off");
+            if agent.status == Status::Working {
+                break;
+            }
+        }
+        assert!(start.elapsed() < GUARD, "off-mode tool event never arrived");
+    }
+    assert!(spool_files(home.path()).is_empty());
+
+    // 4. Flipping cards off -> on keeps prompt cleared until a fresh prompt arrives.
+    client.send(&encode(&ClientMsg::Set {
+        id: 11,
+        name: "cards".into(),
+        value: serde_json::json!(true),
+    }));
+    let start = Instant::now();
+    let (mut on_seen, mut on_ack) = (false, false);
+    while !(on_seen && on_ack) {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        match msg {
+            ServerMsg::Settings { settings } => {
+                assert!(settings.cards, "{settings:?}");
+                on_seen = true;
+            }
+            ServerMsg::Ack {
+                id: 11, ok, error, ..
+            } => {
+                assert!(ok, "{error:?}");
+                on_ack = true;
+            }
+            _ => {}
+        }
+        assert!(start.elapsed() < GUARD, "cards on ack never arrived");
+    }
+
+    thread::sleep(Duration::from_millis(20));
+    run_hook(
+        home.path(),
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"cards-live","cwd":"C:\\r","prompt":"LIVE_AFTER_ON"}"#,
+    );
+    let start = Instant::now();
+    loop {
+        let msg: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+        if let ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent,
+        } = msg
+            && agent.key == key
+            && agent
+                .prompt
+                .as_ref()
+                .is_some_and(|p| p.text == "LIVE_AFTER_ON")
+        {
+            break;
+        }
+        assert!(
+            start.elapsed() < GUARD,
+            "prompt after re-enable never arrived"
+        );
+    }
+
+    // 5. Starting daemon with cards off drops pre-existing spooled prompts too.
+    drop(client);
+    drop(daemon);
+
+    let boot_off = TempDir::new().unwrap();
+    let off_settings = Settings {
+        cards: false,
+        ..Default::default()
+    };
+    fs::create_dir_all(desk_dir(boot_off.path())).unwrap();
+    fs::write(
+        settings_path(boot_off.path()),
+        serde_json::to_vec(&off_settings).unwrap(),
+    )
+    .unwrap();
+    let t_boot = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    write_spool(
+        boot_off.path(),
+        &format!("{t_boot:013}-1.json"),
+        &serde_json::json!({
+            "v": 1, "harness": "claude-code", "recv_ms": t_boot,
+            "kind": "event",
+            "event": { "hook_event_name": "SessionStart", "session_id": "boot-off", "cwd": "C:\\r" }
+        })
+        .to_string(),
+    );
+    write_spool(
+        boot_off.path(),
+        &format!("{:013}-2.json", t_boot + 1),
+        &serde_json::json!({
+            "v": 1, "harness": "claude-code", "recv_ms": t_boot + 1,
+            "kind": "event",
+            "event": { "hook_event_name": "UserPromptSubmit", "session_id": "boot-off", "cwd": "C:\\r", "prompt": "BOOT_OFF_PROMPT" }
+        })
+        .to_string(),
+    );
+
+    let mut d2 = spawn_daemon(boot_off.path());
+    wait_pipe(boot_off.path(), &mut d2);
+    let mut c2 = connect(&pipe_name(boot_off.path()));
+    let first = c2.hello_subscribe();
+    let boot_key = AgentKey {
+        session_id: "boot-off".into(),
+        agent_id: String::new(),
+    };
+    let snap = snapshot_until(
+        &mut c2,
+        first,
+        "boot-off agent in snapshot",
+        |m| matches!(m, ServerMsg::Snapshot { agents, settings, .. } if !settings.cards && agents.iter().any(|a| a.key == boot_key)),
+    );
+    let ServerMsg::Snapshot { agents, .. } = snap else {
+        unreachable!();
+    };
+    let boot_agent = agents.iter().find(|a| a.key == boot_key).unwrap();
+    assert_eq!(boot_agent.prompt, None);
+    assert!(spool_files(boot_off.path()).is_empty());
+}
