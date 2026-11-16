@@ -105,6 +105,28 @@ pub enum CardMsg {
     FailuresChip {
         n: u32,
     },
+    /// Flow view caption, naming the turns the graph was built from.
+    FlowCaption {
+        turns: usize,
+    },
+    FlowLegendRead,
+    FlowLegendChanged,
+    FlowLegendWorking,
+    FlowEmpty,
+    FlowMoreAgents {
+        n: usize,
+    },
+    FlowMoreFiles {
+        n: usize,
+    },
+    FlowReadBy {
+        n: u32,
+    },
+    FlowChangedBy {
+        n: u32,
+    },
+    FlowOpenLatest,
+    CloseCard,
 }
 
 /// Every [`CardMsg`] variant with sample arguments for parity and text scans.
@@ -172,6 +194,22 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::IdleSessions { n: 1 },
         CardMsg::IdleSessions { n: 2 },
         CardMsg::FailuresChip { n: 2 },
+        CardMsg::FlowCaption { turns: 1 },
+        CardMsg::FlowCaption { turns: 20 },
+        CardMsg::FlowLegendRead,
+        CardMsg::FlowLegendChanged,
+        CardMsg::FlowLegendWorking,
+        CardMsg::FlowEmpty,
+        CardMsg::FlowMoreAgents { n: 1 },
+        CardMsg::FlowMoreAgents { n: 3 },
+        CardMsg::FlowMoreFiles { n: 1 },
+        CardMsg::FlowMoreFiles { n: 6 },
+        CardMsg::FlowReadBy { n: 1 },
+        CardMsg::FlowReadBy { n: 2 },
+        CardMsg::FlowChangedBy { n: 1 },
+        CardMsg::FlowChangedBy { n: 3 },
+        CardMsg::FlowOpenLatest,
+        CardMsg::CloseCard,
     ]
 }
 
@@ -258,6 +296,31 @@ fn card_en(msg: &CardMsg) -> String {
             format!("{n} idle {}", plural(*n as u64, "session", "sessions"))
         }
         CardMsg::FailuresChip { n } => format!("{n} failed"),
+        CardMsg::FlowCaption { turns } => format!(
+            "What each agent read and changed in the last {turns} {}",
+            plural(*turns as u64, "turn", "turns")
+        ),
+        CardMsg::FlowLegendRead => "read".to_string(),
+        CardMsg::FlowLegendChanged => "changed".to_string(),
+        CardMsg::FlowLegendWorking => "working now".to_string(),
+        CardMsg::FlowEmpty => {
+            "No files read or changed yet. Files appear here once an agent reads or edits them."
+                .to_string()
+        }
+        CardMsg::FlowMoreAgents { n } => {
+            format!("+{n} older {}", plural(*n as u64, "agent", "agents"))
+        }
+        CardMsg::FlowMoreFiles { n } => {
+            format!("+{n} more {}", plural(*n as u64, "file", "files"))
+        }
+        CardMsg::FlowReadBy { n } => {
+            format!("read by {n} {}", plural(u64::from(*n), "agent", "agents"))
+        }
+        CardMsg::FlowChangedBy { n } => {
+            format!("changed by {n} {}", plural(u64::from(*n), "agent", "agents"))
+        }
+        CardMsg::FlowOpenLatest => "Opens the latest card".to_string(),
+        CardMsg::CloseCard => "Close".to_string(),
     }
 }
 
@@ -328,6 +391,22 @@ fn card_id(msg: &CardMsg) -> String {
         CardMsg::ViewCard => "Lihat kartu \u{203a}".to_string(),
         CardMsg::IdleSessions { n } => format!("{n} sesi idle"),
         CardMsg::FailuresChip { n } => format!("{n} gagal"),
+        CardMsg::FlowCaption { turns } => {
+            format!("Yang dibaca dan diubah tiap agent di {turns} turn terakhir")
+        }
+        CardMsg::FlowLegendRead => "dibaca".to_string(),
+        CardMsg::FlowLegendChanged => "diubah".to_string(),
+        CardMsg::FlowLegendWorking => "sedang bekerja".to_string(),
+        CardMsg::FlowEmpty => {
+            "Belum ada file yang dibaca atau diubah. File muncul di sini setelah agent membaca atau mengubahnya."
+                .to_string()
+        }
+        CardMsg::FlowMoreAgents { n } => format!("+{n} agent lama"),
+        CardMsg::FlowMoreFiles { n } => format!("+{n} file lagi"),
+        CardMsg::FlowReadBy { n } => format!("dibaca {n} agent"),
+        CardMsg::FlowChangedBy { n } => format!("diubah {n} agent"),
+        CardMsg::FlowOpenLatest => "Buka kartu terakhir".to_string(),
+        CardMsg::CloseCard => "Tutup".to_string(),
     }
 }
 

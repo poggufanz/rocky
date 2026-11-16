@@ -643,10 +643,21 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::DoneAge { .. }
         | CardMsg::ViewCard
         | CardMsg::IdleSessions { .. }
-        | CardMsg::FailuresChip { .. } => {}
+        | CardMsg::FailuresChip { .. }
+        | CardMsg::FlowCaption { .. }
+        | CardMsg::FlowLegendRead
+        | CardMsg::FlowLegendChanged
+        | CardMsg::FlowLegendWorking
+        | CardMsg::FlowEmpty
+        | CardMsg::FlowMoreAgents { .. }
+        | CardMsg::FlowMoreFiles { .. }
+        | CardMsg::FlowReadBy { .. }
+        | CardMsg::FlowChangedBy { .. }
+        | CardMsg::FlowOpenLatest
+        | CardMsg::CloseCard => {}
     };
     let _ = check;
-    52
+    63
 }
 
 #[test]

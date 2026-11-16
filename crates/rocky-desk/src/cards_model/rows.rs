@@ -40,7 +40,11 @@ pub(super) fn build_card_row(
 
     let time = sanitize_single_line(&local_hhmm(card_sort_key(card)));
     let (meta, meta_high) = build_meta(card, lang);
-    let (edits, more) = build_edit_rows(card, query_lower, lang);
+    let (mut edits, more) = build_edit_rows(card, query_lower, lang);
+    let meta = match hoist_shared_chip(&mut edits) {
+        Some(chip) => format!("{meta} \u{00b7} {chip}"),
+        None => meta,
+    };
 
     CardRow {
         card_id: card.card_id.clone(),
@@ -52,6 +56,22 @@ pub(super) fn build_card_row(
         edits,
         more,
     }
+}
+
+/// When every row carries the same plain chip ("outside repo" on each of
+/// four edits), it says one thing about the card, not about each row: move
+/// it to the meta line once. Important chips stay on their rows.
+pub(super) fn hoist_shared_chip(edits: &mut [EditRow]) -> Option<String> {
+    let first = edits.first()?.chip.clone();
+    let shared =
+        edits.len() >= 2 && !first.is_empty() && edits.iter().all(|e| e.chip == first && !e.high);
+    if !shared {
+        return None;
+    }
+    for e in edits.iter_mut() {
+        e.chip.clear();
+    }
+    Some(first)
 }
 
 pub(super) fn card_sort_key(card: &Card) -> u64 {

@@ -31,6 +31,8 @@ pub(super) fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> C
         flow: Vec::new(),
         flow_more: 0,
         outside_count: 0,
+        reads: Vec::new(),
+        reads_more: 0,
         coverage: Coverage {
             state: CoverageState::Full,
             reasons: Vec::new(),

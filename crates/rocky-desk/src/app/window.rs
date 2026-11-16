@@ -232,6 +232,12 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
             search: SearchInput::default(),
             search_debounce: Debounce::default(),
             search_focus: cx.focus_handle(),
+            main_tab: Default::default(),
+            flow_hover: None,
+            modal_focus: cx.focus_handle(),
+            // Ordered before every control (they use 0) and never a stop
+            // itself, so the first Tab lands on the first title bar tab.
+            root_focus: cx.focus_handle().tab_index(-1).tab_stop(false),
             removed_quit_at: None,
             home_dir: std::env::home_dir().map(|p| p.to_string_lossy().into_owned()),
             menu_stale: false,
@@ -248,9 +254,11 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                     show: !opts.tray || cfg!(not(windows)),
                     // The consent and settings views scroll when the window is small.
                     is_resizable: true,
+                    // Windows: the desk draws its own bar (`ui::title_bar`), so the
+                    // system one is hidden. Elsewhere the system bar stays.
                     titlebar: Some(TitlebarOptions {
                         title: Some(SharedString::from("rocky")),
-                        appears_transparent: false,
+                        appears_transparent: crate::ui::title_bar::custom_caption(),
                         traffic_light_position: None,
                     }),
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

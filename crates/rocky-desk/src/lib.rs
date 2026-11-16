@@ -10,6 +10,7 @@ pub mod conn;
 pub mod connect;
 pub mod consent_view;
 pub mod desklog;
+pub mod flow_model;
 pub mod i18n;
 pub mod icons;
 pub mod notified;

@@ -9,8 +9,10 @@ use gpui::{
 use crate::cards_model::TooltipLine;
 
 pub(crate) const TEXT_DARK: u32 = 0x1C1917;
-pub(crate) const TEXT_MUTED: u32 = 0x78716C;
-pub(crate) const TEXT_DIM: u32 = 0xA8A29E;
+// Secondary text sits on both the page (#F5F5F4) and cards (#FFFFFF), so
+// both tokens hold WCAG AA 4.5:1 against the darker page: 5.0:1 and 4.7:1.
+pub(crate) const TEXT_MUTED: u32 = 0x6F6863;
+pub(crate) const TEXT_DIM: u32 = 0x736C67;
 pub(crate) const CARD_BG: u32 = 0xFFFFFF;
 pub(crate) const SURFACE_SUBTLE: u32 = 0xF5F5F4;
 pub(crate) const ROW_HOVER_BG: u32 = 0xFAFAF9;

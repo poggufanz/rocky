@@ -176,8 +176,11 @@ fn card_item<T: 'static>(
     let card_id = row.card_id.clone();
     let mut card = card_container()
         .id(SharedString::from(format!("card:{}", row.card_id)))
+        // A tab stop, so Tab reaches the card and Enter opens its modal.
+        .tab_index(0)
         .cursor_pointer()
         .hover(|s| s.border_color(rgb(BORDER_LIGHT)).shadow_sm())
+        .focus(|s| s.border_color(rgb(LINK)))
         .on_click(cx.listener(move |this, _, window, cx| {
             on_action(this, CardAction::OpenDetail(card_id.clone()), window, cx);
         }));

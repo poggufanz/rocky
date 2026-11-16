@@ -34,7 +34,9 @@ use crate::settings_view::{SettingId, View, set_bool, set_lang};
 use crate::setup_settings::SetupSettings;
 use crate::spawn::daemon_exe_name;
 use crate::ui::cards_view::CardAction;
+use crate::ui::flow_view::FlowHover;
 use crate::ui::now_view::NowAction;
+use crate::ui::title_bar::Tab;
 use crate::view::{Conn, Model};
 
 mod autostart_wiring;
@@ -253,6 +255,16 @@ struct DeskView {
     /// start's minimize retries. Only that retry reads it.
     #[cfg(not(windows))]
     user_shown: bool,
+    /// Page under `View::Agents`: the agent list or the Flow graph. A card
+    /// modal opens over it and closing returns to it.
+    main_tab: Tab,
+    /// Flow row under the pointer, whose strands are drawn forward.
+    flow_hover: Option<FlowHover>,
+    /// Focus inside the card modal, so Escape reaches it.
+    modal_focus: FocusHandle,
+    /// Focus on the window root, so Tab and Escape reach the desk's key
+    /// handler while no control has focus yet.
+    root_focus: FocusHandle,
 }
 
 impl DeskView {
@@ -307,6 +319,68 @@ impl DeskView {
             self.refresh_setup();
         }
         cx.notify();
+    }
+
+    /// The tab the title bar shows as current.
+    fn active_tab(&self) -> Tab {
+        match self.ctl.view {
+            View::Settings => Tab::Settings,
+            _ => self.main_tab,
+        }
+    }
+
+    /// Title bar tab click: any open card closes, then the page switches.
+    fn select_tab(&mut self, tab: Tab, _window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.ctl.view, View::Consent | View::Removed) {
+            return;
+        }
+        self.card_detail = None;
+        self.block_diff = None;
+        self.flow_hover = None;
+        match tab {
+            Tab::Agents | Tab::Flow => {
+                self.main_tab = tab;
+                self.ctl.view = View::Agents;
+            }
+            Tab::Settings => {
+                if self.ctl.view != View::Settings {
+                    self.ctl.view = View::Settings;
+                    self.read_autostart();
+                    self.refresh_setup();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Escape, the backdrop, or Close: a diff steps back to its card, a card
+    /// closes to the page underneath.
+    fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let action = if self.ctl.view == View::BlockDiff {
+            CardAction::BackFromDiff
+        } else {
+            CardAction::BackFromDetail
+        };
+        self.on_card_action(action, window, cx);
+        if self.ctl.view != View::BlockDiff && self.ctl.view != View::CardDetail {
+            self.root_focus.focus(window);
+        }
+    }
+
+    fn on_flow_hover(&mut self, row: FlowHover, entered: bool, cx: &mut Context<Self>) {
+        // Moving between rows sends the enter and the leave in either order;
+        // a leave clears only the row still marked.
+        let next = if entered {
+            Some(row)
+        } else if self.flow_hover == Some(row) {
+            None
+        } else {
+            return;
+        };
+        if next != self.flow_hover {
+            self.flow_hover = next;
+            cx.notify();
+        }
     }
 
     /// Adopt a language broadcast: rebuild the tray menu and re-send the

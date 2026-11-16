@@ -11,7 +11,7 @@ use rocky_facts::{
 use rocky_proto::cards::{
     BashInfo, Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage,
     CoverageReason, CoverageState, FlowKind, FlowStep, Importance, Label, MAX_BLOCKS,
-    MAX_FLOW_STEPS, Quote, SymbolKind,
+    MAX_FLOW_STEPS, MAX_READS, Quote, SymbolKind,
 };
 use rocky_proto::paths::{canonical_path, repo_id};
 use rocky_proto::pipe::CaptureState;
@@ -377,6 +377,12 @@ pub fn build_card(
         user_home_abs.as_ref(),
         cwd,
     );
+    let (reads, reads_more) = build_reads(
+        &input.turn.windows,
+        session_root_abs.as_ref(),
+        user_home_abs.as_ref(),
+        cwd,
+    );
     let (prompt, prompt_truncated) = select_prompt(input);
 
     let status = match input.turn.status {
@@ -421,7 +427,41 @@ pub fn build_card(
         flow_more,
         outside_count,
         coverage,
+        reads,
+        reads_more,
     }
+}
+
+/// Distinct files the turn read with the Read tool, in first-read order, as
+/// display paths. Failed reads are left out: the agent never saw those bytes.
+fn build_reads(
+    windows: &[ToolWindow],
+    session_root_abs: Option<&AbsPath>,
+    user_home_abs: Option<&AbsPath>,
+    cwd: Option<&str>,
+) -> (Vec<String>, u32) {
+    let mut ordered: Vec<&ToolWindow> = windows
+        .iter()
+        .filter(|w| w.tool == "Read" && w.ok != Some(false))
+        .collect();
+    ordered.sort_by_key(|w| w.pre_ms);
+    let mut seen = BTreeSet::new();
+    let mut reads = Vec::new();
+    for win in ordered {
+        let (_, _, display) = classify_target_path(
+            win.target_path.as_deref(),
+            "",
+            session_root_abs,
+            user_home_abs,
+            cwd,
+        );
+        if !display.is_empty() && seen.insert(display.clone()) {
+            reads.push(display);
+        }
+    }
+    let more = u32::try_from(reads.len().saturating_sub(MAX_READS)).unwrap_or(u32::MAX);
+    reads.truncate(MAX_READS);
+    (reads, more)
 }
 
 fn collect_windows(
@@ -2100,6 +2140,57 @@ mod tests {
         assert_eq!(card.blocks[0].tool_use_ids, vec!["e-a".to_string()]);
         assert_eq!(card.blocks[0].after.as_deref(), Some("sha-2"));
         assert_eq!(card.outside_count, 1);
+    }
+
+    fn read_win(id: &str, path: String, pre_ms: u64, ok: Option<bool>) -> ToolWindow {
+        ToolWindow {
+            tool_use_id: id.to_string(),
+            agent: main_agent("sess-1"),
+            kind: ToolKind::Other,
+            tool: "Read".to_string(),
+            target_path: Some(path),
+            command: None,
+            pre_ms,
+            post_ms: Some(pre_ms + 10),
+            ok,
+        }
+    }
+
+    #[test]
+    fn reads_are_distinct_in_first_read_order_and_skip_failed() {
+        let input = base_input(base_turn(vec![
+            read_win("r-2", repo_join("src/b.ts"), 2_000, Some(true)),
+            read_win("r-1", repo_join("src/a.ts"), 1_000, Some(true)),
+            read_win("r-3", repo_join("src/a.ts"), 3_000, Some(true)),
+            read_win("r-4", repo_join("src/gone.ts"), 4_000, Some(false)),
+        ]));
+        let card = build_card(&input, &|_: &str| ObjectRead::Missing, &no_stat);
+        assert_eq!(
+            card.reads,
+            vec!["src/a.ts".to_string(), "src/b.ts".to_string()]
+        );
+        assert_eq!(card.reads_more, 0);
+    }
+
+    #[test]
+    fn reads_capped_with_overflow_count() {
+        let wins = (0..MAX_READS + 3)
+            .map(|i| {
+                read_win(
+                    &format!("r-{i}"),
+                    repo_join(&format!("src/f{i}.ts")),
+                    1_000 + i as u64,
+                    Some(true),
+                )
+            })
+            .collect();
+        let card = build_card(
+            &base_input(base_turn(wins)),
+            &|_: &str| ObjectRead::Missing,
+            &no_stat,
+        );
+        assert_eq!(card.reads.len(), MAX_READS);
+        assert_eq!(card.reads_more, 3);
     }
 
     #[test]

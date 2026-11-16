@@ -31,6 +31,8 @@ pub(super) fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> C
         flow: Vec::new(),
         flow_more: 0,
         outside_count: 0,
+        reads: Vec::new(),
+        reads_more: 0,
         coverage: Coverage {
             state: CoverageState::Full,
             reasons: Vec::new(),
@@ -890,4 +892,47 @@ fn row_titles_format_harness_envelopes_and_plain_prompts() {
         id_rows[5].title,
         "Please explain what <task-notification> means"
     );
+}
+
+fn chip_row(seq: u32, chip: &str, high: bool) -> EditRow {
+    EditRow {
+        seq,
+        file: format!("f{seq}.json"),
+        symbol: None,
+        chip: chip.to_string(),
+        high,
+        matched: false,
+        bash: None,
+        tooltip: Vec::new(),
+    }
+}
+
+#[test]
+fn shared_plain_chip_moves_to_the_card_once() {
+    let mut rows = vec![
+        chip_row(1, "outside repo", false),
+        chip_row(2, "outside repo", false),
+    ];
+    assert_eq!(
+        rows::hoist_shared_chip(&mut rows),
+        Some("outside repo".to_string())
+    );
+    assert!(rows.iter().all(|r| r.chip.is_empty()));
+}
+
+#[test]
+fn mixed_single_or_important_chips_stay_on_rows() {
+    let mut mixed = vec![chip_row(1, "outside repo", false), chip_row(2, "", false)];
+    assert_eq!(rows::hoist_shared_chip(&mut mixed), None);
+    assert_eq!(mixed[0].chip, "outside repo");
+
+    let mut single = vec![chip_row(1, "outside repo", false)];
+    assert_eq!(rows::hoist_shared_chip(&mut single), None);
+
+    let mut high = vec![
+        chip_row(1, "public API", true),
+        chip_row(2, "public API", true),
+    ];
+    assert_eq!(rows::hoist_shared_chip(&mut high), None);
+    assert_eq!(high[1].chip, "public API");
 }

@@ -435,6 +435,8 @@ mod tests {
             flow: Vec::new(),
             flow_more: 0,
             outside_count: 0,
+            reads: Vec::new(),
+            reads_more: 0,
             coverage: Coverage {
                 state: CoverageState::Full,
                 reasons: Vec::new(),
@@ -557,6 +559,8 @@ mod tests {
             flow: Vec::new(),
             flow_more: 0,
             outside_count: 0,
+            reads: Vec::new(),
+            reads_more: 0,
             coverage: Coverage {
                 state: CoverageState::Full,
                 reasons: Vec::new(),
@@ -696,6 +700,8 @@ mod tests {
             flow: Vec::new(),
             flow_more: 0,
             outside_count: 0,
+            reads: Vec::new(),
+            reads_more: 0,
             coverage: Coverage {
                 state: CoverageState::Full,
                 reasons: Vec::new(),
@@ -800,6 +806,8 @@ mod tests {
             flow: Vec::new(),
             flow_more: 0,
             outside_count: 0,
+            reads: Vec::new(),
+            reads_more: 0,
             coverage: Coverage {
                 state: CoverageState::Full,
                 reasons: Vec::new(),
@@ -928,6 +936,8 @@ mod tests {
             flow: Vec::new(),
             flow_more: 0,
             outside_count: 0,
+            reads: Vec::new(),
+            reads_more: 0,
             coverage: Coverage {
                 state: CoverageState::Full,
                 reasons: Vec::new(),

@@ -34,7 +34,7 @@ pub struct TooltipLine {
 }
 
 impl TooltipLine {
-    fn text(text: impl AsRef<str>) -> Self {
+    pub(crate) fn text(text: impl AsRef<str>) -> Self {
         Self {
             text: sanitize_single_line(text.as_ref()),
             code: None,

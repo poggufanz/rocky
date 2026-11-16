@@ -108,6 +108,7 @@ pub enum Msg {
     LangId,
     Autostart,
     ViewAgents,
+    ViewFlow,
     ViewSettings,
     SettingsReadOnly,
     ToolTextHistoryNote,
@@ -232,6 +233,7 @@ fn samples() -> Vec<Msg> {
         Msg::LangId,
         Msg::Autostart,
         Msg::ViewAgents,
+        Msg::ViewFlow,
         Msg::ViewSettings,
         Msg::SettingsReadOnly,
         Msg::ToolTextHistoryNote,
@@ -335,6 +337,7 @@ pub fn en(m: &Msg) -> String {
         Msg::LangId => "Indonesia".to_string(),
         Msg::Autostart => "Start rocky when you sign in".to_string(),
         Msg::ViewAgents => "Agents".to_string(),
+        Msg::ViewFlow => "Flow".to_string(),
         Msg::ViewSettings => "Settings".to_string(),
         Msg::SettingsReadOnly => "Settings are read-only while rockyd is not connected.".to_string(),
         Msg::ToolTextHistoryNote => {
@@ -431,6 +434,7 @@ pub fn id(m: &Msg) -> String {
         Msg::LangId => "Indonesia".to_string(),
         Msg::Autostart => "Jalankan rocky saat Anda masuk".to_string(),
         Msg::ViewAgents => "Agen".to_string(),
+        Msg::ViewFlow => "Alur".to_string(),
         Msg::ViewSettings => "Pengaturan".to_string(),
         Msg::SettingsReadOnly => {
             "Pengaturan hanya-baca selama rockyd tidak terhubung.".to_string()

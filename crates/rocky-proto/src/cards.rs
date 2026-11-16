@@ -11,6 +11,9 @@ pub const MAX_BLOCKS: usize = 30;
 /// Maximum number of timeline flow steps included in a single card record.
 pub const MAX_FLOW_STEPS: usize = 100;
 
+/// Maximum number of distinct read paths included in a single card record.
+pub const MAX_READS: usize = 40;
+
 /// Relative significance of a change block or card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -270,6 +273,13 @@ pub struct Card {
     pub flow_more: u32,
     pub outside_count: u64,
     pub coverage: Coverage,
+    /// Distinct files the agent read with the Read tool, in first-read order,
+    /// as display paths. Omitted when empty so older records stay byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<String>,
+    /// Distinct read paths beyond [`MAX_READS`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reads_more: u32,
 }
 
 /// How a card prompt should be shown when a harness envelope, not a person, started the turn.
