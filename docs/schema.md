@@ -592,6 +592,17 @@ from newest downward until the next would exceed `6 MiB` (always keeping at
 least the single newest card), and writes the kept entries in original file
 order.
 
+Purging a repo's capture (`rocky setup --repo <path> --purge-capture`) deletes
+that repo's own card log and then scrubs every other `*.jsonl` card log
+(`_none.jsonl` included): blocks whose path lies inside the purged repo are
+removed, flow steps that only refer to those blocks or name the repo's path are
+removed, and a card left with no blocks is dropped. The prompt and quotes of
+surviving blocks are not edited. Lines the scrub cannot parse or validate are
+kept verbatim, a log with nothing to remove stays byte-identical, and a log
+left empty is deleted. A log larger than `64 MiB`, a symbolic link, or a log
+that keeps changing is left untouched and reported as incomplete; the purge
+still succeeds and can be run again.
+
 ### Card record
 
 One JSON object per line:
