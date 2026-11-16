@@ -5,13 +5,16 @@
  * CLI share this backend; opening or selecting a repo never grants.
  */
 import { execFileSync } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { isPathInside } from "../desk/cards-record.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
 import { cardsFilePath } from "./cards-path.js";
 import { scrubRepoCards } from "./cards-scrub.js";
-import { consentsPath, listeningHome } from "./store-paths.js";
-import { mainRepoRootOf, normalizeRepoRoot } from "./repo-consent-read.js";
+import { consentsPath, listeningHome, repoDir } from "./store-paths.js";
+import { listAllRepoDecisions, mainRepoRootOf, normalizeRepoRoot, readRepoDecision } from "./repo-consent-read.js";
 import { purgeListeningStore } from "./event-log.js";
 
 function isGitRoot(canonicalRoot: string): boolean {
@@ -132,6 +135,51 @@ function deleteCardsFile(path: string): { ok: true; freedBytes: number } | { ok:
   }
 }
 
+export type CardsScrubSkipped = "unsafe-root" | "unknown-repo";
+
+/** A filesystem root, drive root (`X:/`) or UNC host or share root. */
+function isFilesystemRoot(path: string): boolean {
+  const trimmed = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (trimmed === "") return true;
+  if (/^[a-z]:$/i.test(trimmed)) return true;
+  return /^\/\/[^/]+(\/[^/]+)?$/.test(trimmed);
+}
+
+function realOrSelf(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
+
+/** True when the path is a root, or equals or contains the OS home or the Rocky home. */
+function isUnsafeScrubRoot(spellings: readonly string[], rockyHome: string, userHome: string): boolean {
+  const homes = [...new Set([userHome, rockyHome, realOrSelf(userHome), realOrSelf(rockyHome)])];
+  return spellings.some(
+    (spelling) => isFilesystemRoot(spelling) || homes.some((home) => isPathInside(home, spelling)),
+  );
+}
+
+function hasGitEntry(root: string): boolean {
+  try {
+    lstatSync(join(root, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Rocky knew the repo when it holds a consent decision, its own cards or store, or the path is a Git root now. */
+function repoWasKnown(target: string, spellings: readonly string[], home: string | undefined): boolean {
+  const decisions = listAllRepoDecisions(home);
+  for (const spelling of spellings) {
+    if (decisions.has(spelling) || readRepoDecision(spelling, home).decision !== "undecided") return true;
+    if (existsSync(cardsFilePath(spelling, home)) || existsSync(repoDir(spelling, home))) return true;
+  }
+  return hasGitEntry(realOrSelf(target));
+}
+
 /**
  * Stop capture and delete one repo's Listening history and change cards; the
  * setup CLI and the GUI share it. Revoke always runs first (idempotent, and it
@@ -139,18 +187,27 @@ function deleteCardsFile(path: string): { ok: true; freedBytes: number } | { ok:
  * The target's own store and card file are deleted under both the typed and
  * the realpath spelling, which can hash to different names; a worktree keeps
  * its own history and cards even when the revoke names its main repo.
+ *
+ * Other repos' card logs are scrubbed only for a path Rocky knew as a repo and
+ * that is not a root or a parent of a home folder; the scrub decision is made
+ * before the revoke because the revoke erases the consent key.
  */
 export function purgeRepoCapture(
   target: string,
   opts: { yes: boolean; actor: "cli" | "gui" | "desk"; onRevoke: "delete" | "decline" },
   home?: string,
-): { ok: boolean; freedBytes: number; root?: string; reason?: string; cardsIncomplete?: string[] } {
+  env: { userHome?: string } = {},
+): {
+  ok: boolean;
+  freedBytes: number;
+  root?: string;
+  reason?: string;
+  cardsIncomplete?: string[];
+  cardsScrubSkipped?: CardsScrubSkipped;
+} {
   if (opts.yes !== true) return { ok: false, freedBytes: 0, reason: "requires-confirmation" };
   const typed = normalizeRepoRoot(target);
   if (typed.length === 0) return { ok: false, freedBytes: 0, reason: "path-unresolvable" };
-  const revoked = setRepoCapture(target, false, opts, home);
-  if (!revoked.ok) return { ok: false, freedBytes: 0, reason: revoked.reason };
-  const root = revoked.root ?? typed;
   let own = typed;
   try {
     own = canonicalPath(realpathSync(target));
@@ -158,6 +215,16 @@ export function purgeRepoCapture(
     own = typed;
   }
   const spellings = [...new Set([typed, own])];
+  const rockyHome = home ?? resolveRockyPaths().home;
+  const userHome = env.userHome ?? homedir();
+  const skipped: CardsScrubSkipped | undefined = isUnsafeScrubRoot(spellings, rockyHome, userHome)
+    ? "unsafe-root"
+    : repoWasKnown(target, spellings, home)
+      ? undefined
+      : "unknown-repo";
+  const revoked = setRepoCapture(target, false, opts, home);
+  if (!revoked.ok) return { ok: false, freedBytes: 0, reason: revoked.reason };
+  const root = revoked.root ?? typed;
   let freedBytes = 0;
   for (const spelling of spellings) {
     const purged = purgeListeningStore(spelling, home);
@@ -169,7 +236,8 @@ export function purgeRepoCapture(
     if (!removed.ok) return { ok: false, freedBytes, reason: "cards-delete-failed" };
     freedBytes += removed.freedBytes;
   }
-  const scrubbed = scrubCardsAcrossLogs(spellings, home);
+  if (skipped !== undefined) return { ok: true, freedBytes, root, cardsScrubSkipped: skipped };
+  const scrubbed = scrubCardsAcrossLogs(spellings, home, env.userHome);
   freedBytes += scrubbed.freedBytes;
   return scrubbed.incomplete.length > 0
     ? { ok: true, freedBytes, root, cardsIncomplete: scrubbed.incomplete }
@@ -181,9 +249,16 @@ export function purgeRepoCapture(
  * undoes the purge: the repo's own data is already gone, so the caller gets
  * the logs that still need another pass.
  */
-function scrubCardsAcrossLogs(spellings: string[], home: string | undefined): { freedBytes: number; incomplete: string[] } {
+function scrubCardsAcrossLogs(
+  spellings: string[],
+  home: string | undefined,
+  userHome: string | undefined,
+): { freedBytes: number; incomplete: string[] } {
   try {
-    const scrubbed = scrubRepoCards(spellings, home === undefined ? {} : { home });
+    const scrubbed = scrubRepoCards(spellings, {
+      ...(home === undefined ? {} : { rockyHome: home }),
+      ...(userHome === undefined ? {} : { userHome }),
+    });
     if (!scrubbed.ok && scrubbed.incomplete.length === 0) {
       return { freedBytes: scrubbed.freedBytes, incomplete: [dirname(cardsFilePath(spellings[0] ?? "", home))] };
     }

@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, ftruncateSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, parse } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 import { beforeEach, describe, it, mock } from "node:test";
@@ -219,18 +219,126 @@ describe("purge scrubs change cards from every log", () => {
 describe("quoteRepoArgument", () => {
   it("leaves a normal path byte-identical inside double quotes", () => {
     assert.equal(quoteRepoArgument("/work/my repo"), '"/work/my repo"');
-    assert.equal(quoteRepoArgument("C:\work\repo"), '"C:\work\repo"');
+    assert.equal(quoteRepoArgument(String.raw`C:\work\repo`), String.raw`"C:\work\repo"`);
   });
 
   it("doubles the backslash of a drive root", () => {
     assert.equal(quoteRepoArgument("C:\\"), '"C:\\\\"');
+    assert.equal(quoteRepoArgument("C:" + "\\"), String.raw`"C:\\"`);
   });
 
   it("doubles every trailing backslash and only those", () => {
-    assert.equal(quoteRepoArgument("D:\a\b\\\\"), '"D:\a\b\\\\\\\\"');
+    assert.equal(quoteRepoArgument("D:\\a\\b\\"), '"D:\\a\\b\\\\"');
+    assert.equal(quoteRepoArgument("D:" + "\\a\\b\\"), String.raw`"D:\a\b\\"`);
   });
 
   it("still escapes an embedded double quote", () => {
     assert.equal(quoteRepoArgument('/a"b'), '"/a\\"b"');
+  });
+});
+
+describe("purge scrub scope", () => {
+  beforeEach(() => {
+    rmSync(cardsDir(), { recursive: true, force: true });
+    mkdirSync(cardsDir(), { recursive: true });
+  });
+
+  function seedForeignLogs(coveredPath: string): { paths: string[]; before: Buffer[] } {
+    const line = card("c", "/work/other", [`${posix(coveredPath)}/src/a.ts`, "/work/other/keep.ts"]);
+    const paths = [join(cardsDir(), "_none.jsonl"), join(cardsDir(), "other.jsonl")];
+    for (const path of paths) writeFileSync(path, `${line}\n`);
+    return { paths, before: paths.map((path) => readFileSync(path)) };
+  }
+
+  function assertUntouched(seed: { paths: string[]; before: Buffer[] }): void {
+    seed.paths.forEach((path, index) => assert.deepEqual(readFileSync(path), seed.before[index]));
+  }
+
+  function purge(target: string, userHome: string) {
+    return purgeRepoCapture(target, { yes: true, actor: "cli", onRevoke: "delete" }, home.dir(), { userHome });
+  }
+
+  it("skips the scrub for a filesystem or drive root", () => {
+    const root = parse(tmpdir()).root;
+    const seed = seedForeignLogs(root.replace(/[\/]+$/, ""));
+    const purged = purge(root, join(tmpdir(), "no-such-home"));
+    assert.equal(purged.ok, true);
+    assert.equal(purged.cardsScrubSkipped, "unsafe-root");
+    assertUntouched(seed);
+  });
+
+  it("skips the scrub for the OS home and for a folder that holds it", () => {
+    const base = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-purge-home-")));
+    try {
+      const userHome = join(base, "u", "home");
+      mkdirSync(userHome, { recursive: true });
+      const seed = seedForeignLogs(base);
+      assert.equal(purge(userHome, userHome).cardsScrubSkipped, "unsafe-root");
+      assert.equal(purge(join(base, "u"), userHome).cardsScrubSkipped, "unsafe-root");
+      assertUntouched(seed);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the scrub for the parent of the rocky home", () => {
+    const parent = dirname(home.dir());
+    const seed = seedForeignLogs(parent);
+    const purged = purge(parent, join(tmpdir(), "no-such-home"));
+    assert.equal(purged.cardsScrubSkipped, "unsafe-root");
+    assertUntouched(seed);
+  });
+
+  it("skips the scrub for a parent folder that is not a repo", () => {
+    const parent = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-purge-parent-")));
+    try {
+      const seed = seedForeignLogs(parent);
+      const purged = purge(parent, join(tmpdir(), "no-such-home"));
+      assert.equal(purged.ok, true);
+      assert.equal(purged.cardsScrubSkipped, "unknown-repo");
+      assertUntouched(seed);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("scrubs a folder with a .git folder even without a consent decision", () => {
+    const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-purge-dotgit-")));
+    try {
+      mkdirSync(join(repo, ".git"));
+      const seed = seedForeignLogs(repo);
+      const purged = purge(repo, join(tmpdir(), "no-such-home"));
+      assert.equal(purged.cardsScrubSkipped, undefined);
+      assert.ok(!readFileSync(seed.paths[0] as string, "utf8").includes("/src/a.ts"));
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("scrubs a path that only has a remembered decline", () => {
+    const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-purge-consent-")));
+    try {
+      assert.equal(setRepoCapture(repo, false, { yes: true, actor: "cli", onRevoke: "decline" }, home.dir()).ok, true);
+      const seed = seedForeignLogs(repo);
+      const purged = purge(repo, join(tmpdir(), "no-such-home"));
+      assert.equal(purged.cardsScrubSkipped, undefined);
+      assert.ok(!readFileSync(seed.paths[0] as string, "utf8").includes("/src/a.ts"));
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("tells the CLI user that other logs were left alone", async () => {
+    const parent = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-purge-cli-")));
+    try {
+      const seed = seedForeignLogs(parent);
+      const out = await captureStderr(() => setup(["--repo", parent, "--purge-capture", "--yes"], deps()));
+      assert.equal(out.code, 0);
+      assert.ok(out.stderr.includes("also removed from other card logs"), out.stderr);
+      assert.ok(out.stderr.includes("  Change cards in other logs were left alone: Rocky did not know this path as a repo."), out.stderr);
+      assertUntouched(seed);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 });

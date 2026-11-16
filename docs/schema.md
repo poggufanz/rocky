@@ -601,9 +601,18 @@ path are also removed. The prompt and quotes of surviving blocks are not edited.
 A card with no block inside the repo is kept unchanged, so its prompt or flow
 step text can still mention the repo's path. Lines the scrub cannot parse or validate are
 kept verbatim, a log with nothing to remove stays byte-identical, and a log
-left empty is deleted. A log larger than `64 MiB`, a symbolic link, or a log
-that keeps changing is left untouched and reported as incomplete; the purge
-still succeeds and can be run again.
+left empty is deleted. Blocks under a nested repo or linked worktree inside the
+purged folder keep their cards: a directory below the purged folder counts as a
+nested repo when it holds a `.git` file or folder, or when it is the `root` or
+`main_root` of a card in any log. Other logs are scrubbed only for a path Rocky
+knew as a repo (a stored consent decision, its own card log or Listening store,
+or a `.git` entry now) that is not a filesystem, drive or share root and does
+not equal or contain the home folder or the Rocky home; otherwise they are left
+alone and the CLI says so. A log larger than `64 MiB`, a symbolic link, a log
+that keeps changing, a log where purged blocks come back after the scrub, or a
+log with an unreadable line that contains the repo's path is reported as
+incomplete (the unreadable line is not edited); the purge still succeeds and can
+be run again.
 
 ### Card record
 

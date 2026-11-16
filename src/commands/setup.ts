@@ -463,6 +463,15 @@ function detailCardsIncomplete(entries: string[], repo: string): void {
     : `  ${subject}. ${retry}`);
 }
 
+/** Say why change cards in other logs were not touched; silent when they were scrubbed. */
+function detailCardsScrubSkipped(skipped: "unsafe-root" | "unknown-repo" | undefined): void {
+  if (skipped === undefined) return;
+  const why = skipped === "unsafe-root"
+    ? "this path is a drive or folder root, or it holds your home folder"
+    : "Rocky did not know this path as a repo";
+  detail(`  Change cards in other logs were left alone: ${why}.`);
+}
+
 async function runPurgeCapture(
   repo: string,
   probe: { allowed: boolean; root: string },
@@ -472,6 +481,7 @@ async function runPurgeCapture(
 ): Promise<number> {
   const held = listeningStoreUsage(probe.root, home);
   say(`Purge deletes the listening history for this repo (${mib(held.eventsBytes + held.objectsBytes)}). There is no undo.`);
+  say("Change cards about this repo are also removed from other card logs.");
   if (!yes && !(await confirmation.confirm("Purge the listening history for this repo now?"))) {
     say("Consent withheld. Setup stopped and nothing changed.");
     return 1;
@@ -488,6 +498,7 @@ async function runPurgeCapture(
   if (probe.allowed) detail(`capture revoked: ${purged.root ?? probe.root}`);
   detail(`history purged: ${mib(purged.freedBytes)} freed`);
   detailCardsIncomplete(purged.cardsIncomplete ?? [], repo);
+  detailCardsScrubSkipped(purged.cardsScrubSkipped);
   return 0;
 }
 
