@@ -463,6 +463,10 @@ async function runPurgeCapture(
   }
   if (probe.allowed) detail(`capture revoked: ${purged.root ?? probe.root}`);
   detail(`history purged: ${mib(purged.freedBytes)} freed`);
+  const remaining = purged.cardsIncomplete?.length ?? 0;
+  if (remaining > 0) {
+    detail(`Some change cards about this repo could not be removed from ${remaining} log${remaining === 1 ? "" : "s"}. Run the purge again.`);
+  }
   return 0;
 }
 

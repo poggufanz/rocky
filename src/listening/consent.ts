@@ -6,9 +6,10 @@
  */
 import { execFileSync } from "node:child_process";
 import { lstatSync, mkdirSync, readFileSync, renameSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { canonicalPath } from "../core/memory-read.js";
 import { cardsFilePath } from "./cards-path.js";
+import { scrubRepoCards } from "./cards-scrub.js";
 import { consentsPath, listeningHome } from "./store-paths.js";
 import { mainRepoRootOf, normalizeRepoRoot } from "./repo-consent-read.js";
 import { purgeListeningStore } from "./event-log.js";
@@ -143,7 +144,7 @@ export function purgeRepoCapture(
   target: string,
   opts: { yes: boolean; actor: "cli" | "gui" | "desk"; onRevoke: "delete" | "decline" },
   home?: string,
-): { ok: boolean; freedBytes: number; root?: string; reason?: string } {
+): { ok: boolean; freedBytes: number; root?: string; reason?: string; cardsIncomplete?: string[] } {
   if (opts.yes !== true) return { ok: false, freedBytes: 0, reason: "requires-confirmation" };
   const typed = normalizeRepoRoot(target);
   if (typed.length === 0) return { ok: false, freedBytes: 0, reason: "path-unresolvable" };
@@ -168,5 +169,26 @@ export function purgeRepoCapture(
     if (!removed.ok) return { ok: false, freedBytes, reason: "cards-delete-failed" };
     freedBytes += removed.freedBytes;
   }
-  return { ok: true, freedBytes, root };
+  const scrubbed = scrubCardsAcrossLogs(spellings, home);
+  freedBytes += scrubbed.freedBytes;
+  return scrubbed.incomplete.length > 0
+    ? { ok: true, freedBytes, root, cardsIncomplete: scrubbed.incomplete }
+    : { ok: true, freedBytes, root };
+}
+
+/**
+ * Remove this repo's change cards from every other card log. A failure never
+ * undoes the purge: the repo's own data is already gone, so the caller gets
+ * the logs that still need another pass.
+ */
+function scrubCardsAcrossLogs(spellings: string[], home: string | undefined): { freedBytes: number; incomplete: string[] } {
+  try {
+    const scrubbed = scrubRepoCards(spellings, home === undefined ? {} : { home });
+    if (!scrubbed.ok && scrubbed.incomplete.length === 0) {
+      return { freedBytes: scrubbed.freedBytes, incomplete: [dirname(cardsFilePath(spellings[0] ?? "", home))] };
+    }
+    return { freedBytes: scrubbed.freedBytes, incomplete: scrubbed.incomplete };
+  } catch {
+    return { freedBytes: 0, incomplete: [dirname(cardsFilePath(spellings[0] ?? "", home))] };
+  }
 }

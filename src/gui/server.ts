@@ -882,7 +882,7 @@ async function handleApi(
           // revoke inside purge releases the lease on the next tick
           collectors?.kick();
           if (!purged.ok) return sendJson(response, 400, { ok: false, reason: purged.reason });
-          return sendJson(response, 200, { ok: true, id: repoSlug(target), label: basename(target), freedBytes: purged.freedBytes });
+          return sendJson(response, 200, { ok: true, id: repoSlug(target), label: basename(target), freedBytes: purged.freedBytes, ...(purged.cardsIncomplete ? { cardsIncomplete: purged.cardsIncomplete } : {}) });
         } catch {
           return sendJson(response, 500, { error: "Cannot reach the listening store." });
         }
