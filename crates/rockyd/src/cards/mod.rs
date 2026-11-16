@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -24,7 +24,9 @@ use rocky_proto::pipe::{AgentKey, CaptureHealth, CaptureState, Gap, RepoInfo};
 use sha2::{Digest, Sha256};
 
 use crate::capture::CaptureResult;
-use crate::cards::attribute::{BuildInput, build_card, collect_edit_windows_for_turn};
+use crate::cards::attribute::{
+    BuildInput, build_card, collect_edit_windows_for_turn, select_prompt,
+};
 use crate::cards::store::{ObjectRead, StoreReader, Version, read_object};
 use crate::cards::transcript::{TranscriptRead, read_quotes, validate_transcript_path};
 use crate::cards::windows::{PromptIn, ToolKind, ToolWindow, Tracker, TrackerSignal, Turn};
@@ -57,6 +59,14 @@ pub struct EngineCtx {
 
 type TurnId = (AgentKey, u64);
 type BuildHook = Arc<dyn Fn(&BuildInput) + Send + Sync>;
+/// Test hook run inside the publish gate, after the prompt is taken and before the send.
+type PublishHook = Arc<dyn Fn() + Send + Sync>;
+/// Prompt owned by one build job; the engine can clear it while the job is queued or running.
+type PromptSlot = Arc<Mutex<Option<PromptIn>>>;
+
+fn lock_slot(slot: &PromptSlot) -> std::sync::MutexGuard<'_, Option<PromptIn>> {
+    slot.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 struct PendingBuild {
     turn: Turn,
@@ -170,6 +180,9 @@ impl CachedStore {
 }
 
 struct BuildJob {
+    generation: u64,
+    prompt: PromptSlot,
+    had_prompt: bool,
     turn_id: TurnId,
     turn: Turn,
     card_id: String,
@@ -190,6 +203,7 @@ struct BuildJob {
 }
 
 struct BuildDone {
+    generation: u64,
     turn_id: TurnId,
     card: Option<Card>,
     panicked: bool,
@@ -283,12 +297,21 @@ struct WorkerPool {
     res_rx: mpsc::Receiver<BuildDone>,
     stores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<CachedStore>>>>>,
     hook: Option<BuildHook>,
+    publish_hook: Option<PublishHook>,
+    generation: Arc<AtomicU64>,
+    /// Publish gate: a worker holds it from its generation check through the result send,
+    /// and a disable holds it from the generation bump through the result drain.
+    gate: Arc<Mutex<()>>,
+    /// Prompt-bearing results sent but not yet received (test seam).
+    queued_prompts: Arc<AtomicUsize>,
+    outstanding: usize,
+    stale_cards: usize,
     pool_workers: BoundedWorkers,
     panics: Arc<AtomicU64>,
 }
 
 impl WorkerPool {
-    fn new(workers: usize, hook: Option<BuildHook>) -> Self {
+    fn new(workers: usize, hook: Option<BuildHook>, publish_hook: Option<PublishHook>) -> Self {
         let count = workers.clamp(1, 4);
         let (job_tx, job_rx) = mpsc::channel::<BuildJob>();
         let (res_tx, res_rx) = mpsc::channel::<BuildDone>();
@@ -300,6 +323,12 @@ impl WorkerPool {
             res_rx,
             stores: Arc::new(Mutex::new(HashMap::new())),
             hook,
+            publish_hook,
+            generation: Arc::new(AtomicU64::new(0)),
+            gate: Arc::new(Mutex::new(())),
+            queued_prompts: Arc::new(AtomicUsize::new(0)),
+            outstanding: 0,
+            stale_cards: 0,
             pool_workers: BoundedWorkers::new(),
             panics: Arc::new(AtomicU64::new(0)),
         }
@@ -311,10 +340,16 @@ impl WorkerPool {
         };
         for idx in 0..self.workers {
             let rx = Arc::clone(&job_rx);
-            let tx = res_tx.clone();
             let stores_ref = Arc::clone(&self.stores);
             let panics_ref = Arc::clone(&self.panics);
             let hook_ref = self.hook.clone();
+            let publish = Publisher {
+                tx: res_tx.clone(),
+                generation: Arc::clone(&self.generation),
+                gate: Arc::clone(&self.gate),
+                queued_prompts: Arc::clone(&self.queued_prompts),
+                hook: self.publish_hook.clone(),
+            };
             let exit_guard = self.pool_workers.prepare_spawn();
             let finished = exit_guard.finished_flag();
             let name = format!("{CARD_WORKER_THREAD_PREFIX}{idx}");
@@ -322,7 +357,7 @@ impl WorkerPool {
                 .name(name)
                 .spawn(move || {
                     let _exit_guard = exit_guard;
-                    worker_loop(rx, tx, stores_ref, panics_ref, hook_ref);
+                    worker_loop(rx, stores_ref, panics_ref, hook_ref, publish);
                 })
                 .expect("spawn card worker thread");
             self.pool_workers.push(handle, finished);
@@ -331,13 +366,22 @@ impl WorkerPool {
 
     fn submit(&mut self, job: BuildJob) {
         self.ensure_started();
+        self.outstanding += 1;
         if let Some(tx) = &self.job_tx {
             let _ = tx.send(job);
         }
     }
 
-    fn try_recv(&self) -> Option<BuildDone> {
-        self.res_rx.try_recv().ok()
+    fn try_recv(&mut self) -> Option<BuildDone> {
+        let done = self.res_rx.try_recv().ok()?;
+        self.outstanding = self.outstanding.saturating_sub(1);
+        if done.card.as_ref().is_some_and(|c| !c.prompt.is_empty()) {
+            self.queued_prompts.fetch_sub(1, Ordering::AcqRel);
+        }
+        if done.card.is_some() && done.generation != self.generation.load(Ordering::Acquire) {
+            self.stale_cards += 1;
+        }
+        Some(done)
     }
 }
 
@@ -363,22 +407,39 @@ pub struct Engine {
     turn_states: HashMap<TurnId, TurnBuildState>,
     captures_by_root: HashMap<String, Vec<CaptureResult>>,
     latest_valid_capture: HashMap<String, u64>,
+    prompt_slots: Vec<std::sync::Weak<Mutex<Option<PromptIn>>>>,
     pool: WorkerPool,
 }
 
 impl Engine {
     /// Creates an engine using `home` (`~/.rocky`) and `workers` worker threads (clamped to `1..=4`).
     pub fn new(home: PathBuf, workers: usize) -> Self {
-        Self::with_optional_hook(home, workers, None)
+        Self::with_optional_hooks(home, workers, None, None)
     }
 
     /// Creates an engine with a worker build hook used by tests to inspect inputs or inject panics.
     #[doc(hidden)]
     pub fn new_with_build_hook(home: PathBuf, workers: usize, hook: BuildHook) -> Self {
-        Self::with_optional_hook(home, workers, Some(hook))
+        Self::with_optional_hooks(home, workers, Some(hook), None)
     }
 
-    fn with_optional_hook(home: PathBuf, workers: usize, hook: Option<BuildHook>) -> Self {
+    /// Like `new_with_build_hook`, plus a hook run inside the publish gate (tests only).
+    #[doc(hidden)]
+    pub fn new_with_hooks(
+        home: PathBuf,
+        workers: usize,
+        build_hook: BuildHook,
+        publish_hook: PublishHook,
+    ) -> Self {
+        Self::with_optional_hooks(home, workers, Some(build_hook), Some(publish_hook))
+    }
+
+    fn with_optional_hooks(
+        home: PathBuf,
+        workers: usize,
+        hook: Option<BuildHook>,
+        publish_hook: Option<PublishHook>,
+    ) -> Self {
         Self {
             home,
             enabled: true,
@@ -392,7 +453,8 @@ impl Engine {
             turn_states: HashMap::new(),
             captures_by_root: HashMap::new(),
             latest_valid_capture: HashMap::new(),
-            pool: WorkerPool::new(workers, hook),
+            prompt_slots: Vec::new(),
+            pool: WorkerPool::new(workers, hook, publish_hook),
         }
     }
 
@@ -415,6 +477,41 @@ impl Engine {
             self.reset_tracking();
         }
         self.enabled = enabled;
+    }
+
+    /// Counts prompts still held by engine tracking, slots and uncollected results (test seam).
+    #[doc(hidden)]
+    pub fn held_prompt_count(&self) -> usize {
+        let tracked = self
+            .turn_states
+            .values()
+            .filter(|s| s.latest_turn.prompt.is_some())
+            .count();
+        let pending = self
+            .pending_builds
+            .values()
+            .filter(|p| p.turn.prompt.is_some())
+            .count();
+        let slots = self
+            .prompt_slots
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .filter(|slot| lock_slot(slot).is_some())
+            .count();
+        let queued = self.pool.queued_prompts.load(Ordering::Acquire);
+        tracked + pending + slots + queued
+    }
+
+    /// Counts builds submitted whose result has not been collected (test seam).
+    #[doc(hidden)]
+    pub fn outstanding_builds(&self) -> usize {
+        self.pool.outstanding
+    }
+
+    /// Counts old-generation results that carried a card into the result channel (test seam).
+    #[doc(hidden)]
+    pub fn stale_cards_received(&self) -> usize {
+        self.pool.stale_cards
     }
 
     /// Returns the number of build worker threads configured for this engine.
@@ -588,6 +685,9 @@ impl Engine {
     pub fn poll(&mut self, now_ms: u64, ctx: &EngineCtx) -> Vec<Card> {
         let mut ready_cards = Vec::new();
         while let Some(done) = self.pool.try_recv() {
+            if done.generation != self.pool.generation.load(Ordering::Acquire) {
+                continue;
+            }
             if let Some(state) = self.turn_states.get_mut(&done.turn_id) {
                 state.in_flight = false;
                 if !self.removed
@@ -661,16 +761,25 @@ impl Engine {
     }
 
     fn reset_tracking(&mut self) {
+        // Hold the publish gate until every slot and queued result is released, so a
+        // worker either published before this point (and is drained below) or sees the
+        // new generation and drops its result.
+        let gate = Arc::clone(&self.pool.gate);
+        let _gate = gate.lock().unwrap_or_else(|p| p.into_inner());
         self.tracker = Tracker::new();
         self.repo_cache.clear();
         self.parent_card_ids.clear();
         self.bash_by_turn.clear();
         self.awaited_roots.clear();
         self.pending_builds.clear();
-        for state in self.turn_states.values_mut() {
-            state.dirty = false;
+        // Invalidate queued and running builds: their results are discarded and
+        // no turn (and so no prompt) stays tracked across an off switch.
+        self.pool.generation.fetch_add(1, Ordering::AcqRel);
+        self.turn_states.clear();
+        for slot in self.prompt_slots.drain(..).filter_map(|w| w.upgrade()) {
+            lock_slot(&slot).take();
         }
-        self.turn_states.retain(|_, s| s.in_flight);
+        while self.pool.try_recv().is_some() {}
     }
 
     /// Seeds a session's cached repository when cards have not seen the session yet.
@@ -980,7 +1089,16 @@ impl Engine {
         );
         let gaps: Vec<(u64, u64)> = ctx.gaps.iter().map(|g| (g.from_ms, g.to_ms)).collect();
 
+        let mut turn = turn;
+        let had_prompt = turn.prompt.is_some();
+        let prompt: PromptSlot = Arc::new(Mutex::new(turn.prompt.take()));
+        self.prompt_slots.retain(|w| w.strong_count() > 0);
+        self.prompt_slots.push(Arc::downgrade(&prompt));
+
         self.pool.submit(BuildJob {
+            generation: self.pool.generation.load(Ordering::Acquire),
+            prompt,
+            had_prompt,
             turn_id: tid.clone(),
             turn,
             card_id: cid,
@@ -1063,12 +1181,63 @@ impl Engine {
     }
 }
 
+/// Shared state a worker needs to publish a finished build.
+struct Publisher {
+    tx: mpsc::Sender<BuildDone>,
+    generation: Arc<AtomicU64>,
+    gate: Arc<Mutex<()>>,
+    queued_prompts: Arc<AtomicUsize>,
+    hook: Option<PublishHook>,
+}
+
+impl Publisher {
+    fn send_unprompted(&self, generation: u64, turn_id: TurnId, panicked: bool) {
+        let _ = self.tx.send(BuildDone {
+            generation,
+            turn_id,
+            card: None,
+            panicked,
+        });
+    }
+
+    /// Attaches the prompt and sends the result while holding the publish gate.
+    /// A result from an older generation is dropped without ever touching the prompt.
+    fn publish(&self, job_generation: u64, turn_id: TurnId, built: Option<Built>) {
+        let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(built) = built else {
+            self.send_unprompted(job_generation, turn_id, false);
+            return;
+        };
+        if job_generation != self.generation.load(Ordering::Acquire) {
+            self.send_unprompted(job_generation, turn_id, false);
+            return;
+        }
+        let card = built.with_prompt();
+        if let Some(hook) = &self.hook {
+            hook();
+        }
+        let holds_prompt = card.as_ref().is_some_and(|c| !c.prompt.is_empty());
+        if holds_prompt {
+            self.queued_prompts.fetch_add(1, Ordering::AcqRel);
+        }
+        let sent = self.tx.send(BuildDone {
+            generation: job_generation,
+            turn_id,
+            card,
+            panicked: false,
+        });
+        if sent.is_err() && holds_prompt {
+            self.queued_prompts.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 fn worker_loop(
     rx: Arc<Mutex<mpsc::Receiver<BuildJob>>>,
-    tx: mpsc::Sender<BuildDone>,
     stores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<CachedStore>>>>>,
     panics: Arc<AtomicU64>,
     hook: Option<BuildHook>,
+    publisher: Publisher,
 ) {
     loop {
         let job = {
@@ -1079,25 +1248,47 @@ fn worker_loop(
             break;
         };
         let tid = job.turn_id.clone();
+        let job_generation = job.generation;
+        if job_generation != publisher.generation.load(Ordering::Acquire) {
+            publisher.send_unprompted(job_generation, tid, false);
+            continue;
+        }
         let outcome =
             panic::catch_unwind(AssertUnwindSafe(|| run_job(job, &stores, hook.as_deref())));
         match outcome {
-            Ok(card) => {
-                let _ = tx.send(BuildDone {
-                    turn_id: tid,
-                    card,
-                    panicked: false,
-                });
-            }
+            Ok(built) => publisher.publish(job_generation, tid, built),
             Err(_) => {
                 panics.fetch_add(1, Ordering::Relaxed);
-                let _ = tx.send(BuildDone {
-                    turn_id: tid,
-                    card: None,
-                    panicked: true,
-                });
+                publisher.send_unprompted(job_generation, tid, true);
             }
         }
+    }
+}
+
+/// A finished build whose card does not yet carry the prompt.
+struct Built {
+    card: Card,
+    input: BuildInput,
+    prompt: PromptSlot,
+    had_prompt: bool,
+}
+
+impl Built {
+    /// Takes the prompt from its slot and fills the card; call only inside the publish gate.
+    fn with_prompt(self) -> Option<Card> {
+        let Built {
+            mut card,
+            input,
+            prompt,
+            had_prompt,
+        } = self;
+        if had_prompt {
+            let taken = lock_slot(&prompt).take()?;
+            let mut with_prompt = input;
+            with_prompt.turn.prompt = Some(taken);
+            (card.prompt, card.prompt_truncated) = select_prompt(&with_prompt);
+        }
+        Some(card)
     }
 }
 
@@ -1105,7 +1296,7 @@ fn run_job(
     job: BuildJob,
     stores: &Mutex<HashMap<PathBuf, Arc<Mutex<CachedStore>>>>,
     hook: Option<&(dyn Fn(&BuildInput) + Send + Sync)>,
-) -> Option<Card> {
+) -> Option<Built> {
     let version_read = if job.recorded
         && let Some(store_dir) = &job.store_dir
     {
@@ -1148,10 +1339,6 @@ fn run_job(
         parent_card_id: job.parent_card_id,
     };
 
-    if let Some(cb) = hook {
-        cb(&input);
-    }
-
     let store_ref = input.recorded.then_some(job.store_dir.as_deref()).flatten();
     let card = build_card(
         &input,
@@ -1168,10 +1355,20 @@ fn run_job(
         },
     );
 
+    if let Some(cb) = hook {
+        cb(&input);
+    }
+
+    // The prompt stays in its clearable slot; `Publisher::publish` takes it inside the gate.
     if card.blocks.is_empty() {
         None
     } else {
-        Some(card)
+        Some(Built {
+            card,
+            input,
+            prompt: job.prompt,
+            had_prompt: job.had_prompt,
+        })
     }
 }
 
@@ -1408,12 +1605,15 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(8));
         });
 
-        let mut pool = WorkerPool::new(1, Some(hook));
+        let mut pool = WorkerPool::new(1, Some(hook), None);
         let agent = AgentKey {
             session_id: "sess-drop".to_string(),
             agent_id: String::new(),
         };
         let job = BuildJob {
+            generation: 0,
+            prompt: Arc::new(Mutex::new(None)),
+            had_prompt: false,
             turn_id: (agent.clone(), 1_000),
             turn: Turn {
                 agent,

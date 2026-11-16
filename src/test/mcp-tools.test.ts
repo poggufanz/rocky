@@ -1,14 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExplainRecord, FailureRecord, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import type { MemoryQueries } from "../core/memory-query.js";
-import { pathIdentityHash } from "../core/memory-read.js";
+import { canonicalPath, pathIdentityHash } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import type { CardsForFile, StoredBlock, StoredCard } from "../desk/cards-read.js";
+import { cardsFilePath } from "../listening/cards-path.js";
 import { disabledRecallWithAi, type RecallWithAiPort } from "../ai/port.js";
 import { createToolRegistry, McpInvalidParamsError, ToolExecutionError, TOOL_ENVELOPE_RESERVE_BYTES } from "../mcp/tools.js";
 import { MAX_FIELD_BYTES, MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
@@ -35,11 +37,14 @@ const triple: TripleRecord = {
 };
 const knowledgeRecords: MemoryRecord[] = [...records, triple];
 
+const emptyCards = (): CardsForFile => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } });
+
 function registry(exposure: "sanitized" | "raw" = "sanitized") {
   return createToolRegistry({
     exposure,
     memory: createMemoryQueries(() => records),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
 }
 
@@ -48,6 +53,7 @@ function knowledgeRegistry(exposure: "sanitized" | "raw" = "sanitized") {
     exposure,
     memory: createMemoryQueries(() => knowledgeRecords),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
 }
 
@@ -414,6 +420,7 @@ test("why_file keeps two index suffixes ambiguous and future knowledge inert", a
     exposure: "sanitized",
     memory: createMemoryQueries(() => [first, second]),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const result = await ambiguous.call("why_file", { path: "index.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
@@ -436,6 +443,7 @@ test("why_file keeps two index suffixes ambiguous and future knowledge inert", a
     exposure: "sanitized",
     memory: createMemoryQueries(() => [futureNote, futureTriple]),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const search = await futureSearch.call("search_knowledge", { query: "banana", kind: "note" }, new AbortController().signal);
   assert.deepEqual(search.structuredContent.items, []);
@@ -466,6 +474,7 @@ test("why_file keeps two index suffixes ambiguous and future knowledge inert", a
       },
     },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const customSearch = await customFuture.call("search_knowledge", { query: "future" }, new AbortController().signal);
   assert.deepEqual(customSearch.structuredContent.items, []);
@@ -496,7 +505,7 @@ test("why_file suppresses custom matches marked ambiguous", async () => {
     }),
   };
   const result = await createToolRegistry({
-    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
   assert.equal(result.structuredContent.ambiguousPath, true);
@@ -517,7 +526,7 @@ test("why_file custom evidence fails closed on a malformed match", async () => {
     }),
   };
   const result = await createToolRegistry({
-    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
   assert.equal(result.structuredContent.coverageStatus, "unknown");
@@ -533,7 +542,7 @@ test("why_file fallback fails closed on a malformed match", async () => {
     whyFileEvidence: undefined,
   };
   const result = await createToolRegistry({
-    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
   assert.equal(result.structuredContent.coverageStatus, "unknown");
@@ -563,6 +572,7 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([hostileCwd]) },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(cwdResult.structuredContent.items, []);
   assert.equal(cwdResult.structuredContent.coverageStatus, "unknown");
@@ -572,6 +582,7 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([known, hostilePath]) },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(mixedResult.structuredContent.items, []);
   assert.equal(mixedResult.structuredContent.coverageStatus, "unknown");
@@ -590,6 +601,7 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([bounded]) },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: longPath }, new AbortController().signal);
   assert.equal((boundedResult.structuredContent.items as unknown[]).length, 1);
   assert.equal(boundedResult.structuredContent.coverageStatus, "complete");
@@ -628,6 +640,7 @@ test("why_file keeps a bounded witness from an over-cap valid file array and dis
       }),
     },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: "src/target.ts" }, new AbortController().signal);
   const item = (result.structuredContent.items as Array<{
     files: Array<{ path: string }>; truncatedFiles: number; complete: boolean; confidence: string; reason: string;
@@ -737,6 +750,7 @@ test("why_file snapshots every custom triple field once before normalization", a
       }),
     },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const result = await registry.call("why_file", { path: "src/snapshot.ts" }, new AbortController().signal);
   assert.equal((result.structuredContent.items as unknown[]).length, 1);
@@ -771,6 +785,7 @@ test("why_file never falls back from malformed custom evidence", async () => {
         whyFileEvidence: () => value as never,
       },
       recallWithAi: disabledRecallWithAi,
+      cards: emptyCards,
     });
     const result = await registry.call("why_file", { path: "src/known.ts" }, new AbortController().signal);
     assert.deepEqual(result.structuredContent.items, []);
@@ -785,6 +800,7 @@ test("why_file never falls back from malformed custom evidence", async () => {
       whyFileEvidence: undefined,
     },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const legacyResult = await legacy.call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.equal((legacyResult.structuredContent.items as unknown[]).length, 1);
@@ -814,6 +830,7 @@ test("why_file does not emit an accessor-swapped agent credential", async () => 
       }),
     },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.equal((result.structuredContent.items as Array<{ agent: string }>)[0]?.agent, "codex");
   assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|\u001b/gu);
@@ -848,6 +865,7 @@ test("why_file fails closed when an untrusted nested snapshot getter throws", as
       }),
     },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const result = await registry.call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
@@ -861,6 +879,7 @@ test("why_file accepts ordinary and Unicode paths at the byte boundary", async (
     exposure: "sanitized",
     memory: createMemoryQueries(() => []),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const signal = new AbortController().signal;
   const unicodeBoundary = "é".repeat(MAX_FIELD_BYTES / 2);
@@ -889,6 +908,7 @@ test("why_file keeps unmatched relative-root paths unknown", async () => {
     exposure: "sanitized",
     memory: createMemoryQueries(() => [known]),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
   assert.equal(result.structuredContent.coverageIncomplete, true);
@@ -918,6 +938,7 @@ test("why_file retains the shared identity-hash witness triple", async () => {
     exposure: "sanitized",
     memory: createMemoryQueries(() => [known]),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: "src/index.ts" }, new AbortController().signal);
   const item = (result.structuredContent.items as Array<{ id: string; files: Array<{ path: string; plusMinus: [number, number] }> }>)[0];
   assert.equal(item?.id, "hashed-witness-mcp");
@@ -942,7 +963,7 @@ test("why_file fallback rejects absolute cross-root legacy suffixes without plat
     whyFileEvidence: undefined,
   };
   const result = await createToolRegistry({
-    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/index.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
   assert.equal(result.structuredContent.coverageIncomplete, true);
@@ -962,11 +983,11 @@ test("why_file sanitizes custom possible IDs while raw remains explicit", async 
     whyFileEvidence: () => evidence,
   };
   const sanitized = await createToolRegistry({
-    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   assert.doesNotMatch(JSON.stringify(sanitized), /user-secret-answer/u);
   const raw = await createToolRegistry({
-    exposure: "raw", memory, recallWithAi: disabledRecallWithAi,
+    exposure: "raw", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   assert.match(JSON.stringify(raw), /user-secret-answer/u);
 });
@@ -1172,6 +1193,7 @@ test("oversized custom rationale tags fail why coverage closed", async () => {
       }),
     },
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
   assert.equal(result.structuredContent.coverageStatus, "unknown");
@@ -1256,6 +1278,7 @@ test("sanitized knowledge projections remove C1 terminal strings and invisible f
     exposure: "sanitized",
     memory: createMemoryQueries(() => [hostileTriple]),
     recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
   });
   const signal = new AbortController().signal;
   const search = await tools.call("search_knowledge", { query: "hostile" }, signal);
@@ -1952,4 +1975,767 @@ test("why_file flags a stated reason the projection had to clip", async () => {
   const [reason] = content.rationales as WhyReason[];
   assert.ok(reason !== undefined && Buffer.byteLength(reason.text, "utf8") <= MAX_FIELD_BYTES);
   assert.equal(content.truncated, true);
+});
+
+interface ProjectedCardBlock {
+  seq: number;
+  path: string;
+  symbol: { kind: string; name: string; container: string | null } | null;
+  labels: Array<{ id: string; args: Record<string, unknown> }>;
+  importance: string;
+  via: "edit" | "bash" | "other";
+  line: number | null;
+  added: number | null;
+  removed: number | null;
+  quote: string | null;
+  bash_cmd: string | null;
+}
+
+interface ProjectedCard {
+  card_id: string;
+  ended_ms: number | null;
+  started_ms: number;
+  repo: string;
+  prompt: string;
+  prompt_kind: { kind: string; name?: string; args?: string };
+  agent_type: string;
+  blocks: ProjectedCardBlock[];
+  more_blocks?: number;
+}
+
+function sampleStoredBlock(seq: number, overrides: Partial<StoredBlock> = {}): StoredBlock {
+  return {
+    seq,
+    path: "src/a.ts",
+    symbol: { kind: "function", name: `fn${seq}`, container: "Svc", exported: true, nth: 2 },
+    labels: [{ id: "symbol_added", args: { kind: "function" } }],
+    importance: "medium",
+    via: "edit",
+    tool_use_ids: ["tu-secret-1"],
+    before: "deadbeef".repeat(5),
+    after: "cafebabe".repeat(5),
+    recorded: true,
+    line: 10 + seq,
+    added: 3,
+    removed: 1,
+    quote: { text: `Reason ${seq}`, shared: false },
+    bash: null,
+    ...overrides,
+  };
+}
+
+function sampleStoredCard(cardId: string, overrides: Partial<StoredCard> = {}): StoredCard {
+  const blocks = overrides.blocks ?? [sampleStoredBlock(1)];
+  return {
+    v: 1,
+    card_id: cardId,
+    rev: 1,
+    repo_id: "repo-1",
+    root: "/tmp/wt-feature",
+    main_root: "C:\\Users\\dev\\work\\rocky\\",
+    branch: "feat/cards",
+    session_id: "sess-1",
+    agent_id: "agent-1",
+    agent_type: "",
+    parent_card_id: null,
+    started_ms: 1_700_000_000_000,
+    ended_ms: 1_700_000_010_000,
+    status: "done",
+    prompt: "Tighten validation on the config loader",
+    prompt_truncated: false,
+    importance: "high",
+    blocks,
+    more_count: 0,
+    flow: [{ kind: "cmd", text: "npm test", ok: true, dur_ms: 100, seqs: [1] }],
+    flow_more: 0,
+    outside_count: 0,
+    coverage: { state: "full", reasons: [] },
+    ...overrides,
+  };
+}
+
+function cardRegistry(
+  cards: (path: string, limit: number) => CardsForFile,
+  exposure: "sanitized" | "raw" = "sanitized",
+  memory: MemoryQueries = createMemoryQueries(() => []),
+) {
+  return createToolRegistry({
+    exposure,
+    memory,
+    recallWithAi: disabledRecallWithAi,
+    cards,
+  });
+}
+
+test("why_file description notes recorded agent change cards, read-only, with no code", () => {
+  const why = registry().list().find((tool) => tool.name === "why_file");
+  assert.ok(why !== undefined);
+  assert.match(why.description, /recorded agent change cards, read-only, with no code/i);
+});
+
+test("why_file returns change cards when present or absent and strips stored code fields", async () => {
+  const signal = new AbortController().signal;
+  const empty = await cardRegistry(
+    () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  ).call("why_file", { path: "src/a.ts" }, signal);
+  assert.equal(empty.isError, undefined);
+  assert.deepEqual(empty.structuredContent.cards, []);
+  assert.deepEqual(empty.structuredContent.cardsCoverage, { complete: true, skipped: 0 });
+  assert.equal(empty.structuredContent.truncated, false);
+
+  const seenCalls: Array<{ path: string; limit: number }> = [];
+  const twelveMatching = Array.from({ length: 12 }, (_, idx) => sampleStoredBlock(idx + 1, {
+    quote: idx === 0 ? { text: "word ".repeat(140), shared: true } : { text: `q-${idx + 1}`, shared: false },
+    ...(idx === 1 ? { via: "bash", bash: { cmd: "git mv old.ts src/a.ts", candidates: 1 }, quote: null } : {}),
+  }));
+  const unrelatedBlock = sampleStoredBlock(99, { path: "src/other.ts" });
+  const cardMain = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    ended_ms: null,
+    prompt: `${"word ".repeat(55)} trailing details`,
+    blocks: [...twelveMatching, unrelatedBlock],
+  });
+  const cardSub = sampleStoredCard("card-sub-2", {
+    main_root: null,
+    root: "/Users/dev/src/alpha-service/",
+    agent_type: "Explore",
+    prompt: "<command-name>/review</command-name><command-args>src/a.ts --strict</command-args>",
+    blocks: [sampleStoredBlock(1, { symbol: null, labels: [{ id: "file_edited" }], line: null, added: null, removed: null, quote: null })],
+  });
+
+  const matched = new Map<string, StoredBlock[]>([
+    [cardMain.card_id, twelveMatching],
+    [cardSub.card_id, cardSub.blocks],
+  ]);
+  const res = await cardRegistry((path, limit) => {
+    seenCalls.push({ path, limit });
+    return {
+      cards: [cardMain, cardSub],
+      matched,
+      coverage: { complete: false, reason: "line-cap", skipped: 2 },
+    };
+  }).call("why_file", { path: "src/a.ts", limit: 3 }, signal);
+
+  assert.deepEqual(seenCalls, [{ path: "src/a.ts", limit: 3 }]);
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(res.structuredContent.cardsCoverage, { complete: false, reason: "line-cap", skipped: 2 });
+  assert.equal(res.structuredContent.truncated, true);
+
+  const cards = res.structuredContent.cards as ProjectedCard[];
+  assert.equal(cards.length, 2);
+
+  const [first, second] = cards;
+  assert.ok(first && second);
+  assert.equal(first.card_id, cardMain.card_id);
+  assert.equal(first.ended_ms, null);
+  assert.equal(first.started_ms, cardMain.started_ms);
+  assert.equal(first.repo, "rocky");
+  assert.equal(first.agent_type, "");
+  assert.deepEqual(first.prompt_kind, { kind: "plain" });
+  assert.equal(Array.from(first.prompt).length, 200);
+  assert.equal(first.blocks.length, 10);
+  assert.equal(first.more_blocks, 2);
+
+  const [b0, b1] = first.blocks;
+  assert.ok(b0 && b1);
+  assert.deepEqual(b0.symbol, { kind: "function", name: "fn1", container: "Svc" });
+  assert.equal("exported" in (b0.symbol as object), false);
+  assert.equal("nth" in (b0.symbol as object), false);
+  assert.equal(b0.via, "edit");
+  assert.equal(b0.bash_cmd, null);
+  assert.equal(Array.from(b0.quote ?? "").length, 500);
+  assert.equal(b1.via, "bash");
+  assert.equal(b1.bash_cmd, "git mv old.ts src/a.ts");
+  assert.equal(b1.quote, null);
+
+  for (const forbidden of ["before", "after", "tool_use_ids", "flow"]) {
+    assert.equal(JSON.stringify(cards).includes(`"${forbidden}"`), false, `must not serialize ${forbidden}`);
+  }
+
+  assert.equal(second.repo, "alpha-service");
+  assert.equal(second.agent_type, "Explore");
+  assert.equal(second.prompt, "/review src/a.ts --strict");
+  assert.deepEqual(second.prompt_kind, { kind: "slash_command", name: "/review", args: "src/a.ts --strict" });
+  assert.equal(second.more_blocks, undefined);
+  assert.equal("more_blocks" in second, false);
+  assert.deepEqual(second.blocks[0]?.labels, [{ id: "file_edited", args: {} }]);
+  assert.equal(second.blocks[0]?.symbol, null);
+  assert.equal(second.blocks[0]?.line, null);
+  assert.equal(second.blocks[0]?.added, null);
+  assert.equal(second.blocks[0]?.removed, null);
+
+  const rawSlash = await cardRegistry(
+    () => ({ cards: [cardSub], matched: new Map([[cardSub.card_id, cardSub.blocks]]), coverage: { complete: true, skipped: 0 } }),
+    "raw",
+  ).call("why_file", { path: "src/a.ts", limit: 3 }, signal);
+  const [rawSecond] = rawSlash.structuredContent.cards as ProjectedCard[];
+  assert.equal(rawSecond?.prompt, "/review src/a.ts --strict");
+  assert.deepEqual(rawSecond?.prompt_kind, { kind: "slash_command", name: "/review", args: "src/a.ts --strict" });
+});
+
+test("why_file passes default limit 5 to cards reader and keeps working with diff enabled", async () => {
+  const calls: number[] = [];
+  const res = await cardRegistry((_path, limit) => {
+    calls.push(limit);
+    return {
+      cards: [sampleStoredCard("card-diff-1")],
+      matched: new Map([["card-diff-1", [sampleStoredBlock(1)]]]),
+      coverage: { complete: true, skipped: 0 },
+    };
+  }).call("why_file", { path: "src/a.ts", diff: true }, new AbortController().signal);
+  assert.deepEqual(calls, [5]);
+  assert.equal(res.isError, undefined);
+  assert.equal((res.structuredContent.cards as ProjectedCard[]).length, 1);
+});
+
+test("why_file projects card strings according to exposure (sanitized vs raw)", async () => {
+  const secret = "sk-LIVEKEY0123456789ABCDEFGHIJKLMNO";
+  const secretCard = sampleStoredCard("card-sec", {
+    main_root: null,
+    root: `/home/zed/work/repo-${secret}`,
+    prompt: `<command-name>/deploy</command-name><command-args>token=${secret}</command-args>`,
+    blocks: [
+      sampleStoredBlock(1, {
+        path: `/home/zed/repo/src/a.ts`,
+        symbol: { kind: "function", name: `use_${secret}`, container: `/home/zed` },
+        labels: [
+          { id: "note", args: { detail: `key=${secret}` } },
+          { id: "config_changed", args: { key: `token_${secret}`, before: `old_${secret}`, after: `new_${secret}` } },
+        ],
+        via: "bash",
+        bash: { cmd: `curl -H "Authorization: Bearer ${secret}" https://x.example`, candidates: 1 },
+        quote: { text: `rotate ${secret} at /home/zed/app`, shared: true },
+      }),
+    ],
+  });
+  const provider = (): CardsForFile => ({
+    cards: [secretCard],
+    matched: new Map([[secretCard.card_id, secretCard.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  const sanitized = (await cardRegistry(provider, "sanitized").call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.doesNotMatch(JSON.stringify(sanitized.cards), /sk-LIVEKEY|\/home\/zed/u);
+  const [sCard] = sanitized.cards as ProjectedCard[];
+  assert.ok(sCard?.blocks[0]?.quote?.includes("[redacted]"));
+  assert.ok(sCard?.blocks[0]?.bash_cmd?.includes("[redacted]"));
+  assert.deepEqual(sCard?.blocks[0]?.labels, [
+    { id: "note", args: {} },
+    { id: "config_changed", args: { key: "[redacted]" } },
+  ]);
+
+  const raw = (await cardRegistry(provider, "raw").call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  const [rCard] = raw.cards as ProjectedCard[];
+  assert.ok(rCard?.blocks[0]?.quote?.includes(secret));
+  assert.ok(rCard?.blocks[0]?.bash_cmd?.includes(secret));
+  assert.deepEqual(rCard?.blocks[0]?.labels, [
+    { id: "note", args: {} },
+    { id: "config_changed", args: { key: `token_${secret}` } },
+  ]);
+});
+
+test("why_file preserves 32-hex card_id and redacts other opaque card_id strings under sanitized exposure", async () => {
+  const hex32 = "4e5e1a6d22cea72d7a8b3985c9c27fcf";
+  const mixed41 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDE";
+  const upper32 = "4E5E1A6D22CEA72D7A8B3985C9C27FCF";
+  const uuid36 = "550e8400-e29b-41d4-a716-446655440000";
+  const cards = [
+    sampleStoredCard(hex32),
+    sampleStoredCard(mixed41),
+    sampleStoredCard(upper32),
+    sampleStoredCard(uuid36),
+  ];
+  const provider = (): CardsForFile => ({
+    cards,
+    matched: new Map(cards.map((card) => [card.card_id, card.blocks])),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  const sanitized = (await cardRegistry(provider, "sanitized").call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal)).structuredContent;
+  assert.deepEqual((sanitized.cards as ProjectedCard[]).map((c) => c.card_id), [
+    hex32,
+    "[redacted]",
+    "[redacted]",
+    "[redacted]",
+  ]);
+
+  const raw = (await cardRegistry(provider, "raw").call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal)).structuredContent;
+  assert.deepEqual((raw.cards as ProjectedCard[]).map((c) => c.card_id), [
+    hex32,
+    mixed41,
+    upper32,
+    uuid36,
+  ]);
+});
+
+test("why_file sets truncated when card prompt or quote exceeds character limit below 16 KiB", async () => {
+  const promptClipped = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    prompt: `${"w ".repeat(112)}z`,
+    blocks: [sampleStoredBlock(1, { quote: { text: "short quote", shared: false } })],
+  });
+  const promptRes = (await cardRegistry(() => ({
+    cards: [promptClipped],
+    matched: new Map([[promptClipped.card_id, promptClipped.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.equal(Array.from((promptRes.cards as ProjectedCard[])[0]?.prompt ?? "").length, 200);
+  assert.equal(promptRes.truncated, true);
+
+  const quoteClipped = sampleStoredCard("97394ac43381e6ac7a3b66cb264cd2b9", {
+    prompt: "short prompt",
+    blocks: [sampleStoredBlock(1, { quote: { text: `${"w ".repeat(299)}zz`, shared: false } })],
+  });
+  const quoteRes = (await cardRegistry(() => ({
+    cards: [quoteClipped],
+    matched: new Map([[quoteClipped.card_id, quoteClipped.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.equal(Array.from((quoteRes.cards as ProjectedCard[])[0]?.blocks[0]?.quote ?? "").length, 500);
+  assert.equal(quoteRes.truncated, true);
+
+  const exactBounds = sampleStoredCard("085fd43e5e4c84caf8d98e99af9d6ff2", {
+    prompt: "🙂".repeat(200),
+    blocks: [sampleStoredBlock(1, { quote: { text: "🙂".repeat(500), shared: false } })],
+  });
+  const exactRes = (await cardRegistry(() => ({
+    cards: [exactBounds],
+    matched: new Map([[exactBounds.card_id, exactBounds.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts" }, new AbortController().signal)).structuredContent;
+  assert.equal(Array.from((exactRes.cards as ProjectedCard[])[0]?.prompt ?? "").length, 200);
+  assert.equal(Array.from((exactRes.cards as ProjectedCard[])[0]?.blocks[0]?.quote ?? "").length, 500);
+  assert.equal(exactRes.truncated, false);
+});
+
+test("why_file handles cards reader failure without failing tool or altering existing fields", async () => {
+  const reason = statedReason("keep-1", Date.now() - 1_000, "retry limit stays three", ["src/a.ts"]);
+  const content = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
+    const res = await cardRegistry(() => {
+      throw new Error("cards store unreadable");
+    }, "sanitized", memory).call("why_file", { path: "src/a.ts" }, new AbortController().signal);
+    assert.equal(res.isError, undefined);
+    return res.structuredContent;
+  });
+
+  assert.deepEqual(content.cards, []);
+  assert.deepEqual(content.cardsCoverage, { complete: false, skipped: 0 });
+  assert.equal((content.rationales as WhyReason[]).length, 1);
+  assert.equal(content.truncated, false);
+});
+
+test("why_file drops oldest change cards first when response size cap is exceeded and preserves existing evidence", async () => {
+  const existingItem: TripleRecord = {
+    ...triple,
+    id: "existing-item-1",
+    ts: 1_700_000_000_000,
+    cwd: "/repo",
+    platform: "linux",
+    mechanism: {
+      files: [{ path: "src/a.ts", plusMinus: [2, 1], props: ["retry-cap"], provenance: "tool-observed" }],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+  const memoryWithItem = createMemoryQueries(() => [existingItem]);
+  const bigCmd = `node script.mjs ${"arg ".repeat(3_500)}`;
+  const cards = Array.from({ length: 10 }, (_, idx) => sampleStoredCard(`card-${idx}`, {
+    started_ms: 1_700_000_100_000 - idx * 1_000,
+    ended_ms: 1_700_000_110_000 - idx * 1_000,
+    blocks: Array.from({ length: 10 }, (__, seq) => sampleStoredBlock(seq + 1, {
+      via: "bash",
+      bash: { cmd: bigCmd, candidates: 1 },
+      quote: null,
+    })),
+  }));
+  const matched = new Map(cards.map((card) => [card.card_id, card.blocks]));
+
+  const res = await cardRegistry(() => ({
+    cards,
+    matched,
+    coverage: { complete: true, skipped: 0 },
+  }), "sanitized", memoryWithItem).call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal);
+
+  assert.equal(res.isError, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(res), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+  const keptItems = res.structuredContent.items as Array<{ id: string }>;
+  assert.equal(keptItems.length, 1);
+  assert.equal(keptItems[0]?.id, "existing-item-1");
+  const kept = res.structuredContent.cards as ProjectedCard[];
+  assert.ok(kept.length > 0 && kept.length < 10);
+  assert.deepEqual(kept.map((c) => c.card_id), cards.slice(0, kept.length).map((c) => c.card_id));
+  assert.equal(res.structuredContent.truncated, true);
+
+  // Even when a single oversized card would exceed the cap alongside large existing evidence,
+  // all cards drop before existing items or possible evidence are evicted.
+  const largeProps = Array.from({ length: 4 }, (_, idx) => `${idx}-${"p ".repeat(7_000).trim()}`);
+  const largeExistingItem: TripleRecord = {
+    ...existingItem,
+    id: "existing-large-item",
+    mechanism: {
+      files: [
+        { path: "src/a.ts", plusMinus: [2, 1], props: largeProps, provenance: "tool-observed" },
+        { path: "src/b.ts", plusMinus: [1, 0], props: largeProps, provenance: "tool-observed" },
+        { path: "src/c.ts", plusMinus: [1, 0], props: largeProps, provenance: "tool-observed" },
+      ],
+      truncatedFiles: 0,
+      baseline: "captured",
+      coverageStatus: "complete",
+    },
+  };
+  const oneHugeCard = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    blocks: Array.from({ length: 10 }, (_, seq) => sampleStoredBlock(seq + 1, {
+      via: "bash",
+      bash: { cmd: bigCmd, candidates: 1 },
+      quote: null,
+    })),
+  });
+  const heavyMemory: MemoryQueries = {
+    ...createMemoryQueries(() => [largeExistingItem]),
+    whyFileEvidence: () => ({
+      matches: [largeExistingItem],
+      possible: [{ id: "possible-keep-1", ts: 10, source: "agent-hook", reason: "path_may_be_omitted" }],
+      coverage: { status: "complete", complete: true, filesCovered: 1, truncatedFiles: 0 },
+      coverageIncomplete: false,
+    }),
+  };
+  const dropAllCardsRes = await cardRegistry(() => ({
+    cards: [oneHugeCard],
+    matched: new Map([[oneHugeCard.card_id, oneHugeCard.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  }), "sanitized", heavyMemory).call("why_file", { path: "src/a.ts", limit: 10 }, new AbortController().signal);
+
+  assert.equal(dropAllCardsRes.isError, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(dropAllCardsRes), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
+  assert.equal((dropAllCardsRes.structuredContent.cards as ProjectedCard[]).length, 0);
+  assert.equal((dropAllCardsRes.structuredContent.items as Array<{ id: string }>).length, 1);
+  assert.equal((dropAllCardsRes.structuredContent.possible as Array<{ id: string }>).length, 1);
+  assert.equal(dropAllCardsRes.structuredContent.truncated, true);
+});
+
+test("why_file reads change cards end-to-end through default reader under temp ROCKY_HOME and repo", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-mcp-cards-e2e-home-"));
+  const rawRepo = mkdtempSync(join(tmpdir(), "rocky-mcp-cards-e2e-repo-"));
+  const prevHome = process.env.ROCKY_HOME;
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(rawRepo, ".git"), { recursive: true });
+    mkdirSync(join(rawRepo, "src"), { recursive: true });
+    const repo = realpathSync(rawRepo);
+    process.env.ROCKY_HOME = home;
+    process.chdir(repo);
+
+    const cardsPath = cardsFilePath(canonicalPath(repo), home);
+    mkdirSync(dirname(cardsPath), { recursive: true });
+
+    const rev1 = sampleStoredCard("e2e-card-new", {
+      rev: 1,
+      root: repo,
+      main_root: null,
+      ended_ms: 2_000_000,
+      started_ms: 1_999_000,
+      prompt: "Draft change",
+      blocks: [sampleStoredBlock(1, { path: "src/target.ts" })],
+    });
+    const rev2 = sampleStoredCard("e2e-card-new", {
+      rev: 2,
+      root: repo,
+      main_root: null,
+      ended_ms: 2_000_000,
+      started_ms: 1_999_000,
+      prompt: "Refine timeout guard in src/target.ts",
+      blocks: [
+        sampleStoredBlock(1, { path: "src/target.ts", quote: { text: "Guard prevents hanging socket", shared: true } }),
+        sampleStoredBlock(2, { path: "src/unrelated.ts", quote: { text: "Should not appear", shared: true } }),
+      ],
+    });
+    const older = sampleStoredCard("e2e-card-old", {
+      rev: 1,
+      root: repo,
+      main_root: null,
+      ended_ms: 1_000_000,
+      started_ms: 999_000,
+      prompt: "Initial scaffold",
+      blocks: [sampleStoredBlock(1, { path: "src/target.ts", symbol: null, quote: null })],
+    });
+
+    writeFileSync(cardsPath, `${[rev1, older, rev2].map((c) => JSON.stringify(c)).join("\n")}\n`, "utf8");
+
+    const memoryPath = resolveRockyPaths({ ROCKY_HOME: home }).memory;
+    writeFileSync(memoryPath, "", "utf8");
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory: createMemoryQueries(),
+      recallWithAi: disabledRecallWithAi,
+    });
+    const res = await reg.call("why_file", { path: "src/target.ts", limit: 5 }, new AbortController().signal);
+    assert.equal(res.isError, undefined);
+    assert.deepEqual(res.structuredContent.cardsCoverage, { complete: true, skipped: 0 });
+    const cards = res.structuredContent.cards as ProjectedCard[];
+    assert.equal(cards.length, 2);
+    assert.equal(cards[0]?.card_id, "e2e-card-new");
+    assert.equal(cards[0]?.prompt, "Refine timeout guard in src/target.ts");
+    assert.equal(cards[0]?.blocks.length, 1);
+    assert.equal(cards[0]?.blocks[0]?.quote, "Guard prevents hanging socket");
+    assert.equal(cards[1]?.card_id, "e2e-card-old");
+  } finally {
+    process.chdir(prevCwd);
+    if (prevHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(rawRepo, { recursive: true, force: true });
+  }
+});
+
+test("registry helper isolates why_file from ambient ROCKY_HOME desk change cards", async () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-mcp-iso-home-")));
+  const nonRepo = realpathSync(mkdtempSync(join(tmpdir(), "rocky-mcp-iso-dir-")));
+  const target = join(nonRepo, "isolated.ts");
+  const prevHome = process.env.ROCKY_HOME;
+  try {
+    mkdirSync(join(home, "desk", "cards"), { recursive: true });
+    writeFileSync(
+      join(home, "desk", "cards", "_none.jsonl"),
+      `${JSON.stringify({
+        v: 1,
+        card_id: "isolated-mcp-card",
+        rev: 1,
+        root: nonRepo,
+        main_root: null,
+        started_ms: 1000,
+        ended_ms: 2000,
+        prompt: "Leaked card from ambient ROCKY_HOME",
+        blocks: [{ seq: 1, path: target, symbol: null, labels: [{ id: "file_edited" }], importance: "normal", via: "edit", line: 1, added: 1, removed: 0, quote: null }],
+      })}\n`,
+      "utf8",
+    );
+    process.env.ROCKY_HOME = home;
+    const res = await registry().call("why_file", { path: target }, new AbortController().signal);
+    assert.deepEqual(res.structuredContent.cards, []);
+    assert.deepEqual(res.structuredContent.cardsCoverage, { complete: true, skipped: 0 });
+  } finally {
+    if (prevHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(nonRepo, { recursive: true, force: true });
+  }
+});
+
+test("why_file drops literal before/after/version and un-allowlisted label args under both sanitized and raw exposure", async () => {
+  const signal = new AbortController().signal;
+  const labels = [
+    { id: "config_changed", args: { key: "db.password", before: "hunter2-secret-value", after: "correct-horse-battery" } },
+    { id: "value_changed", args: { name: "RETRY_LIMIT", before: "old_val_pw", after: "new_val_pw" } },
+    { id: "dep_version", args: { name: "lodash", before: "4.17.20-secret", after: "4.17.21-secret" } },
+    { id: "dep_added", args: { name: "zod", version: "3.23.0-private" } },
+    { id: "dep_removed", args: { name: "leftpad", extra: "drop" } },
+    { id: "params_changed", args: { added: 1, removed: 0, changed: 2, before: "drop", bad: -1, frac: 1.5 } },
+    { id: "await_changed", args: { added: 2, removed: 1, after: "drop" } },
+    { id: "rewrite", args: { pct: 75, after: "drop" } },
+    { id: "lines_changed", args: { added: 10, removed: 3, version: "drop" } },
+    { id: "symbol_renamed", args: { from: "/Users/alice/oldName", extra: "drop" } },
+    { id: "file_renamed", args: { from: "src/old.ts", before: "drop" } },
+    { id: "call_added", args: { name: "fetchUser", before: "drop" } },
+    { id: "call_removed", args: { name: "legacyCall", after: "drop" } },
+    { id: "import_added", args: { module: "node:fs", version: "drop" } },
+    { id: "import_removed", args: { module: "./legacy", before: "drop" } },
+    { id: "test_added", args: { name: "handles empty list" } },
+    { id: "test_removed", args: { name: "obsolete test" } },
+    { id: "test_skipped", args: { name: "flaky test" } },
+    { id: "test_only", args: { name: "focused test" } },
+    { id: "symbol_added", args: { kind: "function", secret: "drop" } },
+    { id: "unknown_future_label", args: { before: "p1", after: "p2", version: "1.0", foo: "bar" } },
+  ];
+  const card = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    prompt: "Update config and deps",
+    blocks: [sampleStoredBlock(1, { labels, quote: null })],
+  });
+  const provider = (): CardsForFile => ({
+    cards: [card],
+    matched: new Map([[card.card_id, card.blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const res = (await cardRegistry(provider, exposure).call("why_file", { path: "src/a.ts" }, signal)).structuredContent;
+    assert.equal(res.truncated, false, `exposure=${exposure} dropping disallowed args must not set truncated`);
+    const [projCard] = res.cards as ProjectedCard[];
+    const serialized = JSON.stringify(projCard?.blocks[0]?.labels);
+    for (const forbidden of [
+      "\"before\"",
+      "\"after\"",
+      "\"version\"",
+      "hunter2-secret-value",
+      "correct-horse-battery",
+      "old_val_pw",
+      "new_val_pw",
+      "4.17.20-secret",
+      "4.17.21-secret",
+      "3.23.0-private",
+      "\"extra\"",
+      "\"drop\"",
+      "\"bad\"",
+      "\"frac\"",
+      "\"kind\"",
+      "\"foo\"",
+      "\"bar\"",
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, `exposure=${exposure} must not include ${forbidden}`);
+    }
+    assert.deepEqual(projCard?.blocks[0]?.labels, [
+      { id: "config_changed", args: { key: "db.password" } },
+      { id: "value_changed", args: { name: "RETRY_LIMIT" } },
+      { id: "dep_version", args: { name: "lodash" } },
+      { id: "dep_added", args: { name: "zod" } },
+      { id: "dep_removed", args: { name: "leftpad" } },
+      { id: "params_changed", args: { added: 1, removed: 0, changed: 2 } },
+      { id: "await_changed", args: { added: 2, removed: 1 } },
+      { id: "rewrite", args: { pct: 75 } },
+      { id: "lines_changed", args: { added: 10, removed: 3 } },
+      { id: "symbol_renamed", args: { from: exposure === "sanitized" ? "[redacted]" : "/Users/alice/oldName" } },
+      { id: "file_renamed", args: { from: "src/old.ts" } },
+      { id: "call_added", args: { name: "fetchUser" } },
+      { id: "call_removed", args: { name: "legacyCall" } },
+      { id: "import_added", args: { module: "node:fs" } },
+      { id: "import_removed", args: { module: exposure === "sanitized" ? ".[redacted]" : "./legacy" } },
+      { id: "test_added", args: { name: "handles empty list" } },
+      { id: "test_removed", args: { name: "obsolete test" } },
+      { id: "test_skipped", args: { name: "flaky test" } },
+      { id: "test_only", args: { name: "focused test" } },
+      { id: "symbol_added", args: {} },
+      { id: "unknown_future_label", args: {} },
+    ]);
+  }
+});
+
+test("why_file sets truncated and more_blocks when matching blocks exceed 10 even with short prompt and no quote", async () => {
+  const signal = new AbortController().signal;
+  const fourteen = Array.from({ length: 14 }, (_, idx) => sampleStoredBlock(idx + 1, {
+    labels: [{ id: "file_edited", args: {} }],
+    quote: null,
+  }));
+  const card14 = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    prompt: "short",
+    blocks: fourteen,
+  });
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const res = (await cardRegistry(() => ({
+      cards: [card14],
+      matched: new Map([[card14.card_id, fourteen]]),
+      coverage: { complete: true, skipped: 0 },
+    }), exposure).call("why_file", { path: "src/a.ts" }, signal)).structuredContent;
+    assert.equal(res.truncated, true, `exposure=${exposure} must set truncated=true on >10 blocks`);
+    const [proj] = res.cards as ProjectedCard[];
+    assert.equal(proj?.blocks.length, 10);
+    assert.equal(proj?.more_blocks, 4);
+  }
+
+  const tenPlusBad = [
+    ...Array.from({ length: 10 }, (_, idx) => sampleStoredBlock(idx + 1, {
+      labels: [{ id: "file_edited", args: {} }],
+      quote: null,
+    })),
+    { bad: true } as unknown as StoredBlock,
+  ];
+  const card10 = sampleStoredCard("97394ac43381e6ac7a3b66cb264cd2b9", {
+    prompt: "short",
+    blocks: tenPlusBad,
+  });
+  const res10 = (await cardRegistry(() => ({
+    cards: [card10],
+    matched: new Map([[card10.card_id, tenPlusBad]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("why_file", { path: "src/a.ts" }, signal)).structuredContent;
+  assert.equal(res10.truncated, false);
+  const [proj10] = res10.cards as ProjectedCard[];
+  assert.ok(proj10);
+  assert.equal(proj10.blocks.length, 10);
+  assert.equal(proj10.more_blocks, undefined);
+  assert.equal("more_blocks" in proj10, false);
+});
+
+test("why_file preserves valid slash command names under sanitized exposure while sanitizing args and invalid names", async () => {
+  const signal = new AbortController().signal;
+  const secret = "sk-LIVEKEY0123456789ABCDEFGHIJKLMNO";
+  const maxValid = `/${"a".repeat(64)}`;
+  const tooLong = `/${"b".repeat(65)}`;
+  const cards = [
+    sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+      started_ms: 5_000,
+      ended_ms: 5_100,
+      prompt: `<command-name>/gsd:plan_1.2-ok</command-name><command-args>/Users/dev/secret token=${secret}</command-args>`,
+    }),
+    sampleStoredCard("97394ac43381e6ac7a3b66cb264cd2b9", {
+      started_ms: 4_000,
+      ended_ms: 4_100,
+      prompt: `<command-name>/compact</command-name>`,
+    }),
+    sampleStoredCard("085fd43e5e4c84caf8d98e99af9d6ff2", {
+      started_ms: 3_000,
+      ended_ms: 3_100,
+      prompt: `<command-name>${maxValid}</command-name><command-args>ok</command-args>`,
+    }),
+    sampleStoredCard("11111111111111111111111111111111", {
+      started_ms: 2_500,
+      ended_ms: 2_600,
+      prompt: `<command-name>${tooLong}</command-name><command-args>ok</command-args>`,
+    }),
+    sampleStoredCard("22222222222222222222222222222222", {
+      started_ms: 2_000,
+      ended_ms: 2_100,
+      prompt: `<command-name>/bad cmd?x=1\u001b[31m</command-name><command-args>ok</command-args>`,
+    }),
+    sampleStoredCard("33333333333333333333333333333333", {
+      started_ms: 1_500,
+      ended_ms: 1_600,
+      prompt: `<command-name>/Users/alice/secret</command-name><command-args>ok</command-args>`,
+    }),
+  ];
+  const matched = new Map(cards.map((card) => [card.card_id, card.blocks]));
+  const res = (await cardRegistry(() => ({
+    cards,
+    matched,
+    coverage: { complete: true, skipped: 0 },
+  }), "sanitized").call("why_file", { path: "src/a.ts", limit: 10 }, signal)).structuredContent;
+
+  const proj = res.cards as ProjectedCard[];
+  assert.equal(proj.length, 6);
+
+  assert.equal(proj[0]?.prompt, "/gsd:plan_1.2-ok [redacted] [redacted]");
+  assert.deepEqual(proj[0]?.prompt_kind, {
+    kind: "slash_command",
+    name: "/gsd:plan_1.2-ok",
+    args: "[redacted] [redacted]",
+  });
+
+  assert.equal(proj[1]?.prompt, "/compact");
+  assert.deepEqual(proj[1]?.prompt_kind, { kind: "slash_command", name: "/compact", args: "" });
+
+  assert.equal(proj[2]?.prompt, `${maxValid} ok`);
+  assert.deepEqual(proj[2]?.prompt_kind, { kind: "slash_command", name: maxValid, args: "ok" });
+
+  assert.equal(proj[3]?.prompt, "[redacted] ok");
+  assert.deepEqual(proj[3]?.prompt_kind, { kind: "slash_command", name: "[redacted]", args: "ok" });
+
+  assert.equal(/\/bad|\u001b/u.test(JSON.stringify(proj[4])), false);
+  assert.equal(proj[4]?.prompt, "[redacted] cmd?x=1 ok");
+  assert.deepEqual(proj[4]?.prompt_kind, { kind: "slash_command", name: "[redacted] cmd?x=1", args: "ok" });
+
+  assert.equal(proj[5]?.prompt, "[redacted] ok");
+  assert.deepEqual(proj[5]?.prompt_kind, { kind: "slash_command", name: "[redacted]", args: "ok" });
+});
+
+test("why_file maps unknown string block via values to other under both exposures", async () => {
+  const signal = new AbortController().signal;
+  const card = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    blocks: [sampleStoredBlock(1, { via: "python" as unknown as "edit", labels: [{ id: "file_edited", args: {} }], quote: null })],
+  });
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const res = (await cardRegistry(() => ({
+      cards: [card],
+      matched: new Map([[card.card_id, card.blocks]]),
+      coverage: { complete: true, skipped: 0 },
+    }), exposure).call("why_file", { path: "src/a.ts" }, signal)).structuredContent;
+    const [proj] = res.cards as ProjectedCard[];
+    assert.equal(proj?.blocks[0]?.via, "other");
+  }
 });

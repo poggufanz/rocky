@@ -193,7 +193,12 @@ test("why labels source of every rationale record linked to a matched triple", (
     makeRationale("r-unlinked", "human", "excerpt-unlinked", "some-other-triple"),
   ];
   const sayLines: string[] = [];
-  assert.equal(why([path], { load: () => memory, say: (line) => sayLines.push(line), now }), 0);
+  assert.equal(why([path], {
+    load: () => memory,
+    say: (line) => sayLines.push(line),
+    now,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  }), 0);
   assert.ok(sayLines.includes("Captured from thinking: excerpt-think"));
   assert.ok(sayLines.includes("Agent said in reply: excerpt-reply"));
   assert.ok(sayLines.includes("Agent said: excerpt-notify"));
@@ -214,20 +219,26 @@ test("why with no linked rationale prints exactly what it printed before this fe
     },
   };
   const sayLines: string[] = [];
-  assert.equal(why([path], { load: () => [triple], say: (line) => sayLines.push(line), now }), 0);
+  assert.equal(why([path], {
+    load: () => [triple],
+    say: (line) => sayLines.push(line),
+    now,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  }), 0);
   assert.deepEqual(sayLines, ["Change recorded. No reason recorded for this change."]);
 });
 
 type Sink = (line: string) => void;
 
 /** Both sinks into one list, so a test can pin which line comes before which. */
-function orderedSinks(): { lines: string[]; deps: { say: Sink; out: Sink } } {
+function orderedSinks() {
   const lines: string[] = [];
   return {
     lines,
     deps: {
-      say: (line) => { lines.push(`say: ${line}`); },
-      out: (line) => { lines.push(`out: ${line}`); },
+      say: (line: string) => { lines.push(`say: ${line}`); },
+      out: (line: string) => { lines.push(`out: ${line}`); },
+      cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
     },
   };
 }
@@ -388,7 +399,13 @@ test("why <file> shows at most five stated reasons, newest first", () => {
     statedReason({ id: `r${index}`, ts: now - (index + 1) * 60_000, files: ["src/net.ts"] }));
   const said: string[] = [];
 
-  assert.equal(why(["src/net.ts"], { load: () => records, now, say: (line) => said.push(line), out: () => undefined }), 0);
+  assert.equal(why(["src/net.ts"], {
+    load: () => records,
+    now,
+    say: (line) => said.push(line),
+    out: () => undefined,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  }), 0);
 
   assert.deepEqual(said, ["r0", "r1", "r2", "r3", "r4"].map((id) => `You said: reason ${id}`));
 });
@@ -402,7 +419,11 @@ test("why <file> keeps a hostile stated reason bounded, terminal-safe, and quest
   const output = { said: [] as string[], detail: [] as string[] };
 
   assert.equal(why(["src/net.ts"], {
-    load: () => [hostile], now, say: (line) => output.said.push(line), out: (line) => output.detail.push(line),
+    load: () => [hostile],
+    now,
+    say: (line) => output.said.push(line),
+    out: (line) => output.detail.push(line),
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   }), 0);
 
   assert.equal(output.said.length, 1);

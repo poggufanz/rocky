@@ -1,17 +1,19 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { parseClaudeHookPayload } from "../agent/adapters/claude-code.js";
 import { parseCodexHookPayload } from "../agent/adapters/codex.js";
 import { annotateBatch } from "../agent/annotate.js";
 import { boundTripleMechanism, boundTripleRecord, canonicalPath, type MemoryRecord, type TripleRecord } from "../core/memory-read.js";
-import { whyFileEvidence, type KnowledgeSearchHit, type MemoryQueries, type WhyFileEvidence } from "../core/memory-query.js";
+import { createMemoryQueries, whyFileEvidence, type KnowledgeSearchHit, type MemoryQueries, type WhyFileEvidence } from "../core/memory-query.js";
+import type { CardsForFile, StoredCard } from "../desk/cards-read.js";
+import { cardsFilePath } from "../listening/cards-path.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { agentEvent } from "../commands/agent-hook.js";
 import { createToolRegistry } from "../mcp/tools.js";
-import { projectKnowledgeHits } from "../mcp/privacy.js";
+import { MAX_FIELD_BYTES, projectKnowledgeHits } from "../mcp/privacy.js";
 import { appendEvent, readBatch } from "../agent/spool.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 
@@ -77,6 +79,7 @@ test("MCP why_file bounds and validates hostile possible evidence without throwi
     exposure: "sanitized",
     memory: memoryWith({ whyFileEvidence: () => evidence }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/maybe.ts", limit: 10 }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -97,6 +100,7 @@ test("MCP why_file possible evidence forces conservative coverage", async () => 
       coverageIncomplete: false,
     }) }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/maybe.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -123,6 +127,7 @@ test("MCP why_file bounds hostile custom matches before response projection", as
       coverageIncomplete: true,
     }) }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/legacy.ts", limit: 1 }, new AbortController().signal);
   assert.equal((result.structuredContent.items as unknown[]).length, 1);
@@ -134,6 +139,7 @@ test("legacy custom MemoryQueries keep missing triple coverage conservatively un
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [legacyTriple()] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/legacy.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -164,6 +170,7 @@ test("MCP legacy why fallback preserves origin-platform path identity", async ()
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [record] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "C:/work/src/foo.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -185,6 +192,7 @@ test("MCP legacy why fallback discloses missing-platform coverage conservatively
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [record] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -214,6 +222,7 @@ test("MCP custom why evidence cannot associate an unrelated match", async () => 
       }),
     }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -236,6 +245,7 @@ test("MCP legacy why fallback refuses ambiguous suffix rationale", async () => {
       suffix("two", "two/src/missing.ts"),
     ] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   const payload = result.structuredContent as Record<string, unknown>;
@@ -500,4 +510,268 @@ test("annotate merges absolute and relative spellings of one turn file before th
   } finally {
     rmSync(paths.home, { recursive: true, force: true });
   }
+});
+
+test("MCP why_file sanitizes control chars and oversized values in every card string field", async () => {
+  const evil = "\u001b[31mred\u0000\u0007\u0085\u202e\u200b";
+  const huge = "é".repeat(MAX_FIELD_BYTES + 100);
+  const block1 = {
+    seq: 1,
+    path: `src/${evil}target.ts/${huge}`,
+    symbol: {
+      kind: `fn${evil}${huge}`,
+      name: `handle${evil}${huge}`,
+      container: `Svc${evil}${huge}`,
+      exported: true,
+      nth: 9,
+    },
+    labels: [{ id: `lbl${evil}${huge}`, args: { reason: `why${evil}${huge}` } }],
+    importance: `high${evil}${huge}`,
+    via: "bash" as const,
+    line: 42,
+    added: 5,
+    removed: 2,
+    quote: { text: `quote${evil}${huge}`, shared: false },
+    bash: { cmd: `echo ${evil}${huge}`, candidates: 1 },
+  };
+  const card: StoredCard = {
+    v: 1,
+    card_id: `card-${evil}${huge}`,
+    rev: 1,
+    root: `/tmp/wt/${evil}${huge}`,
+    main_root: null,
+    agent_type: `agent${evil}${huge}`,
+    started_ms: 1000,
+    ended_ms: 2000,
+    prompt: `<command-name>/cmd${evil}${huge}</command-name><command-args>arg${evil}${huge}</command-args>`,
+    blocks: [block1],
+  };
+  const controlCard: StoredCard = {
+    v: 1,
+    card_id: "card-ctrl",
+    rev: 1,
+    root: `/tmp/wt/repo-${evil}`,
+    main_root: null,
+    agent_type: `sub-${evil}`,
+    started_ms: 1000,
+    ended_ms: 2000,
+    prompt: `<command-name>/cmd-${evil}</command-name><command-args>arg-${evil}</command-args>`,
+    blocks: [{
+      seq: 2,
+      path: `src/${evil}clean.ts`,
+      symbol: { kind: `fn-${evil}`, name: `go-${evil}`, container: `Box-${evil}` },
+      labels: [{ id: `tag-${evil}`, args: { msg: `detail-${evil}` } }],
+      importance: `medium-${evil}`,
+      via: "bash",
+      line: 1,
+      added: 1,
+      removed: 0,
+      quote: { text: `said-${evil}`, shared: true },
+      bash: { cmd: `run-${evil}`, candidates: 1 },
+    }],
+  };
+
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: memoryWith({}),
+    recallWithAi: disabledRecallWithAi,
+    cards: (): CardsForFile => ({
+      cards: [card, controlCard],
+      matched: new Map([[card.card_id, card.blocks], [controlCard.card_id, controlCard.blocks]]),
+      coverage: { complete: true, skipped: 0 },
+    }),
+  });
+
+  const result = await registry.call("why_file", { path: "src/clean.ts" }, new AbortController().signal);
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { cards: Array<Record<string, unknown>>; truncated: boolean };
+  assert.equal(payload.truncated, true);
+  assert.equal(payload.cards.length, 2);
+  const serialized = JSON.stringify(payload.cards);
+  assert.equal(/[\u0000-\u001f\u007f-\u009f\u200b\u202e]/u.test(serialized), false, "no control/bidi chars may survive");
+
+  const [oversizedProj, ctrlProj] = payload.cards;
+  assert.ok(oversizedProj && ctrlProj);
+  for (const textField of [
+    oversizedProj.card_id,
+    oversizedProj.repo,
+    oversizedProj.prompt,
+    oversizedProj.agent_type,
+  ]) {
+    assert.equal(typeof textField, "string");
+    assert.ok(Buffer.byteLength(textField as string, "utf8") <= MAX_FIELD_BYTES);
+  }
+  assert.ok(Array.from(String(oversizedProj.prompt)).length <= 200);
+  const [b] = (oversizedProj.blocks as Array<Record<string, unknown>>);
+  assert.ok(b !== undefined);
+  assert.ok(Array.from(String(b.quote)).length <= 500);
+  assert.ok(Buffer.byteLength(String(b.bash_cmd), "utf8") <= MAX_FIELD_BYTES);
+  assert.ok(Buffer.byteLength(String(b.path), "utf8") <= MAX_FIELD_BYTES);
+  assert.ok(ctrlProj.repo && !String(ctrlProj.repo).includes("\u001b"));
+});
+
+test("MCP why_file skips forged card file lines with wrong types and handles hostile getters", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rocky-mcp-forged-cards-home-"));
+  const rawRepo = mkdtempSync(join(tmpdir(), "rocky-mcp-forged-cards-repo-"));
+  const prevHome = process.env.ROCKY_HOME;
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(rawRepo, ".git"), { recursive: true });
+    mkdirSync(join(rawRepo, "src"), { recursive: true });
+    const repo = realpathSync(rawRepo);
+    process.env.ROCKY_HOME = home;
+    process.chdir(repo);
+
+    const cardsPath = cardsFilePath(canonicalPath(repo), home);
+    mkdirSync(dirname(cardsPath), { recursive: true });
+    const valid = {
+      v: 1,
+      card_id: "good-card",
+      rev: 1,
+      root: repo,
+      main_root: null,
+      started_ms: 1000,
+      ended_ms: 2000,
+      prompt: "Valid card alongside forged lines",
+      blocks: [{
+        seq: 1,
+        path: "src/app.ts",
+        symbol: null,
+        labels: [{ id: "file_edited" }],
+        importance: "normal",
+        via: "edit",
+        line: 3,
+        added: 1,
+        removed: 0,
+        quote: { text: "Kept valid card", shared: true },
+      }],
+    };
+    const forgedLines = [
+      "{not-json",
+      JSON.stringify({ ...valid, card_id: "bad-v", v: 99 }),
+      JSON.stringify({ ...valid, card_id: "bad-started", started_ms: "1000" }),
+      JSON.stringify({ ...valid, card_id: "bad-blocks", blocks: "nope" }),
+      JSON.stringify({
+        ...valid,
+        card_id: "bad-block-fields",
+        blocks: [{ seq: 1, path: "src/app.ts", labels: [], importance: "normal", quote: "not-an-object", symbol: 42, line: 1.5, via: "warp" }],
+      }),
+      JSON.stringify(valid),
+    ];
+    writeFileSync(cardsPath, `${forgedLines.join("\n")}\n`, "utf8");
+    writeFileSync(resolveRockyPaths({ ROCKY_HOME: home }).memory, "", "utf8");
+
+    const registry = createToolRegistry({
+      exposure: "sanitized",
+      memory: createMemoryQueries(),
+      recallWithAi: disabledRecallWithAi,
+    });
+    const res = await registry.call("why_file", { path: "src/app.ts" }, new AbortController().signal);
+    assert.equal(res.isError, undefined);
+    const payload = res.structuredContent as {
+      cards: Array<{ card_id: string }>;
+      cardsCoverage: { complete: boolean; skipped: number };
+    };
+    assert.equal(payload.cards.length, 1);
+    assert.equal(payload.cards[0]?.card_id, "good-card");
+    assert.equal(payload.cardsCoverage.complete, false);
+    assert.equal(payload.cardsCoverage.skipped, 5);
+  } finally {
+    process.chdir(prevCwd);
+    if (prevHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(rawRepo, { recursive: true, force: true });
+  }
+
+  // Hostile custom provider with throwing getter falls back safely.
+  const hostile = {} as CardsForFile;
+  Object.defineProperty(hostile, "cards", {
+    enumerable: true,
+    get() { throw new Error("hostile getter"); },
+  });
+  const fallbackRes = await createToolRegistry({
+    exposure: "sanitized",
+    memory: memoryWith({}),
+    recallWithAi: disabledRecallWithAi,
+    cards: () => hostile,
+  }).call("why_file", { path: "src/app.ts" }, new AbortController().signal);
+  assert.equal(fallbackRes.isError, undefined);
+  assert.deepEqual(fallbackRes.structuredContent.cards, []);
+  assert.deepEqual(fallbackRes.structuredContent.cardsCoverage, { complete: false, skipped: 0 });
+});
+
+test("MCP why_file redacts non-32-hex forged card_id and flags sub-16KiB character clipping", async () => {
+  const validHexId = "4e5e1a6d22cea72d7a8b3985c9c27fcf";
+  const secretLikeId = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDE";
+  const cards: StoredCard[] = [
+    {
+      v: 1,
+      card_id: validHexId,
+      rev: 1,
+      root: "/tmp/wt/repo",
+      main_root: null,
+      started_ms: 2000,
+      ended_ms: 3000,
+      prompt: `${"w ".repeat(112)}z`,
+      blocks: [{
+        seq: 1,
+        path: "src/app.ts",
+        symbol: null,
+        labels: [{ id: "file_edited" }],
+        importance: "normal",
+        via: "edit",
+        line: 1,
+        added: 1,
+        removed: 0,
+        quote: { text: `${"w ".repeat(299)}zz`, shared: false },
+      }],
+    },
+    {
+      v: 1,
+      card_id: secretLikeId,
+      rev: 1,
+      root: "/tmp/wt/repo",
+      main_root: null,
+      started_ms: 1000,
+      ended_ms: 2000,
+      prompt: "normal prompt",
+      blocks: [{
+        seq: 1,
+        path: "src/app.ts",
+        symbol: null,
+        labels: [{ id: "file_edited" }],
+        importance: "normal",
+        via: "edit",
+        line: 1,
+        added: 1,
+        removed: 0,
+        quote: { text: "short quote", shared: false },
+      }],
+    },
+  ];
+
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: memoryWith({}),
+    recallWithAi: disabledRecallWithAi,
+    cards: (): CardsForFile => ({
+      cards,
+      matched: new Map(cards.map((c) => [c.card_id, c.blocks])),
+      coverage: { complete: true, skipped: 0 },
+    }),
+  });
+
+  const res = await registry.call("why_file", { path: "src/app.ts", limit: 5 }, new AbortController().signal);
+  assert.equal(res.isError, undefined);
+  const payload = res.structuredContent as {
+    cards: Array<{ card_id: string; prompt: string; blocks: Array<{ quote: string | null }> }>;
+    truncated: boolean;
+  };
+  assert.equal(payload.truncated, true);
+  assert.equal(payload.cards.length, 2);
+  assert.equal(payload.cards[0]?.card_id, validHexId);
+  assert.equal(payload.cards[0]?.prompt.length, 200);
+  assert.equal(payload.cards[0]?.blocks[0]?.quote?.length, 500);
+  assert.equal(payload.cards[1]?.card_id, "[redacted]");
 });

@@ -1,0 +1,68 @@
+[
+  {
+    "prompt": "<task-notification>\n<task-id>x</task-id>\n</task-notification>",
+    "kind": "task_notification"
+  },
+  {
+    "prompt": "  \n\t<task-notification>\n<task-id>x</task-id>",
+    "kind": "task_notification"
+  },
+  {
+    "prompt": "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>",
+    "kind": "slash_command",
+    "name": "/compact",
+    "args": ""
+  },
+  {
+    "prompt": "\n <command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>64 --fast</command-args>",
+    "kind": "slash_command",
+    "name": "/review",
+    "args": "64 --fast"
+  },
+  {
+    "prompt": "<command-name>compact</command-name>",
+    "kind": "slash_command",
+    "name": "/compact",
+    "args": ""
+  },
+  {
+    "prompt": "<command-name></command-name>",
+    "kind": "plain"
+  },
+  {
+    "prompt": "<command-name>   \n</command-name>",
+    "kind": "plain"
+  },
+  {
+    "prompt": "<command-name>/x",
+    "kind": "plain"
+  },
+  {
+    "prompt": "<command-message>review</command-message>",
+    "kind": "plain"
+  },
+  {
+    "prompt": "Fix the bug in cart.ts",
+    "kind": "plain"
+  },
+  {
+    "prompt": "Please explain what <task-notification> means",
+    "kind": "plain"
+  },
+  {
+    "prompt": "see <command-name>/x</command-name>",
+    "kind": "plain"
+  },
+  {
+    "prompt": "  \n\t<cross-session-message from=\"sess-1\" sender=\"coordinator\">\nhello\n</cross-session-message>",
+    "kind": "cross_session"
+  },
+  {
+    "prompt": "<cross-session-message from=\"other\">ping",
+    "kind": "cross_session"
+  },
+  {
+    "prompt": "Please explain <cross-session-message from=\"x\">",
+    "kind": "plain"
+  }
+]

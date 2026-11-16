@@ -386,6 +386,7 @@ test("MCP provider read errors cannot become clean fallback answers", async () =
     exposure: "sanitized",
     memory,
     recallWithAi: { run: async () => { const error = new Error("AI down"); (error as Error & { code?: string }).code = "EIO"; throw error; } },
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const stats = await registry.call("stats", {}, new AbortController().signal);
   const statsContent = stats.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; reason?: string } };

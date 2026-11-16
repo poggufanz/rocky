@@ -66,6 +66,7 @@ pub struct StatusState {
     agents: BTreeMap<AgentKey, Agent>,
     repos: BTreeMap<String, RepoInfo>,
     tool_text: bool,
+    prompts_enabled: bool,
 }
 
 impl Default for StatusState {
@@ -74,6 +75,7 @@ impl Default for StatusState {
             agents: BTreeMap::new(),
             repos: BTreeMap::new(),
             tool_text: true,
+            prompts_enabled: true,
         }
     }
 }
@@ -83,11 +85,14 @@ impl StatusState {
         Self::default()
     }
 
-    /// Drops tool text from an event while the setting is off.
+    /// Drops gated text from an event while its setting is off.
     pub fn prepare(&self, mut ev: HookEvent) -> HookEvent {
         if !self.tool_text {
             ev.command = None;
             ev.description = None;
+        }
+        if !self.prompts_enabled {
+            ev.prompt = None;
         }
         ev
     }
@@ -128,6 +133,26 @@ impl StatusState {
 
     pub fn tool_text(&self) -> bool {
         self.tool_text
+    }
+
+    /// Turns live prompts on or off, clearing held prompts when off.
+    /// Returns the agents whose status changed.
+    pub fn set_prompts_enabled(&mut self, on: bool) -> Vec<AgentKey> {
+        self.prompts_enabled = on;
+        if on {
+            return Vec::new();
+        }
+        let mut changed = Vec::new();
+        for (key, agent) in self.agents.iter_mut() {
+            if agent.status.prompt.take().is_some() {
+                changed.push(key.clone());
+            }
+        }
+        changed
+    }
+
+    pub fn prompts_enabled(&self) -> bool {
+        self.prompts_enabled
     }
 
     pub fn session_repo(&self, session_id: &str) -> Option<&RepoInfo> {
@@ -463,6 +488,9 @@ impl StatusState {
         recv_ms: u64,
         prompt: PromptText,
     ) -> Option<AgentKey> {
+        if !self.prompts_enabled {
+            return None;
+        }
         let key = AgentKey {
             session_id: session_id.to_owned(),
             agent_id: String::new(),

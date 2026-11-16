@@ -789,3 +789,102 @@ fn card_samples_covers_every_variant_and_label_full_details() {
         "parameters changed"
     );
 }
+
+#[test]
+fn label_chips_en_match_shared_vectors() {
+    use rocky_proto::cards::{Label, SymbolKind};
+    use std::collections::{HashMap, HashSet};
+
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/cards/label-chips-en.json"
+    ));
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_str(raw).expect("parse shared label-chips-en vectors");
+    assert!(
+        !entries.is_empty(),
+        "shared label-chips-en vectors are empty"
+    );
+
+    let mut covered_variants = HashSet::new();
+    let mut symbol_kinds: HashMap<&'static str, HashSet<Option<SymbolKind>>> = HashMap::new();
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let obj = entry
+            .as_object()
+            .unwrap_or_else(|| panic!("vector {idx} is not a JSON object"));
+        let label_val = obj
+            .get("label")
+            .unwrap_or_else(|| panic!("vector {idx} missing label"))
+            .clone();
+        let kind_val = obj
+            .get("kind")
+            .unwrap_or_else(|| panic!("vector {idx} missing kind"))
+            .clone();
+        let expected_chip = obj
+            .get("chip")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("vector {idx} missing string chip"));
+
+        let label: Label = serde_json::from_value(label_val.clone())
+            .unwrap_or_else(|err| panic!("vector {idx} invalid label: {err}"));
+        let kind: Option<SymbolKind> = serde_json::from_value(kind_val.clone())
+            .unwrap_or_else(|err| panic!("vector {idx} invalid kind: {err}"));
+
+        assert_eq!(
+            serde_json::to_value(&label).expect("serialize label"),
+            label_val,
+            "vector {idx}: label JSON does not match serde output"
+        );
+        assert_eq!(
+            serde_json::to_value(kind).expect("serialize kind"),
+            kind_val,
+            "vector {idx}: kind JSON does not match serde output"
+        );
+
+        assert_eq!(
+            label_chip(UiLang::En, &label, kind),
+            expected_chip,
+            "vector {idx}: label={label:?} kind={kind:?}"
+        );
+
+        covered_variants.insert(std::mem::discriminant(&label));
+        match label {
+            Label::SymbolAdded {} => {
+                symbol_kinds.entry("symbol_added").or_default().insert(kind);
+            }
+            Label::SymbolRemoved {} => {
+                symbol_kinds
+                    .entry("symbol_removed")
+                    .or_default()
+                    .insert(kind);
+            }
+            Label::SymbolRenamed { .. } => {
+                symbol_kinds
+                    .entry("symbol_renamed")
+                    .or_default()
+                    .insert(kind);
+            }
+            _ => {}
+        }
+    }
+
+    for sample in sample_labels() {
+        assert!(
+            covered_variants.contains(&std::mem::discriminant(&sample)),
+            "shared label-chips-en vectors missing variant {sample:?}"
+        );
+    }
+
+    for id in ["symbol_added", "symbol_removed", "symbol_renamed"] {
+        let kinds = symbol_kinds
+            .get(id)
+            .unwrap_or_else(|| panic!("missing symbol vectors for {id}"));
+        assert!(kinds.contains(&None), "{id} missing null kind");
+        let named_count = kinds.iter().filter(|k| k.is_some()).count();
+        assert!(
+            named_count >= 2,
+            "{id} needs at least two distinct SymbolKind vectors, got {named_count}"
+        );
+    }
+}

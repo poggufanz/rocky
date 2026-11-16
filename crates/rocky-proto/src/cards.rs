@@ -445,4 +445,84 @@ mod tests {
             PromptKind::Plain
         );
     }
+
+    #[derive(serde::Deserialize)]
+    struct PromptKindVector {
+        prompt: String,
+        kind: String,
+        name: Option<String>,
+        args: Option<String>,
+    }
+
+    #[test]
+    fn classify_prompt_matches_shared_vectors() {
+        use std::collections::HashSet;
+
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/cards/prompt-kinds.json"
+        ));
+        let vectors: Vec<PromptKindVector> =
+            serde_json::from_str(raw).expect("parse shared prompt-kinds vectors");
+        assert!(!vectors.is_empty(), "shared prompt-kinds vectors are empty");
+
+        let mut seen_kinds = HashSet::new();
+        for (idx, v) in vectors.iter().enumerate() {
+            let expected = match v.kind.as_str() {
+                "plain" => {
+                    assert!(
+                        v.name.is_none() && v.args.is_none(),
+                        "vector {idx}: plain must not specify name or args"
+                    );
+                    PromptKind::Plain
+                }
+                "task_notification" => {
+                    assert!(
+                        v.name.is_none() && v.args.is_none(),
+                        "vector {idx}: task_notification must not specify name or args"
+                    );
+                    PromptKind::TaskNotification
+                }
+                "cross_session" => {
+                    assert!(
+                        v.name.is_none() && v.args.is_none(),
+                        "vector {idx}: cross_session must not specify name or args"
+                    );
+                    PromptKind::CrossSession
+                }
+                "slash_command" => {
+                    let name = v
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| panic!("vector {idx}: slash_command missing name"));
+                    let args = v
+                        .args
+                        .clone()
+                        .unwrap_or_else(|| panic!("vector {idx}: slash_command missing args"));
+                    PromptKind::SlashCommand { name, args }
+                }
+                other => panic!("vector {idx}: unexpected kind {other:?}"),
+            };
+
+            assert_eq!(
+                classify_prompt(&v.prompt),
+                expected,
+                "vector {idx}: prompt={:?}",
+                v.prompt
+            );
+            seen_kinds.insert(v.kind.as_str());
+        }
+
+        for required in [
+            "plain",
+            "task_notification",
+            "cross_session",
+            "slash_command",
+        ] {
+            assert!(
+                seen_kinds.contains(required),
+                "shared prompt-kinds vectors missing kind {required:?}"
+            );
+        }
+    }
 }

@@ -1137,7 +1137,7 @@ fn is_main_agent(turn: &Turn) -> bool {
     turn.parent.is_none() && turn.agent.agent_id.is_empty()
 }
 
-fn select_prompt(input: &BuildInput) -> (String, bool) {
+pub fn select_prompt(input: &BuildInput) -> (String, bool) {
     let raw = if is_main_agent(&input.turn) {
         input
             .turn

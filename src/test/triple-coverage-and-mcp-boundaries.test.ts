@@ -214,7 +214,12 @@ function hostileMemory(): MemoryQueries {
 }
 
 test("custom MCP query boundaries fail open to bounded safe schemas", async () => {
-  const registry = createToolRegistry({ exposure: "sanitized", memory: hostileMemory(), recallWithAi: disabledRecallWithAi });
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: hostileMemory(),
+    recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  });
   const signal = new AbortController().signal;
   const stats = await registry.call("stats", {}, signal);
   const statsKeys = Object.keys(stats.structuredContent).sort();

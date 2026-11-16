@@ -1,0 +1,407 @@
+[
+  {
+    "label": {
+      "id": "params_changed",
+      "args": {
+        "added": 1,
+        "removed": 2,
+        "changed": 3
+      }
+    },
+    "kind": "function",
+    "chip": "parameters changed"
+  },
+  {
+    "label": {
+      "id": "return_type_changed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "return type changed"
+  },
+  {
+    "label": {
+      "id": "symbol_removed",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "file removed"
+  },
+  {
+    "label": {
+      "id": "symbol_removed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "function removed"
+  },
+  {
+    "label": {
+      "id": "symbol_removed",
+      "args": {}
+    },
+    "kind": "class",
+    "chip": "class removed"
+  },
+  {
+    "label": {
+      "id": "symbol_added",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "new file"
+  },
+  {
+    "label": {
+      "id": "symbol_added",
+      "args": {}
+    },
+    "kind": "method",
+    "chip": "new method"
+  },
+  {
+    "label": {
+      "id": "symbol_added",
+      "args": {}
+    },
+    "kind": "struct",
+    "chip": "new struct"
+  },
+  {
+    "label": {
+      "id": "symbol_renamed",
+      "args": {
+        "from": "oldFn"
+      }
+    },
+    "kind": null,
+    "chip": "file renamed"
+  },
+  {
+    "label": {
+      "id": "symbol_renamed",
+      "args": {
+        "from": "oldFn"
+      }
+    },
+    "kind": "type",
+    "chip": "type renamed"
+  },
+  {
+    "label": {
+      "id": "symbol_renamed",
+      "args": {
+        "from": "oldFn"
+      }
+    },
+    "kind": "const",
+    "chip": "const renamed"
+  },
+  {
+    "label": {
+      "id": "guard_added",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "new guard"
+  },
+  {
+    "label": {
+      "id": "condition_changed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "condition changed"
+  },
+  {
+    "label": {
+      "id": "branch_added",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "new branch"
+  },
+  {
+    "label": {
+      "id": "branch_removed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "branch removed"
+  },
+  {
+    "label": {
+      "id": "error_handling_added",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "error handling added"
+  },
+  {
+    "label": {
+      "id": "error_handling_removed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "error handling removed"
+  },
+  {
+    "label": {
+      "id": "loop_added",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "new loop"
+  },
+  {
+    "label": {
+      "id": "loop_removed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "loop removed"
+  },
+  {
+    "label": {
+      "id": "return_changed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "return changed"
+  },
+  {
+    "label": {
+      "id": "call_added",
+      "args": {
+        "name": "validate"
+      }
+    },
+    "kind": "function",
+    "chip": "calls validate"
+  },
+  {
+    "label": {
+      "id": "call_removed",
+      "args": {
+        "name": "legacyCheck"
+      }
+    },
+    "kind": "function",
+    "chip": "no longer calls legacyCheck"
+  },
+  {
+    "label": {
+      "id": "await_changed",
+      "args": {
+        "added": 1,
+        "removed": 1
+      }
+    },
+    "kind": "function",
+    "chip": "await changed"
+  },
+  {
+    "label": {
+      "id": "body_changed",
+      "args": {}
+    },
+    "kind": "function",
+    "chip": "body changed"
+  },
+  {
+    "label": {
+      "id": "value_changed",
+      "args": {
+        "name": "MAX_RETRY",
+        "before": "3",
+        "after": "5"
+      }
+    },
+    "kind": "const",
+    "chip": "value changed"
+  },
+  {
+    "label": {
+      "id": "config_changed",
+      "args": {
+        "key": "timeout",
+        "before": null,
+        "after": "30s"
+      }
+    },
+    "kind": "key",
+    "chip": "config changed"
+  },
+  {
+    "label": {
+      "id": "dep_added",
+      "args": {
+        "name": "serde",
+        "version": "1.0"
+      }
+    },
+    "kind": null,
+    "chip": "new dependency"
+  },
+  {
+    "label": {
+      "id": "dep_removed",
+      "args": {
+        "name": "old_pkg"
+      }
+    },
+    "kind": null,
+    "chip": "dependency removed"
+  },
+  {
+    "label": {
+      "id": "dep_version",
+      "args": {
+        "name": "tokio",
+        "before": "1.37",
+        "after": "1.40"
+      }
+    },
+    "kind": null,
+    "chip": "dependency version"
+  },
+  {
+    "label": {
+      "id": "import_added",
+      "args": {
+        "module": "std::path::Path"
+      }
+    },
+    "kind": null,
+    "chip": "new import"
+  },
+  {
+    "label": {
+      "id": "import_removed",
+      "args": {
+        "module": "std::env"
+      }
+    },
+    "kind": null,
+    "chip": "import removed"
+  },
+  {
+    "label": {
+      "id": "test_added",
+      "args": {
+        "name": "parses_empty"
+      }
+    },
+    "kind": "test",
+    "chip": "new test"
+  },
+  {
+    "label": {
+      "id": "test_removed",
+      "args": {
+        "name": "old_smoke"
+      }
+    },
+    "kind": "test",
+    "chip": "test removed"
+  },
+  {
+    "label": {
+      "id": "test_skipped",
+      "args": {
+        "name": "slow_sync"
+      }
+    },
+    "kind": "test",
+    "chip": "test skipped"
+  },
+  {
+    "label": {
+      "id": "test_only",
+      "args": {
+        "name": "focus_case"
+      }
+    },
+    "kind": "test",
+    "chip": "test .only"
+  },
+  {
+    "label": {
+      "id": "file_new",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "new file"
+  },
+  {
+    "label": {
+      "id": "file_deleted",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "file deleted"
+  },
+  {
+    "label": {
+      "id": "file_renamed",
+      "args": {
+        "from": "src/old.rs"
+      }
+    },
+    "kind": null,
+    "chip": "file renamed"
+  },
+  {
+    "label": {
+      "id": "format_only",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "format only"
+  },
+  {
+    "label": {
+      "id": "rewrite",
+      "args": {
+        "pct": 80
+      }
+    },
+    "kind": null,
+    "chip": "rewritten"
+  },
+  {
+    "label": {
+      "id": "lockfile_changed",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "lockfile changed"
+  },
+  {
+    "label": {
+      "id": "lines_changed",
+      "args": {
+        "added": 12,
+        "removed": 4
+      }
+    },
+    "kind": null,
+    "chip": "lines changed"
+  },
+  {
+    "label": {
+      "id": "too_large",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "too large"
+  },
+  {
+    "label": {
+      "id": "not_captured",
+      "args": {}
+    },
+    "kind": null,
+    "chip": "not captured"
+  }
+]

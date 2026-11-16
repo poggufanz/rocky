@@ -325,6 +325,7 @@ test("core and custom why remain ambiguous when redacted display paths have dist
     exposure: "sanitized",
     memory: emptyMemory({ whyFile: () => [first, second] }),
     recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const result = await registry.call("why_file", { path: display }, signal);
   assert.deepEqual((result.structuredContent as { items?: unknown[] }).items, []);

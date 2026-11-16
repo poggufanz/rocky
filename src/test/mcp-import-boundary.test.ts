@@ -78,12 +78,15 @@ const FILESYSTEM_MUTATIONS = new Set([
   "rmdirSync", "symlink", "symlinkSync", "truncate", "truncateSync", "unlink", "unlinkSync",
   "utimes", "utimesSync", "write", "writeFile", "writeFileSync", "writeSync", "writev", "writevSync",
 ]);
-const READ_ONLY_OPEN_SYNC_PATH = "core/memory-read.ts";
+const READ_ONLY_OPEN_SYNC_PATHS = new Set([
+  "core/memory-read.ts",
+  "desk/cards-read.ts",
+]);
 
 function assertReadOnlyImport(imported: SourceImport, localPath: string): void {
   if (["fs", "node:fs", "fs/promises", "node:fs/promises"].includes(imported.specifier)) {
-    // memory-read opens with read-only flags and validates descriptor identity; keep exception exact.
-    const auditedReadOnlyOpenSync = localPath === READ_ONLY_OPEN_SYNC_PATH && imported.specifier === "node:fs";
+    // Audited read-only readers open with O_RDONLY | O_NOFOLLOW | O_NONBLOCK and verify descriptor identity.
+    const auditedReadOnlyOpenSync = READ_ONLY_OPEN_SYNC_PATHS.has(localPath) && imported.specifier === "node:fs";
     const mutation = imported.importedNames.find((name) =>
       name === "*" || name === "default" ||
       (FILESYSTEM_MUTATIONS.has(name) && !(name === "openSync" && auditedReadOnlyOpenSync)));
@@ -141,6 +144,11 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "core/concepts.ts",
     "core/cs-explain.ts",
     "core/dictionary.ts",
+    // Audited read-only helper: desk/cards-read.ts imports only pure
+    // `gitRootFor` (walks parent directories using injected `existsSync`).
+    // `execFileSync` in this module is only used by other functions never
+    // imported or called by MCP.
+    "core/compare-data.ts",
     // Audited pure predicate: no imports, no filesystem access; read-side
     // retrieval filtering only (retrieval-quality spec, step 0).
     "core/envelope.ts",
@@ -162,6 +170,9 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "core/teach.ts",
     "core/teach-ladder.ts",
     "core/teach-render.ts",
+    // Audited Desk read-only change-card reader & pure text classifier.
+    "desk/card-text.ts",
+    "desk/cards-read.ts",
     "ai/ollama.ts",
     "ai/port.ts",
     "ai/recall-ai.ts",
@@ -173,11 +184,12 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "mcp/tools.ts",
     // Listening v1 read-only projection side: tools import only
     // these. graph-store and event-log-read project durable state,
-    // repo-consent-read gates on explicit consent. Writer modules
-    // (event-log, consent, collector, watcher, hook-ingress) stay out.
+    // repo-consent-read gates on explicit consent, cards-path resolves paths.
+    // Writer modules (event-log, consent, collector, watcher, hook-ingress) stay out.
     "listening/types.ts",
     "listening/event-codec.ts",
     "listening/store-paths.ts",
+    "listening/cards-path.ts",
     "listening/event-log-read.ts",
     "listening/repo-consent-read.ts",
     "listening/graph-store.ts",

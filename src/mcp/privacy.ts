@@ -9,6 +9,8 @@ import type { KnowledgeSearchHit, RecallHit, RecentFailureHit, WhyFilePossible }
 import type { ExplainRecord } from "../core/memory-read.js";
 import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls } from "../core/redact.js";
 import { configuredRockyHome } from "../core/state-paths.js";
+import { classifyPrompt, promptTitle, type PromptKind } from "../desk/card-text.js";
+import type { CardsForFile, CardsReadCoverage } from "../desk/cards-read.js";
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -630,6 +632,443 @@ export function projectWhyRationales(
     });
   }
   return { rationales, truncated: truncation.fields.length > 0 };
+}
+
+const MAX_CARD_PROMPT_CHARS = 200;
+const MAX_CARD_QUOTE_CHARS = 500;
+const MAX_BLOCKS_PER_CARD = 10;
+const MAX_CARDS_PER_FILE = 10;
+const CARD_ID_HEX_32 = /^[0-9a-f]{32}$/;
+
+export interface ProjectedWhyCardSymbol {
+  kind: string;
+  name: string;
+  container: string | null;
+}
+
+export interface ProjectedWhyCardLabel {
+  id: string;
+  args: Record<string, unknown>;
+}
+
+export interface ProjectedWhyCardBlock {
+  seq: number;
+  path: string;
+  symbol: ProjectedWhyCardSymbol | null;
+  labels: ProjectedWhyCardLabel[];
+  importance: string;
+  via: "edit" | "bash" | "other";
+  line: number | null;
+  added: number | null;
+  removed: number | null;
+  quote: string | null;
+  bash_cmd: string | null;
+}
+
+export type ProjectedPromptKind =
+  | { kind: "plain" }
+  | { kind: "task_notification" }
+  | { kind: "cross_session" }
+  | { kind: "slash_command"; name: string; args: string };
+
+export interface ProjectedWhyCard {
+  card_id: string;
+  ended_ms: number | null;
+  started_ms: number;
+  repo: string;
+  prompt: string;
+  prompt_kind: ProjectedPromptKind;
+  agent_type: string;
+  blocks: ProjectedWhyCardBlock[];
+  more_blocks?: number;
+}
+
+export interface ProjectedWhyCardsResult {
+  cards: ProjectedWhyCard[];
+  cardsCoverage: CardsReadCoverage;
+  truncated: boolean;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sliceCodePoints(
+  value: string,
+  maxChars: number,
+  path: string,
+  truncation: Truncation,
+): string {
+  if (value.length <= maxChars) return value;
+  const chars = Array.from(value);
+  if (chars.length <= maxChars) return value;
+  truncation.fields.push(path);
+  return chars.slice(0, maxChars).join("");
+}
+
+function projectClippedCardText(
+  value: string,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+  maxChars: number,
+): string {
+  return sliceCodePoints(projectText(value, exposure, path, truncation), maxChars, path, truncation);
+}
+
+function projectCardId(
+  value: string,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): string {
+  return CARD_ID_HEX_32.test(value)
+    ? value
+    : projectText(value, exposure, path, truncation);
+}
+
+function lastPathSegment(rootPath: string): string {
+  const normalized = rootPath.replace(/\\/g, "/").replace(/\/+$/u, "");
+  if (normalized.length === 0) return "";
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+}
+
+function validateCardCoverage(coverage: unknown): CardsReadCoverage {
+  try {
+    if (!isPlainRecord(coverage)) return { complete: false, skipped: 0 };
+    const reason = coverage.reason === "file-size-cap" || coverage.reason === "line-cap" || coverage.reason === "read-race"
+      ? coverage.reason
+      : undefined;
+    const complete = coverage.complete === true;
+    const skipped = isSafeNonNegativeInteger(coverage.skipped) ? coverage.skipped : 0;
+    return reason === undefined ? { complete, skipped } : { complete, reason, skipped };
+  } catch {
+    return { complete: false, skipped: 0 };
+  }
+}
+
+const SAFE_SLASH_COMMAND = /^\/[A-Za-z0-9:_.-]{1,64}$/;
+
+function isSafeSlashCommandName(name: string): boolean {
+  return SAFE_SLASH_COMMAND.test(name);
+}
+
+function projectPromptKind(
+  kind: PromptKind,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedPromptKind {
+  if (kind.kind === "slash_command") {
+    return {
+      kind: "slash_command",
+      name: isSafeSlashCommandName(kind.name)
+        ? kind.name
+        : projectText(kind.name, exposure, `${path}.name`, truncation),
+      args: projectText(kind.args, exposure, `${path}.args`, truncation),
+    };
+  }
+  return { kind: kind.kind };
+}
+
+function projectCardPrompt(
+  title: string,
+  kind: PromptKind,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): string {
+  if (kind.kind === "slash_command" && isSafeSlashCommandName(kind.name)) {
+    const singleLineArgs = kind.args.replace(/[\r\n\u2028\u2029]+/g, " ").trim();
+    const projectedArgs = singleLineArgs.length > 0
+      ? projectText(singleLineArgs, exposure, path, truncation).trim()
+      : "";
+    const joined = projectedArgs.length > 0 ? `${kind.name} ${projectedArgs}` : kind.name;
+    return sliceCodePoints(joined, MAX_CARD_PROMPT_CHARS, path, truncation);
+  }
+  return projectClippedCardText(title, exposure, path, truncation, MAX_CARD_PROMPT_CHARS);
+}
+
+interface CardLabelArgSpec {
+  readonly strings?: readonly string[];
+  readonly numbers?: readonly string[];
+}
+
+// Strict per-label allowlist aligned with crates/rocky-facts/src/model.rs;
+// literal `before`, `after`, and `version` values are never projected.
+const CARD_LABEL_ARG_ALLOWLIST: Readonly<Record<string, CardLabelArgSpec>> = {
+  params_changed: { numbers: ["added", "removed", "changed"] },
+  symbol_renamed: { strings: ["from"] },
+  call_added: { strings: ["name"] },
+  call_removed: { strings: ["name"] },
+  await_changed: { numbers: ["added", "removed"] },
+  value_changed: { strings: ["name"] },
+  config_changed: { strings: ["key"] },
+  dep_added: { strings: ["name"] },
+  dep_removed: { strings: ["name"] },
+  dep_version: { strings: ["name"] },
+  import_added: { strings: ["module"] },
+  import_removed: { strings: ["module"] },
+  test_added: { strings: ["name"] },
+  test_removed: { strings: ["name"] },
+  test_skipped: { strings: ["name"] },
+  test_only: { strings: ["name"] },
+  file_renamed: { strings: ["from"] },
+  rewrite: { numbers: ["pct"] },
+  lines_changed: { numbers: ["added", "removed"] },
+};
+
+function hasOwn(record: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function projectCardLabelArgs(
+  labelId: string,
+  rawArgs: Record<string, unknown>,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): Record<string, unknown> {
+  const spec = hasOwn(CARD_LABEL_ARG_ALLOWLIST, labelId)
+    ? CARD_LABEL_ARG_ALLOWLIST[labelId]
+    : undefined;
+  if (!spec) return {};
+  const out: Record<string, unknown> = {};
+  for (const key of spec.strings ?? []) {
+    if (!hasOwn(rawArgs, key)) continue;
+    const value = rawArgs[key];
+    if (typeof value === "string") {
+      out[key] = projectText(value, exposure, `${path}.${key}`, truncation);
+    }
+  }
+  for (const key of spec.numbers ?? []) {
+    if (!hasOwn(rawArgs, key)) continue;
+    const value = rawArgs[key];
+    if (isSafeNonNegativeInteger(value)) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function projectCardLabels(
+  rawLabels: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardLabel[] | undefined {
+  if (!Array.isArray(rawLabels)) return undefined;
+  const bound = Math.min(rawLabels.length, MAX_NESTED_ITEMS);
+  if (rawLabels.length > bound) truncation.fields.push(path);
+  const projected: ProjectedWhyCardLabel[] = [];
+  for (let index = 0; index < bound; index += 1) {
+    const entry = rawLabels[index];
+    if (!isPlainRecord(entry) || typeof entry.id !== "string") return undefined;
+    const labelPath = `${path}[${index}]`;
+    let args: Record<string, unknown> = {};
+    if (entry.args !== undefined && entry.args !== null) {
+      if (!isPlainRecord(entry.args)) return undefined;
+      args = projectCardLabelArgs(entry.id, entry.args, exposure, `${labelPath}.args`, truncation);
+    }
+    projected.push({
+      id: projectText(entry.id, exposure, `${labelPath}.id`, truncation),
+      args,
+    });
+  }
+  return projected;
+}
+
+function projectCardSymbol(
+  rawSymbol: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardSymbol | null | undefined {
+  if (rawSymbol === undefined || rawSymbol === null) return null;
+  if (!isPlainRecord(rawSymbol) || typeof rawSymbol.kind !== "string" || typeof rawSymbol.name !== "string") {
+    return undefined;
+  }
+  if (rawSymbol.container !== undefined && rawSymbol.container !== null && typeof rawSymbol.container !== "string") {
+    return undefined;
+  }
+  return {
+    kind: projectText(rawSymbol.kind, exposure, `${path}.kind`, truncation),
+    name: projectText(rawSymbol.name, exposure, `${path}.name`, truncation),
+    container: rawSymbol.container === undefined || rawSymbol.container === null
+      ? null
+      : projectText(rawSymbol.container, exposure, `${path}.container`, truncation),
+  };
+}
+
+function optionalSafeCardInt(value: unknown): number | null | undefined {
+  if (value === undefined || value === null) return null;
+  return isSafeNonNegativeInteger(value) ? value : undefined;
+}
+
+function projectCardBlock(
+  rawBlock: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardBlock | undefined {
+  if (!isPlainRecord(rawBlock)) return undefined;
+  if (!isSafeNonNegativeInteger(rawBlock.seq)) return undefined;
+  if (typeof rawBlock.path !== "string" || rawBlock.path.length === 0) return undefined;
+  if (typeof rawBlock.importance !== "string") return undefined;
+  if (rawBlock.via !== undefined && typeof rawBlock.via !== "string") return undefined;
+
+  const line = optionalSafeCardInt(rawBlock.line);
+  const added = optionalSafeCardInt(rawBlock.added);
+  const removed = optionalSafeCardInt(rawBlock.removed);
+  if (line === undefined || added === undefined || removed === undefined) return undefined;
+
+  let rawQuoteText: string | null = null;
+  if (rawBlock.quote !== undefined && rawBlock.quote !== null) {
+    if (!isPlainRecord(rawBlock.quote) || typeof rawBlock.quote.text !== "string") return undefined;
+    rawQuoteText = rawBlock.quote.text;
+  }
+
+  let rawBashCmd: string | null = null;
+  if (rawBlock.bash !== undefined && rawBlock.bash !== null) {
+    if (!isPlainRecord(rawBlock.bash) || typeof rawBlock.bash.cmd !== "string") return undefined;
+    rawBashCmd = rawBlock.bash.cmd;
+  }
+
+  const symbol = projectCardSymbol(rawBlock.symbol, exposure, `${path}.symbol`, truncation);
+  if (symbol === undefined) return undefined;
+
+  const labels = projectCardLabels(rawBlock.labels, exposure, `${path}.labels`, truncation);
+  if (labels === undefined) return undefined;
+
+  const via: "edit" | "bash" | "other" =
+    rawBlock.via === undefined || rawBlock.via === "edit"
+      ? "edit"
+      : rawBlock.via === "bash"
+        ? "bash"
+        : "other";
+  return {
+    seq: rawBlock.seq,
+    path: projectText(rawBlock.path, exposure, `${path}.path`, truncation),
+    symbol,
+    labels,
+    importance: projectText(rawBlock.importance, exposure, `${path}.importance`, truncation),
+    via,
+    line,
+    added,
+    removed,
+    quote: rawQuoteText === null
+      ? null
+      : projectClippedCardText(rawQuoteText, exposure, `${path}.quote`, truncation, MAX_CARD_QUOTE_CHARS),
+    bash_cmd: rawBashCmd === null
+      ? null
+      : projectText(rawBashCmd, exposure, `${path}.bash_cmd`, truncation),
+  };
+}
+
+/**
+ * Project Desk change cards returned for one file through MCP boundaries:
+ * strings run through `projectText` (passing through only 32-lowercase-hex
+ * `card_id` values unchanged), stored code shas/tool IDs/flow are never
+ * included, prompts and quotes are bounded with truncation recorded, and
+ * invalid or hostile values cannot throw out of the projection.
+ */
+export function projectWhyCards(
+  result: CardsForFile,
+  exposure: Exposure,
+  limit: number,
+): ProjectedWhyCardsResult {
+  const truncation: Truncation = { fields: [] };
+  const cards: ProjectedWhyCard[] = [];
+  const cardsCoverage = validateCardCoverage(result.coverage);
+  const maxCards = Math.min(MAX_CARDS_PER_FILE, Math.max(0, isSafeNonNegativeInteger(limit) ? limit : 0));
+
+  const rawCards = result.cards;
+  const matchedMap = result.matched instanceof Map ? result.matched : undefined;
+  if (!Array.isArray(rawCards)) {
+    return { cards, cardsCoverage, truncated: false };
+  }
+
+  const cardBound = Math.min(rawCards.length, MAX_NESTED_ITEMS);
+  for (let cardIndex = 0; cardIndex < cardBound && cards.length < maxCards; cardIndex += 1) {
+    try {
+      const rawCard = rawCards[cardIndex];
+      if (!isPlainRecord(rawCard)) continue;
+      const rawCardId = rawCard.card_id;
+      const rawStartedMs = rawCard.started_ms;
+      const rawEndedMs = rawCard.ended_ms;
+      const rawCardRoot = rawCard.root;
+      const rawCardMainRoot = rawCard.main_root;
+      const rawCardAgentType = rawCard.agent_type;
+      const rawCardPrompt = rawCard.prompt;
+      if (typeof rawCardId !== "string" || rawCardId.length === 0) continue;
+      if (!isSafeNonNegativeInteger(rawStartedMs)) continue;
+      if (rawEndedMs !== undefined && rawEndedMs !== null && !isSafeNonNegativeInteger(rawEndedMs)) continue;
+      if (typeof rawCardRoot !== "string") continue;
+      if (rawCardMainRoot !== undefined && rawCardMainRoot !== null && typeof rawCardMainRoot !== "string") continue;
+      if (rawCardAgentType !== undefined && typeof rawCardAgentType !== "string") continue;
+      if (typeof rawCardPrompt !== "string") continue;
+
+      const at = `cards[${cards.length}]`;
+      const rawRoot = typeof rawCardMainRoot === "string" && rawCardMainRoot.length > 0
+        ? rawCardMainRoot
+        : rawCardRoot;
+      const rawAgentType = typeof rawCardAgentType === "string" ? rawCardAgentType : "";
+
+      const promptInput = rawCardPrompt.length > MAX_NESTED_BYTES
+        ? rawCardPrompt.slice(0, MAX_NESTED_BYTES)
+        : rawCardPrompt;
+      if (promptInput.length !== rawCardPrompt.length) truncation.fields.push(`${at}.prompt`);
+      const promptKind = classifyPrompt(promptInput);
+      const title = promptTitle(promptInput);
+
+      const blocks: ProjectedWhyCardBlock[] = [];
+      let moreBlocks = 0;
+      const matchingBlocks = matchedMap?.get(rawCardId);
+      if (Array.isArray(matchingBlocks)) {
+        const blockScanBound = Math.min(matchingBlocks.length, MAX_NESTED_ITEMS);
+        const discardTruncation: Truncation = { fields: [] };
+        for (let blockIndex = 0; blockIndex < blockScanBound; blockIndex += 1) {
+          if (blocks.length < MAX_BLOCKS_PER_CARD) {
+            const projectedBlock = projectCardBlock(
+              matchingBlocks[blockIndex],
+              exposure,
+              `${at}.blocks[${blocks.length}]`,
+              truncation,
+            );
+            if (projectedBlock !== undefined) blocks.push(projectedBlock);
+          } else {
+            const extraBlock = projectCardBlock(
+              matchingBlocks[blockIndex],
+              exposure,
+              `${at}.blocks[${MAX_BLOCKS_PER_CARD + moreBlocks}]`,
+              discardTruncation,
+            );
+            if (extraBlock !== undefined) moreBlocks += 1;
+          }
+        }
+        if (moreBlocks > 0 || matchingBlocks.length > blockScanBound) {
+          truncation.fields.push(`${at}.blocks`);
+        }
+      }
+
+      cards.push({
+        card_id: projectCardId(rawCardId, exposure, `${at}.card_id`, truncation),
+        ended_ms: rawEndedMs === undefined || rawEndedMs === null ? null : rawEndedMs,
+        started_ms: rawStartedMs,
+        repo: projectText(lastPathSegment(rawRoot), exposure, `${at}.repo`, truncation),
+        prompt: projectCardPrompt(title, promptKind, exposure, `${at}.prompt`, truncation),
+        prompt_kind: projectPromptKind(promptKind, exposure, `${at}.prompt_kind`, truncation),
+        agent_type: projectText(rawAgentType, exposure, `${at}.agent_type`, truncation),
+        blocks,
+        ...(moreBlocks > 0 ? { more_blocks: moreBlocks } : {}),
+      });
+    } catch {
+      // A hostile card object cannot break MCP projection.
+    }
+  }
+
+  return { cards, cardsCoverage, truncated: truncation.fields.length > 0 };
 }
 
 function safeKnowledgeString(value: unknown, maximum = MAX_FIELD_BYTES): string | undefined {

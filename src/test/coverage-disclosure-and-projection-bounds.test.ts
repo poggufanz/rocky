@@ -52,7 +52,12 @@ function gitCurrent(paths: readonly string[]): (args: string[], cwd: string) => 
 test("why discloses incomplete coverage when requested path was omitted", () => {
   const records: MemoryRecord[] = [triple(Array.from({ length: 10 }, (_, index) => file(`src/file-${index}.ts`)))];
   const said: string[] = [];
-  const code = why(["src/file-9.ts"], { load: () => records, say: (line) => said.push(line), out: () => {} });
+  const code = why(["src/file-9.ts"], {
+    load: () => records,
+    say: (line) => said.push(line),
+    out: () => {},
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
+  });
   assert.equal(code, 0);
   assert.ok(said.some((line) => /coverage|incomplete|unknown|possible/iu.test(line)), said.join("\n"));
   assert.equal(said.some((line) => /nobody touch/iu.test(line)), false, said.join("\n"));
@@ -61,7 +66,10 @@ test("why discloses incomplete coverage when requested path was omitted", () => 
 test("MCP why_file returns coverage summary independently of response truncation", async () => {
   const records: MemoryRecord[] = [triple(Array.from({ length: 10 }, (_, index) => file(`src/file-${index}.ts`)))];
   const registry = createToolRegistry({
-    exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized",
+    memory: createMemoryQueries(() => records),
+    recallWithAi: disabledRecallWithAi,
+    cards: () => ({ cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } }),
   });
   const empty = await registry.call("why_file", { path: "src/file-9.ts" }, new AbortController().signal);
   assert.equal(empty.structuredContent.truncated, false);

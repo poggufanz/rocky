@@ -901,3 +901,53 @@ fn set_prompt_updates_main_agent_only_and_skips_stale_prompts() {
     assert_eq!(st.get(&main_key("S1")).unwrap().prompt, Some(second));
     assert_eq!(st.get(&key("S1", "A1")).unwrap().prompt, None);
 }
+
+#[test]
+fn prompts_switch_clears_held_drops_off_events_and_accepts_next_when_on() {
+    let mut st = StatusState::new();
+    st.apply(&ev("SessionStart", "S1", None), 10, &mut repo);
+    st.apply(&ev("SessionStart", "S2", None), 11, &mut repo);
+
+    let first = PromptText {
+        text: "first".into(),
+        truncated: false,
+    };
+    assert_eq!(st.set_prompt("S1", 20, first.clone()), Some(main_key("S1")));
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, Some(first));
+    assert_eq!(st.get(&main_key("S2")).unwrap().prompt, None);
+
+    // Turning prompts off clears held prompts and reports only the agent whose prompt cleared.
+    assert_eq!(st.set_prompts_enabled(false), vec![main_key("S1")]);
+    assert!(!st.prompts_enabled());
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, None);
+    assert_eq!(st.set_prompts_enabled(false), Vec::<AgentKey>::new());
+
+    // While off, prepare strips prompts and set_prompt ignores new prompts.
+    let mut off_ev = ev("UserPromptSubmit", "S1", None);
+    off_ev.prompt = Some("dropped-prompt".into());
+    assert_eq!(st.prepare(off_ev).prompt, None);
+    assert_eq!(
+        st.set_prompt(
+            "S1",
+            30,
+            PromptText {
+                text: "dropped-prompt".into(),
+                truncated: false,
+            },
+        ),
+        None
+    );
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, None);
+
+    // Turning prompts back on does not restore dropped prompts, and accepts the next one.
+    assert_eq!(st.set_prompts_enabled(true), Vec::<AgentKey>::new());
+    assert!(st.prompts_enabled());
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, None);
+
+    let next = PromptText {
+        text: "after-on".into(),
+        truncated: false,
+    };
+    assert_eq!(st.set_prompt("S1", 40, next.clone()), Some(main_key("S1")));
+    assert_eq!(st.get(&main_key("S1")).unwrap().prompt, Some(next));
+}
