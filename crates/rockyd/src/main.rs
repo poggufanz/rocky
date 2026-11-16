@@ -1006,7 +1006,7 @@ mod tests {
         let worker = thread::spawn(move || {
             let mut ingest = Ingestor::new();
             let mut guards = GuardLoop::new(home_bg.clone(), &log_bg, now_ms());
-            let mut cards = Engine::new(home_bg.clone(), 1);
+            let mut cards = Engine::new(home_bg.clone(), 1).with_user_home(None);
             let mut queries = CardQueryLoop::new_with_object_reader(
                 home_bg.clone(),
                 cards.worker_count(),
@@ -1149,7 +1149,7 @@ mod tests {
 
             let mut ingest = Ingestor::new();
             let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
-            let mut cards = Engine::new(home.clone(), 2);
+            let mut cards = Engine::new(home.clone(), 2).with_user_home(None);
             assert_eq!(cards.worker_count(), 2);
             let observed_thread = Arc::new(Mutex::new(None::<String>));
             let observed_thread_ref = Arc::clone(&observed_thread);
@@ -1372,7 +1372,8 @@ mod tests {
                         .recv_timeout(Duration::from_secs(10));
                 }
             }),
-        );
+        )
+        .with_user_home(None);
         struct DropRelease(mpsc::SyncSender<()>);
         impl Drop for DropRelease {
             fn drop(&mut self) {
@@ -1574,7 +1575,8 @@ mod tests {
                         .recv_timeout(Duration::from_secs(10));
                 }
             }),
-        );
+        )
+        .with_user_home(None);
         struct DropRelease(mpsc::SyncSender<()>);
         impl Drop for DropRelease {
             fn drop(&mut self) {
@@ -1769,7 +1771,8 @@ mod tests {
                         .recv_timeout(Duration::from_secs(10));
                 }
             }),
-        );
+        )
+        .with_user_home(None);
         struct DropRelease(mpsc::SyncSender<()>);
         impl Drop for DropRelease {
             fn drop(&mut self) {
@@ -1903,7 +1906,7 @@ mod tests {
         let hub = Hub::new();
         let mut ingest = Ingestor::new();
         let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
-        let mut cards = Engine::new(home.clone(), 1);
+        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
 
         let resolve_calls = std::sync::atomic::AtomicUsize::new(0);
         let mut resolver = |cwd: &str| {
@@ -2025,7 +2028,7 @@ mod tests {
         let rx = hub.subscribe_for_test();
         let mut ingest = Ingestor::new();
         let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
-        let mut cards = Engine::new(home.clone(), 1);
+        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
 
         std::fs::write(
             spool.join("0000000001000-1-0.json"),
@@ -2107,7 +2110,7 @@ mod tests {
         let rx = hub.subscribe_for_test();
         let mut ingest = Ingestor::new();
         let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
-        let mut cards = Engine::new(home.clone(), 1);
+        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
         let mut resolver = stub_repo_resolver;
 
         std::fs::write(
@@ -2241,7 +2244,8 @@ mod tests {
             Arc::new(move |_| {
                 builds_ref.fetch_add(1, Ordering::SeqCst);
             }),
-        );
+        )
+        .with_user_home(None);
         let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
         let owned = BTreeSet::new();
         let mut resolver = stub_repo_resolver;
@@ -2377,7 +2381,8 @@ mod tests {
             Arc::new(move |_| {
                 builds_ref.fetch_add(1, Ordering::SeqCst);
             }),
-        );
+        )
+        .with_user_home(None);
         let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
         let owned = BTreeSet::new();
         let mut resolver = stub_repo_resolver;
@@ -2673,7 +2678,8 @@ mod tests {
             Arc::new(move |_| {
                 builds_ref.fetch_add(1, Ordering::SeqCst);
             }),
-        );
+        )
+        .with_user_home(None);
         let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
         let owned = BTreeSet::new();
         let mut resolver = stub_repo_resolver;

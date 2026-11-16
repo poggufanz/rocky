@@ -195,7 +195,7 @@ struct BuildJob {
     other_edits: Vec<(String, u64, u64)>,
     gaps: Vec<(u64, u64)>,
     capture_state: Option<CaptureState>,
-    home_dir: PathBuf,
+    user_home: Option<PathBuf>,
     config_dirs: Vec<PathBuf>,
     parent_card_id: Option<String>,
     versions_through_ms: u64,
@@ -396,6 +396,8 @@ impl Drop for WorkerPool {
 /// Asynchronous worker-backed change card engine fed by spool ingest and capture results.
 pub struct Engine {
     home: PathBuf,
+    /// OS user home used only to shorten paths outside the repo to `~/`; `None` keeps them absolute.
+    user_home: Option<PathBuf>,
     enabled: bool,
     removed: bool,
     tracker: Tracker,
@@ -434,6 +436,13 @@ impl Engine {
         Self::with_optional_hooks(home, workers, Some(build_hook), Some(publish_hook))
     }
 
+    /// Overrides the OS user home used for `~/` path shortening (tests inject a temp dir or `None`).
+    #[must_use]
+    pub fn with_user_home(mut self, user_home: Option<PathBuf>) -> Self {
+        self.user_home = user_home;
+        self
+    }
+
     fn with_optional_hooks(
         home: PathBuf,
         workers: usize,
@@ -442,6 +451,7 @@ impl Engine {
     ) -> Self {
         Self {
             home,
+            user_home: std::env::home_dir(),
             enabled: true,
             removed: false,
             tracker: Tracker::new(),
@@ -1111,7 +1121,7 @@ impl Engine {
             other_edits,
             gaps,
             capture_state,
-            home_dir: self.home.clone(),
+            user_home: self.user_home.clone(),
             config_dirs: ctx.config_dirs.clone(),
             parent_card_id,
             versions_through_ms,
@@ -1153,7 +1163,12 @@ impl Engine {
             if other.agent == turn.agent {
                 continue;
             }
-            for item in collect_edit_windows_for_turn(other, session_root, &self.home, results) {
+            for item in collect_edit_windows_for_turn(
+                other,
+                session_root,
+                self.user_home.as_deref(),
+                results,
+            ) {
                 if item.1 <= through_ms && item.2 >= turn.started_ms {
                     out.push(item);
                 }
@@ -1335,7 +1350,7 @@ fn run_job(
         capture_state: job.capture_state,
         store_error: version_read.store_error,
         tail_cut: version_read.tail_cut,
-        home_dir: job.home_dir,
+        user_home: job.user_home,
         parent_card_id: job.parent_card_id,
     };
 
@@ -1496,7 +1511,7 @@ mod tests {
     #[test]
     fn resolve_session_repo_caches_non_git_sessions_after_first_resolution() {
         let dir = tempfile::tempdir().unwrap();
-        let mut engine = Engine::new(dir.path().to_path_buf(), 1);
+        let mut engine = Engine::new(dir.path().to_path_buf(), 1).with_user_home(None);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let mut repo_of = |cwd: &str| {
             calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1638,7 +1653,7 @@ mod tests {
             other_edits: Vec::new(),
             gaps: Vec::new(),
             capture_state: None,
-            home_dir: dir.path().to_path_buf(),
+            user_home: Some(dir.path().to_path_buf()),
             config_dirs: Vec::new(),
             parent_card_id: None,
             versions_through_ms: 2_000,

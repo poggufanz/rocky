@@ -324,7 +324,7 @@ fn card_after_stop_within_budget() {
         &[("tu-1", "Adding parameter b to add().")],
     );
 
-    let mut engine = Engine::new(fx.home.clone(), 2);
+    let mut engine = Engine::new(fx.home.clone(), 2).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
 
@@ -502,7 +502,7 @@ fn subagent_card_has_parent() {
         &[],
     );
 
-    let mut engine = Engine::new(fx.home.clone(), 2);
+    let mut engine = Engine::new(fx.home.clone(), 2).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
 
@@ -639,7 +639,7 @@ fn revision_after_late_event() {
     fx.append_version("src/c.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Update count", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 2);
+    let mut engine = Engine::new(fx.home.clone(), 2).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let target = fx.file_abs("src/c.ts");
@@ -755,7 +755,7 @@ fn final_after_60s() {
     fx.append_version("src/z.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Change z", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let target = fx.file_abs("src/z.ts");
@@ -868,7 +868,7 @@ fn cards_off_builds_nothing_and_never_flushes() {
     fx.append_version("src/off.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Turn while off", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx_off = fx.ctx(false);
     let ctx_on = fx.ctx(true);
@@ -954,7 +954,7 @@ fn turn_without_changes_gives_no_card() {
     fx.append_version("src/manual.ts", 1_400, &outside_sha, None, true);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Inspect files", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
 
@@ -1018,7 +1018,7 @@ fn turn_without_changes_gives_no_card() {
 #[test]
 fn stop_without_open_turn_is_ignored() {
     let fx = Fixture::new("sess-nostart");
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
 
@@ -1060,7 +1060,8 @@ fn worker_panic_is_contained() {
                 panic!("simulated worker panic");
             }
         }),
-    );
+    )
+    .with_user_home(None);
 
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
@@ -1251,7 +1252,7 @@ fn typical_load_under_500ms() {
         &tool_refs,
     );
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
 
@@ -1355,7 +1356,8 @@ fn daemon_panic_hook_contains_worker_and_aborts_others() {
                             panic!("SECRET_LEAK_TOKEN");
                         }
                     }),
-                );
+                )
+                .with_user_home(None);
                 let mut repo_of = |_: &str| fx.repo_info();
                 let ctx = fx.ctx(true);
                 let target = fx.file_abs("src/p.ts");
@@ -1562,7 +1564,7 @@ fn late_edit_waits_for_capture_then_includes_change() {
     fx.append_version("src/c.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Late edit wait", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let c_abs = fx.file_abs("src/c.ts");
@@ -1700,7 +1702,7 @@ fn late_event_routes_to_updated_turn_with_newer_closed_and_open_turns() {
     fx.append_version("src/c1.ts", 5_250, &s_c1, Some(&s0_c1), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Multi turns", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
 
@@ -1968,7 +1970,7 @@ fn shared_cache_retains_versions_for_overlapping_open_session() {
     fx.append_version("src/b.ts", 3_550, &s_b, Some(&s0_b), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Session A", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let a_abs = fx.file_abs("src/a.ts");
@@ -2102,7 +2104,7 @@ fn shared_cache_retains_versions_across_intervening_build_for_revision() {
     fx.append_version("src/d.ts", 20_550, &s_d, Some(&s0_d), false);
     fx.write_transcript("1970-01-01T00:00:10.000Z", "Session C", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let c1_abs = fx.file_abs("src/c1.ts");
@@ -2270,7 +2272,7 @@ fn bash_only_turn_waits_for_capture_while_unchanged_stays_empty() {
     let s1 = fx.put_object(2, "export const b = 2;\n");
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Run bash script", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
 
@@ -2409,7 +2411,7 @@ fn late_bash_completion_waits_for_capture_and_revises_card() {
     fx.append_version("src/e.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Edit plus bash", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let e_abs = fx.file_abs("src/e.ts");
@@ -2524,7 +2526,7 @@ fn store_error_after_cache_prime_suppresses_code_and_marks_capture_off() {
     fx.append_version("src/a.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Prime cache", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let a_abs = fx.file_abs("src/a.ts");
@@ -2677,7 +2679,7 @@ fn store_tail_cut_marks_capture_late() {
     fx.append_version("src/t.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Tail cut turn", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let t_abs = fx.file_abs("src/t.ts");
@@ -2791,7 +2793,8 @@ fn set_removed_drops_pending_discards_in_flight_and_ignores_reenable() {
                     .recv_timeout(Duration::from_secs(10));
             }
         }),
-    );
+    )
+    .with_user_home(None);
     struct DropRelease(mpsc::SyncSender<()>);
     impl Drop for DropRelease {
         fn drop(&mut self) {
@@ -2994,7 +2997,7 @@ fn parallel_subagent_edit_and_open_bash_attribution() {
     fx.append_version("src/bash_file.ts", 45_000, &a_sha, Some(&b_sha), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "run tests", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let info = fx.repo_info();
     let mut repo_of = |_: &str| info.clone();
     let ctx = fx.ctx(true);
@@ -3124,7 +3127,7 @@ fn store_log_shrink_during_turn_does_not_duplicate_outside_count() {
     fx.append_version("src/z.ts", 1_550, &s1, Some(&s0), false);
     fx.write_transcript("1970-01-01T00:00:01.000Z", "Change z", &[]);
 
-    let mut engine = Engine::new(fx.home.clone(), 1);
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let target = fx.file_abs("src/z.ts");
@@ -3242,7 +3245,7 @@ fn store_log_shrink_during_turn_does_not_duplicate_outside_count() {
 #[ignore]
 fn rss_after_twenty_cards() {
     let fx = Fixture::new("sess-rss-init");
-    let mut engine = Engine::new(fx.home.clone(), 2);
+    let mut engine = Engine::new(fx.home.clone(), 2).with_user_home(None);
     let mut repo_of = |_: &str| fx.repo_info();
     let ctx = fx.ctx(true);
     let projects_dir = fx.config_dir.join("projects").join("proj-a");
@@ -3469,4 +3472,112 @@ fn run_command_with_timeout(cmd: &mut Command, timeout: Duration) -> std::proces
         stdout,
         stderr,
     }
+}
+
+/// Runs one turn that edits `target` (outside the repo) and returns the built card.
+fn outside_edit_card(
+    fx: &Fixture,
+    session_id: &str,
+    user_home: Option<PathBuf>,
+    target: &str,
+) -> Card {
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(user_home);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            session_id,
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Edit outside",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        session_id,
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-o1",
+                        target,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        session_id,
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-o1",
+                        target,
+                    ),
+                    1_500,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        session_id,
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+    let mut cards = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    cards.remove(0)
+}
+
+fn outside_target(dir: &Path, rel: &str) -> String {
+    let path = dir.join(rel);
+    fs::create_dir_all(path.parent().expect("parent")).expect("create target dir");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn outside_edit_under_user_home_shows_tilde() {
+    let fx = Fixture::new("sess-tilde");
+    let user_home = fx.home.parent().expect("root").join("userhome");
+    let target = outside_target(&user_home, "notes/a.md");
+    let card = outside_edit_card(&fx, "sess-tilde", Some(user_home), &target);
+    assert_eq!(card.blocks[0].path, "~/notes/a.md");
+    assert!(
+        card.flow.iter().any(|s| s.text.contains("~/notes/a.md")),
+        "flow: {:?}",
+        card.flow
+    );
+}
+
+#[test]
+fn outside_edit_under_rocky_home_stays_absolute() {
+    let fx = Fixture::new("sess-rocky-home");
+    let user_home = fx.home.parent().expect("root").join("userhome");
+    fs::create_dir_all(&user_home).expect("create user home");
+    let target = outside_target(&fx.home, "x.md");
+    let card = outside_edit_card(&fx, "sess-rocky-home", Some(user_home), &target);
+    assert_eq!(card.blocks[0].path, target.replace('\\', "/"));
+}
+
+#[test]
+fn outside_edit_without_user_home_stays_absolute() {
+    let fx = Fixture::new("sess-no-home");
+    let user_home = fx.home.parent().expect("root").join("userhome");
+    let target = outside_target(&user_home, "notes/a.md");
+    let card = outside_edit_card(&fx, "sess-no-home", None, &target);
+    assert_eq!(card.blocks[0].path, target.replace('\\', "/"));
 }
