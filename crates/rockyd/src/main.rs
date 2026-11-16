@@ -1731,6 +1731,168 @@ mod tests {
     }
 
     #[test]
+    fn cards_off_waits_for_publishing_worker_and_releases_its_prompt() {
+        use rocky_proto::paths::cards_dir;
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let spool = spool_dir(&home);
+        let repo = home.join("repo");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        settings::save(&settings_path(&home), &Settings::default()).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let hook_once = AtomicBool::new(false);
+
+        let log = RotatingLog::new(&log_path(&home));
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let shared = make_test_shared(&home);
+        let mut ingest = Ingestor::new();
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut cards = Engine::new_with_hooks(
+            home.clone(),
+            1,
+            Arc::new(|_| {}),
+            Arc::new(move || {
+                if !hook_once.swap(true, Ordering::SeqCst) {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    let _ = release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10));
+                }
+            }),
+        );
+        struct DropRelease(mpsc::SyncSender<()>);
+        impl Drop for DropRelease {
+            fn drop(&mut self) {
+                let _ = self.0.try_send(());
+            }
+        }
+        let _unblock = DropRelease(release_tx.clone());
+        let owned = BTreeSet::new();
+
+        let cwd = repo.to_string_lossy().into_owned();
+        let target = repo.join("src").join("a.rs").to_string_lossy().into_owned();
+        let write_turn = |seq: u64, sess: &str, ts_base: u64| {
+            let events = [
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base,
+                    "kind": "event",
+                    "event": { "hook_event_name": "SessionStart", "session_id": sess, "cwd": cwd }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 1,
+                    "kind": "event",
+                    "event": { "hook_event_name": "UserPromptSubmit", "session_id": sess, "cwd": cwd, "prompt": "PUBLISHING_PROMPT" }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 2,
+                    "kind": "event",
+                    "event": { "hook_event_name": "PreToolUse", "session_id": sess, "cwd": cwd, "tool_name": "Edit", "tool_use_id": format!("tu-{seq}"), "target_path": target }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 3,
+                    "kind": "event",
+                    "event": { "hook_event_name": "PostToolUse", "session_id": sess, "cwd": cwd, "tool_name": "Edit", "tool_use_id": format!("tu-{seq}"), "target_path": target }
+                }),
+                serde_json::json!({
+                    "v": 1, "harness": "claude-code", "recv_ms": ts_base + 4,
+                    "kind": "event",
+                    "event": { "hook_event_name": "Stop", "session_id": sess, "cwd": cwd }
+                }),
+            ];
+            for (idx, ev) in events.iter().enumerate() {
+                let name = format!("{:013}-{seq}-{idx}.json", ts_base + idx as u64);
+                std::fs::write(spool.join(name), serde_json::to_vec(ev).unwrap()).unwrap();
+            }
+        };
+        let card_broadcasts = || {
+            drain_server_msgs(&rx)
+                .into_iter()
+                .filter_map(|m| match m {
+                    ServerMsg::Card { item } => Some(item.session_id),
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+        };
+
+        write_turn(1, "sess-publishing", 1_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("worker should reach the publish gate");
+
+        let disabled = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                cards.set_enabled(false);
+                disabled.store(true, Ordering::SeqCst);
+            });
+            thread::sleep(Duration::from_millis(300));
+            assert!(
+                !disabled.load(Ordering::SeqCst),
+                "disable must wait for the worker inside the publish gate"
+            );
+            release_tx.send(()).unwrap();
+            handle.join().unwrap();
+        });
+        assert_eq!(
+            cards.held_prompt_count(),
+            0,
+            "no prompt may stay held once disable returns"
+        );
+        assert_eq!(cards.outstanding_builds(), 0);
+        service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+        assert!(
+            card_broadcasts().is_empty(),
+            "stale card must not be broadcast"
+        );
+        assert!(
+            !cards_dir(&home).exists(),
+            "stale card must not be persisted"
+        );
+
+        cards.set_enabled(true);
+        write_turn(2, "sess-after-on", 10_000);
+        rescan(
+            &spool,
+            &shared,
+            &hub,
+            &log,
+            &mut ingest,
+            &mut guards,
+            &mut cards,
+            None,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut fresh = Vec::new();
+        while Instant::now() < deadline && fresh.is_empty() {
+            service_cards(&mut cards, &owned, &[], &shared, &hub, &log);
+            fresh.extend(card_broadcasts());
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(fresh, vec!["sess-after-on".to_string()]);
+    }
+
+    #[test]
     fn rescan_reuses_state_repo_without_duplicate_resolution() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
