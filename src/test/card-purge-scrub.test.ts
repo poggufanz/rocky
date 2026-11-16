@@ -151,7 +151,7 @@ describe("purge scrubs change cards from every log", () => {
       assert.match(out.stderr, /history purged:/);
       const lines = out.stderr.split("\n");
       const notice = lines.find((line) => line.includes("could not be removed"));
-      assert.equal(notice, `  Some change cards about this repo could not be removed from 1 log. Run rocky setup --repo ${repo} --purge-capture again.`);
+      assert.equal(notice, `  Some change cards about this repo could not be removed from 1 log. Run rocky setup --repo "${repo}" --purge-capture again.`);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -182,11 +182,36 @@ describe("purge scrubs change cards from every log", () => {
       const out = await captureStderr(() => setup(["--repo", repo, "--purge-capture", "--yes"], deps()));
       assert.equal(out.code, 0);
       const notice = out.stderr.split("\n").find((line) => line.includes("could not be removed"));
-      assert.equal(notice, `  Some change cards about this repo could not be removed. Run rocky setup --repo ${repo} --purge-capture again.`);
+      assert.equal(notice, `  Some change cards about this repo could not be removed. Run rocky setup --repo "${repo}" --purge-capture again.`);
     } finally {
       mock.restoreAll();
       syncBuiltinESMExports();
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("the retry command quotes a repo path that contains a space", async () => {
+    const parent = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky purge cards ")));
+    const repo = join(parent, "my repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    assert.equal(setRepoCapture(repo, true, { yes: true, actor: "cli", onRevoke: "delete" }, home.dir()).ok, true);
+    const huge = join(cardsDir(), "huge.jsonl");
+    writeFileSync(huge, `${card("big", repo, [join(repo, "a.ts")])}
+`);
+    const fd = openSync(huge, "r+");
+    try {
+      ftruncateSync(fd, 65 * 1024 * 1024);
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      const out = await captureStderr(() => setup(["--repo", repo, "--purge-capture", "--yes"], deps()));
+      assert.equal(out.code, 0);
+      const notice = out.stderr.split("\n").find((line) => line.includes("could not be removed"));
+      assert.ok(notice?.endsWith(`Run rocky setup --repo "${repo}" --purge-capture again.`), notice);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 });

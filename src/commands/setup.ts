@@ -445,7 +445,7 @@ function reportStoreUsage(root: string, allowed: boolean, home: string | undefin
  */
 function detailCardsIncomplete(entries: string[], repo: string): void {
   if (entries.length === 0) return;
-  const retry = `Run rocky setup --repo ${safeTerminalLine(repo)} --purge-capture again.`;
+  const retry = `Run rocky setup --repo "${safeTerminalLine(repo).replace(/"/g, '\\"')}" --purge-capture again.`;
   const perLog = entries.every((entry) => entry.endsWith(".jsonl"));
   const subject = "Some change cards about this repo could not be removed";
   detail(perLog
