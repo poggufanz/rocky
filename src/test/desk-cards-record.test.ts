@@ -10,6 +10,14 @@ import {
   parseCardLine,
   validateCard,
 } from "../desk/cards-record.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
+import { useTempRockyHome } from "./temp-rocky-home.js";
+
+const rockyHome = useTempRockyHome("rocky-cards-record-");
+
+test("tests run under a temp rocky home", () => {
+  assert.equal(resolveRockyPaths().home, rockyHome.dir());
+});
 
 function card(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -123,4 +131,31 @@ test("isPathInside never matches relative paths", () => {
   assert.equal(isPathInside("src/a.ts", "/work/app", o), false);
   assert.equal(isPathInside("/work/app/a.ts", "work/app", o), false);
   assert.equal(isPathInside("../a.ts", "/work", o), false);
+});
+
+test("isPathInside keeps trailing whitespace and format characters", () => {
+  const o = { platform: "linux" as const, home: "/h" };
+  assert.equal(isPathInside("/work/app ", "/work/app", o), false);
+  assert.equal(isPathInside("/work/app/a.ts", "/work/app ", o), false);
+  assert.equal(isPathInside("/work/app\u200b/a.ts", "/work/app", o), false);
+  assert.equal(isPathInside("/work/app\u0007/a.ts", "/work/app", o), false);
+});
+
+test("isPathInside on linux collapses separators before dot segments", () => {
+  const o = { platform: "linux" as const, home: "/h" };
+  assert.equal(isPathInside("//work/app/../other/a.ts", "/work/app", o), false);
+  assert.equal(isPathInside("//work//app//src/a.ts", "/work/app", o), true);
+});
+
+test("isPathInside fails closed when dot segments climb above the root", () => {
+  const o = { platform: "linux" as const, home: "/h" };
+  assert.equal(isPathInside("/../work/app/a.ts", "/work/app", o), false);
+  assert.equal(isPathInside("/work/app/a.ts", "/../work/app", o), false);
+});
+
+test("isPathInside understands win32 unc paths", () => {
+  const o = { platform: "win32" as const, home: "C:/h" };
+  assert.equal(isPathInside("\\\\server\\share\\repo\\a.ts", "\\\\server\\share\\repo", o), true);
+  assert.equal(isPathInside("\\\\server\\share\\repo2\\a.ts", "\\\\server\\share\\repo", o), false);
+  assert.equal(isPathInside("\\\\server\\share\\..\\x", "\\\\server\\share", o), false);
 });

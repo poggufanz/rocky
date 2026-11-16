@@ -295,21 +295,56 @@ export interface PathInsideOptions {
 }
 
 /**
+ * Purely lexical absolute-path form used for containment checks. It keeps every
+ * character of every segment (no trimming, no control-character stripping) and
+ * applies only: backslash to slash, home expansion, duplicate separators, dot
+ * segments, and case folding on win32. Returns undefined for relative paths and
+ * for paths whose dot segments climb above their root.
+ */
+function lexicalAbsolute(value: string, platform: NodeJS.Platform, home: string): string | undefined {
+  if (!isAbsOrTildeBlockPath(value)) return undefined;
+  const forward = expandTilde(value, home).replace(/\\/g, "/");
+  let prefix: string;
+  let rest: string;
+  const drive = forward.match(/^([a-zA-Z]:)(?:\/(.*))?$/);
+  const unc = platform === "win32" ? forward.match(/^\/\/([^/]+)\/([^/]+)(?:\/(.*))?$/) : null;
+  if (unc) {
+    prefix = `//${unc[1]}/${unc[2]}/`;
+    rest = unc[3] ?? "";
+  } else if (drive) {
+    prefix = `${drive[1]}/`;
+    rest = drive[2] ?? "";
+  } else if (forward.startsWith("/")) {
+    prefix = "/";
+    rest = forward.replace(/^\/+/, "");
+  } else {
+    return undefined;
+  }
+  const segments: string[] = [];
+  for (const part of rest.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (segments.length === 0) return undefined;
+      segments.pop();
+      continue;
+    }
+    segments.push(part);
+  }
+  const joined = `${prefix}${segments.join("/")}`;
+  return platform === "win32" ? joined.toLowerCase() : joined;
+}
+
+/**
  * True when `path` equals `root` or lies below it, compared by whole segments.
  * Only absolute or `~/` paths can be inside; `~/` expands against `home`.
- * Case-insensitive on win32 only.
+ * Case-insensitive on win32 only. Ambiguous input fails closed (not inside).
  */
 export function isPathInside(path: string, root: string, options: PathInsideOptions = {}): boolean {
   const platform = options.platform ?? process.platform;
   const home = options.home ?? homedir();
-  if (!isAbsOrTildeBlockPath(path) || !isAbsOrTildeBlockPath(root)) return false;
-  const fold = (value: string): string => {
-    const normalized = normalizeAbsForPlatform(expandTilde(value, home), platform);
-    return platform === "win32" ? normalized.toLowerCase() : normalized;
-  };
-  const pathNorm = fold(path);
-  const rootNorm = fold(root);
-  if (pathNorm.length === 0 || rootNorm.length === 0) return false;
+  const pathNorm = lexicalAbsolute(path, platform, home);
+  const rootNorm = lexicalAbsolute(root, platform, home);
+  if (pathNorm === undefined || rootNorm === undefined) return false;
   if (pathNorm === rootNorm) return true;
   const prefix = rootNorm.endsWith("/") ? rootNorm : `${rootNorm}/`;
   return pathNorm.startsWith(prefix);
