@@ -271,13 +271,10 @@ fn needs_you_agent_shows_a_waiting_star() {
 }
 
 #[test]
-fn ticks_align_to_wall_clock_and_label_the_recent_part() {
+fn ticks_align_to_wall_clock() {
     let c = chart(vec![], vec![], false);
     assert!(c.ticks.iter().all(|t| t.ms % 60_000 == 0));
-    assert!(c.ticks.iter().filter(|t| t.x >= 0.3).all(|t| t.labeled));
-    let old: Vec<_> = c.ticks.iter().filter(|t| t.x < 0.3).collect();
-    assert!(old[0].labeled);
-    assert!(!old[1].labeled);
+    assert!(c.ticks.len() >= 9);
 }
 
 fn card(id: &str, session: &str, started_ms: u64, prompt: &str) -> Card {

@@ -5,13 +5,12 @@
 
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Point, Window, fill, point, px, rgb, size};
 
-use crate::atlas_model::sky::{RowKind, SkyBand, SkyChart};
+use crate::atlas_model::sky::{RowKind, SkyBand, SkyChart, StarKind};
 use crate::ui::tooltip::{
     BORDER_SUBTLE, ROW_HOVER_BG, STATUS_WORKING, TEXT_DARK, TEXT_DIM, TEXT_MUTED,
 };
 
 pub const ROW_H: f32 = 35.0;
-/// Padding a band adds around its rows: 6 px above and 6 px below.
 /// Title strip above a band with stars: turn titles and the earlier note.
 pub(super) const TITLE_H: f32 = 18.0;
 /// Foot below the last row, room for a failed caption.
@@ -61,12 +60,12 @@ pub(super) fn band_tops(chart: &SkyChart) -> Vec<f32> {
         .collect()
 }
 
-/// Vertical center of `row` in a band whose top edge is `band_top`.
 /// Top of a turn title inside its band's title strip.
 pub(super) fn title_y(band_top: f32) -> f32 {
     band_top + 1.0
 }
 
+/// Vertical center of `row` in a band whose top edge is `band_top`.
 pub(super) fn row_y(band_top: f32, row: RowKind) -> f32 {
     band_top + TITLE_H + (row_index(row) as f32 + 0.5) * ROW_H
 }
@@ -167,7 +166,12 @@ fn link_segs(chart: &SkyChart, tops: &[f32]) -> Vec<Seg> {
             };
             let from = pt(spawn_x, row_y(top, RowKind::Cmd));
             let to = pt(band.stars[first].x, row_y(top, RowKind::Sub(lane_idx)));
-            out.push(dashed(seg(from, to, 1.0, STATUS_WORKING)));
+            let live = lane
+                .stars
+                .iter()
+                .any(|&i| matches!(band.stars[i].kind, StarKind::Running | StarKind::Waiting));
+            let color = if live { STATUS_WORKING } else { TEXT_DIM };
+            out.push(dashed(seg(from, to, 1.0, color)));
         }
     }
     out

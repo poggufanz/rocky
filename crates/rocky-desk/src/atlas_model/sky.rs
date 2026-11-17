@@ -132,7 +132,6 @@ pub struct SkyBand {
 pub struct Tick {
     pub x: f32,
     pub ms: u64,
-    pub labeled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -216,18 +215,11 @@ fn tick_step_secs(window: SkyWindow) -> u64 {
 fn ticks(now_ms: u64, window: SkyWindow) -> Vec<Tick> {
     let step = tick_step_secs(window) * 1000;
     let start = now_ms.saturating_sub(window.secs() * 1000);
-    let split = now_ms - (f64::from(RECENT_SHARE_OF_WINDOW) * (window.secs() * 1000) as f64) as u64;
     let mut out = Vec::new();
-    let mut old_index = 0usize;
     let mut ms = start.div_ceil(step) * step;
     while ms <= now_ms {
-        let in_old = ms < split;
-        let labeled = !in_old || old_index.is_multiple_of(2);
-        if in_old {
-            old_index += 1;
-        }
         if let Some(x) = x_frac(ms, now_ms, window) {
-            out.push(Tick { x, ms, labeled });
+            out.push(Tick { x, ms });
         }
         ms += step;
     }

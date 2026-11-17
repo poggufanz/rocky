@@ -4,14 +4,17 @@
 use gpui::prelude::*;
 use gpui::{Context, Div, FontWeight, SharedString, Stateful, canvas, div, px, relative, rgb};
 
+use super::sky_labels::{
+    CAPTION_MAX_W, EARLIER_NOTE_W, Placed, Side, TICK_LABEL_W, visible_captions, visible_ticks,
+    visible_titles,
+};
 use super::sky_paint::{
     Seg, band_height, band_tops, paint_sky, plot_height, row_y, sky_segments, title_y,
 };
 use super::star::{hit_box, hit_side, legend_swatches, star_caption};
 use super::{AtlasAction, OnAtlasAction};
 use crate::atlas_model::sky::{
-    LIVE_RADIUS, RECENT_SHARE_OF_WIDTH, RECENT_SHARE_OF_WINDOW, RowKind, SkyBand, SkyChart, Star,
-    StarKind, Turn,
+    LIVE_RADIUS, RECENT_SHARE_OF_WINDOW, RowKind, SkyBand, SkyChart, Star, StarKind, Turn,
 };
 use crate::atlas_model::{SkyWindow, StepRef};
 use crate::clock::local_hhmm;
@@ -36,21 +39,9 @@ pub fn plot_width(avail_w: f32) -> f32 {
 }
 
 const TICK_STRIP_H: f32 = 20.0;
-const TITLE_MAX_W: f32 = 360.0;
-const CAPTION_MAX_W: f32 = 220.0;
-/// Smallest distance between the left edges of two drawn turn titles.
-const TITLE_MIN_GAP: f32 = 120.0;
-/// Estimated width of the "earlier" note at the band's left edge.
-const EARLIER_NOTE_W: f32 = 170.0;
-/// A title keeps this far from the `//` scale mark on either side.
-const BREAK_CLEAR: f32 = 8.0;
 const LIVE_GUTTER: f32 = LIVE_RADIUS * 2.0 + 4.0;
 const BADGE_ICON: f32 = 18.0;
 const BRANCH_MAX_W: f32 = 38.0;
-/// Past this share of the plot a label grows leftward so it stays inside.
-const RIGHT_ANCHOR_FROM: f32 = 0.6;
-/// Labeled ticks this close to "now" give way to the "now" label.
-const TICK_NEAR_NOW: f32 = 0.96;
 const WINDOWS: [(SkyWindow, &str); 3] = [
     (SkyWindow::Min10, "10"),
     (SkyWindow::Min30, "30"),
@@ -65,14 +56,12 @@ pub(super) fn recent_span_label(lang: UiLang, window: SkyWindow) -> String {
 }
 
 /// The Sky chart card for `chart`; `avail_w` is the card's inner width. `repo` names the project in the subtitle.
-/// The chart's geometry is already anchored to now, so `_now_ms` is unused here.
 #[allow(clippy::too_many_arguments)]
 pub fn sky_card<T: 'static>(
     lang: UiLang,
     chart: &SkyChart,
     repo: &str,
     selected: Option<&StepRef>,
-    _now_ms: u64,
     avail_w: f32,
     cx: &mut Context<T>,
     on: OnAtlasAction<T>,
@@ -212,7 +201,7 @@ fn plot_row<T: 'static>(
         .flex_col()
         .flex_none()
         .w(px(plot_w))
-        .child(tick_strip(lang, chart))
+        .child(tick_strip(lang, chart, drawable_width(plot_w)))
         .child(plot_body(lang, chart, selected, (height, plot_w), cx, on));
     div()
         .flex()
@@ -229,22 +218,18 @@ pub(super) fn mono_text(size: f32, color: u32) -> Div {
         .text_color(rgb(color))
 }
 
-fn tick_strip(lang: UiLang, chart: &SkyChart) -> Div {
-    let ticks = chart
-        .ticks
-        .iter()
-        .filter(|t| t.labeled && t.x < TICK_NEAR_NOW)
-        .map(|t| {
-            mono_text(10.5, TEXT_MUTED)
-                .absolute()
-                .top(px(3.0))
-                .left(relative(t.x))
-                .ml(px(-16.0))
-                .w(px(32.0))
-                .flex()
-                .justify_center()
-                .child(local_hhmm(t.ms))
-        });
+fn tick_strip(lang: UiLang, chart: &SkyChart, d: f32) -> Div {
+    let ticks = visible_ticks(&chart.ticks, d).into_iter().map(|t| {
+        mono_text(10.5, TEXT_MUTED)
+            .absolute()
+            .top(px(3.0))
+            .left(relative(t.x))
+            .ml(px(-TICK_LABEL_W / 2.0))
+            .w(px(TICK_LABEL_W))
+            .flex()
+            .justify_center()
+            .child(local_hhmm(t.ms))
+    });
     let now = mono_text(10.5, TEXT_DARK)
         .absolute()
         .top(px(3.0))
@@ -363,66 +348,25 @@ fn drawable_layer() -> Div {
         .right(px(plot_gutter()))
 }
 
-/// Which side of the star a label hangs from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Side {
-    Left,
-    Right,
-}
-
-/// Labels of stars in the right 40% of the plot end at the star.
-fn label_side(x: f32) -> Side {
-    if x > RIGHT_ANCHOR_FROM {
-        Side::Right
-    } else {
-        Side::Left
-    }
-}
-
-/// Width of the plot a star at `now` may use, so it is not cut at the edge.
-/// Right gutter of the drawable layer, in px.
+/// Right gutter of the drawable layer, in px, so a star at now is not cut at the edge.
 fn plot_gutter() -> f32 {
     LIVE_GUTTER
 }
 
+/// Width of the plot the x fractions map onto.
 fn drawable_width(plot_w: f32) -> f32 {
     plot_w - plot_gutter()
 }
 
-/// Indexes of the turns whose title is drawn: each must start at least
-/// [`TITLE_MIN_GAP`] px after the previous drawn title.
-fn visible_titles(band: &SkyBand, plot_w: f32) -> Vec<usize> {
-    let drawable = drawable_width(plot_w);
-    let split = (1.0 - RECENT_SHARE_OF_WIDTH) * drawable;
-    let mut shown: Vec<usize> = Vec::new();
-    // The earlier note counts as an already drawn item at the left edge.
-    let mut next_free = if band.earlier.is_some() {
-        EARLIER_NOTE_W
-    } else {
-        0.0
+/// One-line text hung from plot fraction `x`: its left edge at `x`, or its
+/// right edge when `side` is right. Text past `max_w` ends in an ellipsis.
+fn hung(text: Div, x: f32, top: f32, (side, max_w): (Side, f32)) -> Div {
+    let frame = div().absolute().top(px(top)).max_w(px(max_w)).flex();
+    let frame = match side {
+        Side::Right => frame.right(relative(1.0 - x)).justify_end(),
+        Side::Left => frame.left(relative(x)),
     };
-    for (i, turn) in band.turns.iter().enumerate() {
-        let (Some(_), Some(&first)) = (&turn.title, turn.stars.first()) else {
-            continue;
-        };
-        let left = band.stars[first].x * drawable;
-        let over_mark = left < split + BREAK_CLEAR && left + TITLE_MIN_GAP > split - BREAK_CLEAR;
-        if left >= next_free && !over_mark {
-            shown.push(i);
-            next_free = left + TITLE_MIN_GAP;
-        }
-    }
-    shown
-}
-
-/// Places `el` so its left edge sits at plot fraction `x`, or its right edge
-/// when `x` is far right so the text stays inside the plot.
-fn anchored(el: Div, x: f32) -> Div {
-    let el = el.absolute();
-    match label_side(x) {
-        Side::Right => el.right(relative(1.0 - x)).flex().justify_end(),
-        Side::Left => el.left(relative(x)),
-    }
+    frame.child(text.min_w_0().truncate())
 }
 
 /// Quiet and earlier notes of one band.
@@ -432,7 +376,6 @@ fn band_notes(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
             .absolute()
             .left(px(8.0))
             .top(px(top + y))
-            .whitespace_nowrap()
             .italic()
             .text_size(px(11.5))
             .text_color(rgb(TEXT_MUTED))
@@ -444,42 +387,40 @@ fn band_notes(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
             last: local_hhmm(q.last_ms),
             action: q.action.clone(),
         };
-        out.push(note(atlas_text(lang, &msg), 6.0));
+        out.push(note(atlas_text(lang, &msg), 6.0).right(px(8.0)).truncate());
     }
     if let Some(e) = &band.earlier {
         let msg = AtlasMsg::Earlier {
             at: local_hhmm(e.start_ms),
             edits: e.edits,
         };
-        out.push(note(
-            atlas_text(lang, &msg),
-            if band.quiet.is_some() {
-                band_height(band) - 17.0
-            } else {
-                title_y(0.0)
-            },
-        ));
+        let y = if band.quiet.is_some() {
+            band_height(band) - 17.0
+        } else {
+            title_y(0.0)
+        };
+        out.push(
+            note(atlas_text(lang, &msg), y)
+                .max_w(px(EARLIER_NOTE_W - 8.0))
+                .truncate(),
+        );
     }
     out
 }
 
-fn turn_title(turn: &Turn, band: &SkyBand, top: f32) -> Option<Div> {
+fn turn_title(turn: &Turn, band: &SkyBand, top: f32, placed: &Placed) -> Option<Div> {
     let title = turn.title.clone()?;
     let first = &band.stars[*turn.stars.first()?];
-    let y = title_y(top);
     let el = div()
-        .top(px(y))
-        .max_w(px(TITLE_MAX_W))
-        .truncate()
         .whitespace_nowrap()
         .italic()
         .text_size(px(12.5))
         .text_color(rgb(TEXT_BODY))
         .child(title);
-    Some(anchored(el, first.x))
+    Some(hung(el, first.x, title_y(top), (placed.side, placed.max_w)))
 }
 
-fn star_caption_for(star: &Star, lang: UiLang, top: f32) -> Option<Div> {
+fn star_caption_for(star: &Star, lang: UiLang, top: f32, placed: &Placed) -> Option<Div> {
     let label = star.label.clone()?;
     let y = row_y(top, star.row);
     let (text, color, above) = match star.kind {
@@ -497,22 +438,20 @@ fn star_caption_for(star: &Star, lang: UiLang, top: f32) -> Option<Div> {
     } else {
         y + star.radius + 5.0
     };
-    let el = star_caption(text, color)
-        .top(px(y))
-        .max_w(px(CAPTION_MAX_W))
-        .truncate();
-    Some(anchored(el, star.x))
+    let side_w = (placed.side, placed.max_w.min(CAPTION_MAX_W));
+    Some(hung(star_caption(text, color), star.x, y, side_w))
 }
 
-/// Turn titles and failed or live star captions of one band.
+/// Turn titles and failed or live star captions of one band that fit.
 fn band_captions(lang: UiLang, band: &SkyBand, top: f32, plot_w: f32) -> Vec<Div> {
-    let titles = visible_titles(band, plot_w)
+    let d = drawable_width(plot_w);
+    let caps = visible_captions(band, d);
+    let titles = visible_titles(band, d, &caps)
         .into_iter()
-        .filter_map(|i| turn_title(&band.turns[i], band, top));
-    let captions = band
-        .stars
+        .filter_map(|p| turn_title(&band.turns[p.idx], band, top, &p));
+    let captions = caps
         .iter()
-        .filter_map(|s| star_caption_for(s, lang, top));
+        .filter_map(|p| star_caption_for(&band.stars[p.idx], lang, top, p));
     titles.chain(captions).collect()
 }
 
@@ -572,14 +511,13 @@ mod tests {
     use rocky_proto::pipe::{AgentKey, Status};
 
     use super::{
-        PLOT_MIN_W, Side, drawable_width, label_side, plot_gutter, plot_scroller, plot_surface,
-        plot_width, recent_span_label, star_hit_box, visible_titles,
+        PLOT_MIN_W, drawable_width, plot_gutter, plot_scroller, plot_surface, plot_width,
+        recent_span_label, star_hit_box,
     };
     use crate::atlas_model::SkyWindow;
     use crate::atlas_model::StepRef;
     use crate::atlas_model::sky::{
-        EarlierNote, LIVE_RADIUS, QuietNote, RowKind, SkyBand, SkyChart, Star, StarKind, SubLane,
-        Turn,
+        LIVE_RADIUS, QuietNote, RowKind, SkyBand, SkyChart, Star, StarKind, SubLane,
     };
     use crate::i18n::UiLang;
     use crate::ui::atlas::sky_paint::{ROW_H, TITLE_H, band_height, plot_height, row_y, title_y};
@@ -645,68 +583,6 @@ mod tests {
             bands: vec![band(true, 0), band(false, 0)],
         };
         assert_eq!(plot_height(&chart), 47.0 + 145.0);
-    }
-
-    fn turn_at(x: f32) -> (Star, Turn) {
-        let mut s = star(2.5);
-        s.x = x;
-        let t = Turn {
-            stars: vec![0],
-            live: false,
-            start_ms: 0,
-            title: Some("Background task notice".into()),
-        };
-        (s, t)
-    }
-
-    #[test]
-    fn labels_in_the_right_forty_percent_end_at_the_star() {
-        assert_eq!(label_side(0.59), Side::Left);
-        assert_eq!(label_side(0.61), Side::Right);
-        assert_eq!(label_side(1.0), Side::Right);
-    }
-
-    #[test]
-    fn crowded_turn_titles_are_skipped() {
-        let mut b = band(false, 0);
-        // 0.05 and 0.10 are 31 px apart; 0.40 is 220 px past 0.05; 0.45 is 31 px past 0.40.
-        for x in [0.05, 0.10, 0.40, 0.45] {
-            let (s, mut t) = turn_at(x);
-            b.turns.push(Turn {
-                stars: vec![b.stars.len()],
-                ..t.clone()
-            });
-            t.stars.clear();
-            b.stars.push(s);
-        }
-        assert_eq!(visible_titles(&b, 640.0), vec![0, 2]);
-    }
-
-    fn titled_band(xs: &[f32], earlier: bool) -> SkyBand {
-        let mut b = band(false, 0);
-        for &x in xs {
-            let (s, mut t) = turn_at(x);
-            t.stars = vec![b.stars.len()];
-            b.turns.push(t);
-            b.stars.push(s);
-        }
-        if earlier {
-            b.earlier = Some(EarlierNote {
-                start_ms: 0,
-                edits: 3,
-            });
-        }
-        b
-    }
-
-    #[test]
-    fn titles_clear_the_earlier_note_and_the_scale_mark() {
-        // Drawable width 627: 0.02 is inside the earlier note, 0.28 (176 px)
-        // would run across the // mark at 188 px, 0.5 and 0.7 are clear.
-        let b = titled_band(&[0.02, 0.28, 0.5, 0.7], true);
-        assert_eq!(visible_titles(&b, 640.0), vec![2, 3]);
-        let plain = titled_band(&[0.02, 0.5], false);
-        assert_eq!(visible_titles(&plain, 640.0), vec![0, 1]);
     }
 
     #[test]

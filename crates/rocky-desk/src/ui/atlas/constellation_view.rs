@@ -199,7 +199,7 @@ fn constellation_segments(view: &ConstellationView, width: f32, height: f32) -> 
         // No parent segment to drop from when the sub starts before step 1.
         if let (Some(&first), true) = (points.first(), sub.after_n > 0) {
             let from = spawn_point(view, sub.after_n);
-            out.push(dashed(line(from, first, LINE_W, STATUS_WORKING)));
+            out.push(dashed(line(from, first, LINE_W, main_color)));
         }
     }
     out

@@ -304,7 +304,6 @@ impl DeskView {
                     &chart,
                     title,
                     selected,
-                    now,
                     avail_w,
                     cx,
                     Self::on_atlas_action,
