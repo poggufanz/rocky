@@ -7,6 +7,7 @@ pub mod constellation;
 pub mod detail;
 pub mod projects;
 pub mod sky;
+pub mod time_scale;
 
 #[cfg(test)]
 pub mod test_support;
