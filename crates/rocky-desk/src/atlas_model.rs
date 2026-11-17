@@ -4,11 +4,14 @@ use rocky_proto::pipe::{AgentKey, AgentStatus, RepoInfo};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod projects;
+pub mod sky;
 
 #[cfg(test)]
 pub mod test_support;
 #[cfg(test)]
 mod tests_projects;
+#[cfg(test)]
+mod tests_sky;
 
 /// Stable identity of a project: the main checkout root, else the repo
 /// root, else empty for sessions outside any repo.

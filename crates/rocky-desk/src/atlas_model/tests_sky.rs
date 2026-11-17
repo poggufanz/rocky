@@ -1,0 +1,323 @@
+use super::sky::*;
+use super::test_support::model_with;
+use super::{ProjectId, SkyWindow};
+use crate::cards_model::CardsModel;
+use rocky_proto::cards::{CARD_VERSION, Card, CardStatus, Coverage, CoverageState, Importance};
+use rocky_proto::pipe::{
+    AgentKey, AgentStatus, Outcome, PromptText, RepoInfo, Status, TimelineEntry, TimelineKind,
+};
+
+const NOW: u64 = 10_000_000;
+const ROOT: &str = "C:/p/rocky";
+
+fn key(session: &str, sub: &str) -> AgentKey {
+    AgentKey {
+        session_id: session.into(),
+        agent_id: sub.into(),
+    }
+}
+
+fn agent(session: &str, sub: &str, status: Status, last_ms: u64) -> AgentStatus {
+    AgentStatus {
+        key: key(session, sub),
+        agent_type: None,
+        status,
+        action: None,
+        summary: None,
+        description: None,
+        failures: 0,
+        last_event_ms: last_ms,
+        quiet_10m: false,
+        repo: RepoInfo {
+            root: Some(ROOT.into()),
+            main_root: None,
+            name: "rocky".into(),
+            branch: Some("main".into()),
+        },
+        prompt: None,
+        harness: None,
+    }
+}
+
+fn entry(
+    ms: u64,
+    kind: TimelineKind,
+    tool: Option<&str>,
+    outcome: Option<Outcome>,
+) -> TimelineEntry {
+    TimelineEntry {
+        ms,
+        kind,
+        tool_name: tool.map(str::to_string),
+        text: None,
+        outcome,
+        dur_ms: None,
+    }
+}
+
+fn tool(ms: u64, name: &str, outcome: Outcome) -> TimelineEntry {
+    entry(ms, TimelineKind::Tool, Some(name), Some(outcome))
+}
+
+fn turn_start(ms: u64) -> TimelineEntry {
+    entry(ms, TimelineKind::TurnStart, None, None)
+}
+
+fn project() -> ProjectId {
+    ProjectId(ROOT.into())
+}
+
+fn chart(
+    agents: Vec<AgentStatus>,
+    timelines: Vec<(AgentKey, Vec<TimelineEntry>)>,
+    tree: bool,
+) -> SkyChart {
+    let model = model_with(agents, timelines, tree);
+    sky_chart(
+        &model,
+        &CardsModel::new(),
+        &project(),
+        SkyWindow::Min10,
+        NOW,
+    )
+}
+
+#[test]
+fn x_frac_splits_the_window_seventy_thirty() {
+    let w = SkyWindow::Min10;
+    assert_eq!(x_frac(NOW, NOW, w), Some(1.0));
+    assert_eq!(x_frac(NOW - 600_000, NOW, w), Some(0.0));
+    assert!((x_frac(NOW - 180_000, NOW, w).unwrap() - 0.3).abs() < 1e-4);
+    assert_eq!(x_frac(NOW - 600_001, NOW, w), None);
+    assert_eq!(x_frac(NOW + 5_000, NOW, w), Some(1.0));
+}
+
+#[test]
+fn rows_and_magnitudes_follow_the_legend() {
+    assert_eq!(row_of(Some("Edit")), RowKind::Edit);
+    assert_eq!(row_of(Some("Bash")), RowKind::Cmd);
+    assert_eq!(row_of(Some("Grep")), RowKind::Read);
+    assert_eq!(row_of(Some("mcp__x__y")), RowKind::Read);
+    assert_eq!(magnitude(Some(400)), 2.5);
+    assert_eq!(magnitude(None), 2.5);
+    assert_eq!(magnitude(Some(1_100)), 3.7);
+    assert_eq!(magnitude(Some(12_000)), 6.0);
+}
+
+#[test]
+fn live_turn_marks_failed_and_running_steps() {
+    let k = key("s1", "");
+    let tl = vec![
+        turn_start(NOW - 60_000),
+        tool(NOW - 50_000, "Read", Outcome::Ok),
+        tool(NOW - 40_000, "Bash", Outcome::Failed),
+        tool(NOW - 30_000, "Edit", Outcome::Pending),
+    ];
+    let c = chart(
+        vec![agent("s1", "", Status::Working, NOW - 30_000)],
+        vec![(k, tl)],
+        false,
+    );
+    let band = &c.bands[0];
+    assert_eq!(band.stars.len(), 3);
+    let kinds: Vec<_> = band.stars.iter().map(|s| s.kind).collect();
+    assert_eq!(
+        kinds,
+        [StarKind::Plain, StarKind::Failed, StarKind::Running]
+    );
+    assert_eq!(band.stars[2].radius, LIVE_RADIUS);
+    assert_eq!(band.turns.len(), 1);
+    assert!(band.turns[0].live);
+    assert_eq!(band.turns[0].stars, vec![0, 1, 2]);
+}
+
+#[test]
+fn steps_before_the_first_turn_start_form_an_untitled_turn() {
+    let k = key("s1", "");
+    let tl = vec![
+        tool(NOW - 90_000, "Read", Outcome::Ok),
+        tool(NOW - 80_000, "Read", Outcome::Ok),
+        turn_start(NOW - 70_000),
+        tool(NOW - 60_000, "Edit", Outcome::Ok),
+    ];
+    let c = chart(
+        vec![agent("s1", "", Status::Idle, NOW - 60_000)],
+        vec![(k, tl)],
+        false,
+    );
+    let turns = &c.bands[0].turns;
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].title, None);
+    assert_eq!(turns[0].stars.len(), 2);
+    assert!(!turns[1].live);
+}
+
+#[test]
+fn idle_band_without_steps_in_window_gets_a_quiet_note() {
+    let k = key("s1", "");
+    let last = NOW - 20 * 60_000;
+    let tl = vec![turn_start(last - 5_000), tool(last, "Edit", Outcome::Ok)];
+    let c = chart(
+        vec![agent("s1", "", Status::Idle, last)],
+        vec![(k, tl)],
+        false,
+    );
+    let band = &c.bands[0];
+    assert!(band.stars.is_empty());
+    assert_eq!(band.quiet.as_ref().unwrap().last_ms, last);
+    let earlier = band.earlier.as_ref().unwrap();
+    assert_eq!(earlier.edits, 1);
+}
+
+#[test]
+fn subagent_lane_only_when_the_tree_setting_is_on() {
+    let build = |tree| {
+        chart(
+            vec![
+                agent("s1", "", Status::Working, NOW - 10_000),
+                agent("s1", "c1", Status::Working, NOW - 10_000),
+            ],
+            vec![
+                (
+                    key("s1", ""),
+                    vec![
+                        turn_start(NOW - 60_000),
+                        entry(NOW - 50_000, TimelineKind::SubagentStart, None, None),
+                        tool(NOW - 20_000, "Read", Outcome::Ok),
+                    ],
+                ),
+                (
+                    key("s1", "c1"),
+                    vec![tool(NOW - 40_000, "Grep", Outcome::Ok)],
+                ),
+            ],
+            tree,
+        )
+    };
+    let on = build(true);
+    let band = &on.bands[0];
+    assert_eq!(band.subs.len(), 1);
+    assert_eq!(band.subs[0].key, key("s1", "c1"));
+    assert!(band.subs[0].spawn_x.is_some());
+    assert_eq!(
+        band.stars
+            .iter()
+            .filter(|s| s.row == RowKind::Sub(0))
+            .count(),
+        1
+    );
+    assert_eq!(on.bands.len(), 1);
+    assert!(build(false).bands[0].subs.is_empty());
+    assert_eq!(build(false).bands[0].stars.len(), 1);
+}
+
+#[test]
+fn bands_order_working_then_needs_you_then_recent() {
+    let c = chart(
+        vec![
+            agent("idle", "", Status::Idle, NOW - 1_000),
+            agent("needs", "", Status::NeedsYou, NOW - 5_000),
+            agent("work", "", Status::Working, NOW - 9_000),
+        ],
+        vec![],
+        false,
+    );
+    let order: Vec<_> = c.bands.iter().map(|b| b.key.session_id.as_str()).collect();
+    assert_eq!(order, ["work", "needs", "idle"]);
+}
+
+#[test]
+fn future_entries_clamp_to_the_right_edge() {
+    let k = key("s1", "");
+    let tl = vec![
+        turn_start(NOW - 1_000),
+        tool(NOW + 5_000, "Read", Outcome::Ok),
+    ];
+    let c = chart(
+        vec![agent("s1", "", Status::Idle, NOW)],
+        vec![(k, tl)],
+        false,
+    );
+    assert_eq!(c.bands[0].stars[0].x, 1.0);
+}
+
+#[test]
+fn needs_you_agent_shows_a_waiting_star() {
+    let k = key("s1", "");
+    let tl = vec![
+        turn_start(NOW - 30_000),
+        entry(NOW - 20_000, TimelineKind::NeedsYou, Some("Bash"), None),
+    ];
+    let c = chart(
+        vec![agent("s1", "", Status::NeedsYou, NOW - 20_000)],
+        vec![(k, tl)],
+        false,
+    );
+    assert_eq!(c.bands[0].stars[0].kind, StarKind::Waiting);
+}
+
+#[test]
+fn ticks_align_to_wall_clock_and_label_the_recent_part() {
+    let c = chart(vec![], vec![], false);
+    assert!(c.ticks.iter().all(|t| t.ms % 60_000 == 0));
+    assert!(c.ticks.iter().filter(|t| t.x >= 0.3).all(|t| t.labeled));
+    let old: Vec<_> = c.ticks.iter().filter(|t| t.x < 0.3).collect();
+    assert!(old[0].labeled);
+    assert!(!old[1].labeled);
+}
+
+fn card(id: &str, session: &str, started_ms: u64, prompt: &str) -> Card {
+    Card {
+        v: CARD_VERSION,
+        card_id: id.into(),
+        rev: 1,
+        repo_id: "r".into(),
+        root: ROOT.into(),
+        main_root: None,
+        branch: None,
+        session_id: session.into(),
+        agent_id: String::new(),
+        agent_type: String::new(),
+        parent_card_id: None,
+        started_ms,
+        ended_ms: None,
+        status: CardStatus::Done,
+        prompt: prompt.into(),
+        prompt_truncated: false,
+        importance: Importance::Medium,
+        blocks: Vec::new(),
+        more_count: 0,
+        flow: Vec::new(),
+        flow_more: 0,
+        outside_count: 0,
+        reads: Vec::new(),
+        reads_more: 0,
+        coverage: Coverage {
+            state: CoverageState::Full,
+            reasons: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn turn_titles_come_from_the_live_prompt_and_matching_cards() {
+    let k = key("s1", "");
+    let mut a = agent("s1", "", Status::Working, NOW - 5_000);
+    a.prompt = Some(PromptText {
+        text: "Add sky chart\nmore detail".into(),
+        truncated: false,
+    });
+    let tl = vec![
+        turn_start(NOW - 100_000),
+        tool(NOW - 90_000, "Read", Outcome::Ok),
+        turn_start(NOW - 20_000),
+        tool(NOW - 10_000, "Read", Outcome::Pending),
+    ];
+    let model = model_with(vec![a], vec![(k, tl)], false);
+    let mut cards = CardsModel::new();
+    cards.on_push(card("c1", "s1", NOW - 102_000, "Fix the bug"));
+    let c = sky_chart(&model, &cards, &project(), SkyWindow::Min10, NOW);
+    let turns = &c.bands[0].turns;
+    assert_eq!(turns[0].title.as_deref(), Some("Fix the bug"));
+    assert_eq!(turns[1].title.as_deref(), Some("Add sky chart"));
+}
