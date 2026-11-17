@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use gpui::prelude::*;
 use gpui::{Context, Div, FontWeight, SharedString, div, px, rgb};
 
-use super::{NowAction, OnNowAction, dot_el, failures_chip, status_dot};
+use super::{NowAction, OnNowAction};
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::now_model::{FinishedRow, IdleRow};
+use crate::ui::status::{dot_el, failures_chip, status_dot};
 use crate::ui::tooltip::{
     BORDER_SUBTLE, LINK, ROW_HOVER_BG, TEXT_DARK, TEXT_DIM, TEXT_MUTED, TEXT_SUBTLE,
     card_container, mono_font,

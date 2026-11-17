@@ -139,306 +139,308 @@ fn retry_tray_minimize(view: &Entity<DeskView>, window: WindowHandle<DeskView>, 
 }
 
 pub fn run(rocky_home: PathBuf, opts: RunOptions) {
-    Application::new().run(move |cx: &mut App| {
-        // Blocking startup attempt (the GPUI loop is not running yet).
-        let exe = daemon_exe();
-        let done = connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET);
-        let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
-        let log_path = desk_dir(&rocky_home).join("rocky-desk.log");
-        #[cfg(windows)]
-        let log = {
-            let mut log = LogOnce::new(log_path);
-            if let Err(e) = set_process_aumid() {
-                log.once("aumid", &e);
-            }
-            log
-        };
-        #[cfg(not(windows))]
-        let log = LogOnce::new(log_path);
-        let notices = OsNotices::new(&rocky_home);
-        let (click_tx, clicks) = mpsc::channel::<()>();
-        let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
-        let state = ConnState::new(3, 300_000);
-        let detected = detect_ui_lang();
-        let mut ctl = Controller {
-            model: Model::new(),
-            timeline_fetch: TimelineFetch::new(),
-            notifier: Notifier::default(),
-            inbox: None,
-            outbox: None,
-            worker_rx,
-            worker_tx,
-            state,
-            cmd_id: 0,
-            rocky_home,
-            last_aggregate: Status::Idle,
-            last_tooltip: Msg::Tooltip {
-                working: 0,
-                needs_you: 0,
-                failed: 0,
-                done: 0,
-                idle: 0,
-            },
-            ui_lang: detected,
-            detected,
-            view: View::default(),
-            tray_start: opts.tray,
-            autostart_on: None,
-            autostart_failed: false,
-        };
-        let action = ctl.state.on_connect_result(outcome);
-        if let Some((outbox, inbox)) = live {
-            ctl.outbox = Some(outbox);
-            ctl.inbox = Some(inbox);
-        }
-        if tied {
-            ctl.state.set_tied();
-            ctl.set_conn(Conn::TiedToJob);
-        } else {
-            ctl.act(action);
-            if outcome == ConnectOutcome::Connected {
-                ctl.set_conn(Conn::Connected);
-            }
-        }
-        let notified_path = desk_dir(&ctl.rocky_home).join("notified.json");
-        let (notified, notified_unreadable) = NotifiedStore::load(&notified_path);
-        let mut log = log;
-        if notified_unreadable {
-            log.once(
-                "notified-read",
-                &"notified.json is unreadable; starting empty",
-            );
-        }
-        let view: Entity<DeskView> = cx.new(|cx| DeskView {
-            ctl,
-            window: None,
-            tray: None,
-            log,
-            notices,
-            click_tx,
-            clicks,
-            show_requested: false,
-            notices_ready: false,
-            notified,
-            notified_path,
-            requests: Requests::default(),
-            consent: ConsentModel::default(),
-            setup: SetupSettings::default(),
-            cards: CardsModel::new(),
-            card_detail: None,
-            block_diff: None,
-            notices_open: false,
-            idle_open: false,
-            search: SearchInput::default(),
-            search_debounce: Debounce::default(),
-            search_focus: cx.focus_handle(),
-            main_tab: Default::default(),
-            flow_hover: None,
-            modal_focus: cx.focus_handle(),
-            // Ordered before every control (they use 0) and never a stop
-            // itself, so the first Tab lands on the first title bar tab.
-            root_focus: cx.focus_handle().tab_index(-1).tab_stop(false),
-            removed_quit_at: None,
-            home_dir: std::env::home_dir().map(|p| p.to_string_lossy().into_owned()),
-            menu_stale: false,
+    Application::new()
+        .with_assets(crate::assets::DeskAssets)
+        .run(move |cx: &mut App| {
+            // Blocking startup attempt (the GPUI loop is not running yet).
+            let exe = daemon_exe();
+            let done = connect_attempt(&rocky_home, exe.as_deref(), CONNECT_BUDGET);
+            let (outcome, tied, live) = (done.outcome, done.tied_to_job, done.live);
+            let log_path = desk_dir(&rocky_home).join("rocky-desk.log");
+            #[cfg(windows)]
+            let log = {
+                let mut log = LogOnce::new(log_path);
+                if let Err(e) = set_process_aumid() {
+                    log.once("aumid", &e);
+                }
+                log
+            };
             #[cfg(not(windows))]
-            user_shown: false,
-        });
-
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    // Windows can open straight into the tray; elsewhere the
-                    // window is opened and then minimized, since a window that
-                    // was never shown has no surface to minimize.
-                    show: !opts.tray || cfg!(not(windows)),
-                    // The consent and settings views scroll when the window is small.
-                    is_resizable: true,
-                    // Windows: the desk draws its own bar (`ui::title_bar`), so the
-                    // system one is hidden. Elsewhere the system bar stays.
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(SharedString::from("rocky")),
-                        appears_transparent: crate::ui::title_bar::custom_caption(),
-                        traffic_light_position: None,
-                    }),
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                        None,
-                        size(px(440.), px(560.)),
-                        cx,
-                    ))),
-                    ..Default::default()
+            let log = LogOnce::new(log_path);
+            let notices = OsNotices::new(&rocky_home);
+            let (click_tx, clicks) = mpsc::channel::<()>();
+            let (worker_tx, worker_rx) = mpsc::channel::<ConnectDone>();
+            let state = ConnState::new(3, 300_000);
+            let detected = detect_ui_lang();
+            let mut ctl = Controller {
+                model: Model::new(),
+                timeline_fetch: TimelineFetch::new(),
+                notifier: Notifier::default(),
+                inbox: None,
+                outbox: None,
+                worker_rx,
+                worker_tx,
+                state,
+                cmd_id: 0,
+                rocky_home,
+                last_aggregate: Status::Idle,
+                last_tooltip: Msg::Tooltip {
+                    working: 0,
+                    needs_you: 0,
+                    failed: 0,
+                    done: 0,
+                    idle: 0,
                 },
-                |_, _| view.clone(),
-            )
-            .expect("open window");
-        view.update(cx, |v, _| {
-            v.window = Some(window);
-        });
-        // A `--tray` launch stays out of the way: Windows opened it hidden
-        // above; elsewhere the window had to be opened first, so minimize it.
-        #[cfg(not(windows))]
-        {
-            if opts.tray {
-                let _ = window.update(cx, |_, window, _| window.minimize_window());
-                retry_tray_minimize(&view, window, cx);
+                ui_lang: detected,
+                detected,
+                view: View::default(),
+                tray_start: opts.tray,
+                autostart_on: None,
+                autostart_failed: false,
+            };
+            let action = ctl.state.on_connect_result(outcome);
+            if let Some((outbox, inbox)) = live {
+                ctl.outbox = Some(outbox);
+                ctl.inbox = Some(inbox);
             }
-        }
-        // Closing the window hides it: veto the close and minimize instead.
-        // On the final screen it quits instead.
-        if let Err(e) = window.update(cx, |_, window, cx| {
-            let view = view.clone();
-            window.on_window_should_close(&*cx, move |window, cx| {
-                let quitting = view.update(cx, |v, cx| v.on_close_request(cx));
-                if !quitting {
-                    set_visible(window, false);
+            if tied {
+                ctl.state.set_tied();
+                ctl.set_conn(Conn::TiedToJob);
+            } else {
+                ctl.act(action);
+                if outcome == ConnectOutcome::Connected {
+                    ctl.set_conn(Conn::Connected);
                 }
-                false
+            }
+            let notified_path = desk_dir(&ctl.rocky_home).join("notified.json");
+            let (notified, notified_unreadable) = NotifiedStore::load(&notified_path);
+            let mut log = log;
+            if notified_unreadable {
+                log.once(
+                    "notified-read",
+                    &"notified.json is unreadable; starting empty",
+                );
+            }
+            let view: Entity<DeskView> = cx.new(|cx| DeskView {
+                ctl,
+                window: None,
+                tray: None,
+                log,
+                notices,
+                click_tx,
+                clicks,
+                show_requested: false,
+                notices_ready: false,
+                notified,
+                notified_path,
+                requests: Requests::default(),
+                consent: ConsentModel::default(),
+                setup: SetupSettings::default(),
+                cards: CardsModel::new(),
+                card_detail: None,
+                block_diff: None,
+                notices_open: false,
+                idle_open: false,
+                search: SearchInput::default(),
+                search_debounce: Debounce::default(),
+                search_focus: cx.focus_handle(),
+                main_tab: Default::default(),
+                flow_hover: None,
+                modal_focus: cx.focus_handle(),
+                // Ordered before every control (they use 0) and never a stop
+                // itself, so the first Tab lands on the first title bar tab.
+                root_focus: cx.focus_handle().tab_index(-1).tab_stop(false),
+                removed_quit_at: None,
+                home_dir: std::env::home_dir().map(|p| p.to_string_lossy().into_owned()),
+                menu_stale: false,
+                #[cfg(not(windows))]
+                user_shown: false,
             });
-        }) {
+
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        // Windows can open straight into the tray; elsewhere the
+                        // window is opened and then minimized, since a window that
+                        // was never shown has no surface to minimize.
+                        show: !opts.tray || cfg!(not(windows)),
+                        // The consent and settings views scroll when the window is small.
+                        is_resizable: true,
+                        // Windows: the desk draws its own bar (`ui::title_bar`), so the
+                        // system one is hidden. Elsewhere the system bar stays.
+                        titlebar: Some(TitlebarOptions {
+                            title: Some(SharedString::from("rocky")),
+                            appears_transparent: crate::ui::title_bar::custom_caption(),
+                            traffic_light_position: None,
+                        }),
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                            None,
+                            size(px(440.), px(560.)),
+                            cx,
+                        ))),
+                        ..Default::default()
+                    },
+                    |_, _| view.clone(),
+                )
+                .expect("open window");
             view.update(cx, |v, _| {
-                v.log.once("close_veto", &e);
+                v.window = Some(window);
             });
-        }
-
-        let lang = view.read(cx).ctl.ui_lang;
-        let agg = view.read(cx).ctl.model.aggregate();
-        let tip = view.read(cx).ctl.model.tooltip();
-        let tray = Tray::builder()
-            .icon(tray_icon(agg))
-            .tooltip(tr(lang, &tip))
-            .on_activate_with({
-                let view = view.clone();
-                move |_, cx| show_window(&view, cx)
-            })
-            .menu({
-                let view = view.clone();
-                move |cx| {
-                    let lang = view.read(cx).ctl.ui_lang;
-                    vec![
-                        MenuItem::action(tr(lang, &Msg::MenuOpen), OpenRocky),
-                        MenuItem::action(tr(lang, &Msg::MenuStop), StopRecording),
-                        MenuItem::action(tr(lang, &Msg::MenuQuit), QuitDesk),
-                    ]
+            // A `--tray` launch stays out of the way: Windows opened it hidden
+            // above; elsewhere the window had to be opened first, so minimize it.
+            #[cfg(not(windows))]
+            {
+                if opts.tray {
+                    let _ = window.update(cx, |_, window, _| window.minimize_window());
+                    retry_tray_minimize(&view, window, cx);
                 }
-            })
-            .build(cx);
-        #[cfg(windows)]
-        let tray = Some(tray.expect("build tray"));
-        #[cfg(not(windows))]
-        let tray = match tray {
-            Ok(tray) => Some(tray),
-            Err(e) => {
-                // A bus-less session has no tray; the rest of the desk works
-                // without one (`self.tray = None` is handled everywhere).
+            }
+            // Closing the window hides it: veto the close and minimize instead.
+            // On the final screen it quits instead.
+            if let Err(e) = window.update(cx, |_, window, cx| {
+                let view = view.clone();
+                window.on_window_should_close(&*cx, move |window, cx| {
+                    let quitting = view.update(cx, |v, cx| v.on_close_request(cx));
+                    if !quitting {
+                        set_visible(window, false);
+                    }
+                    false
+                });
+            }) {
                 view.update(cx, |v, _| {
-                    v.log.once("tray", &e);
+                    v.log.once("close_veto", &e);
                 });
-                None
             }
-        };
-        view.update(cx, |v, _| {
-            v.ctl.last_aggregate = agg;
-            v.ctl.last_tooltip = tip;
-            v.tray = tray;
-        });
 
-        cx.on_action({
-            let view = view.clone();
-            move |_: &OpenRocky, cx: &mut App| {
-                view.update(cx, |v, cx| {
-                    // User-initiated: one background connect+spawn when there
-                    // is no live connection and none in flight. No slot used.
-                    if v.ctl.outbox.is_none() && !v.ctl.state.is_connecting() {
-                        let action = v.ctl.state.on_user_open();
-                        v.ctl.act(action);
-                        cx.notify();
+            let lang = view.read(cx).ctl.ui_lang;
+            let agg = view.read(cx).ctl.model.aggregate();
+            let tip = view.read(cx).ctl.model.tooltip();
+            let tray = Tray::builder()
+                .icon(tray_icon(agg))
+                .tooltip(tr(lang, &tip))
+                .on_activate_with({
+                    let view = view.clone();
+                    move |_, cx| show_window(&view, cx)
+                })
+                .menu({
+                    let view = view.clone();
+                    move |cx| {
+                        let lang = view.read(cx).ctl.ui_lang;
+                        vec![
+                            MenuItem::action(tr(lang, &Msg::MenuOpen), OpenRocky),
+                            MenuItem::action(tr(lang, &Msg::MenuStop), StopRecording),
+                            MenuItem::action(tr(lang, &Msg::MenuQuit), QuitDesk),
+                        ]
                     }
-                });
-                show_window(&view, cx);
-            }
-        });
-        cx.on_action({
-            let view = view.clone();
-            move |_: &StopRecording, cx: &mut App| {
-                view.update(cx, |v, cx| {
-                    v.ctl.cmd_id += 1;
-                    let id = v.ctl.cmd_id;
-                    if let Some(outbox) = v.ctl.outbox.as_ref() {
-                        let _ = outbox.send(ClientMsg::Cmd {
-                            name: CmdName::Stop,
-                            id,
-                        });
-                        v.ctl.state.stop_sent(id);
-                    }
-                    cx.notify();
-                });
-            }
-        });
-        cx.on_action({
-            let view = view.clone();
-            move |_: &QuitDesk, cx: &mut App| {
-                view.update(cx, |v, cx| v.quit(cx));
-            }
-        });
+                })
+                .build(cx);
+            #[cfg(windows)]
+            let tray = Some(tray.expect("build tray"));
+            #[cfg(not(windows))]
+            let tray = match tray {
+                Ok(tray) => Some(tray),
+                Err(e) => {
+                    // A bus-less session has no tray; the rest of the desk works
+                    // without one (`self.tray = None` is handled everywhere).
+                    view.update(cx, |v, _| {
+                        v.log.once("tray", &e);
+                    });
+                    None
+                }
+            };
+            view.update(cx, |v, _| {
+                v.ctl.last_aggregate = agg;
+                v.ctl.last_tooltip = tip;
+                v.tray = tray;
+            });
 
-        // Pump: drain the reader inbox every 100 ms; age text refreshes
-        // every 5 s. notify only fires on real changes or the slow tick.
-        cx.spawn({
-            let view = view.downgrade();
-            async move |cx| {
-                let mut tick = 0u32;
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(100))
-                        .await;
-                    tick = tick.wrapping_add(1);
-                    let slow = tick.is_multiple_of(50);
-                    let alive = cx
-                        .update(|cx| {
-                            let Some(v) = view.upgrade() else {
-                                return false;
-                            };
-                            // Read outside the view lease: the window's root
-                            // view is this entity, so updating it inside
-                            // `v.update` would double-borrow.
-                            let handle = v.read(cx).window;
-                            let active = handle.and_then(|h| h.is_active(cx)).unwrap_or(false);
-                            let mut menu_stale = false;
-                            let mut show = false;
-                            v.update(cx, |v, cx| {
-                                v.on_inbox(cx, active);
-                                v.poll_timelines();
-                                v.poll_search_debounce(cx);
-                                v.on_clicks();
-                                v.refresh_tray(cx);
-                                menu_stale = std::mem::take(&mut v.menu_stale);
-                                show = std::mem::take(&mut v.show_requested);
-                                if slow {
-                                    cx.notify();
-                                }
+            cx.on_action({
+                let view = view.clone();
+                move |_: &OpenRocky, cx: &mut App| {
+                    view.update(cx, |v, cx| {
+                        // User-initiated: one background connect+spawn when there
+                        // is no live connection and none in flight. No slot used.
+                        if v.ctl.outbox.is_none() && !v.ctl.state.is_connecting() {
+                            let action = v.ctl.state.on_user_open();
+                            v.ctl.act(action);
+                            cx.notify();
+                        }
+                    });
+                    show_window(&view, cx);
+                }
+            });
+            cx.on_action({
+                let view = view.clone();
+                move |_: &StopRecording, cx: &mut App| {
+                    view.update(cx, |v, cx| {
+                        v.ctl.cmd_id += 1;
+                        let id = v.ctl.cmd_id;
+                        if let Some(outbox) = v.ctl.outbox.as_ref() {
+                            let _ = outbox.send(ClientMsg::Cmd {
+                                name: CmdName::Stop,
+                                id,
                             });
-                            // The menu builder reads this view, so the
-                            // rebuild must run outside the lease above.
-                            if menu_stale
-                                && let Some(tray) = v.read(cx).tray.clone()
-                                && let Err(e) = tray.refresh_menu(cx)
-                            {
-                                v.update(cx, |v, _| {
-                                    v.log.once("refresh_menu", &e);
+                            v.ctl.state.stop_sent(id);
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+            cx.on_action({
+                let view = view.clone();
+                move |_: &QuitDesk, cx: &mut App| {
+                    view.update(cx, |v, cx| v.quit(cx));
+                }
+            });
+
+            // Pump: drain the reader inbox every 100 ms; age text refreshes
+            // every 5 s. notify only fires on real changes or the slow tick.
+            cx.spawn({
+                let view = view.downgrade();
+                async move |cx| {
+                    let mut tick = 0u32;
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(100))
+                            .await;
+                        tick = tick.wrapping_add(1);
+                        let slow = tick.is_multiple_of(50);
+                        let alive = cx
+                            .update(|cx| {
+                                let Some(v) = view.upgrade() else {
+                                    return false;
+                                };
+                                // Read outside the view lease: the window's root
+                                // view is this entity, so updating it inside
+                                // `v.update` would double-borrow.
+                                let handle = v.read(cx).window;
+                                let active = handle.and_then(|h| h.is_active(cx)).unwrap_or(false);
+                                let mut menu_stale = false;
+                                let mut show = false;
+                                v.update(cx, |v, cx| {
+                                    v.on_inbox(cx, active);
+                                    v.poll_timelines();
+                                    v.poll_search_debounce(cx);
+                                    v.on_clicks();
+                                    v.refresh_tray(cx);
+                                    menu_stale = std::mem::take(&mut v.menu_stale);
+                                    show = std::mem::take(&mut v.show_requested);
+                                    if slow {
+                                        cx.notify();
+                                    }
                                 });
-                            }
-                            if show {
-                                show_window(&v, cx);
-                            }
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !alive {
-                        break;
+                                // The menu builder reads this view, so the
+                                // rebuild must run outside the lease above.
+                                if menu_stale
+                                    && let Some(tray) = v.read(cx).tray.clone()
+                                    && let Err(e) = tray.refresh_menu(cx)
+                                {
+                                    v.update(cx, |v, _| {
+                                        v.log.once("refresh_menu", &e);
+                                    });
+                                }
+                                if show {
+                                    show_window(&v, cx);
+                                }
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !alive {
+                            break;
+                        }
                     }
                 }
-            }
-        })
-        .detach();
-    });
+            })
+            .detach();
+        });
 }

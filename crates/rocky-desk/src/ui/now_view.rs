@@ -1,19 +1,17 @@
 //! Render tree for the collapsible Notices card and live Now section.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, px, rgb};
+use gpui::{Context, Div, FontWeight, SharedString, Window, div, px, rgb};
 use rocky_proto::pipe::{AgentKey, Status};
 
 use crate::i18n::{CardMsg, Msg, UiLang, card_text, tr};
 use crate::now_model::{NowView, SessionCard, SubRow};
 use crate::ui::cards_view::section_title;
 use crate::ui::motion;
+use crate::ui::status::{dot_el, failures_chip, status_dot, status_pill, timer_color};
 use crate::ui::tooltip::{
-    BORDER_NEEDS_YOU, BORDER_SUBTLE, CHIP_BG, CHIP_FG, CHIP_HIGH_BG, CHIP_HIGH_FG,
-    CHIP_NEEDS_YOU_BG, CHIP_NEEDS_YOU_FG, CHIP_WORKING_BG, CHIP_WORKING_FG, NOTICE_DOT,
-    ROW_HOVER_BG, STATUS_DONE, STATUS_FAILED, STATUS_IDLE, STATUS_NEEDS_YOU, STATUS_WORKING,
-    TEXT_BODY, TEXT_DARK, TEXT_MUTED, TEXT_SUBTLE, TIMER_NEEDS_YOU, TIMER_WORKING, card_container,
-    mono_font,
+    BORDER_NEEDS_YOU, BORDER_SUBTLE, NOTICE_DOT, ROW_HOVER_BG, TEXT_BODY, TEXT_DARK, TEXT_MUTED,
+    TEXT_SUBTLE, TIMER_NEEDS_YOU, card_container, mono_font,
 };
 
 mod finished;
@@ -489,76 +487,6 @@ fn sub_row_view<T: 'static>(
     row
 }
 
-pub(super) fn dot_el(color: u32) -> Div {
-    div()
-        .w(px(8.0))
-        .h(px(8.0))
-        .rounded_full()
-        .flex_shrink_0()
-        .bg(rgb(color))
-}
-
-pub(super) fn status_dot(status: Status, pulse_id: Option<SharedString>) -> AnyElement {
-    let dot = dot_el(status_dot_color(status));
-    match pulse_id {
-        Some(id) if matches!(status, Status::NeedsYou | Status::Working) => {
-            motion::pulse(dot, id).into_any_element()
-        }
-        _ => dot.into_any_element(),
-    }
-}
-
-fn status_pill(lang: UiLang, status: Status) -> Div {
-    let (bg, fg) = match status {
-        Status::NeedsYou => (CHIP_NEEDS_YOU_BG, CHIP_NEEDS_YOU_FG),
-        Status::Working => (CHIP_WORKING_BG, CHIP_WORKING_FG),
-        Status::Done | Status::Failed | Status::Idle | Status::Ended => (CHIP_BG, CHIP_FG),
-    };
-    div()
-        .py(px(2.0))
-        .px(px(7.0))
-        .rounded(px(99.0))
-        .whitespace_nowrap()
-        .flex_shrink_0()
-        .bg(rgb(bg))
-        .text_color(rgb(fg))
-        .text_size(px(10.5))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(tr(lang, &Msg::Status(status)))
-}
-
-pub(super) fn failures_chip(text: String) -> Div {
-    div()
-        .text_size(px(10.5))
-        .font_weight(FontWeight::SEMIBOLD)
-        .py(px(2.0))
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .whitespace_nowrap()
-        .flex_shrink_0()
-        .bg(rgb(CHIP_HIGH_BG))
-        .text_color(rgb(CHIP_HIGH_FG))
-        .child(text)
-}
-
-fn status_dot_color(status: Status) -> u32 {
-    match status {
-        Status::NeedsYou => STATUS_NEEDS_YOU,
-        Status::Working => STATUS_WORKING,
-        Status::Done => STATUS_DONE,
-        Status::Failed => STATUS_FAILED,
-        Status::Idle | Status::Ended => STATUS_IDLE,
-    }
-}
-
-fn timer_color(status: Status) -> u32 {
-    match status {
-        Status::NeedsYou => TIMER_NEEDS_YOU,
-        Status::Working => TIMER_WORKING,
-        Status::Done | Status::Failed | Status::Idle | Status::Ended => TEXT_MUTED,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use gpui::{DefiniteLength, Display, Length, Overflow, Styled, WhiteSpace, px};
@@ -566,10 +494,11 @@ mod tests {
 
     use super::{
         action_row, action_tool_column, session_header_left, session_header_line1,
-        session_header_timer, status_pill,
+        session_header_timer,
     };
     use crate::i18n::UiLang;
     use crate::now_model::SessionCard;
+    use crate::ui::status::status_pill;
 
     fn sample_card(tool: &str, action: Option<&str>, failures: u32) -> SessionCard {
         SessionCard {
