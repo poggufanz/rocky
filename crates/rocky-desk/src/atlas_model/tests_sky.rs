@@ -335,3 +335,41 @@ fn turn_titles_come_from_the_live_prompt_and_matching_cards() {
     assert_eq!(turns[0].title.as_deref(), Some("Fix the bug"));
     assert_eq!(turns[1].title.as_deref(), Some("Add sky chart"));
 }
+
+#[test]
+fn working_subagent_last_pending_step_is_running() {
+    let c = chart(
+        vec![
+            agent("s1", "", Status::Working, NOW - 10_000),
+            agent("s1", "c1", Status::Working, NOW - 10_000),
+        ],
+        vec![
+            (
+                key("s1", ""),
+                vec![
+                    turn_start(NOW - 60_000),
+                    entry(NOW - 50_000, TimelineKind::SubagentStart, None, None),
+                    tool(NOW - 20_000, "Read", Outcome::Ok),
+                ],
+            ),
+            (
+                key("s1", "c1"),
+                vec![
+                    tool(NOW - 40_000, "Grep", Outcome::Ok),
+                    tool(NOW - 30_000, "Bash", Outcome::Pending),
+                ],
+            ),
+        ],
+        true,
+    );
+    let band = &c.bands[0];
+    let subs: Vec<&Star> = band
+        .stars
+        .iter()
+        .filter(|s| s.row == RowKind::Sub(0))
+        .collect();
+    assert_eq!(subs.len(), 2);
+    assert_eq!(subs[0].kind, StarKind::Plain);
+    assert_eq!(subs[1].kind, StarKind::Running);
+    assert_eq!(subs[1].radius, LIVE_RADIUS);
+}

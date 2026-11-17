@@ -427,7 +427,7 @@ fn sub_lanes(
             &steps,
             &child.key,
             Some(RowKind::Sub(lane_idx)),
-            None,
+            is_live_status(child.status).then_some(child.status),
             input.now_ms,
             input.window,
         );

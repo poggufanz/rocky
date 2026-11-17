@@ -173,7 +173,9 @@ fn sub_lanes(
             .get(i)
             .copied()
             .unwrap_or_else(|| parent_steps.iter().filter(|e| e.ms < first.ms).count());
-        let kinds = turn_kinds(&steps, None);
+        let reaches_latest = end.is_none_or(|e| !entries.iter().any(|x| is_step(x) && x.ms >= e));
+        let live = is_live_status(child.status) && reaches_latest;
+        let kinds = turn_kinds(&steps, live.then_some(child.status));
         let row = RowKind::Sub(lanes.len());
         lanes.push(CSub {
             key: child.key.clone(),

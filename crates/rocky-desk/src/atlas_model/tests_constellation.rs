@@ -326,3 +326,32 @@ fn step_detail_reports_position_and_outcome() {
 fn local_hhmmss_appends_seconds() {
     assert!(local_hhmmss(61_000).ends_with(":01"));
 }
+
+#[test]
+fn working_subagent_last_pending_step_is_running_in_star_and_detail() {
+    let parent = vec![
+        turn_start(100),
+        tool(110, "Read", "a.rs", Outcome::Ok),
+        entry(120, TimelineKind::SubagentStart, None, None),
+        tool(130, "Read", "b.rs", Outcome::Ok),
+    ];
+    let child = vec![
+        tool(125, "Grep", "x", Outcome::Ok),
+        tool(126, "Bash", "cargo test", Outcome::Pending),
+    ];
+    let model = model_with(
+        vec![
+            agent("s1", "", Status::Working, 130),
+            agent("s1", "c1", Status::Working, 126),
+        ],
+        vec![(key("s1", ""), parent), (key("s1", "c1"), child)],
+        true,
+    );
+    let v = view(&model, None).expect("turn");
+    let last = &v.subs[0].stars[1];
+    assert_eq!(last.kind, StarKind::Running);
+    assert_eq!(last.radius, crate::atlas_model::sky::LIVE_RADIUS);
+    assert_eq!(v.subs[0].stars[0].kind, StarKind::Plain);
+    let d = step_detail(&model, &last.step, None).expect("detail");
+    assert_eq!(d.outcome, StepOutcome::Running { since_ms: 126 });
+}
