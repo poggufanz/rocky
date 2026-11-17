@@ -1,8 +1,10 @@
 //! Which Sky chart text fits: turn titles, star captions, and time labels.
 //!
 //! Positions are px on the drawable layer, whose width `d` the caller passes.
-//! Text widths are estimates from the character count, so a label that is
-//! shorter than its estimate may leave a gap but never overlaps.
+//! Text widths are estimates from the character count. A label is capped at
+//! the width reserved for it, so text wider than its estimate truncates with
+//! an ellipsis instead of running into its neighbour, and text narrower than
+//! the estimate only leaves a gap.
 
 use crate::atlas_model::sky::{RECENT_SHARE_OF_WIDTH, RowKind, SkyBand, StarKind, Tick};
 
@@ -160,7 +162,7 @@ pub(super) fn visible_titles(band: &SkyBand, d: f32, captions: &[Placed]) -> Vec
             out.push(Placed {
                 idx,
                 side: Side::Left,
-                max_w: left,
+                max_w: used,
             });
             continue;
         }
@@ -300,6 +302,33 @@ mod tests {
         let p = visible_titles(&with_note, 400.0, &[]);
         let lo = title_span(&with_note, 400.0, &p[0]).0;
         assert!(lo >= EARLIER_NOTE_W, "{lo} crosses the earlier note");
+    }
+
+    #[test]
+    fn a_left_title_is_capped_at_the_width_the_cursor_reserved() {
+        // d = 400, short titles of 10 chars (70 px estimated).
+        let d = 400.0;
+        let mut b = empty_band();
+        for (n, x) in [0.35, 0.875].into_iter().enumerate() {
+            let star = push_star(&mut b, x, n as u64, StarKind::Plain, None);
+            b.turns.push(Turn {
+                stars: vec![star],
+                live: false,
+                start_ms: n as u64,
+                title: Some("ABCDEFGHIJ".into()),
+            });
+        }
+        let placed = visible_titles(&b, d, &[]);
+        assert_eq!(placed.len(), 2);
+        assert_eq!(placed[0].side, Side::Left);
+        assert_eq!(placed[0].max_w, 70.0);
+        assert_eq!(placed[1].side, Side::Right);
+        let reserved_end = 140.0 + 70.0 + LABEL_GAP;
+        let lo = title_span(&b, d, &placed[1]).0;
+        assert!(
+            lo >= reserved_end + LABEL_GAP,
+            "{lo} overlaps the left title"
+        );
     }
 
     #[test]
