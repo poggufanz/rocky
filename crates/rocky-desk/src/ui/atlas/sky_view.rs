@@ -10,7 +10,8 @@ use super::sky_paint::{
 use super::star::{hit_box, hit_side, legend_swatches, star_caption};
 use super::{AtlasAction, OnAtlasAction};
 use crate::atlas_model::sky::{
-    LIVE_RADIUS, RECENT_SHARE_OF_WINDOW, RowKind, SkyBand, SkyChart, Star, StarKind, Turn,
+    LIVE_RADIUS, RECENT_SHARE_OF_WIDTH, RECENT_SHARE_OF_WINDOW, RowKind, SkyBand, SkyChart, Star,
+    StarKind, Turn,
 };
 use crate::atlas_model::{SkyWindow, StepRef};
 use crate::clock::local_hhmm;
@@ -22,13 +23,18 @@ use crate::ui::tooltip::{
 };
 
 pub const BAND_LABEL_W: f32 = 64.0;
-pub const PLOT_MIN_W: f32 = 640.0;
+/// Narrow enough that the default window shows the whole plot, "now" included.
+pub const PLOT_MIN_W: f32 = 480.0;
 
 const TICK_STRIP_H: f32 = 20.0;
 const TITLE_MAX_W: f32 = 360.0;
 const CAPTION_MAX_W: f32 = 220.0;
 /// Smallest distance between the left edges of two drawn turn titles.
 const TITLE_MIN_GAP: f32 = 120.0;
+/// Estimated width of the "earlier" note at the band's left edge.
+const EARLIER_NOTE_W: f32 = 170.0;
+/// A title keeps this far from the `//` scale mark on either side.
+const BREAK_CLEAR: f32 = 8.0;
 const LIVE_GUTTER: f32 = LIVE_RADIUS * 2.0 + 4.0;
 const BADGE_ICON: f32 = 18.0;
 const BRANCH_MAX_W: f32 = 38.0;
@@ -342,7 +348,7 @@ fn drawable_layer() -> Div {
         .top_0()
         .bottom_0()
         .left_0()
-        .right(px(LIVE_GUTTER))
+        .right(px(plot_gutter()))
 }
 
 /// Which side of the star a label hangs from.
@@ -362,23 +368,36 @@ fn label_side(x: f32) -> Side {
 }
 
 /// Width of the plot a star at `now` may use, so it is not cut at the edge.
+/// Right gutter of the drawable layer, in px.
+fn plot_gutter() -> f32 {
+    LIVE_GUTTER
+}
+
 fn drawable_width(plot_w: f32) -> f32 {
-    plot_w - LIVE_GUTTER
+    plot_w - plot_gutter()
 }
 
 /// Indexes of the turns whose title is drawn: each must start at least
 /// [`TITLE_MIN_GAP`] px after the previous drawn title.
 fn visible_titles(band: &SkyBand, plot_w: f32) -> Vec<usize> {
+    let drawable = drawable_width(plot_w);
+    let split = (1.0 - RECENT_SHARE_OF_WIDTH) * drawable;
     let mut shown: Vec<usize> = Vec::new();
-    let mut last_left: Option<f32> = None;
+    // The earlier note counts as an already drawn item at the left edge.
+    let mut next_free = if band.earlier.is_some() {
+        EARLIER_NOTE_W
+    } else {
+        0.0
+    };
     for (i, turn) in band.turns.iter().enumerate() {
         let (Some(_), Some(&first)) = (&turn.title, turn.stars.first()) else {
             continue;
         };
-        let left = band.stars[first].x * drawable_width(plot_w);
-        if last_left.is_none_or(|prev| left - prev >= TITLE_MIN_GAP) {
+        let left = band.stars[first].x * drawable;
+        let over_mark = left < split + BREAK_CLEAR && left + TITLE_MIN_GAP > split - BREAK_CLEAR;
+        if left >= next_free && !over_mark {
             shown.push(i);
-            last_left = Some(left);
+            next_free = left + TITLE_MIN_GAP;
         }
     }
     shown
@@ -541,13 +560,14 @@ mod tests {
     use rocky_proto::pipe::{AgentKey, Status};
 
     use super::{
-        PLOT_MIN_W, Side, drawable_width, label_side, plot_scroller, plot_surface,
-        recent_span_label, star_hit_box, visible_titles,
+        BAND_LABEL_W, PLOT_MIN_W, Side, drawable_width, label_side, plot_gutter, plot_scroller,
+        plot_surface, recent_span_label, star_hit_box, visible_titles,
     };
     use crate::atlas_model::SkyWindow;
     use crate::atlas_model::StepRef;
     use crate::atlas_model::sky::{
-        LIVE_RADIUS, QuietNote, RowKind, SkyBand, SkyChart, Star, StarKind, SubLane, Turn,
+        EarlierNote, LIVE_RADIUS, QuietNote, RowKind, SkyBand, SkyChart, Star, StarKind, SubLane,
+        Turn,
     };
     use crate::i18n::UiLang;
     use crate::ui::atlas::sky_paint::{ROW_H, TITLE_H, band_height, plot_height, row_y, title_y};
@@ -637,8 +657,8 @@ mod tests {
     #[test]
     fn crowded_turn_titles_are_skipped() {
         let mut b = band(false, 0);
-        // 0.05 and 0.10 of 640 px are 32 px apart; 0.30 is 160 px past 0.05.
-        for x in [0.05, 0.10, 0.30, 0.35] {
+        // 0.05 and 0.10 are 31 px apart; 0.40 is 220 px past 0.05; 0.45 is 31 px past 0.40.
+        for x in [0.05, 0.10, 0.40, 0.45] {
             let (s, mut t) = turn_at(x);
             b.turns.push(Turn {
                 stars: vec![b.stars.len()],
@@ -648,6 +668,45 @@ mod tests {
             b.stars.push(s);
         }
         assert_eq!(visible_titles(&b, 640.0), vec![0, 2]);
+    }
+
+    fn titled_band(xs: &[f32], earlier: bool) -> SkyBand {
+        let mut b = band(false, 0);
+        for &x in xs {
+            let (s, mut t) = turn_at(x);
+            t.stars = vec![b.stars.len()];
+            b.turns.push(t);
+            b.stars.push(s);
+        }
+        if earlier {
+            b.earlier = Some(EarlierNote {
+                start_ms: 0,
+                edits: 3,
+            });
+        }
+        b
+    }
+
+    #[test]
+    fn titles_clear_the_earlier_note_and_the_scale_mark() {
+        // Drawable width 627: 0.02 is inside the earlier note, 0.28 (176 px)
+        // would run across the // mark at 188 px, 0.5 and 0.7 are clear.
+        let b = titled_band(&[0.02, 0.28, 0.5, 0.7], true);
+        assert_eq!(visible_titles(&b, 640.0), vec![2, 3]);
+        let plain = titled_band(&[0.02, 0.5], false);
+        assert_eq!(visible_titles(&plain, 640.0), vec![0, 1]);
+    }
+
+    #[test]
+    fn the_view_gutter_is_the_one_the_helper_subtracts() {
+        assert_eq!(drawable_width(600.0), 600.0 - plot_gutter());
+        assert!(plot_gutter() >= LIVE_RADIUS * 2.0 + 4.0);
+    }
+
+    #[test]
+    fn plot_fits_a_default_window_without_scrolling() {
+        // A 933 px window leaves about 617 px inside the chart card.
+        const { assert!(BAND_LABEL_W + PLOT_MIN_W <= 617.0) };
     }
 
     #[test]
