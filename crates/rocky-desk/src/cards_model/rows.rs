@@ -4,7 +4,7 @@ use rocky_proto::cards::{
     Block, BlockSymbol, BlockVia, Card, Importance, Label, PromptKind, SymbolKind, classify_prompt,
 };
 
-use super::{BashRow, CardRow, EditRow, TooltipLine};
+use super::{BashRow, CardRow, EditRow, FileChip, TooltipLine};
 use crate::clock::local_hhmm;
 use crate::i18n::{CardMsg, UiLang, card_text, label_chip, label_full};
 
@@ -12,6 +12,7 @@ const TITLE_MAX_CHARS: usize = 80;
 const QUOTE_MAX_CHARS: usize = 200;
 const CMD_MAX_CHARS: usize = 80;
 const MAX_EDIT_ROWS: usize = 3;
+const MAX_FILE_CHIPS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockStatus {
@@ -40,7 +41,12 @@ pub(super) fn build_card_row(
 
     let time = sanitize_single_line(&local_hhmm(card_sort_key(card)));
     let (meta, meta_high) = build_meta(card, lang);
-    let (edits, more) = build_edit_rows(card, query_lower, lang);
+    let (mut edits, more) = build_edit_rows(card, query_lower, lang);
+    let meta = match hoist_shared_chip(&mut edits) {
+        Some(chip) => format!("{meta} \u{00b7} {chip}"),
+        None => meta,
+    };
+    let (files, files_more) = build_file_chips(card, query_lower, lang);
 
     CardRow {
         card_id: card.card_id.clone(),
@@ -51,7 +57,70 @@ pub(super) fn build_card_row(
         meta_high,
         edits,
         more,
+        files,
+        files_more,
     }
+}
+
+/// Distinct files of a card in first-edit order, at most [`MAX_FILE_CHIPS`].
+/// Two edits to one file make one chip that says ×2, not two rows.
+fn build_file_chips(card: &Card, query_lower: &str, lang: UiLang) -> (Vec<FileChip>, usize) {
+    let mut order: Vec<&str> = Vec::new();
+    for block in &card.blocks {
+        if !order.contains(&block.path.as_str()) {
+            order.push(block.path.as_str());
+        }
+    }
+    let shown: Vec<&str> = order.iter().take(MAX_FILE_CHIPS).copied().collect();
+    // Two different files with one name ("settings.json" twice) keep their
+    // parent folder, so the chips do not read as a repeated edit.
+    let name_of = |path: &str| {
+        let name = last_path_segment(path);
+        let clash = shown
+            .iter()
+            .filter(|p| **p != path && last_path_segment(p) == name)
+            .count()
+            > 0;
+        if clash {
+            let segs: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+            segs[segs.len().saturating_sub(2)..].join("/")
+        } else {
+            name
+        }
+    };
+    let chips = shown
+        .iter()
+        .map(|path| {
+            let group: Vec<&Block> = card.blocks.iter().filter(|b| b.path == *path).collect();
+            let mut tooltip = vec![TooltipLine::text(path)];
+            tooltip.extend(build_tooltip(&group, lang));
+            FileChip {
+                name: name_of(path),
+                edits: u32::try_from(group.len()).unwrap_or(u32::MAX),
+                high: group.iter().any(|b| b.importance == Importance::High),
+                matched: !query_lower.is_empty()
+                    && group.iter().any(|b| block_matches_query(b, query_lower)),
+                tooltip,
+            }
+        })
+        .collect();
+    (chips, order.len().saturating_sub(MAX_FILE_CHIPS))
+}
+
+/// When every row carries the same plain chip ("outside repo" on each of
+/// four edits), it says one thing about the card, not about each row: move
+/// it to the meta line once. Important chips stay on their rows.
+pub(super) fn hoist_shared_chip(edits: &mut [EditRow]) -> Option<String> {
+    let first = edits.first()?.chip.clone();
+    let shared =
+        edits.len() >= 2 && !first.is_empty() && edits.iter().all(|e| e.chip == first && !e.high);
+    if !shared {
+        return None;
+    }
+    for e in edits.iter_mut() {
+        e.chip.clear();
+    }
+    Some(first)
 }
 
 pub(super) fn card_sort_key(card: &Card) -> u64 {

@@ -5,7 +5,7 @@ use gpui::{App, ClickEvent, Div, IntoElement, SharedString, Stateful, Window, di
 
 use crate::consent_view::{ConsentModel, PlanRow, Stage, consent_notes, plan_failure_msg};
 use crate::i18n::{Msg, SetupMsg, UiLang, tr};
-use crate::settings_view::toggle_row;
+use crate::ui::settings_kit::toggle_row;
 
 const ERROR_COLOR: u32 = 0xD92B2B;
 
@@ -129,6 +129,7 @@ pub fn consent_screen(
     root.child(toggle_row(
         SharedString::from("consent-autostart"),
         text(lang, SetupMsg::ConsentAutostart),
+        None,
         model.autostart,
         model.can_agree(),
         toggle_autostart,

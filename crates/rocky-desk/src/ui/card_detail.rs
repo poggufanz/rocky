@@ -11,8 +11,8 @@ use crate::ui::cards_view::{CardAction, OnCardAction};
 use crate::ui::motion;
 use crate::ui::tooltip::{
     BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, DIFF_DEL_FG, DiffLineTone, LINK, OK, TEXT_DARK, TEXT_DIM,
-    TEXT_MUTED, back_button, card_container, card_header, chip_badge, code_block_container,
-    diff_code_line, mono_font, path_symbol_text, seq_badge,
+    TEXT_MUTED, card_container, card_header, chip_badge, code_block_container, diff_code_line,
+    mono_font, path_symbol_text, seq_badge,
 };
 
 /// Renders the full detail screen for an opened change card.
@@ -22,15 +22,9 @@ pub fn card_detail_view<T: 'static>(
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
 ) -> impl IntoElement {
+    // Shown inside the card modal, which owns closing; no back control here.
     let card_id = detail.map(DetailModel::card_id).unwrap_or("none");
     let mut out = div().flex().flex_col().gap_2();
-
-    out = out.child(back_button(
-        "detail-back",
-        card_text(lang, &CardMsg::BackDone),
-        move |this, window, cx| on_action(this, CardAction::BackFromDetail, window, cx),
-        cx,
-    ));
 
     match detail.map(DetailModel::state) {
         None | Some(DetailState::Loading) => {
@@ -56,7 +50,7 @@ pub fn card_detail_view<T: 'static>(
         }
     }
 
-    motion::slide_from_right(out, SharedString::from(format!("detail:{card_id}")))
+    out
 }
 
 fn ready_card<T: 'static>(

@@ -463,6 +463,7 @@ mod tests {
                 branch: None,
             },
             prompt: None,
+            harness: None,
         }
     }
 

@@ -51,6 +51,8 @@ impl DeskView {
                     id,
                 );
                 self.send_card_msg(msg);
+                // The card opens as a modal; focus it so Escape closes it.
+                self.modal_focus.focus(window);
                 cx.notify();
             }
             CardAction::LoadMore => {

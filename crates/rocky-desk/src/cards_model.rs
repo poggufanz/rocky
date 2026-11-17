@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use rocky_proto::cards::Card;
 use rocky_proto::pipe::ClientMsg;
 
+use crate::atlas_model::ProjectId;
 use crate::i18n::{CardMsg, UiLang};
 pub(crate) use rows::{
     block_kind, block_status, first_non_empty_line, format_symbol, last_path_segment,
@@ -34,7 +35,7 @@ pub struct TooltipLine {
 }
 
 impl TooltipLine {
-    fn text(text: impl AsRef<str>) -> Self {
+    pub(crate) fn text(text: impl AsRef<str>) -> Self {
         Self {
             text: sanitize_single_line(text.as_ref()),
             code: None,
@@ -73,6 +74,22 @@ pub struct CardRow {
     pub meta_high: Option<String>,
     pub edits: Vec<EditRow>,
     pub more: Option<String>,
+    /// One chip per distinct file, in first-edit order, for the compact list.
+    pub files: Vec<FileChip>,
+    /// Distinct files beyond `files`.
+    pub files_more: usize,
+}
+
+/// One changed file in the compact Done list: name, how many edits, and
+/// whether any of them is important or matches the search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChip {
+    pub name: String,
+    pub edits: u32,
+    pub high: bool,
+    pub matched: bool,
+    /// Full path first, then the labels and words of its edits.
+    pub tooltip: Vec<TooltipLine>,
 }
 
 /// Pure state machine for the desk's paginated, searchable change-card list.
@@ -105,6 +122,17 @@ impl CardsModel {
             CardMsg::Loading
         } else {
             CardMsg::Empty
+        }
+    }
+
+    /// Copy for an empty list shown for one project: when other projects have
+    /// cards, say this project has none instead of "No cards yet".
+    pub fn empty_msg_for(&self, project: Option<&ProjectId>) -> CardMsg {
+        match self.empty_msg() {
+            CardMsg::Empty if project.is_some() && !self.items.is_empty() => {
+                CardMsg::EmptyForProject
+            }
+            other => other,
         }
     }
 
@@ -241,6 +269,20 @@ impl CardsModel {
         out
     }
 
+    /// Like [`Self::rows`], but only the cards that belong to `project`.
+    pub fn rows_for(&self, lang: UiLang, project: &ProjectId) -> Vec<CardRow> {
+        let mine: HashSet<&str> = self
+            .items
+            .iter()
+            .filter(|c| card_project(c) == *project)
+            .map(|c| c.card_id.as_str())
+            .collect();
+        self.rows(lang)
+            .into_iter()
+            .filter(|row| mine.contains(row.card_id.as_str()))
+            .collect()
+    }
+
     fn apply_push(&mut self, card: Card) -> bool {
         if let Some(existing) = self.items.iter_mut().find(|c| c.card_id == card.card_id) {
             if card.rev > existing.rev {
@@ -280,6 +322,11 @@ fn upsert_by_rev(cards: &mut Vec<Card>, card: Card) {
     } else {
         cards.push(card);
     }
+}
+
+/// The project a card belongs to: its main checkout, else its root.
+fn card_project(card: &Card) -> ProjectId {
+    ProjectId(card.main_root.clone().unwrap_or_else(|| card.root.clone()))
 }
 
 fn emit_subtree(

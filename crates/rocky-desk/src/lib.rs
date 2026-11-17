@@ -1,4 +1,6 @@
 pub mod app;
+pub mod assets;
+pub mod atlas_model;
 pub mod autostart;
 pub mod capture_lines;
 pub mod card_detail_model;
@@ -10,6 +12,7 @@ pub mod conn;
 pub mod connect;
 pub mod consent_view;
 pub mod desklog;
+pub mod flow_model;
 pub mod i18n;
 pub mod icons;
 pub mod notified;

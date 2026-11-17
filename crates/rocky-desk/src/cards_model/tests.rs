@@ -31,6 +31,8 @@ pub(super) fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> C
         flow: Vec::new(),
         flow_more: 0,
         outside_count: 0,
+        reads: Vec::new(),
+        reads_more: 0,
         coverage: Coverage {
             state: CoverageState::Full,
             reasons: Vec::new(),
@@ -890,4 +892,138 @@ fn row_titles_format_harness_envelopes_and_plain_prompts() {
         id_rows[5].title,
         "Please explain what <task-notification> means"
     );
+}
+
+fn chip_row(seq: u32, chip: &str, high: bool) -> EditRow {
+    EditRow {
+        seq,
+        file: format!("f{seq}.json"),
+        symbol: None,
+        chip: chip.to_string(),
+        high,
+        matched: false,
+        bash: None,
+        tooltip: Vec::new(),
+    }
+}
+
+#[test]
+fn shared_plain_chip_moves_to_the_card_once() {
+    let mut rows = vec![
+        chip_row(1, "outside repo", false),
+        chip_row(2, "outside repo", false),
+    ];
+    assert_eq!(
+        rows::hoist_shared_chip(&mut rows),
+        Some("outside repo".to_string())
+    );
+    assert!(rows.iter().all(|r| r.chip.is_empty()));
+}
+
+#[test]
+fn mixed_single_or_important_chips_stay_on_rows() {
+    let mut mixed = vec![chip_row(1, "outside repo", false), chip_row(2, "", false)];
+    assert_eq!(rows::hoist_shared_chip(&mut mixed), None);
+    assert_eq!(mixed[0].chip, "outside repo");
+
+    let mut single = vec![chip_row(1, "outside repo", false)];
+    assert_eq!(rows::hoist_shared_chip(&mut single), None);
+
+    let mut high = vec![
+        chip_row(1, "public API", true),
+        chip_row(2, "public API", true),
+    ];
+    assert_eq!(rows::hoist_shared_chip(&mut high), None);
+    assert_eq!(high[1].chip, "public API");
+}
+
+#[test]
+fn file_chips_merge_repeat_edits_and_cap_at_four() {
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    card.blocks = vec![
+        sample_block(1, "src/a.rs", Vec::new()),
+        sample_block(2, "src/a.rs", Vec::new()),
+        sample_block(3, "src/b.rs", Vec::new()),
+        sample_block(4, "src/c.rs", Vec::new()),
+        sample_block(5, "src/d.rs", Vec::new()),
+        sample_block(6, "src/e.rs", Vec::new()),
+        sample_block(7, "src/f.rs", Vec::new()),
+    ];
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+    model.on_cards(1, vec![card], None);
+    let rows = model.rows(UiLang::En);
+    let names: Vec<(&str, u32)> = rows[0]
+        .files
+        .iter()
+        .map(|f| (f.name.as_str(), f.edits))
+        .collect();
+    assert_eq!(
+        names,
+        vec![("a.rs", 2), ("b.rs", 1), ("c.rs", 1), ("d.rs", 1)]
+    );
+    assert_eq!(rows[0].files_more, 2);
+    assert_eq!(rows[0].files[0].tooltip[0].text, "src/a.rs");
+}
+
+#[test]
+fn file_chips_with_one_name_keep_their_folder() {
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    card.blocks = vec![
+        sample_block(1, "~/.claude/settings.json", Vec::new()),
+        sample_block(2, "~/profile/home/settings.json", Vec::new()),
+        sample_block(3, "src/a.rs", Vec::new()),
+    ];
+    let mut model = CardsModel::new();
+    let _ = model.request_first_page(1);
+    model.on_cards(1, vec![card], None);
+    let names: Vec<String> = model.rows(UiLang::En)[0]
+        .files
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec![".claude/settings.json", "home/settings.json", "a.rs"]
+    );
+}
+
+#[test]
+fn rows_for_keeps_only_cards_of_the_project() {
+    let mut cards = CardsModel::new();
+    let mut other = sample_card("other", 2_000, Some(2_100));
+    other.main_root = None;
+    other.root = "/work/other".to_string();
+    cards.request_first_page(1);
+    cards.on_cards(
+        1,
+        vec![sample_card("mine", 1_000, Some(1_100)), other],
+        None,
+    );
+
+    let project = crate::atlas_model::ProjectId("/work/rocky".to_string());
+    let rows = cards.rows_for(UiLang::En, &project);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].card_id, "mine");
+}
+
+#[test]
+fn empty_log_for_a_project_says_so_when_other_projects_have_cards() {
+    let mut cards = CardsModel::new();
+    cards.request_first_page(1);
+    cards.on_cards(1, Vec::new(), None);
+    let project = crate::atlas_model::ProjectId("/work/rocky".to_string());
+    assert_eq!(cards.empty_msg_for(Some(&project)), CardMsg::Empty);
+
+    let mut other = sample_card("other", 2_000, Some(2_100));
+    other.main_root = None;
+    other.root = "/work/other".to_string();
+    let _ = cards.request_first_page(2);
+    cards.on_cards(2, vec![other], None);
+    assert_eq!(
+        cards.empty_msg_for(Some(&project)),
+        CardMsg::EmptyForProject
+    );
+    assert_eq!(cards.empty_msg_for(None), CardMsg::Empty);
 }

@@ -60,6 +60,11 @@ pub fn local_hhmm(ms: u64) -> String {
     utc_hhmm(ms)
 }
 
+/// Local `HH:MM:SS` for a Unix millisecond timestamp.
+pub fn local_hhmmss(ms: u64) -> String {
+    format!("{}:{:02}", local_hhmm(ms), (ms / 1000) % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,13 +17,113 @@ use crate::settings_view::View;
 /// The command that removes the command line itself, which Rocky cannot do.
 pub const UNINSTALL_COMMAND: &str = "npm uninstall -g @poggufanz/rocky-cli";
 
+/// The harness id of the shell hook target. Its switch is the shell hook,
+/// not a harness switch, so Settings shows it apart from the agent tools.
+pub const SHELL_HARNESS: &str = "shell";
+
+/// How much a status asks for the owner's eye, drawn as the color of its chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Ok,
+    Warn,
+    Bad,
+    Neutral,
+}
+
 /// One harness in the Settings list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessRow {
     pub harness: String,
     pub on: bool,
     pub state: Msg,
+    pub tone: Tone,
     pub paths: Vec<String>,
+    /// The config file that holds a rocky entry Rocky did not write.
+    pub foreign_path: Option<String>,
+    /// Why the harness failed, shown under its row.
+    pub error: Option<String>,
+}
+
+/// The tool's own name for a harness id; an unknown id shows as it is.
+pub fn harness_name(id: &str) -> String {
+    match id {
+        "claude-code" => "Claude Code",
+        "codex" => "Codex",
+        "copilot-cli" => "Copilot CLI",
+        "gemini-cli" => "Gemini CLI",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Splits the shell hook target off the harness rows.
+pub fn split_shell(rows: Vec<HarnessRow>) -> (Vec<HarnessRow>, Option<HarnessRow>) {
+    let (shell, tools): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|r| r.harness == SHELL_HARNESS);
+    (tools, shell.into_iter().next())
+}
+
+/// `path` with the home folder written as `~`. Windows paths compare without
+/// case and with either separator; the rest of the path keeps its spelling.
+pub fn home_short(path: &str, home: Option<&str>) -> String {
+    const SEPS: [char; 2] = ['/', '\\'];
+    let Some(home) = home.map(|h| h.trim_end_matches(SEPS)) else {
+        return path.to_string();
+    };
+    if home.is_empty() || path.len() < home.len() || !path.is_char_boundary(home.len()) {
+        return path.to_string();
+    }
+    let (head, rest) = path.split_at(home.len());
+    let same = if cfg!(windows) {
+        head.replace('\\', "/")
+            .eq_ignore_ascii_case(&home.replace('\\', "/"))
+    } else {
+        head == home
+    };
+    if same && (rest.is_empty() || rest.starts_with(SEPS)) {
+        format!("~{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+/// `text` with each path that starts at the home folder written from `~`,
+/// for sentences that carry a path. A folder that only shares the home's
+/// first letters stays whole.
+pub fn home_short_text(text: &str, home: Option<&str>) -> String {
+    const SEPS: [char; 2] = ['/', '\\'];
+    let Some(home) = home
+        .map(|h| h.trim_end_matches(SEPS))
+        .filter(|h| !h.is_empty())
+    else {
+        return text.to_string();
+    };
+    // ASCII lowercasing keeps byte offsets, so indexes found in `hay` cut `text`.
+    let fold = |s: &str| {
+        if cfg!(windows) {
+            s.to_ascii_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let hay = fold(text);
+    let needle = fold(home);
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(found) = hay[from..].find(&needle) {
+        let start = from + found;
+        let end = start + needle.len();
+        let after = &text[end..];
+        out.push_str(&text[from..start]);
+        if after.is_empty() || after.starts_with(SEPS) {
+            out.push('~');
+        } else {
+            out.push_str(&text[start..end]);
+        }
+        from = end;
+    }
+    out.push_str(&text[from..]);
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +149,10 @@ pub struct RepoRow {
     pub declined: bool,
     pub size: String,
     pub capture: Option<Msg>,
+    /// Tone of the capture state, else of the decision.
+    pub tone: Tone,
+    /// Why capture failed, shown under the row.
+    pub capture_error: Option<String>,
     pub worktrees: Vec<WorktreeRow>,
 }
 
@@ -164,6 +268,26 @@ struct Probe {
     state: TargetState,
     error: Option<String>,
     repaired_ms: Option<u64>,
+    path: String,
+}
+
+/// What a harness row shows about its worst config entry.
+struct ProbeView {
+    state: Msg,
+    tone: Tone,
+    foreign_path: Option<String>,
+    error: Option<String>,
+}
+
+impl ProbeView {
+    fn plain(state: SetupMsg, tone: Tone) -> Self {
+        ProbeView {
+            state: Msg::Setup(state),
+            tone,
+            foreign_path: None,
+            error: None,
+        }
+    }
 }
 
 /// How much a state needs the owner's eye; the worst entry names the harness.
@@ -177,7 +301,7 @@ fn rank(state: TargetState) -> u8 {
     }
 }
 
-fn probe_msg(probes: &[Probe], fmt_time: &dyn Fn(u64) -> String) -> Msg {
+fn probe_view(probes: &[Probe], fmt_time: &dyn Fn(u64) -> String) -> ProbeView {
     let Some(worst) = probes.iter().reduce(|best, p| {
         if rank(p.state) > rank(best.state) {
             p
@@ -185,24 +309,33 @@ fn probe_msg(probes: &[Probe], fmt_time: &dyn Fn(u64) -> String) -> Msg {
             best
         }
     }) else {
-        return Msg::Setup(SetupMsg::HarnessNotInstalled);
+        return ProbeView::plain(SetupMsg::HarnessNotInstalled, Tone::Neutral);
     };
-    let failed = |error: &Option<String>| {
-        Msg::Setup(SetupMsg::HarnessFailed {
-            error: error.clone().unwrap_or_default(),
-        })
+    let failed = |error: &Option<String>| ProbeView {
+        error: error.clone().filter(|e| !e.trim().is_empty()),
+        ..ProbeView::plain(
+            SetupMsg::HarnessFailed {
+                error: error.clone().unwrap_or_default(),
+            },
+            Tone::Bad,
+        )
     };
     match worst.state {
-        TargetState::Foreign => Msg::Setup(SetupMsg::HarnessForeign),
+        TargetState::Foreign => ProbeView {
+            foreign_path: Some(worst.path.clone()),
+            ..ProbeView::plain(SetupMsg::HarnessForeign, Tone::Warn)
+        },
         TargetState::Refused | TargetState::Error | TargetState::Changed => failed(&worst.error),
         TargetState::Missing | TargetState::Stale if worst.error.is_some() => failed(&worst.error),
         TargetState::Missing | TargetState::Stale | TargetState::NotConsented => {
-            Msg::Setup(SetupMsg::HarnessNotInstalled)
+            ProbeView::plain(SetupMsg::HarnessNotInstalled, Tone::Neutral)
         }
         TargetState::Ok | TargetState::Written => {
             match probes.iter().filter_map(|p| p.repaired_ms).max() {
-                Some(ms) => Msg::Setup(SetupMsg::HarnessRestored { time: fmt_time(ms) }),
-                None => Msg::Setup(SetupMsg::HarnessOk),
+                Some(ms) => {
+                    ProbeView::plain(SetupMsg::HarnessRestored { time: fmt_time(ms) }, Tone::Ok)
+                }
+                None => ProbeView::plain(SetupMsg::HarnessOk, Tone::Ok),
             }
         }
     }
@@ -235,12 +368,13 @@ pub fn harness_rows(
                     state: t.state,
                     error: t.error.clone(),
                     repaired_ms: t.last_repair_ms,
+                    path: t.path.clone(),
                 })
                 .collect();
             let planned: Vec<&SetupTarget> =
                 plan_targets.iter().filter(|t| t.harness == name).collect();
-            let state = if off {
-                Msg::Setup(SetupMsg::HarnessOff)
+            let view = if off {
+                ProbeView::plain(SetupMsg::HarnessOff, Tone::Neutral)
             } else if live.is_empty() {
                 let probes: Vec<Probe> = planned
                     .iter()
@@ -248,38 +382,64 @@ pub fn harness_rows(
                         state: t.state,
                         error: t.detail.clone(),
                         repaired_ms: None,
+                        path: t.path.clone(),
                     })
                     .collect();
-                probe_msg(&probes, fmt_time)
+                probe_view(&probes, fmt_time)
             } else {
-                probe_msg(&live, fmt_time)
+                probe_view(&live, fmt_time)
             };
             let mut paths: Vec<String> = planned.iter().map(|t| t.path.clone()).collect();
             paths.dedup();
             HarnessRow {
                 harness: name.to_string(),
                 on: !off,
-                state,
+                state: view.state,
+                tone: view.tone,
                 paths,
+                foreign_path: view.foreign_path,
+                error: view.error,
             }
         })
         .collect()
 }
 
-fn capture_msg(row: &CaptureHealth) -> Msg {
-    Msg::Setup(match row.state {
-        CaptureState::Starting => SetupMsg::CaptureStarting,
-        CaptureState::Ok => SetupMsg::CaptureOk,
-        CaptureState::Partial => SetupMsg::CapturePartial,
-        CaptureState::Elsewhere => SetupMsg::CaptureElsewhere,
-        CaptureState::Polling => SetupMsg::Polling {
-            root: row.root.clone(),
-        },
-        CaptureState::Failed => SetupMsg::Failed {
-            root: row.root.clone(),
-            error: row.error.clone().unwrap_or_default(),
-        },
-    })
+/// A repo row's capture status: a short message, its tone, and why it failed.
+struct CaptureView {
+    msg: Msg,
+    tone: Tone,
+    error: Option<String>,
+}
+
+fn capture_view(row: &CaptureHealth) -> CaptureView {
+    let (msg, tone) = match row.state {
+        CaptureState::Starting => (SetupMsg::CaptureStarting, Tone::Neutral),
+        CaptureState::Ok => (SetupMsg::CaptureOk, Tone::Ok),
+        CaptureState::Partial => (SetupMsg::CapturePartial, Tone::Warn),
+        CaptureState::Elsewhere => (SetupMsg::CaptureElsewhere, Tone::Neutral),
+        CaptureState::Polling => (SetupMsg::CapturePolling, Tone::Warn),
+        CaptureState::Failed => (SetupMsg::CaptureFailed, Tone::Bad),
+    };
+    let error = if row.state == CaptureState::Failed {
+        row.error.clone().filter(|e| !e.trim().is_empty())
+    } else {
+        None
+    };
+    CaptureView {
+        msg: Msg::Setup(msg),
+        tone,
+        error,
+    }
+}
+
+/// A repo row's chip fields from its capture status, else from its decision:
+/// a repo still waiting for an answer asks for one, a decided repo is quiet.
+fn repo_status(cap: Option<CaptureView>, decided: bool) -> (Option<Msg>, Tone, Option<String>) {
+    match cap {
+        Some(c) => (Some(c.msg), c.tone, c.error),
+        None if decided => (None, Tone::Neutral, None),
+        None => (None, Tone::Warn, None),
+    }
 }
 
 /// Decided repos, then repos still waiting for an answer.
@@ -292,7 +452,7 @@ pub fn repo_rows(
         capture
             .iter()
             .find(|c| same_root(&c.root, main, cfg!(windows)))
-            .map(capture_msg)
+            .map(capture_view)
     };
     let decided = repos.iter().map(|r| {
         let (decision, allowed, declined) = match r.decision {
@@ -300,6 +460,7 @@ pub fn repo_rows(
             RepoDecisionState::Declined => (SetupMsg::RepoDeclined, false, true),
             RepoDecisionState::Undecided => (SetupMsg::RepoNotAsked, false, false),
         };
+        let (capture, tone, capture_error) = repo_status(capture_of(&r.main), allowed || declined);
         RepoRow {
             main: r.main.clone(),
             name: r.name.clone(),
@@ -307,7 +468,9 @@ pub fn repo_rows(
             allowed,
             declined,
             size: format_mib(r.bytes),
-            capture: capture_of(&r.main),
+            capture,
+            tone,
+            capture_error,
             worktrees: r
                 .worktrees
                 .iter()
@@ -322,15 +485,20 @@ pub fn repo_rows(
     let waiting = pending
         .iter()
         .filter(|p| !repos.iter().any(|r| r.key == p.key))
-        .map(|p| RepoRow {
-            main: p.main.clone(),
-            name: p.name.clone(),
-            decision: Msg::Setup(SetupMsg::RepoNotAsked),
-            allowed: false,
-            declined: false,
-            size: format_mib(0),
-            capture: capture_of(&p.main),
-            worktrees: Vec::new(),
+        .map(|p| {
+            let (capture, tone, capture_error) = repo_status(capture_of(&p.main), false);
+            RepoRow {
+                main: p.main.clone(),
+                name: p.name.clone(),
+                decision: Msg::Setup(SetupMsg::RepoNotAsked),
+                allowed: false,
+                declined: false,
+                size: format_mib(0),
+                capture,
+                tone,
+                capture_error,
+                worktrees: Vec::new(),
+            }
         });
     decided.chain(waiting).collect()
 }

@@ -69,6 +69,8 @@ pub struct AgentStatus {
     pub repo: RepoInfo,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<PromptText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -651,6 +653,47 @@ mod tests {
         }
     }
     #[test]
+    fn agent_status_harness_roundtrips_and_is_optional() {
+        let mut a = AgentStatus {
+            key: key(),
+            agent_type: None,
+            status: Status::Idle,
+            action: None,
+            summary: None,
+            description: None,
+            failures: 0,
+            last_event_ms: 1,
+            quiet_10m: false,
+            repo: RepoInfo {
+                root: None,
+                main_root: None,
+                name: "rocky".into(),
+                branch: None,
+            },
+            prompt: None,
+            harness: Some("codex".into()),
+        };
+        let line = encode(&ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent: a.clone(),
+        });
+        assert!(line.contains("\"harness\":\"codex\""));
+        let back = decode::<ServerMsg>(line.trim_end()).unwrap();
+        assert!(
+            matches!(back, ServerMsg::Status { agent, .. } if agent.harness.as_deref() == Some("codex"))
+        );
+
+        a.harness = None;
+        let line = encode(&ServerMsg::Status {
+            op: StatusOp::Upsert,
+            agent: a,
+        });
+        assert!(!line.contains("harness"));
+        let back = decode::<ServerMsg>(line.trim_end()).unwrap();
+        assert!(matches!(back, ServerMsg::Status { agent, .. } if agent.harness.is_none()));
+    }
+
+    #[test]
     fn every_server_msg_roundtrips() {
         let agent = AgentStatus {
             key: key(),
@@ -669,6 +712,7 @@ mod tests {
                 branch: None,
             },
             prompt: None,
+            harness: None,
         };
         let health = Health::default();
         let msgs = [
@@ -1018,6 +1062,8 @@ mod tests {
             flow: Vec::new(),
             flow_more: 0,
             outside_count: 0,
+            reads: Vec::new(),
+            reads_more: 0,
             coverage: Coverage {
                 state: CoverageState::Full,
                 reasons: Vec::new(),

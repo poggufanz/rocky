@@ -6,9 +6,11 @@
 use rocky_proto::pipe::{GapReason, Outcome, Status, TimelineKind};
 use rocky_proto::settings::Lang;
 
+mod atlas;
 mod cards;
 mod setup;
 
+pub use atlas::{AtlasMsg, atlas_text};
 pub use cards::{CardMsg, card_samples, card_text, label_chip, label_full, reason_text};
 #[cfg(test)]
 use setup::setup_samples;
@@ -81,10 +83,6 @@ pub enum Msg {
     SubagentsStillWorking {
         n: u64,
     },
-    SubagentsHidden {
-        n: u64,
-        working: u64,
-    },
     TimelineEntry {
         kind: TimelineKind,
         tool: Option<String>,
@@ -108,6 +106,7 @@ pub enum Msg {
     LangId,
     Autostart,
     ViewAgents,
+    ViewFlow,
     ViewSettings,
     SettingsReadOnly,
     ToolTextHistoryNote,
@@ -196,7 +195,6 @@ fn samples() -> Vec<Msg> {
         },
         Msg::EarlierGaps { n: 2 },
         Msg::SubagentsStillWorking { n: 2 },
-        Msg::SubagentsHidden { n: 3, working: 1 },
         Msg::TimelineEntry {
             kind: TimelineKind::Tool,
             tool: Some("Bash".into()),
@@ -232,6 +230,7 @@ fn samples() -> Vec<Msg> {
         Msg::LangId,
         Msg::Autostart,
         Msg::ViewAgents,
+        Msg::ViewFlow,
         Msg::ViewSettings,
         Msg::SettingsReadOnly,
         Msg::ToolTextHistoryNote,
@@ -311,9 +310,6 @@ pub fn en(m: &Msg) -> String {
         Msg::SubagentsStillWorking { n } => {
             format!("{n} {} still working", plural(*n, "subagent", "subagents"))
         }
-        Msg::SubagentsHidden { n, working } => {
-            format!("+{n} {} ({working} working)", plural(*n, "subagent", "subagents"))
-        }
         Msg::TimelineEntry { kind, tool, text } => {
             timeline_entry_en(*kind, tool.as_deref(), text.as_deref())
         }
@@ -335,6 +331,7 @@ pub fn en(m: &Msg) -> String {
         Msg::LangId => "Indonesia".to_string(),
         Msg::Autostart => "Start rocky when you sign in".to_string(),
         Msg::ViewAgents => "Agents".to_string(),
+        Msg::ViewFlow => "Flow".to_string(),
         Msg::ViewSettings => "Settings".to_string(),
         Msg::SettingsReadOnly => "Settings are read-only while rockyd is not connected.".to_string(),
         Msg::ToolTextHistoryNote => {
@@ -409,7 +406,6 @@ pub fn id(m: &Msg) -> String {
         } => gap_id(*count, from, to, *reason),
         Msg::EarlierGaps { n } => format!("{n} celah sebelumnya"),
         Msg::SubagentsStillWorking { n } => format!("{n} subagen masih bekerja"),
-        Msg::SubagentsHidden { n, working } => format!("+{n} subagen ({working} bekerja)"),
         Msg::TimelineEntry { kind, tool, text } => {
             timeline_entry_id(*kind, tool.as_deref(), text.as_deref())
         }
@@ -431,6 +427,7 @@ pub fn id(m: &Msg) -> String {
         Msg::LangId => "Indonesia".to_string(),
         Msg::Autostart => "Jalankan rocky saat Anda masuk".to_string(),
         Msg::ViewAgents => "Agen".to_string(),
+        Msg::ViewFlow => "Alur".to_string(),
         Msg::ViewSettings => "Pengaturan".to_string(),
         Msg::SettingsReadOnly => {
             "Pengaturan hanya-baca selama rockyd tidak terhubung.".to_string()
@@ -711,5 +708,7 @@ fn gap_id(count: u64, from: &str, to: &str, reason: GapReason) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_atlas;
 #[cfg(test)]
 mod tests_now;

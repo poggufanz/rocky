@@ -80,10 +80,6 @@ fn english_counts_of_one_are_singular() {
         en(&Msg::SubagentsStillWorking { n: 2 }),
         "2 subagents still working"
     );
-    assert_eq!(
-        en(&Msg::SubagentsHidden { n: 1, working: 1 }),
-        "+1 subagent (1 working)"
-    );
     assert_eq!(en(&Msg::EarlierGaps { n: 1 }), "1 earlier gap");
     assert_eq!(en(&Msg::SpoolPending { n: 1 }), "1 spool file pending.");
     assert_eq!(
@@ -579,24 +575,16 @@ fn card_copy_matches_brief_details() {
         card_text(UiLang::Id, &CardMsg::TaskNoticePrompt),
         "Notifikasi task latar"
     );
-    assert_eq!(
-        card_text(UiLang::En, &CardMsg::WaitingApproval),
-        "waiting for approval"
-    );
-    assert_eq!(
-        card_text(UiLang::Id, &CardMsg::WaitingApproval),
-        "menunggu izin"
-    );
 }
 
 fn card_msg_variant_count() -> usize {
     // Exhaustive guard so adding a CardMsg variant forces updating this count and card_samples().
     let check = |m: &CardMsg| match m {
-        CardMsg::SectionNow
-        | CardMsg::SectionDone
+        CardMsg::SectionDone
         | CardMsg::SearchPlaceholder
         | CardMsg::LoadMore
         | CardMsg::Empty
+        | CardMsg::EmptyForProject
         | CardMsg::Loading
         | CardMsg::MetaEdits { .. }
         | CardMsg::MetaImportant { .. }
@@ -632,21 +620,24 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::NoticeConsent
         | CardMsg::TaskNoticePrompt
         | CardMsg::CrossSessionPrompt
-        | CardMsg::WaitingApproval
         | CardMsg::SetupNotes { .. }
         | CardMsg::Show
         | CardMsg::Hide
-        | CardMsg::ActiveCount { .. }
-        | CardMsg::NeedYouCount { .. }
-        | CardMsg::EarlierSteps { .. }
-        | CardMsg::Collapse
-        | CardMsg::DoneAge { .. }
-        | CardMsg::ViewCard
-        | CardMsg::IdleSessions { .. }
-        | CardMsg::FailuresChip { .. } => {}
+        | CardMsg::FailuresChip { .. }
+        | CardMsg::FlowCaption { .. }
+        | CardMsg::FlowLegendRead
+        | CardMsg::FlowLegendChanged
+        | CardMsg::FlowLegendWorking
+        | CardMsg::FlowEmpty
+        | CardMsg::FlowMoreAgents { .. }
+        | CardMsg::FlowMoreFiles { .. }
+        | CardMsg::FlowReadBy { .. }
+        | CardMsg::FlowChangedBy { .. }
+        | CardMsg::FlowOpenLatest
+        | CardMsg::CloseCard => {}
     };
     let _ = check;
-    52
+    55
 }
 
 #[test]

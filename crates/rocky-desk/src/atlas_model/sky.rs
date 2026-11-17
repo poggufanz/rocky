@@ -1,0 +1,495 @@
+//! Timeline model: every agent step of one project as a dot placed by time.
+
+use super::constellation::step_label;
+use super::time_scale::TimeScale;
+use super::{ProjectId, SkyWindow, StepRef, project_id};
+use crate::cards_model::{CardsModel, first_non_empty_line, prompt_display, sanitize_single_line};
+use crate::i18n::UiLang;
+use crate::now_model::tool_label;
+use crate::view::{Model, action_target, short8};
+use rocky_proto::pipe::{AgentKey, AgentStatus, Outcome, Status, TimelineEntry, TimelineKind};
+
+/// Radius of the one star that is still in flight.
+pub const LIVE_RADIUS: f32 = 4.5;
+
+const SHORT_MS: u64 = 1_000;
+const LONG_MS: u64 = 10_000;
+const TITLE_MATCH_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    Edit,
+    Read,
+    Cmd,
+    Sub(usize),
+}
+
+pub fn row_of(tool_name: Option<&str>) -> RowKind {
+    match tool_name.map(tool_label).as_deref() {
+        Some("edit") => RowKind::Edit,
+        Some("cmd") => RowKind::Cmd,
+        _ => RowKind::Read,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StarKind {
+    Plain,
+    Failed,
+    Running,
+    Waiting,
+}
+
+pub fn magnitude(dur_ms: Option<u64>) -> f32 {
+    match dur_ms {
+        Some(d) if d > LONG_MS => 6.0,
+        Some(d) if d >= SHORT_MS => 3.7,
+        _ => 2.5,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Star {
+    pub step: StepRef,
+    pub row: RowKind,
+    pub radius: f32,
+    pub kind: StarKind,
+    /// Tool and target, set only for failed, running, and waiting stars.
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    /// Indexes into `SkyBand.stars`, in step order.
+    pub stars: Vec<usize>,
+    pub live: bool,
+    pub start_ms: u64,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubLane {
+    pub key: AgentKey,
+    pub label: String,
+    /// When the subagent started, if it ever did.
+    pub spawn_ms: Option<u64>,
+    /// Indexes into the parent `SkyBand.stars`, in step order.
+    pub stars: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuietNote {
+    pub last_ms: u64,
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EarlierNote {
+    pub start_ms: u64,
+    pub edits: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkyBand {
+    pub key: AgentKey,
+    pub harness: Option<String>,
+    pub branch: Option<String>,
+    pub status: Status,
+    pub subs: Vec<SubLane>,
+    pub stars: Vec<Star>,
+    pub turns: Vec<Turn>,
+    pub quiet: Option<QuietNote>,
+    pub earlier: Option<EarlierNote>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkyChart {
+    pub window: SkyWindow,
+    pub now_ms: u64,
+    pub scale: TimeScale,
+    pub bands: Vec<SkyBand>,
+}
+
+/// One turn of a whole timeline, before any window filtering.
+pub(crate) struct TurnSlice<'a> {
+    pub start_ms: u64,
+    pub titled: bool,
+    pub steps: Vec<&'a TimelineEntry>,
+}
+
+/// Splits a timeline into turns. Steps before the first `TurnStart` form one
+/// untitled turn; a titled turn with no steps is still returned.
+pub(crate) fn split_turns(entries: &[TimelineEntry]) -> Vec<TurnSlice<'_>> {
+    let mut turns: Vec<TurnSlice<'_>> = Vec::new();
+    for entry in entries {
+        match entry.kind {
+            TimelineKind::TurnStart => turns.push(TurnSlice {
+                start_ms: entry.ms,
+                titled: true,
+                steps: Vec::new(),
+            }),
+            TimelineKind::Tool | TimelineKind::NeedsYou => {
+                if turns.is_empty() {
+                    turns.push(TurnSlice {
+                        start_ms: entry.ms,
+                        titled: false,
+                        steps: Vec::new(),
+                    });
+                }
+                if let Some(turn) = turns.last_mut() {
+                    turn.steps.push(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+    turns
+}
+
+fn is_pending(entry: &TimelineEntry) -> bool {
+    matches!(entry.outcome, None | Some(Outcome::Pending))
+}
+
+/// Kind of one star; `is_last_of_live_turn` marks the step still in flight.
+pub(crate) fn star_kind(
+    entry: &TimelineEntry,
+    is_last_of_live_turn: bool,
+    agent: Status,
+) -> StarKind {
+    if entry.outcome == Some(Outcome::Failed) {
+        return StarKind::Failed;
+    }
+    if !is_last_of_live_turn || !is_pending(entry) {
+        return StarKind::Plain;
+    }
+    match (agent, entry.kind) {
+        (Status::Working, _) => StarKind::Running,
+        (Status::NeedsYou, TimelineKind::NeedsYou) => StarKind::Waiting,
+        _ => StarKind::Plain,
+    }
+}
+
+pub(crate) fn is_live_status(status: Status) -> bool {
+    matches!(status, Status::Working | Status::NeedsYou)
+}
+
+fn one_line(text: &str, lang: UiLang) -> Option<String> {
+    let (display, _) = prompt_display(text, lang);
+    let clean = sanitize_single_line(first_non_empty_line(&display))
+        .trim()
+        .to_string();
+    (!clean.is_empty()).then_some(clean)
+}
+
+fn card_title(cards: &CardsModel, session_id: &str, start_ms: u64, lang: UiLang) -> Option<String> {
+    cards
+        .items()
+        .iter()
+        .find(|c| {
+            c.session_id == session_id
+                && c.agent_id.is_empty()
+                && c.started_ms.abs_diff(start_ms) <= TITLE_MATCH_MS
+        })
+        .and_then(|c| one_line(&c.prompt, lang))
+}
+
+/// Title of one turn: the live turn uses the agent's current prompt, a titled
+/// past turn looks up its prompt card, an untitled turn has none.
+pub(crate) fn turn_title(
+    agent: &AgentStatus,
+    cards: &CardsModel,
+    is_live: bool,
+    titled: bool,
+    start_ms: u64,
+    lang: UiLang,
+) -> Option<String> {
+    if is_live {
+        agent.prompt.as_ref().and_then(|p| one_line(&p.text, lang))
+    } else if titled {
+        card_title(cards, &agent.key.session_id, start_ms, lang)
+    } else {
+        None
+    }
+}
+
+/// Kinds of the steps of one turn, in step order. `live_status` is the agent's
+/// status when this is the turn it is still working in.
+pub(crate) fn turn_kinds(steps: &[&TimelineEntry], live_status: Option<Status>) -> Vec<StarKind> {
+    let live_idx = live_status.and_then(|_| steps.iter().rposition(|e| is_pending(e)));
+    let status = live_status.unwrap_or(Status::Idle);
+    steps
+        .iter()
+        .enumerate()
+        .map(|(i, e)| star_kind(e, live_idx == Some(i), status))
+        .collect()
+}
+
+fn band_rank(status: Status) -> u8 {
+    match status {
+        Status::Working => 0,
+        Status::NeedsYou => 1,
+        _ => 2,
+    }
+}
+
+/// `"{tool} {target}"` for a step, the target shortened like the constellation's labels.
+fn star_label(entry: &TimelineEntry, root: Option<&str>) -> String {
+    let tool = tool_label(entry.tool_name.as_deref().unwrap_or(""));
+    let target = step_label(entry, root, None);
+    if target.is_empty() || Some(target.as_str()) == entry.tool_name.as_deref() {
+        tool
+    } else {
+        format!("{tool} {target}")
+    }
+}
+
+/// Stars of one agent's steps that fall in the window. `live` is the turn the
+/// agent is still working in; its one pending step is the live star.
+fn turn_stars(
+    steps: &[&TimelineEntry],
+    key: &AgentKey,
+    row_override: Option<RowKind>,
+    live_status: Option<Status>,
+    now_ms: u64,
+    window: SkyWindow,
+    root: Option<&str>,
+) -> Vec<Star> {
+    let start = now_ms.saturating_sub(window.secs() * 1000);
+    let in_window: Vec<&TimelineEntry> = steps.iter().copied().filter(|e| e.ms >= start).collect();
+    let live_idx = live_status.and_then(|_| in_window.iter().rposition(|e| is_pending(e)));
+    in_window
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let status = live_status.unwrap_or(Status::Idle);
+            let kind = star_kind(entry, live_idx == Some(i), status);
+            let live_star = matches!(kind, StarKind::Running | StarKind::Waiting);
+            Star {
+                step: StepRef {
+                    key: key.clone(),
+                    ms: entry.ms,
+                },
+                row: row_override.unwrap_or_else(|| row_of(entry.tool_name.as_deref())),
+                radius: if live_star {
+                    LIVE_RADIUS
+                } else {
+                    magnitude(entry.dur_ms)
+                },
+                kind,
+                label: (kind != StarKind::Plain).then(|| star_label(entry, root)),
+            }
+        })
+        .collect()
+}
+
+struct BandInput<'a> {
+    agent: &'a AgentStatus,
+    cards: &'a CardsModel,
+    now_ms: u64,
+    window: SkyWindow,
+    lang: UiLang,
+}
+
+fn primary_turns(
+    input: &BandInput<'_>,
+    slices: &[TurnSlice<'_>],
+    stars: &mut Vec<Star>,
+) -> Vec<Turn> {
+    let agent = input.agent;
+    let start = input.now_ms.saturating_sub(input.window.secs() * 1000);
+    let kept: Vec<&TurnSlice<'_>> = slices
+        .iter()
+        .filter(|s| s.steps.iter().any(|e| e.ms >= start) || (s.titled && s.start_ms >= start))
+        .collect();
+    let live_status = is_live_status(agent.status).then_some(agent.status);
+    let mut turns = Vec::new();
+    for (i, slice) in kept.iter().enumerate() {
+        let is_live = live_status.is_some() && i + 1 == kept.len();
+        let built = turn_stars(
+            &slice.steps,
+            &agent.key,
+            None,
+            is_live.then_some(agent.status),
+            input.now_ms,
+            input.window,
+            agent.repo.root.as_deref(),
+        );
+        let first = stars.len();
+        stars.extend(built);
+        let title = turn_title(
+            agent,
+            input.cards,
+            is_live,
+            slice.titled,
+            slice.start_ms,
+            input.lang,
+        );
+        turns.push(Turn {
+            stars: (first..stars.len()).collect(),
+            live: is_live,
+            start_ms: slice.start_ms,
+            title,
+        });
+    }
+    turns
+}
+
+fn earlier_note(slices: &[TurnSlice<'_>], start: u64) -> Option<EarlierNote> {
+    slices
+        .iter()
+        .rev()
+        .find(|s| s.steps.last().map_or(s.start_ms, |e| e.ms) < start)
+        .map(|s| EarlierNote {
+            start_ms: s.start_ms,
+            edits: s
+                .steps
+                .iter()
+                .filter(|e| row_of(e.tool_name.as_deref()) == RowKind::Edit)
+                .count(),
+        })
+}
+
+fn sub_lanes(
+    model: &Model,
+    parent: &AgentStatus,
+    input: &BandInput<'_>,
+    stars: &mut Vec<Star>,
+) -> Vec<SubLane> {
+    if !model.subagent_tree_enabled() {
+        return Vec::new();
+    }
+    let mut lanes = Vec::new();
+    for child in model
+        .agents()
+        .values()
+        .filter(|a| a.key.session_id == parent.key.session_id && !a.key.agent_id.is_empty())
+    {
+        let entries = model.timeline(&child.key).unwrap_or(&[]);
+        let steps: Vec<&TimelineEntry> = split_turns(entries)
+            .into_iter()
+            .flat_map(|t| t.steps)
+            .collect();
+        let lane_idx = lanes.len();
+        let built = turn_stars(
+            &steps,
+            &child.key,
+            Some(RowKind::Sub(lane_idx)),
+            is_live_status(child.status).then_some(child.status),
+            input.now_ms,
+            input.window,
+            parent.repo.root.as_deref(),
+        );
+        if built.is_empty() {
+            continue;
+        }
+        let first = stars.len();
+        stars.extend(built);
+        lanes.push(SubLane {
+            key: child.key.clone(),
+            label: child
+                .agent_type
+                .clone()
+                .unwrap_or_else(|| short8(&child.key.agent_id)),
+            spawn_ms: spawn_ms(entries),
+            stars: (first..stars.len()).collect(),
+        });
+    }
+    lanes
+}
+
+/// When a subagent started: its own first `SubagentStart` (the daemon records
+/// that event under the child), else its first entry.
+pub(crate) fn spawn_ms(entries: &[TimelineEntry]) -> Option<u64> {
+    entries
+        .iter()
+        .find(|e| e.kind == TimelineKind::SubagentStart)
+        .or_else(|| entries.first())
+        .map(|e| e.ms)
+}
+
+fn quiet_note(agent: &AgentStatus) -> QuietNote {
+    let action = agent
+        .action
+        .as_ref()
+        .and_then(|a| action_target(a, agent.repo.root.as_deref()))
+        .or_else(|| agent.summary.clone());
+    QuietNote {
+        last_ms: agent.last_event_ms,
+        action,
+    }
+}
+
+fn build_band(model: &Model, input: &BandInput<'_>) -> SkyBand {
+    let agent = input.agent;
+    let entries = model.timeline(&agent.key).unwrap_or(&[]);
+    let slices = split_turns(entries);
+    let mut stars = Vec::new();
+    let turns = primary_turns(input, &slices, &mut stars);
+    let subs = sub_lanes(model, agent, input, &mut stars);
+    let start = input.now_ms.saturating_sub(input.window.secs() * 1000);
+    SkyBand {
+        key: agent.key.clone(),
+        harness: agent.harness.clone(),
+        branch: agent.repo.branch.clone(),
+        status: agent.status,
+        subs,
+        quiet: stars.is_empty().then(|| quiet_note(agent)),
+        earlier: earlier_note(&slices, start),
+        stars,
+        turns,
+    }
+}
+
+/// Primary agents of the project in band order: working, then needs you, then
+/// the rest, newest first.
+pub(crate) fn band_agents<'a>(model: &'a Model, project: &ProjectId) -> Vec<&'a AgentStatus> {
+    let mut agents: Vec<&AgentStatus> = model
+        .agents()
+        .values()
+        .filter(|a| a.key.agent_id.is_empty() && project_id(&a.repo) == *project)
+        .collect();
+    agents.sort_by_key(|a| {
+        (
+            band_rank(a.status),
+            std::cmp::Reverse(a.last_event_ms),
+            a.key.clone(),
+        )
+    });
+    agents
+}
+
+/// Projects the project's agents and timelines into chart geometry.
+pub fn sky_chart(
+    model: &Model,
+    cards: &CardsModel,
+    project: &ProjectId,
+    window: SkyWindow,
+    now_ms: u64,
+    lang: UiLang,
+) -> SkyChart {
+    let bands: Vec<SkyBand> = band_agents(model, project)
+        .into_iter()
+        .map(|agent| {
+            build_band(
+                model,
+                &BandInput {
+                    agent,
+                    cards,
+                    now_ms,
+                    window,
+                    lang,
+                },
+            )
+        })
+        .collect();
+    let times: Vec<u64> = bands
+        .iter()
+        .flat_map(|b| b.stars.iter().map(|s| s.step.ms))
+        .collect();
+    SkyChart {
+        window,
+        now_ms,
+        scale: TimeScale::build(&times, window, now_ms),
+        bands,
+    }
+}

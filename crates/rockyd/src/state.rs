@@ -65,6 +65,7 @@ struct InFlight {
 pub struct StatusState {
     agents: BTreeMap<AgentKey, Agent>,
     repos: BTreeMap<String, RepoInfo>,
+    harness: BTreeMap<String, String>,
     tool_text: bool,
     prompts_enabled: bool,
 }
@@ -74,6 +75,7 @@ impl Default for StatusState {
         Self {
             agents: BTreeMap::new(),
             repos: BTreeMap::new(),
+            harness: BTreeMap::new(),
             tool_text: true,
             prompts_enabled: true,
         }
@@ -153,6 +155,15 @@ impl StatusState {
 
     pub fn prompts_enabled(&self) -> bool {
         self.prompts_enabled
+    }
+
+    /// Records which harness produced a session's events, so every agent of
+    /// that session reports it. Called before `apply` by the event sources.
+    pub fn set_session_harness(&mut self, session_id: &str, harness: &str) {
+        if self.harness.get(session_id).map(String::as_str) != Some(harness) {
+            self.harness
+                .insert(session_id.to_string(), harness.to_string());
+        }
     }
 
     pub fn session_repo(&self, session_id: &str) -> Option<&RepoInfo> {
@@ -259,6 +270,7 @@ impl StatusState {
                 quiet_10m: false,
                 repo: repo.clone(),
                 prompt: None,
+                harness: None,
             },
             in_flight: Vec::new(),
             timeline: VecDeque::new(),
@@ -266,6 +278,7 @@ impl StatusState {
             prompt_recv_ms: None,
         });
         agent.status.repo = repo;
+        agent.status.harness = self.harness.get(&ev.session_id).cloned();
         agent.status.last_event_ms = recv_ms;
         agent.status.quiet_10m = false;
         agent.last_recv_ms = recv_ms;
@@ -427,7 +440,18 @@ impl StatusState {
         for key in &removed {
             self.agents.remove(key);
         }
+        self.forget_harness_of(&removed);
         Changes { upserted, removed }
+    }
+
+    /// Drops the harness of every session in `removed` that has no agent left.
+    fn forget_harness_of(&mut self, removed: &[AgentKey]) {
+        for key in removed {
+            let alive = self.agents.keys().any(|k| k.session_id == key.session_id);
+            if !alive {
+                self.harness.remove(&key.session_id);
+            }
+        }
     }
 
     /// Pairs a fresh child with the main agent's one unpaired Agent/Task call

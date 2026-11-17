@@ -1,7 +1,7 @@
 //! Pure view-model for rocky-desk: grouping, aggregate, tooltip, warnings.
 
 use rocky_proto::pipe::{
-    AgentKey, AgentStatus, Health, Outcome, ServerMsg, Status, StatusOp, TimelineEntry,
+    AgentKey, AgentStatus, Health, ServerMsg, Status, StatusOp, TimelineEntry,
 };
 use rocky_proto::settings::Settings;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,22 +32,16 @@ pub struct RepoGroup {
     pub roots: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimelineRow {
-    pub time: String,
-    pub text: Msg,
-    pub outcome: Option<Outcome>,
-}
-
 #[derive(Debug, Default)]
 pub struct Model {
     agents: BTreeMap<AgentKey, AgentStatus>,
     health: Health,
     conn: Conn,
     settings: Option<Settings>,
-    /// Agent rows whose timeline is expanded, and the entries last received.
-    open: BTreeSet<AgentKey>,
+    /// Timeline entries last received per agent.
     timelines: BTreeMap<AgentKey, Vec<TimelineEntry>>,
+    /// Keys the chart draws; their timelines are kept.
+    wanted: BTreeSet<AgentKey>,
     /// Ids of `set` messages awaiting their ack.
     sent: BTreeSet<u64>,
     /// Error from the last failed `set`, shown until the next settings broadcast.
@@ -61,9 +55,9 @@ impl Model {
 
     /// Applies one daemon message and returns the timeline keys to (re)request.
     ///
-    /// Keys come back for an upsert of an open row, for every open row on a
-    /// settings broadcast, and for every open row a snapshot still carries.
-    /// Rows that disappear close on the spot and are not requested again.
+    /// Keys come back for an upsert of a wanted idle row and for every wanted
+    /// row a snapshot still carries. Rows that disappear drop their timeline
+    /// on the spot and are not requested again.
     pub fn apply(&mut self, msg: ServerMsg) -> Vec<AgentKey> {
         match msg {
             ServerMsg::Snapshot {
@@ -75,14 +69,18 @@ impl Model {
                 self.agents = agents.into_iter().map(|a| (a.key.clone(), a)).collect();
                 self.health = health;
                 self.settings = Some(settings);
-                self.open.retain(|k| self.agents.contains_key(k));
                 self.retain_timelines();
-                self.open.iter().cloned().collect()
+                // A snapshot follows every (re)connect, so wanted rows ask again.
+                self.wanted
+                    .iter()
+                    .filter(|k| self.agents.contains_key(*k))
+                    .cloned()
+                    .collect()
             }
             ServerMsg::Settings { settings } => {
                 self.settings = Some(settings);
                 self.set_error = None;
-                self.open.iter().cloned().collect()
+                Vec::new()
             }
             ServerMsg::Ack { id, ok, error, .. } => {
                 if self.sent.remove(&id) && !ok {
@@ -93,9 +91,11 @@ impl Model {
             ServerMsg::Status { op, agent } => match op {
                 StatusOp::Upsert => {
                     let key = agent.key.clone();
+                    let idle = !is_active_status(agent.status);
                     self.agents.insert(key.clone(), agent);
                     self.retain_timelines();
-                    if self.open.contains(&key) {
+                    // Active rows ask through the debounced fetch scheduler.
+                    if idle && self.wanted.contains(&key) {
                         vec![key]
                     } else {
                         Vec::new()
@@ -103,7 +103,7 @@ impl Model {
                 }
                 StatusOp::Remove => {
                     self.agents.remove(&agent.key);
-                    self.close(&agent.key);
+                    self.timelines.remove(&agent.key);
                     self.retain_timelines();
                     Vec::new()
                 }
@@ -130,55 +130,18 @@ impl Model {
         }
     }
 
-    /// Expands an agent row and returns the key when it opened; collapsing
-    /// drops the stored entries and returns `None`.
-    pub fn toggle_open(&mut self, key: &AgentKey) -> Option<AgentKey> {
-        if self.open.remove(key) {
-            if !self.active_primary_keys().contains(key) {
-                self.timelines.remove(key);
-            }
-            None
-        } else {
-            self.open.insert(key.clone());
-            Some(key.clone())
-        }
-    }
-
-    pub fn is_open(&self, key: &AgentKey) -> bool {
-        self.open.contains(key)
-    }
-
-    /// Entries of an open timeline in daemon order; empty while closed.
-    pub fn timeline_rows(
-        &self,
-        key: &AgentKey,
-        fmt_time: &dyn Fn(u64) -> String,
-    ) -> Vec<TimelineRow> {
-        if !self.open.contains(key) {
-            return Vec::new();
-        }
-        self.timelines
-            .get(key)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|e| TimelineRow {
-                        time: fmt_time(e.ms),
-                        text: Msg::TimelineEntry {
-                            kind: e.kind,
-                            tool: e.tool_name.clone(),
-                            text: e.text.clone(),
-                        },
-                        outcome: e.outcome,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn close(&mut self, key: &AgentKey) {
-        self.open.remove(key);
-        self.timelines.remove(key);
+    /// Stores the keys the chart needs timelines for. Returns the newly added
+    /// keys that are not active primaries, which the caller requests.
+    pub fn set_wanted(&mut self, keys: BTreeSet<AgentKey>) -> Vec<AgentKey> {
+        let active = self.active_primary_keys();
+        let added = keys
+            .iter()
+            .filter(|k| !self.wanted.contains(*k) && !active.contains(*k))
+            .cloned()
+            .collect();
+        self.wanted = keys;
+        self.retain_timelines();
+        added
     }
 
     pub fn set_conn(&mut self, c: Conn) {
@@ -219,25 +182,29 @@ impl Model {
 
     fn retain_timelines(&mut self) {
         let active = self.active_primary_keys();
-        self.timelines.retain(|k, _| {
-            active.contains(k)
-                || (self.open.contains(k)
-                    && self
-                        .agents
-                        .get(k)
-                        .is_none_or(|a| is_active_status(a.status)))
-        });
+        self.timelines
+            .retain(|k, _| active.contains(k) || self.wanted.contains(k));
     }
 
     pub(crate) fn accepts_timeline(&self, key: &AgentKey) -> bool {
-        if self.active_primary_keys().contains(key) {
-            return true;
-        }
-        self.open.contains(key)
-            && self
-                .agents
-                .get(key)
-                .is_none_or(|a| is_active_status(a.status))
+        self.wanted.contains(key) || self.active_primary_keys().contains(key)
+    }
+
+    /// Keys whose timeline refreshes on each status event, debounced: active
+    /// primaries plus wanted rows that are working or need the user.
+    pub(crate) fn active_timeline_keys(&self) -> BTreeSet<AgentKey> {
+        let mut keys = self.active_primary_keys();
+        keys.extend(
+            self.wanted
+                .iter()
+                .filter(|k| {
+                    self.agents
+                        .get(*k)
+                        .is_some_and(|a| is_active_status(a.status))
+                })
+                .cloned(),
+        );
+        keys
     }
 
     pub(crate) fn subagent_tree_enabled(&self) -> bool {

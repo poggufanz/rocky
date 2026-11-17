@@ -10,11 +10,11 @@ use super::{UiLang, plural};
 /// One user-visible change card UI string, rendered through [`card_text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardMsg {
-    SectionNow,
     SectionDone,
     SearchPlaceholder,
     LoadMore,
     Empty,
+    EmptyForProject,
     Loading,
     MetaEdits {
         n: usize,
@@ -79,42 +79,46 @@ pub enum CardMsg {
     NoticeConsent,
     TaskNoticePrompt,
     CrossSessionPrompt,
-    WaitingApproval,
     SetupNotes {
         n: usize,
     },
     Show,
     Hide,
-    ActiveCount {
-        n: usize,
-    },
-    NeedYouCount {
-        n: usize,
-    },
-    EarlierSteps {
-        n: usize,
-    },
-    Collapse,
-    DoneAge {
-        age: String,
-    },
-    ViewCard,
-    IdleSessions {
-        n: usize,
-    },
     FailuresChip {
         n: u32,
     },
+    /// Flow view caption, naming the turns the graph was built from.
+    FlowCaption {
+        turns: usize,
+    },
+    FlowLegendRead,
+    FlowLegendChanged,
+    FlowLegendWorking,
+    FlowEmpty,
+    FlowMoreAgents {
+        n: usize,
+    },
+    FlowMoreFiles {
+        n: usize,
+    },
+    FlowReadBy {
+        n: u32,
+    },
+    FlowChangedBy {
+        n: u32,
+    },
+    FlowOpenLatest,
+    CloseCard,
 }
 
 /// Every [`CardMsg`] variant with sample arguments for parity and text scans.
 pub fn card_samples() -> Vec<CardMsg> {
     vec![
-        CardMsg::SectionNow,
         CardMsg::SectionDone,
         CardMsg::SearchPlaceholder,
         CardMsg::LoadMore,
         CardMsg::Empty,
+        CardMsg::EmptyForProject,
         CardMsg::Loading,
         CardMsg::MetaEdits { n: 1 },
         CardMsg::MetaEdits { n: 3 },
@@ -154,24 +158,27 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::NoticeConsent,
         CardMsg::TaskNoticePrompt,
         CardMsg::CrossSessionPrompt,
-        CardMsg::WaitingApproval,
         CardMsg::SetupNotes { n: 1 },
         CardMsg::SetupNotes { n: 3 },
         CardMsg::Show,
         CardMsg::Hide,
-        CardMsg::ActiveCount { n: 3 },
-        CardMsg::NeedYouCount { n: 1 },
-        CardMsg::NeedYouCount { n: 2 },
-        CardMsg::EarlierSteps { n: 1 },
-        CardMsg::EarlierSteps { n: 4 },
-        CardMsg::Collapse,
-        CardMsg::DoneAge {
-            age: "46s".to_string(),
-        },
-        CardMsg::ViewCard,
-        CardMsg::IdleSessions { n: 1 },
-        CardMsg::IdleSessions { n: 2 },
         CardMsg::FailuresChip { n: 2 },
+        CardMsg::FlowCaption { turns: 1 },
+        CardMsg::FlowCaption { turns: 20 },
+        CardMsg::FlowLegendRead,
+        CardMsg::FlowLegendChanged,
+        CardMsg::FlowLegendWorking,
+        CardMsg::FlowEmpty,
+        CardMsg::FlowMoreAgents { n: 1 },
+        CardMsg::FlowMoreAgents { n: 3 },
+        CardMsg::FlowMoreFiles { n: 1 },
+        CardMsg::FlowMoreFiles { n: 6 },
+        CardMsg::FlowReadBy { n: 1 },
+        CardMsg::FlowReadBy { n: 2 },
+        CardMsg::FlowChangedBy { n: 1 },
+        CardMsg::FlowChangedBy { n: 3 },
+        CardMsg::FlowOpenLatest,
+        CardMsg::CloseCard,
     ]
 }
 
@@ -185,11 +192,11 @@ pub fn card_text(lang: UiLang, msg: &CardMsg) -> String {
 
 fn card_en(msg: &CardMsg) -> String {
     match msg {
-        CardMsg::SectionNow => "Now".to_string(),
         CardMsg::SectionDone => "Done".to_string(),
         CardMsg::SearchPlaceholder => "Search file or repo".to_string(),
         CardMsg::LoadMore => "Load more".to_string(),
         CardMsg::Empty => "No cards yet".to_string(),
+        CardMsg::EmptyForProject => "No finished cards for this project yet.".to_string(),
         CardMsg::Loading => "Loading\u{2026}".to_string(),
         CardMsg::MetaEdits { n } => format!("{n} {}", plural(*n as u64, "edit", "edits")),
         CardMsg::MetaImportant { n } => format!("{n} important"),
@@ -238,36 +245,47 @@ fn card_en(msg: &CardMsg) -> String {
         }
         CardMsg::TaskNoticePrompt => "Background task notice".to_string(),
         CardMsg::CrossSessionPrompt => "Message from another session".to_string(),
-        CardMsg::WaitingApproval => "waiting for approval".to_string(),
         CardMsg::SetupNotes { n } => {
             format!("{n} {}", plural(*n as u64, "setup note", "setup notes"))
         }
         CardMsg::Show => "Show".to_string(),
         CardMsg::Hide => "Hide".to_string(),
-        CardMsg::ActiveCount { n } => format!("{n} active"),
-        CardMsg::NeedYouCount { n } => {
-            format!("{n} {}", plural(*n as u64, "needs you", "need you"))
-        }
-        CardMsg::EarlierSteps { n } => {
-            format!("+{n} earlier {}", plural(*n as u64, "step", "steps"))
-        }
-        CardMsg::Collapse => "Collapse".to_string(),
-        CardMsg::DoneAge { age } => format!("done {age}"),
-        CardMsg::ViewCard => "View card \u{203a}".to_string(),
-        CardMsg::IdleSessions { n } => {
-            format!("{n} idle {}", plural(*n as u64, "session", "sessions"))
-        }
         CardMsg::FailuresChip { n } => format!("{n} failed"),
+        CardMsg::FlowCaption { turns } => format!(
+            "What each agent read and changed in the last {turns} {}",
+            plural(*turns as u64, "turn", "turns")
+        ),
+        CardMsg::FlowLegendRead => "read".to_string(),
+        CardMsg::FlowLegendChanged => "changed".to_string(),
+        CardMsg::FlowLegendWorking => "working now".to_string(),
+        CardMsg::FlowEmpty => {
+            "No files read or changed yet. Files appear here once an agent reads or edits them."
+                .to_string()
+        }
+        CardMsg::FlowMoreAgents { n } => {
+            format!("+{n} older {}", plural(*n as u64, "agent", "agents"))
+        }
+        CardMsg::FlowMoreFiles { n } => {
+            format!("+{n} more {}", plural(*n as u64, "file", "files"))
+        }
+        CardMsg::FlowReadBy { n } => {
+            format!("read by {n} {}", plural(u64::from(*n), "agent", "agents"))
+        }
+        CardMsg::FlowChangedBy { n } => {
+            format!("changed by {n} {}", plural(u64::from(*n), "agent", "agents"))
+        }
+        CardMsg::FlowOpenLatest => "Opens the latest card".to_string(),
+        CardMsg::CloseCard => "Close".to_string(),
     }
 }
 
 fn card_id(msg: &CardMsg) -> String {
     match msg {
-        CardMsg::SectionNow => "Sekarang".to_string(),
         CardMsg::SectionDone => "Selesai".to_string(),
         CardMsg::SearchPlaceholder => "Cari file atau repo".to_string(),
         CardMsg::LoadMore => "Muat lagi".to_string(),
         CardMsg::Empty => "Belum ada kartu".to_string(),
+        CardMsg::EmptyForProject => "Belum ada kartu selesai di proyek ini.".to_string(),
         CardMsg::Loading => "Memuat\u{2026}".to_string(),
         CardMsg::MetaEdits { n } => format!("{n} edit"),
         CardMsg::MetaImportant { n } => format!("{n} penting"),
@@ -316,18 +334,26 @@ fn card_id(msg: &CardMsg) -> String {
         }
         CardMsg::TaskNoticePrompt => "Notifikasi task latar".to_string(),
         CardMsg::CrossSessionPrompt => "Pesan dari sesi lain".to_string(),
-        CardMsg::WaitingApproval => "menunggu izin".to_string(),
         CardMsg::SetupNotes { n } => format!("{n} catatan setup"),
         CardMsg::Show => "Lihat".to_string(),
         CardMsg::Hide => "Tutup".to_string(),
-        CardMsg::ActiveCount { n } => format!("{n} aktif"),
-        CardMsg::NeedYouCount { n } => format!("{n} butuh kamu"),
-        CardMsg::EarlierSteps { n } => format!("+{n} langkah sebelumnya"),
-        CardMsg::Collapse => "Ringkas".to_string(),
-        CardMsg::DoneAge { age } => format!("selesai {age}"),
-        CardMsg::ViewCard => "Lihat kartu \u{203a}".to_string(),
-        CardMsg::IdleSessions { n } => format!("{n} sesi idle"),
         CardMsg::FailuresChip { n } => format!("{n} gagal"),
+        CardMsg::FlowCaption { turns } => {
+            format!("Yang dibaca dan diubah tiap agent di {turns} turn terakhir")
+        }
+        CardMsg::FlowLegendRead => "dibaca".to_string(),
+        CardMsg::FlowLegendChanged => "diubah".to_string(),
+        CardMsg::FlowLegendWorking => "sedang bekerja".to_string(),
+        CardMsg::FlowEmpty => {
+            "Belum ada file yang dibaca atau diubah. File muncul di sini setelah agent membaca atau mengubahnya."
+                .to_string()
+        }
+        CardMsg::FlowMoreAgents { n } => format!("+{n} agent lama"),
+        CardMsg::FlowMoreFiles { n } => format!("+{n} file lagi"),
+        CardMsg::FlowReadBy { n } => format!("dibaca {n} agent"),
+        CardMsg::FlowChangedBy { n } => format!("diubah {n} agent"),
+        CardMsg::FlowOpenLatest => "Buka kartu terakhir".to_string(),
+        CardMsg::CloseCard => "Tutup".to_string(),
     }
 }
 

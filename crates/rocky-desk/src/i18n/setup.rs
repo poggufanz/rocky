@@ -119,6 +119,30 @@ pub enum SetupMsg {
     CaptureStarting,
     CapturePartial,
     CaptureElsewhere,
+    /// Short chip forms of the capture failure and polling lines.
+    CaptureFailed,
+    CapturePolling,
+    SettingsGeneral,
+    SettingsRecords,
+    SettingsNotifications,
+    SettingsLanguage,
+    SettingsLanguageNote,
+    SettingsAutostartNote,
+    SettingsHistoryNote,
+    SettingsToolTextNote,
+    SettingsCardsNote,
+    SettingsSubagentNote,
+    SettingsNotifyNeedsYou,
+    SettingsNotifyFailed,
+    SettingsNotifyDone,
+    SettingsToolsNote,
+    SettingsReinstallNote,
+    SettingsReposNote,
+    SettingsRemoveNote,
+    SettingsRemoveButton,
+    SettingsMorePaths {
+        n: usize,
+    },
     DeleteHistory,
     /// `name` is a repo name and never translated.
     DeleteHistoryAsk {
@@ -255,6 +279,27 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         SetupMsg::CaptureStarting,
         SetupMsg::CapturePartial,
         SetupMsg::CaptureElsewhere,
+        SetupMsg::CaptureFailed,
+        SetupMsg::CapturePolling,
+        SetupMsg::SettingsGeneral,
+        SetupMsg::SettingsRecords,
+        SetupMsg::SettingsNotifications,
+        SetupMsg::SettingsLanguage,
+        SetupMsg::SettingsLanguageNote,
+        SetupMsg::SettingsAutostartNote,
+        SetupMsg::SettingsHistoryNote,
+        SetupMsg::SettingsToolTextNote,
+        SetupMsg::SettingsCardsNote,
+        SetupMsg::SettingsSubagentNote,
+        SetupMsg::SettingsNotifyNeedsYou,
+        SetupMsg::SettingsNotifyFailed,
+        SetupMsg::SettingsNotifyDone,
+        SetupMsg::SettingsToolsNote,
+        SetupMsg::SettingsReinstallNote,
+        SetupMsg::SettingsReposNote,
+        SetupMsg::SettingsRemoveNote,
+        SetupMsg::SettingsRemoveButton,
+        SetupMsg::SettingsMorePaths { n: 4 },
         SetupMsg::DeleteHistory,
         SetupMsg::DeleteHistoryAsk { name: "app".into() },
         SetupMsg::DeleteConfirm,
@@ -349,9 +394,9 @@ pub fn setup_en(m: &SetupMsg) -> String {
         SetupMsg::ConsentInstall => "Install".to_string(),
         SetupMsg::NotConnected => "Rocky is not connected yet.".to_string(),
         SetupMsg::SettingsAgentTools => "Agent tools".to_string(),
-        SetupMsg::HarnessOk => "ok".to_string(),
+        SetupMsg::HarnessOk => "connected".to_string(),
         SetupMsg::HarnessRestored { time } => format!("restored at {time}"),
-        SetupMsg::HarnessForeign => "foreign".to_string(),
+        SetupMsg::HarnessForeign => "other rocky entry".to_string(),
         SetupMsg::HarnessFailed { error } => format!("failed{}", error_suffix(error)),
         SetupMsg::HarnessOff => "off".to_string(),
         SetupMsg::HarnessNotInstalled => "not installed".to_string(),
@@ -363,7 +408,7 @@ pub fn setup_en(m: &SetupMsg) -> String {
         SetupMsg::RepoDeclined => "not recorded".to_string(),
         SetupMsg::RepoNotAsked => "not asked yet".to_string(),
         SetupMsg::RepoAllow => "Allow".to_string(),
-        SetupMsg::RepoRevoke => "Revoke".to_string(),
+        SetupMsg::RepoRevoke => "Stop recording".to_string(),
         SetupMsg::RepoBannerAsk { name } => {
             format!("Allow Rocky to record file history for {name}?")
         }
@@ -372,6 +417,45 @@ pub fn setup_en(m: &SetupMsg) -> String {
         SetupMsg::CaptureStarting => "capture starting".to_string(),
         SetupMsg::CapturePartial => "capture is partial".to_string(),
         SetupMsg::CaptureElsewhere => "another process captures this repo".to_string(),
+        SetupMsg::CaptureFailed => "capture failed".to_string(),
+        SetupMsg::CapturePolling => "checks every 60 seconds".to_string(),
+        SetupMsg::SettingsGeneral => "General".to_string(),
+        SetupMsg::SettingsRecords => "What Rocky records".to_string(),
+        SetupMsg::SettingsNotifications => "Notifications".to_string(),
+        SetupMsg::SettingsLanguage => "Language".to_string(),
+        SetupMsg::SettingsLanguageNote => "Auto follows your system language.".to_string(),
+        SetupMsg::SettingsAutostartNote => {
+            "Starts in the tray, without opening a window.".to_string()
+        }
+        SetupMsg::SettingsHistoryNote => {
+            "Agent events from the last 24 hours stay on disk, so timelines survive a restart."
+                .to_string()
+        }
+        SetupMsg::SettingsToolTextNote => {
+            "Commands and paths agents ran, with secrets redacted.".to_string()
+        }
+        SetupMsg::SettingsCardsNote => {
+            "One card per agent turn with the files it changed.".to_string()
+        }
+        SetupMsg::SettingsSubagentNote => {
+            "Subagents get their own rows under the main agent.".to_string()
+        }
+        SetupMsg::SettingsNotifyNeedsYou => "When an agent needs you".to_string(),
+        SetupMsg::SettingsNotifyFailed => "When an agent fails".to_string(),
+        SetupMsg::SettingsNotifyDone => "When an agent finishes".to_string(),
+        SetupMsg::SettingsToolsNote => {
+            "Rocky adds its hooks and MCP server to each tool's config.".to_string()
+        }
+        SetupMsg::SettingsReinstallNote => {
+            "Writes Rocky's entries back into every tool above.".to_string()
+        }
+        SetupMsg::SettingsReposNote => "File history Rocky records for each repo.".to_string(),
+        SetupMsg::SettingsRemoveNote => {
+            "Takes Rocky out of your agent tools and shell, then stops it. Memory, journal and file history stay on disk."
+                .to_string()
+        }
+        SetupMsg::SettingsRemoveButton => "Remove\u{2026}".to_string(),
+        SetupMsg::SettingsMorePaths { n } => format!("+{n} more"),
         SetupMsg::DeleteHistory => "Delete history".to_string(),
         SetupMsg::DeleteHistoryAsk { name } => {
             format!("Delete the recorded history for {name} and stop recording it? This cannot be undone.")
@@ -471,9 +555,9 @@ pub fn setup_id(m: &SetupMsg) -> String {
         SetupMsg::ConsentInstall => "Pasang".to_string(),
         SetupMsg::NotConnected => "Rocky belum terhubung.".to_string(),
         SetupMsg::SettingsAgentTools => "Alat agen".to_string(),
-        SetupMsg::HarnessOk => "baik".to_string(),
+        SetupMsg::HarnessOk => "terhubung".to_string(),
         SetupMsg::HarnessRestored { time } => format!("dipulihkan pukul {time}"),
-        SetupMsg::HarnessForeign => "asing".to_string(),
+        SetupMsg::HarnessForeign => "entri rocky lain".to_string(),
         SetupMsg::HarnessFailed { error } => format!("gagal{}", error_suffix(error)),
         SetupMsg::HarnessOff => "mati".to_string(),
         SetupMsg::HarnessNotInstalled => "belum terpasang".to_string(),
@@ -485,7 +569,7 @@ pub fn setup_id(m: &SetupMsg) -> String {
         SetupMsg::RepoDeclined => "tidak direkam".to_string(),
         SetupMsg::RepoNotAsked => "belum ditanya".to_string(),
         SetupMsg::RepoAllow => "Izinkan".to_string(),
-        SetupMsg::RepoRevoke => "Cabut".to_string(),
+        SetupMsg::RepoRevoke => "Berhenti merekam".to_string(),
         SetupMsg::RepoBannerAsk { name } => {
             format!("Izinkan Rocky merekam riwayat file {name}?")
         }
@@ -494,6 +578,43 @@ pub fn setup_id(m: &SetupMsg) -> String {
         SetupMsg::CaptureStarting => "capture sedang mulai".to_string(),
         SetupMsg::CapturePartial => "capture sebagian".to_string(),
         SetupMsg::CaptureElsewhere => "proses lain merekam repo ini".to_string(),
+        SetupMsg::CaptureFailed => "capture gagal".to_string(),
+        SetupMsg::CapturePolling => "dicek tiap 60 detik".to_string(),
+        SetupMsg::SettingsGeneral => "Umum".to_string(),
+        SetupMsg::SettingsRecords => "Yang direkam Rocky".to_string(),
+        SetupMsg::SettingsNotifications => "Notifikasi".to_string(),
+        SetupMsg::SettingsLanguage => "Bahasa".to_string(),
+        SetupMsg::SettingsLanguageNote => "Auto mengikuti bahasa sistem.".to_string(),
+        SetupMsg::SettingsAutostartNote => "Mulai di tray, tanpa membuka jendela.".to_string(),
+        SetupMsg::SettingsHistoryNote => {
+            "Event agent 24 jam terakhir disimpan di disk, jadi timeline tetap ada setelah restart."
+                .to_string()
+        }
+        SetupMsg::SettingsToolTextNote => {
+            "Command dan path yang dijalankan agent, dengan rahasia disamarkan.".to_string()
+        }
+        SetupMsg::SettingsCardsNote => {
+            "Satu kartu per turn agent berisi file yang diubahnya.".to_string()
+        }
+        SetupMsg::SettingsSubagentNote => {
+            "Subagent tampil di baris sendiri di bawah agent utama.".to_string()
+        }
+        SetupMsg::SettingsNotifyNeedsYou => "Saat agent perlu Anda".to_string(),
+        SetupMsg::SettingsNotifyFailed => "Saat agent gagal".to_string(),
+        SetupMsg::SettingsNotifyDone => "Saat agent selesai".to_string(),
+        SetupMsg::SettingsToolsNote => {
+            "Rocky menambahkan hook dan server MCP-nya ke config tiap tool.".to_string()
+        }
+        SetupMsg::SettingsReinstallNote => {
+            "Menulis ulang entri Rocky di semua tool di atas.".to_string()
+        }
+        SetupMsg::SettingsReposNote => "Riwayat file yang direkam Rocky per repo.".to_string(),
+        SetupMsg::SettingsRemoveNote => {
+            "Mencabut Rocky dari alat agen dan shell, lalu menghentikannya. Memory, journal, dan riwayat file tetap di disk."
+                .to_string()
+        }
+        SetupMsg::SettingsRemoveButton => "Hapus\u{2026}".to_string(),
+        SetupMsg::SettingsMorePaths { n } => format!("+{n} lagi"),
         SetupMsg::DeleteHistory => "Hapus riwayat".to_string(),
         SetupMsg::DeleteHistoryAsk { name } => {
             format!("Hapus riwayat yang terekam untuk {name} dan berhenti merekamnya? Ini tidak bisa dibatalkan.")

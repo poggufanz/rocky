@@ -4,8 +4,6 @@
 //! settings file keys. The panel itself only reflects what the daemon
 //! broadcasts back, so a rejected value never looks applied.
 
-use gpui::prelude::*;
-use gpui::{App, ClickEvent, IntoElement, SharedString, Window, div, px, rgb};
 use rocky_proto::pipe::ClientMsg;
 use rocky_proto::settings::{Lang, Settings};
 
@@ -124,57 +122,6 @@ pub enum View {
 /// A `--tray` start never shows it, and neither does a desk without settings.
 pub fn show_autostart_banner(tray_start: bool, settings: Option<&Settings>) -> bool {
     !tray_start && settings.is_some_and(|s| !s.autostart_asked)
-}
-
-/// One boolean row: label and an on/off square, clickable while enabled.
-pub fn toggle_row(
-    id: SharedString,
-    label: String,
-    on: bool,
-    enabled: bool,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let mut row = div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_sm()
-        .child(div().w(px(12.)).h(px(12.)).rounded_sm().bg(if on {
-            rgb(0x2BA044)
-        } else {
-            rgb(0xC4C4C4)
-        }))
-        .child(label);
-    if enabled {
-        row = row.cursor_pointer().on_click(handler);
-    }
-    row
-}
-
-/// One choice chip, highlighted while selected.
-pub fn choice(
-    id: SharedString,
-    label: String,
-    selected: bool,
-    enabled: bool,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let mut chip = div()
-        .id(id)
-        .px_2()
-        .rounded_sm()
-        .text_sm()
-        .bg(if selected {
-            rgb(0xD4D4D4)
-        } else {
-            rgb(0xEDEDEC)
-        })
-        .child(label);
-    if enabled {
-        chip = chip.cursor_pointer().on_click(handler);
-    }
-    chip
 }
 
 #[cfg(test)]

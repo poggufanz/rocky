@@ -196,6 +196,7 @@ impl Ingestor {
                                     recv_ms: rec.recv_ms,
                                 });
                             }
+                            state.set_session_harness(&ev.session_id, &rec.harness);
                             if let ApplyOutcome::Changed(c) = state.apply(&ev, rec.recv_ms, repo_of)
                             {
                                 for key in c.upserted {
@@ -489,6 +490,7 @@ mod tests {
 
         let agents = state.agents();
         assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].harness.as_deref(), Some("claude-code"));
         let agents_json = serde_json::to_string(&agents).unwrap();
         assert!(!agents_json.contains("SECRET_PROMPT_TEXT"), "{agents_json}");
         assert!(!agents_json.contains(r#""prompt""#), "{agents_json}");
