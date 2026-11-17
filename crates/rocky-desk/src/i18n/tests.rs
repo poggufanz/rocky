@@ -579,14 +579,6 @@ fn card_copy_matches_brief_details() {
         card_text(UiLang::Id, &CardMsg::TaskNoticePrompt),
         "Notifikasi task latar"
     );
-    assert_eq!(
-        card_text(UiLang::En, &CardMsg::WaitingApproval),
-        "waiting for approval"
-    );
-    assert_eq!(
-        card_text(UiLang::Id, &CardMsg::WaitingApproval),
-        "menunggu izin"
-    );
 }
 
 fn card_msg_variant_count() -> usize {
@@ -632,17 +624,9 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::NoticeConsent
         | CardMsg::TaskNoticePrompt
         | CardMsg::CrossSessionPrompt
-        | CardMsg::WaitingApproval
         | CardMsg::SetupNotes { .. }
         | CardMsg::Show
         | CardMsg::Hide
-        | CardMsg::ActiveCount { .. }
-        | CardMsg::NeedYouCount { .. }
-        | CardMsg::EarlierSteps { .. }
-        | CardMsg::Collapse
-        | CardMsg::DoneAge { .. }
-        | CardMsg::ViewCard
-        | CardMsg::IdleSessions { .. }
         | CardMsg::FailuresChip { .. }
         | CardMsg::FlowCaption { .. }
         | CardMsg::FlowLegendRead
@@ -657,7 +641,7 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::CloseCard => {}
     };
     let _ = check;
-    63
+    55
 }
 
 #[test]

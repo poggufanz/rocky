@@ -81,6 +81,119 @@ fn drain_timelines(rx: &Receiver<ClientMsg>) -> Vec<AgentKey> {
     keys
 }
 
+fn working_snapshot(agents: Vec<AgentStatus>) -> ServerMsg {
+    ServerMsg::Snapshot {
+        agents,
+        aggregate: Status::Working,
+        health: Health::default(),
+        settings: Settings::default(),
+        repo_pending: Vec::new(),
+    }
+}
+
+fn upsert(agent: AgentStatus) -> ServerMsg {
+    ServerMsg::Status {
+        op: rocky_proto::pipe::StatusOp::Upsert,
+        agent,
+    }
+}
+
+#[test]
+fn controller_requests_active_timeline_once_and_flushes_trailing_at_cooldown() {
+    let (mut ctl, rx) = test_controller();
+    let k1 = AgentKey {
+        session_id: "S1".to_string(),
+        agent_id: String::new(),
+    };
+
+    apply_at(
+        &mut ctl,
+        working_snapshot(vec![test_agent("S1", Status::Working, 900)]),
+        1_000,
+    );
+    assert_eq!(drain_timelines(&rx), vec![k1.clone()]);
+
+    // A cached reply must not trigger another request.
+    apply_at(
+        &mut ctl,
+        ServerMsg::Timeline {
+            id: 1,
+            key: k1.clone(),
+            entries: vec![TimelineEntry {
+                ms: 950,
+                kind: TimelineKind::Tool,
+                tool_name: Some("Bash".to_string()),
+                text: Some("cargo test".to_string()),
+                outcome: Some(Outcome::Ok),
+                dur_ms: Some(1_000),
+            }],
+        },
+        1_050,
+    );
+    assert!(drain_timelines(&rx).is_empty());
+    assert!(ctl.model.timeline(&k1).is_some());
+
+    // An upsert inside the 500 ms cooldown is deferred, then flushed once by poll.
+    apply_at(
+        &mut ctl,
+        upsert(test_agent("S1", Status::Working, 1_100)),
+        1_100,
+    );
+    assert!(drain_timelines(&rx).is_empty());
+
+    ctl.poll_timelines(1_499);
+    assert!(drain_timelines(&rx).is_empty());
+
+    ctl.poll_timelines(1_500);
+    assert_eq!(drain_timelines(&rx), vec![k1.clone()]);
+
+    ctl.poll_timelines(1_600);
+    assert!(drain_timelines(&rx).is_empty());
+
+    // Leaving active must not emit a dead request.
+    apply_at(
+        &mut ctl,
+        upsert(test_agent("S1", Status::Done, 2_100)),
+        2_100,
+    );
+    assert!(drain_timelines(&rx).is_empty());
+}
+
+#[test]
+fn controller_open_child_status_upsert_inside_cooldown_still_sends() {
+    let (mut ctl, rx) = test_controller();
+    let k_main = AgentKey {
+        session_id: "S1".to_string(),
+        agent_id: String::new(),
+    };
+    let k_child = AgentKey {
+        session_id: "S1".to_string(),
+        agent_id: "sub-1".to_string(),
+    };
+
+    apply_at(
+        &mut ctl,
+        working_snapshot(vec![
+            test_agent("S1", Status::Working, 900),
+            test_agent_with_id("S1", "sub-1", Status::Working, 950),
+        ]),
+        1_000,
+    );
+    assert_eq!(drain_timelines(&rx), vec![k_main]);
+
+    ctl.model.toggle_open(&k_child);
+    apply_at(
+        &mut ctl,
+        upsert(test_agent_with_id("S1", "sub-1", Status::Working, 1_200)),
+        1_200,
+    );
+    assert_eq!(
+        drain_timelines(&rx),
+        vec![k_child.clone()],
+        "open child status upsert inside 500 ms must send directly"
+    );
+}
+
 fn atlas_project() -> crate::atlas_model::ProjectId {
     crate::atlas_model::ProjectId("/repos/rocky".to_string())
 }
