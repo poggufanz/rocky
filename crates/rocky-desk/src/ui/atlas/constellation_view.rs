@@ -52,7 +52,12 @@ fn step_x(n: usize) -> f32 {
 }
 
 /// X of the `j`-th (1-based) star of a subagent spawned after `after_n` steps.
+/// A subagent that starts before the first step lines up with the parent's
+/// own columns, so no star sits left of the first step.
 fn sub_star_x(after_n: usize, j: usize) -> f32 {
+    if after_n == 0 {
+        return step_x(j);
+    }
     step_x(after_n) + STEP_SPACING * (j as f32 - 0.5)
 }
 
@@ -191,7 +196,8 @@ fn constellation_segments(view: &ConstellationView, width: f32, height: f32) -> 
                 .windows(2)
                 .map(|w| line(w[0], w[1], LINE_W, TEXT_DIM)),
         );
-        if let Some(&first) = points.first() {
+        // No parent segment to drop from when the sub starts before step 1.
+        if let (Some(&first), true) = (points.first(), sub.after_n > 0) {
             let from = spawn_point(view, sub.after_n);
             out.push(dashed(line(from, first, LINE_W, STATUS_WORKING)));
         }
@@ -580,8 +586,9 @@ mod tests {
     use rocky_proto::pipe::{AgentKey, Status};
 
     use super::{
-        PLOT_MIN_W, empty_line, empty_text, is_live, label_top, next_button_disabled, plot_height,
-        plot_width, polyline_color, row_y_at, spawn_point, step_x, sub_star_x, tick_steps,
+        PLOT_MIN_W, constellation_segments, empty_line, empty_text, is_live, label_top,
+        next_button_disabled, plot_height, plot_width, polyline_color, row_y_at, spawn_point,
+        step_x, sub_star_x, tick_steps,
     };
     use crate::atlas_model::StepRef;
     use crate::atlas_model::constellation::{CStar, CSub, ConstellationView};
@@ -647,6 +654,28 @@ mod tests {
     fn sub_star_sits_half_a_step_after_its_parent_step() {
         assert_eq!(sub_star_x(2, 1), step_x(2) + 28.0);
         assert_eq!(sub_star_x(2, 2), step_x(2) + 84.0);
+    }
+
+    #[test]
+    fn sub_that_starts_before_the_first_step_aligns_with_the_first_columns() {
+        assert_eq!(sub_star_x(0, 1), step_x(1));
+        assert_eq!(sub_star_x(0, 2), step_x(2));
+        assert_eq!(sub_star_x(3, 1), step_x(3) + 28.0);
+    }
+
+    #[test]
+    fn no_spawn_link_when_the_sub_starts_before_the_first_step() {
+        let with_sub = |after_n| {
+            let mut v = view(&[StarKind::Plain; 4], Status::Idle);
+            v.subs.push(CSub {
+                key: key(),
+                label: "sub".into(),
+                after_n,
+                stars: vec![cstar(1, StarKind::Plain)],
+            });
+            constellation_segments(&v, 640.0, 300.0).len()
+        };
+        assert_eq!(with_sub(3), with_sub(0) + 1);
     }
 
     #[test]
