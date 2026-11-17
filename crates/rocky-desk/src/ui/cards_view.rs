@@ -90,7 +90,7 @@ pub fn cards_section<T: 'static>(
         None => cards.rows(lang),
     };
     if rows.is_empty() {
-        let copy = cards.empty_msg();
+        let copy = cards.empty_msg_for(project);
         section = section.child(
             div()
                 .px(px(14.0))

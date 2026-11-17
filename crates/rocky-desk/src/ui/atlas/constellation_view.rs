@@ -7,7 +7,7 @@ use gpui::{Context, Div, FontWeight, SharedString, Stateful, canvas, div, px, rg
 use rocky_proto::pipe::{AgentKey, Status};
 
 use super::sky_paint::{Seg, dashed, faint, line, paint_segs};
-use super::sky_view::{BAND_LABEL_W, PLOT_MIN_W, card_shell, mono_text};
+use super::sky_view::{BAND_LABEL_W, card_shell, mono_text};
 use super::star::{hit_box, hit_side, legend_swatches};
 use super::{AtlasAction, OnAtlasAction};
 use crate::atlas_model::StepRef;
@@ -23,6 +23,8 @@ use crate::ui::tooltip::{
 };
 use crate::view::{age_secs, short8};
 
+/// Narrowest the constellation plot gets, so a short turn still has room.
+const CONSTELLATION_MIN_W: f32 = 640.0;
 /// Distance between the edit, read, and cmd rows.
 const PRIMARY_ROW_GAP: f32 = 90.0;
 /// Distance between a subagent row and the row above it.
@@ -100,7 +102,7 @@ fn plot_width(view: &ConstellationView) -> f32 {
         .iter()
         .flat_map(|s| (1..=s.stars.len()).map(|j| sub_star_x(s.after_n, j)));
     let right = main.chain(subs).fold(0.0_f32, f32::max);
-    (right + RIGHT_PAD).max(PLOT_MIN_W)
+    (right + RIGHT_PAD).max(CONSTELLATION_MIN_W)
 }
 
 /// Steps that get a time tick: x and time, first, failed, and last, minus
@@ -586,7 +588,7 @@ mod tests {
     use rocky_proto::pipe::{AgentKey, Status};
 
     use super::{
-        PLOT_MIN_W, constellation_segments, empty_line, empty_text, is_live, label_top,
+        CONSTELLATION_MIN_W, constellation_segments, empty_line, empty_text, is_live, label_top,
         next_button_disabled, plot_height, plot_width, polyline_color, row_y_at, spawn_point,
         step_x, sub_star_x, tick_steps,
     };
@@ -691,7 +693,7 @@ mod tests {
     #[test]
     fn plot_is_at_least_min_wide_and_grows_with_steps() {
         let one = view(&[StarKind::Plain], Status::Idle);
-        assert_eq!(plot_width(&one), PLOT_MIN_W);
+        assert_eq!(plot_width(&one), CONSTELLATION_MIN_W);
         let many = view(&[StarKind::Plain; 20], Status::Idle);
         assert_eq!(plot_width(&many), step_x(20) + 80.0);
     }

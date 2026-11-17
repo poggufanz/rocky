@@ -83,10 +83,6 @@ pub enum Msg {
     SubagentsStillWorking {
         n: u64,
     },
-    SubagentsHidden {
-        n: u64,
-        working: u64,
-    },
     TimelineEntry {
         kind: TimelineKind,
         tool: Option<String>,
@@ -199,7 +195,6 @@ fn samples() -> Vec<Msg> {
         },
         Msg::EarlierGaps { n: 2 },
         Msg::SubagentsStillWorking { n: 2 },
-        Msg::SubagentsHidden { n: 3, working: 1 },
         Msg::TimelineEntry {
             kind: TimelineKind::Tool,
             tool: Some("Bash".into()),
@@ -315,9 +310,6 @@ pub fn en(m: &Msg) -> String {
         Msg::SubagentsStillWorking { n } => {
             format!("{n} {} still working", plural(*n, "subagent", "subagents"))
         }
-        Msg::SubagentsHidden { n, working } => {
-            format!("+{n} {} ({working} working)", plural(*n, "subagent", "subagents"))
-        }
         Msg::TimelineEntry { kind, tool, text } => {
             timeline_entry_en(*kind, tool.as_deref(), text.as_deref())
         }
@@ -414,7 +406,6 @@ pub fn id(m: &Msg) -> String {
         } => gap_id(*count, from, to, *reason),
         Msg::EarlierGaps { n } => format!("{n} celah sebelumnya"),
         Msg::SubagentsStillWorking { n } => format!("{n} subagen masih bekerja"),
-        Msg::SubagentsHidden { n, working } => format!("+{n} subagen ({working} bekerja)"),
         Msg::TimelineEntry { kind, tool, text } => {
             timeline_entry_id(*kind, tool.as_deref(), text.as_deref())
         }

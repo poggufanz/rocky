@@ -1007,3 +1007,23 @@ fn rows_for_keeps_only_cards_of_the_project() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].card_id, "mine");
 }
+
+#[test]
+fn empty_log_for_a_project_says_so_when_other_projects_have_cards() {
+    let mut cards = CardsModel::new();
+    cards.request_first_page(1);
+    cards.on_cards(1, Vec::new(), None);
+    let project = crate::atlas_model::ProjectId("/work/rocky".to_string());
+    assert_eq!(cards.empty_msg_for(Some(&project)), CardMsg::Empty);
+
+    let mut other = sample_card("other", 2_000, Some(2_100));
+    other.main_root = None;
+    other.root = "/work/other".to_string();
+    let _ = cards.request_first_page(2);
+    cards.on_cards(2, vec![other], None);
+    assert_eq!(
+        cards.empty_msg_for(Some(&project)),
+        CardMsg::EmptyForProject
+    );
+    assert_eq!(cards.empty_msg_for(None), CardMsg::Empty);
+}

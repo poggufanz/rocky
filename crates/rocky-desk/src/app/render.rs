@@ -114,7 +114,9 @@ impl DeskView {
                 self.close_modal(window, cx);
             }
             _ => {
-                self.on_atlas_key(ev, window, cx);
+                if self.on_atlas_key(ev, window, cx) {
+                    cx.stop_propagation();
+                }
             }
         }
     }

@@ -10,11 +10,11 @@ use super::{UiLang, plural};
 /// One user-visible change card UI string, rendered through [`card_text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardMsg {
-    SectionNow,
     SectionDone,
     SearchPlaceholder,
     LoadMore,
     Empty,
+    EmptyForProject,
     Loading,
     MetaEdits {
         n: usize,
@@ -114,11 +114,11 @@ pub enum CardMsg {
 /// Every [`CardMsg`] variant with sample arguments for parity and text scans.
 pub fn card_samples() -> Vec<CardMsg> {
     vec![
-        CardMsg::SectionNow,
         CardMsg::SectionDone,
         CardMsg::SearchPlaceholder,
         CardMsg::LoadMore,
         CardMsg::Empty,
+        CardMsg::EmptyForProject,
         CardMsg::Loading,
         CardMsg::MetaEdits { n: 1 },
         CardMsg::MetaEdits { n: 3 },
@@ -192,11 +192,11 @@ pub fn card_text(lang: UiLang, msg: &CardMsg) -> String {
 
 fn card_en(msg: &CardMsg) -> String {
     match msg {
-        CardMsg::SectionNow => "Now".to_string(),
         CardMsg::SectionDone => "Done".to_string(),
         CardMsg::SearchPlaceholder => "Search file or repo".to_string(),
         CardMsg::LoadMore => "Load more".to_string(),
         CardMsg::Empty => "No cards yet".to_string(),
+        CardMsg::EmptyForProject => "No finished cards for this project yet.".to_string(),
         CardMsg::Loading => "Loading\u{2026}".to_string(),
         CardMsg::MetaEdits { n } => format!("{n} {}", plural(*n as u64, "edit", "edits")),
         CardMsg::MetaImportant { n } => format!("{n} important"),
@@ -281,11 +281,11 @@ fn card_en(msg: &CardMsg) -> String {
 
 fn card_id(msg: &CardMsg) -> String {
     match msg {
-        CardMsg::SectionNow => "Sekarang".to_string(),
         CardMsg::SectionDone => "Selesai".to_string(),
         CardMsg::SearchPlaceholder => "Cari file atau repo".to_string(),
         CardMsg::LoadMore => "Muat lagi".to_string(),
         CardMsg::Empty => "Belum ada kartu".to_string(),
+        CardMsg::EmptyForProject => "Belum ada kartu selesai di proyek ini.".to_string(),
         CardMsg::Loading => "Memuat\u{2026}".to_string(),
         CardMsg::MetaEdits { n } => format!("{n} edit"),
         CardMsg::MetaImportant { n } => format!("{n} penting"),

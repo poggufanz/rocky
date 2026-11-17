@@ -12,12 +12,12 @@ use crate::i18n::{AtlasMsg, Msg, UiLang, atlas_text, tr};
 use crate::ui::harness::{HarnessKind, harness_icon};
 use crate::ui::status::status_pill;
 use crate::ui::tooltip::{
-    BORDER_LIGHT, CARD_BG, CHIP_BG, CHIP_FG, CHIP_HIGH_BG, CHIP_HIGH_FG, CHIP_WORKING_BG,
-    CHIP_WORKING_FG, SURFACE_SUBTLE, TEXT_DARK, TEXT_MUTED, TEXT_SUBTLE, TIMER_NEEDS_YOU,
-    TIMER_WORKING, mono_font,
+    BORDER_LIGHT, CARD_BG, CHIP_BG, CHIP_FG, CHIP_HIGH_BG, CHIP_HIGH_FG, CHIP_NEEDS_YOU_BG,
+    CHIP_NEEDS_YOU_FG, CHIP_WORKING_BG, CHIP_WORKING_FG, SURFACE_SUBTLE, TEXT_DARK, TEXT_MUTED,
+    TEXT_SUBTLE, TIMER_NEEDS_YOU, TIMER_WORKING, mono_font,
 };
 use crate::view::{age_secs, short8};
-use rocky_proto::pipe::Status;
+use rocky_proto::pipe::{Outcome, Status};
 
 const HARNESS_ICON: f32 = 14.0;
 const SUB_SECOND_DECIMAL_MS: u64 = 10_000;
@@ -45,29 +45,42 @@ fn chip(text: String, bg: u32, fg: u32) -> Div {
         .child(text)
 }
 
-fn outcome_chip(lang: UiLang, outcome: &StepOutcome, now_ms: u64) -> Div {
+/// Chip copy for a step outcome. A step with no recorded duration says only
+/// whether it failed or finished, never a duration phrase with the time missing.
+fn outcome_text(lang: UiLang, outcome: &StepOutcome, now_ms: u64) -> String {
+    let since = |since_ms: &u64| dur_text(now_ms.saturating_sub(*since_ms));
     match outcome {
-        StepOutcome::Failed { dur_ms } => {
-            let dur = dur_ms.map(dur_text).unwrap_or_default();
-            chip(
-                atlas_text(lang, &AtlasMsg::FailedAfter { dur }),
-                CHIP_HIGH_BG,
-                CHIP_HIGH_FG,
-            )
+        StepOutcome::Failed { dur_ms: Some(ms) } => {
+            atlas_text(lang, &AtlasMsg::FailedAfter { dur: dur_text(*ms) })
         }
-        StepOutcome::Running { since_ms } | StepOutcome::Waiting { since_ms } => {
-            let dur = dur_text(now_ms.saturating_sub(*since_ms));
-            chip(
-                atlas_text(lang, &AtlasMsg::RunningFor { dur }),
-                CHIP_WORKING_BG,
-                CHIP_WORKING_FG,
-            )
+        StepOutcome::Failed { dur_ms: None } => tr(lang, &Msg::Outcome(Outcome::Failed)),
+        StepOutcome::Running { since_ms } => atlas_text(
+            lang,
+            &AtlasMsg::RunningFor {
+                dur: since(since_ms),
+            },
+        ),
+        StepOutcome::Waiting { since_ms } => atlas_text(
+            lang,
+            &AtlasMsg::NeedsYouFor {
+                dur: since(since_ms),
+            },
+        ),
+        StepOutcome::Done { dur_ms: Some(ms) } => {
+            atlas_text(lang, &AtlasMsg::Took { dur: dur_text(*ms) })
         }
-        StepOutcome::Done { dur_ms } => {
-            let dur = dur_ms.map(dur_text).unwrap_or_default();
-            chip(atlas_text(lang, &AtlasMsg::Took { dur }), CHIP_BG, CHIP_FG)
-        }
+        StepOutcome::Done { dur_ms: None } => tr(lang, &Msg::Outcome(Outcome::Ok)),
     }
+}
+
+fn outcome_chip(lang: UiLang, outcome: &StepOutcome, now_ms: u64) -> Div {
+    let (bg, fg) = match outcome {
+        StepOutcome::Failed { .. } => (CHIP_HIGH_BG, CHIP_HIGH_FG),
+        StepOutcome::Running { .. } => (CHIP_WORKING_BG, CHIP_WORKING_FG),
+        StepOutcome::Waiting { .. } => (CHIP_NEEDS_YOU_BG, CHIP_NEEDS_YOU_FG),
+        StepOutcome::Done { .. } => (CHIP_BG, CHIP_FG),
+    };
+    chip(outcome_text(lang, outcome, now_ms), bg, fg)
 }
 
 fn field_label(text: String) -> Div {
@@ -321,7 +334,9 @@ pub fn status_bar(lang: UiLang, last_event_ms: Option<u64>) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::dur_text;
+    use super::{dur_text, outcome_text};
+    use crate::atlas_model::detail::StepOutcome;
+    use crate::i18n::UiLang;
 
     #[test]
     fn dur_text_keeps_a_decimal_under_ten_seconds() {
@@ -329,5 +344,25 @@ mod tests {
         assert_eq!(dur_text(9_000), "9.0s");
         assert_eq!(dur_text(12_000), "12s");
         assert_eq!(dur_text(65_000), "1m 5s");
+    }
+
+    #[test]
+    fn a_waiting_step_reads_needs_you_not_running() {
+        let waiting = StepOutcome::Waiting { since_ms: 1_000 };
+        assert_eq!(outcome_text(UiLang::En, &waiting, 13_000), "needs you 12s");
+        assert_eq!(outcome_text(UiLang::Id, &waiting, 13_000), "perlu Anda 12s");
+    }
+
+    #[test]
+    fn a_step_without_a_duration_has_no_dangling_phrase() {
+        let failed = StepOutcome::Failed { dur_ms: None };
+        let done = StepOutcome::Done { dur_ms: None };
+        assert_eq!(outcome_text(UiLang::En, &failed, 0), "failed");
+        assert_eq!(outcome_text(UiLang::Id, &failed, 0), "gagal");
+        assert_eq!(outcome_text(UiLang::En, &done, 0), "ok");
+        let timed = StepOutcome::Failed {
+            dur_ms: Some(2_000),
+        };
+        assert_eq!(outcome_text(UiLang::En, &timed, 0), "failed after 2.0s");
     }
 }

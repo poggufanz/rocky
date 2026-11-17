@@ -53,6 +53,9 @@ pub enum AtlasMsg {
     RunningFor {
         dur: String,
     },
+    NeedsYouFor {
+        dur: String,
+    },
     Took {
         dur: String,
     },
@@ -125,6 +128,7 @@ fn atlas_en(msg: &AtlasMsg) -> String {
         AtlasMsg::Copy => "Copy".into(),
         AtlasMsg::FailedAfter { dur } => format!("failed after {dur}"),
         AtlasMsg::RunningFor { dur } => format!("running {dur}"),
+        AtlasMsg::NeedsYouFor { dur } => format!("needs you {dur}"),
         AtlasMsg::Took { dur } => format!("took {dur}"),
         AtlasMsg::TurnSteps { at, n } => format!(
             "turn {at}, {n} {} in order",
@@ -183,6 +187,7 @@ fn atlas_id(msg: &AtlasMsg) -> String {
         AtlasMsg::Copy => "Salin".into(),
         AtlasMsg::FailedAfter { dur } => format!("gagal setelah {dur}"),
         AtlasMsg::RunningFor { dur } => format!("berjalan {dur}"),
+        AtlasMsg::NeedsYouFor { dur } => format!("perlu Anda {dur}"),
         AtlasMsg::Took { dur } => format!("makan {dur}"),
         AtlasMsg::TurnSteps { at, n } => format!("turn {at}, {n} langkah berurutan"),
         AtlasMsg::PrevTurn { at } => format!("Turn sebelumnya, {at}"),

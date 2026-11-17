@@ -27,7 +27,7 @@ use crate::view::Model;
 const NARROW_BELOW: f32 = 760.0;
 /// Widest the atlas column grows.
 const MAX_ATLAS_W: f32 = 1200.0;
-/// Padding of the scrolling column and of the sidebar wrapper (`p_3`), per side.
+/// Padding of the scrolling column and of the sidebar wrapper, per side.
 const PAGE_PAD: f32 = 12.0;
 
 /// Inner width of the Sky chart card for a window `viewport_w` wide.
@@ -348,13 +348,13 @@ fn compose(side: Div, column: Div, bar: Div, narrow: bool) -> AnyElement {
         .min_w_0()
         .min_h_0()
         .overflow_y_scroll()
-        .p_3()
+        .p(px(PAGE_PAD))
         .child(column.max_w(px(MAX_ATLAS_W)).mx_auto());
     let side = div()
         .id(SharedString::from("atlas-sidebar"))
         .flex_shrink_0()
         .overflow_y_scroll()
-        .p_3()
+        .p(px(PAGE_PAD))
         .child(side);
     let mut body = div().flex().flex_1().min_h_0();
     body = if narrow {

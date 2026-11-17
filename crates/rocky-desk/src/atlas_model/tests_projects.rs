@@ -104,6 +104,17 @@ fn default_project_prefers_working_then_needs_you() {
 }
 
 #[test]
+fn default_project_is_the_working_one_with_the_newest_event() {
+    let a = map([
+        agent("a", "", Status::Working, Some("C:/p/a"), 5),
+        agent("b", "", Status::Working, Some("C:/p/b"), 9),
+        agent("c", "", Status::Working, Some("C:/p/c"), 9),
+    ]);
+    let rows = projects(&a, 10);
+    assert_eq!(default_project(&rows), Some(ProjectId("C:/p/b".into())));
+}
+
+#[test]
 fn needs_you_bars_skip_the_selected_project_and_cap_at_three() {
     let list: Vec<_> = ["a", "b", "c", "d", "e"]
         .iter()

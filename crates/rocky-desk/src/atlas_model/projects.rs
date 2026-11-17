@@ -119,10 +119,18 @@ pub fn projects(agents: &BTreeMap<AgentKey, AgentStatus>, now_ms: u64) -> Vec<Pr
     rows
 }
 
+/// The project to open on: the working one with the newest event (ties go to
+/// the first by name), else the first waiting one, else the first row.
 pub fn default_project(rows: &[ProjectRow]) -> Option<ProjectId> {
-    let pick = |state: ProjectState| rows.iter().find(|r| r.state == state);
-    pick(ProjectState::Working)
-        .or_else(|| pick(ProjectState::NeedsYou))
+    let working = rows
+        .iter()
+        .filter(|r| r.state == ProjectState::Working)
+        .fold(None::<&ProjectRow>, |best, r| match best {
+            Some(b) if b.last_event_ms >= r.last_event_ms => Some(b),
+            _ => Some(r),
+        });
+    working
+        .or_else(|| rows.iter().find(|r| r.state == ProjectState::NeedsYou))
         .or_else(|| rows.first())
         .map(|r| r.id.clone())
 }

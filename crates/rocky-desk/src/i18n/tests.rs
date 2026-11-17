@@ -80,10 +80,6 @@ fn english_counts_of_one_are_singular() {
         en(&Msg::SubagentsStillWorking { n: 2 }),
         "2 subagents still working"
     );
-    assert_eq!(
-        en(&Msg::SubagentsHidden { n: 1, working: 1 }),
-        "+1 subagent (1 working)"
-    );
     assert_eq!(en(&Msg::EarlierGaps { n: 1 }), "1 earlier gap");
     assert_eq!(en(&Msg::SpoolPending { n: 1 }), "1 spool file pending.");
     assert_eq!(
@@ -584,11 +580,11 @@ fn card_copy_matches_brief_details() {
 fn card_msg_variant_count() -> usize {
     // Exhaustive guard so adding a CardMsg variant forces updating this count and card_samples().
     let check = |m: &CardMsg| match m {
-        CardMsg::SectionNow
-        | CardMsg::SectionDone
+        CardMsg::SectionDone
         | CardMsg::SearchPlaceholder
         | CardMsg::LoadMore
         | CardMsg::Empty
+        | CardMsg::EmptyForProject
         | CardMsg::Loading
         | CardMsg::MetaEdits { .. }
         | CardMsg::MetaImportant { .. }

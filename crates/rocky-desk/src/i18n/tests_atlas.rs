@@ -107,6 +107,11 @@ fn atlas_copy_renders_en_and_id() {
         "running 2s",
         "berjalan 2s",
     );
+    check(
+        AtlasMsg::NeedsYouFor { dur: s("2s") },
+        "needs you 2s",
+        "perlu Anda 2s",
+    );
     check(AtlasMsg::Took { dur: s("2s") }, "took 2s", "makan 2s");
     check(
         AtlasMsg::TurnSteps {

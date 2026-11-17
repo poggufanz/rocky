@@ -125,6 +125,17 @@ impl CardsModel {
         }
     }
 
+    /// Copy for an empty list shown for one project: when other projects have
+    /// cards, say this project has none instead of "No cards yet".
+    pub fn empty_msg_for(&self, project: Option<&ProjectId>) -> CardMsg {
+        match self.empty_msg() {
+            CardMsg::Empty if project.is_some() && !self.items.is_empty() => {
+                CardMsg::EmptyForProject
+            }
+            other => other,
+        }
+    }
+
     /// True when the daemon reported another page cursor after the loaded items.
     pub fn has_more(&self) -> bool {
         self.next.is_some()
