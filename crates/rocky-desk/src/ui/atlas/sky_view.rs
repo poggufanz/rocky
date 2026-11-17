@@ -7,7 +7,7 @@ use gpui::{Context, Div, FontWeight, SharedString, Stateful, canvas, div, px, re
 use super::sky_paint::{
     Seg, band_height, band_tops, paint_sky, plot_height, row_y, sky_segments, title_y,
 };
-use super::star::{legend_swatches, star as draw_star, star_box, star_caption};
+use super::star::{hit_box, hit_side, legend_swatches, star_caption};
 use super::{AtlasAction, OnAtlasAction};
 use crate::atlas_model::sky::{
     RECENT_SHARE_OF_WINDOW, RowKind, SkyBand, SkyChart, Star, StarKind, Turn,
@@ -27,8 +27,6 @@ pub const PLOT_MIN_W: f32 = 640.0;
 const TICK_STRIP_H: f32 = 20.0;
 /// Space right of the plot so a star at "now" is not clipped by the scroller.
 const RIGHT_GUTTER: f32 = 16.0;
-/// Smallest clickable side of a star.
-const HIT_MIN: f32 = 14.0;
 const TITLE_MAX_W: f32 = 360.0;
 const CAPTION_MAX_W: f32 = 280.0;
 const BADGE_ICON: f32 = 18.0;
@@ -61,6 +59,14 @@ pub fn sky_card<T: 'static>(
     cx: &mut Context<T>,
     on: OnAtlasAction<T>,
 ) -> Div {
+    card_shell()
+        .child(header(lang, chart.window, repo, cx, on))
+        .child(plot_scroller().child(plot_row(lang, chart, selected, cx, on)))
+        .child(legend(lang, chart.window))
+}
+
+/// The padded, bordered card both atlas views sit in.
+pub(super) fn card_shell() -> Div {
     div()
         .flex()
         .flex_col()
@@ -70,9 +76,6 @@ pub fn sky_card<T: 'static>(
         .bg(rgb(CARD_BG))
         .border_1()
         .border_color(rgb(BORDER_SUBTLE))
-        .child(header(lang, chart.window, repo, cx, on))
-        .child(plot_scroller().child(plot_row(lang, chart, selected, cx, on)))
-        .child(legend(lang, chart.window))
 }
 
 fn header<T: 'static>(
@@ -200,7 +203,7 @@ fn plot_row<T: 'static>(
         .child(div().flex_none().w(px(RIGHT_GUTTER)))
 }
 
-fn mono_text(size: f32, color: u32) -> Div {
+pub(super) fn mono_text(size: f32, color: u32) -> Div {
     div()
         .whitespace_nowrap()
         .font_family(mono_font())
@@ -432,21 +435,14 @@ fn band_captions(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
     titles.chain(captions).collect()
 }
 
-/// The clickable box of a star: at least [`HIT_MIN`] on each side, centered
-/// on the star's position.
+/// The clickable box of a star, centered on the star's position.
 fn star_hit_box(star: &Star, y: f32, selected: bool) -> Div {
-    let side = star_box(star.radius).max(HIT_MIN);
-    div()
+    let side = hit_side(star.radius);
+    hit_box(star.kind, star.radius, selected)
         .absolute()
         .left(relative(star.x))
         .ml(px(-side / 2.0))
         .top(px(y - side / 2.0))
-        .size(px(side))
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(draw_star(star.kind, star.radius, selected))
 }
 
 fn star_button<T: 'static>(

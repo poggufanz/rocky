@@ -105,14 +105,20 @@ fn seg(a: Pt, b: Pt, width: f32, color: u32) -> Seg {
     }
 }
 
-fn faint(mut s: Seg, alpha: f32) -> Seg {
+pub(super) fn faint(mut s: Seg, alpha: f32) -> Seg {
     s.alpha = alpha;
     s
 }
 
-fn dashed(mut s: Seg) -> Seg {
+pub(super) fn dashed(mut s: Seg) -> Seg {
     s.dashed = true;
     s
+}
+
+/// A line between two points given in plot pixels from the plot's top left.
+pub(super) fn line(from: (f32, f32), to: (f32, f32), width: f32, color: u32) -> Seg {
+    let at = |(x, y): (f32, f32)| Pt { x: 0.0, dx: x, y };
+    seg(at(from), at(to), width, color)
 }
 
 /// Tick lines, row guides, and band separators, drawn under everything else.
@@ -223,6 +229,11 @@ pub(super) fn paint_sky(bounds: Bounds<Pixels>, segs: &[Seg], window: &mut Windo
     let old_w = bounds.size.width * (1.0 - crate::atlas_model::sky::RECENT_SHARE_OF_WIDTH);
     let shade = Bounds::new(bounds.origin, size(old_w, bounds.size.height));
     window.paint_quad(fill(shade, Hsla::from(rgb(ROW_HOVER_BG))));
+    paint_segs(bounds, segs, window);
+}
+
+/// Strokes every line, in order.
+pub(super) fn paint_segs(bounds: Bounds<Pixels>, segs: &[Seg], window: &mut Window) {
     for s in segs {
         stroke(bounds, s, window);
     }

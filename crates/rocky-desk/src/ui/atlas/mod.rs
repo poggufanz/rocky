@@ -14,6 +14,7 @@ use crate::ui::tooltip::{
     STATUS_NEEDS_YOU, SURFACE_SUBTLE, TEXT_DARK, TEXT_MUTED, TIMER_NEEDS_YOU, mono_font,
 };
 
+pub mod constellation_view;
 pub mod sidebar;
 pub mod sky_paint;
 pub mod sky_view;

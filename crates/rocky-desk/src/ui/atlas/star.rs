@@ -113,6 +113,26 @@ pub(crate) fn star(kind: StarKind, radius: f32, selected: bool) -> Div {
     el
 }
 
+/// Smallest clickable side of a star.
+const HIT_MIN: f32 = 14.0;
+
+/// Side of a star's clickable box: at least [`HIT_MIN`].
+pub(crate) fn hit_side(radius: f32) -> f32 {
+    star_box(radius).max(HIT_MIN)
+}
+
+/// The clickable box of a star, centered on the star. Placement, id, and
+/// click handling belong to the caller.
+pub(crate) fn hit_box(kind: StarKind, radius: f32, selected: bool) -> Div {
+    div()
+        .size(px(hit_side(radius)))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(star(kind, radius, selected))
+}
+
 fn legend_item(swatch: Div, text: String) -> Div {
     div()
         .flex()
