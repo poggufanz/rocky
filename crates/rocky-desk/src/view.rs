@@ -138,7 +138,7 @@ impl Model {
     /// drops the stored entries and returns `None`.
     pub fn toggle_open(&mut self, key: &AgentKey) -> Option<AgentKey> {
         if self.open.remove(key) {
-            if !self.active_primary_keys().contains(key) {
+            if !self.active_primary_keys().contains(key) && !self.wanted.contains(key) {
                 self.timelines.remove(key);
             }
             None

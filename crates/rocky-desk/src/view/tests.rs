@@ -681,3 +681,18 @@ fn set_wanted_skips_active_primaries_and_already_wanted_keys() {
     );
     assert!(m.set_wanted(BTreeSet::from([a, b])).is_empty());
 }
+
+#[test]
+fn closing_a_wanted_idle_row_keeps_its_timeline() {
+    let mut m = Model::new();
+    m.apply(snapshot(vec![agent("s1", "", Status::Idle)]));
+    let k = key("s1", "");
+    m.set_wanted(BTreeSet::from([k.clone()]));
+    m.toggle_open(&k);
+    m.apply(timeline_msg(
+        k.clone(),
+        vec![entry(1, TimelineKind::Tool, Some("Bash"), None, None)],
+    ));
+    m.toggle_open(&k);
+    assert!(m.timeline(&k).is_some());
+}
