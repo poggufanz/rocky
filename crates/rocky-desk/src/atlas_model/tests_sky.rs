@@ -402,3 +402,22 @@ fn only_failed_and_live_stars_carry_a_label() {
         ]
     );
 }
+
+#[test]
+fn running_last_step_makes_a_running_star_and_a_live_turn() {
+    let k = key("s1", "");
+    let tl = vec![
+        turn_start(NOW - 20_000),
+        tool(NOW - 15_000, "Read", Outcome::Ok),
+        tool(NOW, "Bash", Outcome::Pending),
+    ];
+    let c = chart(
+        vec![agent("s1", "", Status::Working, NOW)],
+        vec![(k, tl)],
+        false,
+    );
+    let band = &c.bands[0];
+    assert_eq!(band.stars.last().unwrap().kind, StarKind::Running);
+    assert_eq!(band.stars.last().unwrap().x, 1.0);
+    assert!(band.turns.last().unwrap().live);
+}
