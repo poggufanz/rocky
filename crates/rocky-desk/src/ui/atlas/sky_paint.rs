@@ -5,7 +5,7 @@
 
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Point, Window, fill, point, px, rgb, size};
 
-use crate::atlas_model::sky::{RowKind, SkyBand, SkyChart, StarKind};
+use crate::atlas_model::sky::{RowKind, SkyBand, SkyChart, Turn};
 use crate::ui::tooltip::{
     BORDER_SUBTLE, ROW_HOVER_BG, STATUS_WORKING, TEXT_DARK, TEXT_DIM, TEXT_MUTED,
 };
@@ -140,6 +140,26 @@ fn grid_segs(chart: &SkyChart, tops: &[f32], height: f32) -> Vec<Seg> {
     out
 }
 
+/// Width and color of a turn's line: blue and heavier while the turn is live.
+fn turn_line(live: bool) -> (f32, u32) {
+    if live {
+        (1.5, STATUS_WORKING)
+    } else {
+        (1.0, TEXT_DIM)
+    }
+}
+
+/// Whether the turn a subagent spawned in is live: the last turn that began
+/// at or before `spawn_x`, else the band's first turn.
+fn spawn_turn_live(band: &SkyBand, spawn_x: f32) -> bool {
+    let start_x = |t: &&Turn| t.stars.first().map(|&i| band.stars[i].x);
+    band.turns
+        .iter()
+        .rfind(|t| start_x(t).is_some_and(|x| x <= spawn_x))
+        .or_else(|| band.turns.first())
+        .is_some_and(|t| t.live)
+}
+
 /// Constellation lines of each turn and the spawn links of subagents.
 fn link_segs(chart: &SkyChart, tops: &[f32]) -> Vec<Seg> {
     let mut out = Vec::new();
@@ -149,11 +169,7 @@ fn link_segs(chart: &SkyChart, tops: &[f32]) -> Vec<Seg> {
             pt(star.x, row_y(top, star.row))
         };
         for turn in &band.turns {
-            let (width, color) = if turn.live {
-                (1.5, STATUS_WORKING)
-            } else {
-                (1.0, TEXT_DIM)
-            };
+            let (width, color) = turn_line(turn.live);
             out.extend(
                 turn.stars
                     .windows(2)
@@ -166,11 +182,7 @@ fn link_segs(chart: &SkyChart, tops: &[f32]) -> Vec<Seg> {
             };
             let from = pt(spawn_x, row_y(top, RowKind::Cmd));
             let to = pt(band.stars[first].x, row_y(top, RowKind::Sub(lane_idx)));
-            let live = lane
-                .stars
-                .iter()
-                .any(|&i| matches!(band.stars[i].kind, StarKind::Running | StarKind::Waiting));
-            let color = if live { STATUS_WORKING } else { TEXT_DIM };
+            let (_, color) = turn_line(spawn_turn_live(band, spawn_x));
             out.push(dashed(seg(from, to, 1.0, color)));
         }
     }
@@ -240,5 +252,89 @@ pub(super) fn paint_sky(bounds: Bounds<Pixels>, segs: &[Seg], window: &mut Windo
 pub(super) fn paint_segs(bounds: Bounds<Pixels>, segs: &[Seg], window: &mut Window) {
     for s in segs {
         stroke(bounds, s, window);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rocky_proto::pipe::{AgentKey, Status};
+
+    use super::{Seg, link_segs};
+    use crate::atlas_model::SkyWindow;
+    use crate::atlas_model::StepRef;
+    use crate::atlas_model::sky::{RowKind, SkyBand, SkyChart, Star, StarKind, SubLane, Turn};
+    use crate::ui::tooltip::{STATUS_WORKING, TEXT_DIM};
+
+    fn key(agent: &str) -> AgentKey {
+        AgentKey {
+            session_id: "s".into(),
+            agent_id: agent.into(),
+        }
+    }
+
+    fn star(agent: &str, x: f32, row: RowKind, kind: StarKind) -> Star {
+        Star {
+            step: StepRef {
+                key: key(agent),
+                ms: (x * 1000.0) as u64,
+            },
+            x,
+            row,
+            radius: 2.5,
+            kind,
+            label: None,
+        }
+    }
+
+    /// A parent turn with `parent_live`, and a finished subagent spawned inside it.
+    fn chart(parent_live: bool) -> SkyChart {
+        let parent_kind = if parent_live {
+            StarKind::Running
+        } else {
+            StarKind::Plain
+        };
+        SkyChart {
+            window: SkyWindow::Min10,
+            ticks: vec![],
+            bands: vec![SkyBand {
+                key: key(""),
+                harness: None,
+                branch: None,
+                status: Status::Idle,
+                subs: vec![SubLane {
+                    key: key("c"),
+                    label: "c".into(),
+                    spawn_x: Some(0.4),
+                    stars: vec![2],
+                }],
+                stars: vec![
+                    star("", 0.2, RowKind::Cmd, StarKind::Plain),
+                    star("", 0.8, RowKind::Cmd, parent_kind),
+                    star("c", 0.5, RowKind::Sub(0), StarKind::Plain),
+                ],
+                turns: vec![Turn {
+                    stars: vec![0, 1],
+                    live: parent_live,
+                    start_ms: 1,
+                    title: None,
+                }],
+                quiet: None,
+                earlier: None,
+            }],
+        }
+    }
+
+    fn spawn_link(chart: &SkyChart) -> Seg {
+        let tops = super::band_tops(chart);
+        *link_segs(chart, &tops)
+            .iter()
+            .find(|s| s.dashed)
+            .expect("spawn link")
+    }
+
+    #[test]
+    fn spawn_link_follows_the_parent_turns_line_color() {
+        assert_eq!(spawn_link(&chart(true)).color, STATUS_WORKING);
+        assert_eq!(spawn_link(&chart(false)).color, TEXT_DIM);
     }
 }
