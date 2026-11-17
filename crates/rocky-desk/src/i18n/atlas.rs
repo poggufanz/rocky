@@ -92,8 +92,8 @@ pub fn atlas_text(lang: UiLang, msg: &AtlasMsg) -> String {
 fn atlas_en(msg: &AtlasMsg) -> String {
     match msg {
         AtlasMsg::Projects => "Projects".into(),
-        AtlasMsg::SkyChart => "Sky chart".into(),
-        AtlasMsg::Constellation => "Constellation".into(),
+        AtlasMsg::SkyChart => "Timeline".into(),
+        AtlasMsg::Constellation => "Turn steps".into(),
         AtlasMsg::SkySub { repo } => format!("every agent step in {repo}, by time"),
         AtlasMsg::Window(SkyWindow::Min10) => "10 min".into(),
         AtlasMsg::Window(SkyWindow::Min30) => "30 min".into(),
@@ -106,7 +106,7 @@ fn atlas_en(msg: &AtlasMsg) -> String {
             "earlier: turn {at}, {edits} {}",
             plural(*edits as u64, "edit", "edits")
         ),
-        AtlasMsg::LegendSize => "star size: step duration, under 1s, 1 to 10s, over 10s".into(),
+        AtlasMsg::LegendSize => "dot size: step duration, under 1s, 1 to 10s, over 10s".into(),
         AtlasMsg::LegendFailed => "failed".into(),
         AtlasMsg::LegendRunning => "running now".into(),
         AtlasMsg::LegendLines => {
@@ -118,7 +118,7 @@ fn atlas_en(msg: &AtlasMsg) -> String {
         AtlasMsg::LegendRows => {
             "Rows: what kind of step. Line: the order the agent took them.".into()
         }
-        AtlasMsg::ClickStar => "Click a star to inspect it.".into(),
+        AtlasMsg::ClickStar => "Click a step to inspect it.".into(),
         AtlasMsg::OpenProject { name } => format!("Open {name}"),
         AtlasMsg::More { n } => format!("+{n} more"),
         AtlasMsg::SelectedStep { n, of } => format!("Selected step {n} of {of}"),
@@ -151,8 +151,8 @@ fn atlas_en(msg: &AtlasMsg) -> String {
 fn atlas_id(msg: &AtlasMsg) -> String {
     match msg {
         AtlasMsg::Projects => "Proyek".into(),
-        AtlasMsg::SkyChart => "Peta langit".into(),
-        AtlasMsg::Constellation => "Rasi".into(),
+        AtlasMsg::SkyChart => "Lini waktu".into(),
+        AtlasMsg::Constellation => "Langkah turn".into(),
         AtlasMsg::SkySub { repo } => format!("setiap langkah agent di {repo}, menurut waktu"),
         AtlasMsg::Window(SkyWindow::Min10) => "10 mnt".into(),
         AtlasMsg::Window(SkyWindow::Min30) => "30 mnt".into(),
@@ -165,7 +165,7 @@ fn atlas_id(msg: &AtlasMsg) -> String {
         },
         AtlasMsg::Earlier { at, edits } => format!("sebelumnya: turn {at}, {edits} edit"),
         AtlasMsg::LegendSize => {
-            "ukuran bintang: durasi langkah, di bawah 1 dtk, 1 sampai 10 dtk, di atas 10 dtk".into()
+            "ukuran titik: durasi langkah, di bawah 1 dtk, 1 sampai 10 dtk, di atas 10 dtk".into()
         }
         AtlasMsg::LegendFailed => "gagal".into(),
         AtlasMsg::LegendRunning => "sedang berjalan".into(),
@@ -177,7 +177,7 @@ fn atlas_id(msg: &AtlasMsg) -> String {
             "{recent} terakhir digambar lebih lebar; bagian berarsir dan tanda // menunjukkan pergantian skala."
         ),
         AtlasMsg::LegendRows => "Baris: jenis langkah. Garis: urutan yang diambil agent.".into(),
-        AtlasMsg::ClickStar => "Klik bintang untuk melihat detailnya.".into(),
+        AtlasMsg::ClickStar => "Klik langkah untuk melihat detailnya.".into(),
         AtlasMsg::OpenProject { name } => format!("Buka {name}"),
         AtlasMsg::More { n } => format!("+{n} lagi"),
         AtlasMsg::SelectedStep { n, of } => format!("Langkah terpilih {n} dari {of}"),

@@ -4,7 +4,7 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
-Desk: the Agents tab is now a project sidebar with a star chart of agent steps (Sky chart by time, Constellation by order), a step detail panel, and harness icons. The daemon now reports each agent's harness.
+Desk: the Agents tab is now a project sidebar with two views of agent steps (Timeline by time, Turn steps by order), a step detail panel, and harness icons. The daemon now reports each agent's harness.
 
 The desktop app adds change cards: the "Done" list shows live-updating change cards with file or repo search, a detail view with each edit's code snippet, logic labels, the agent's own words, and a step timeline, a paged full diff, subtle entrance, slide, and pulse motion, and a **Change cards** switch in Settings.
 

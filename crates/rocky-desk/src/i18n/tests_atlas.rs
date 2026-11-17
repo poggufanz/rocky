@@ -13,8 +13,8 @@ fn check(msg: AtlasMsg, en: &str, id: &str) {
 #[test]
 fn atlas_copy_renders_en_and_id() {
     check(AtlasMsg::Projects, "Projects", "Proyek");
-    check(AtlasMsg::SkyChart, "Sky chart", "Peta langit");
-    check(AtlasMsg::Constellation, "Constellation", "Rasi");
+    check(AtlasMsg::SkyChart, "Timeline", "Lini waktu");
+    check(AtlasMsg::Constellation, "Turn steps", "Langkah turn");
     check(
         AtlasMsg::SkySub { repo: s("rocky") },
         "every agent step in rocky, by time",
@@ -57,8 +57,8 @@ fn atlas_copy_renders_en_and_id() {
     );
     check(
         AtlasMsg::LegendSize,
-        "star size: step duration, under 1s, 1 to 10s, over 10s",
-        "ukuran bintang: durasi langkah, di bawah 1 dtk, 1 sampai 10 dtk, di atas 10 dtk",
+        "dot size: step duration, under 1s, 1 to 10s, over 10s",
+        "ukuran titik: durasi langkah, di bawah 1 dtk, 1 sampai 10 dtk, di atas 10 dtk",
     );
     check(AtlasMsg::LegendFailed, "failed", "gagal");
     check(AtlasMsg::LegendRunning, "running now", "sedang berjalan");
@@ -79,8 +79,8 @@ fn atlas_copy_renders_en_and_id() {
     );
     check(
         AtlasMsg::ClickStar,
-        "Click a star to inspect it.",
-        "Klik bintang untuk melihat detailnya.",
+        "Click a step to inspect it.",
+        "Klik langkah untuk melihat detailnya.",
     );
     check(
         AtlasMsg::OpenProject { name: s("rocky") },
