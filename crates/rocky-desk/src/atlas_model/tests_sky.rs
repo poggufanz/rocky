@@ -2,6 +2,7 @@ use super::sky::*;
 use super::test_support::model_with;
 use super::{ProjectId, SkyWindow};
 use crate::cards_model::CardsModel;
+use crate::i18n::UiLang;
 use rocky_proto::cards::{CARD_VERSION, Card, CardStatus, Coverage, CoverageState, Importance};
 use rocky_proto::pipe::{
     AgentKey, AgentStatus, Outcome, PromptText, RepoInfo, Status, TimelineEntry, TimelineKind,
@@ -79,6 +80,7 @@ fn chart(
         &project(),
         SkyWindow::Min10,
         NOW,
+        UiLang::En,
     )
 }
 
@@ -199,6 +201,11 @@ fn subagent_lane_only_when_the_tree_setting_is_on() {
     assert_eq!(band.subs.len(), 1);
     assert_eq!(band.subs[0].key, key("s1", "c1"));
     assert!(band.subs[0].spawn_x.is_some());
+    assert_eq!(band.subs[0].stars.len(), 1);
+    for &i in &band.subs[0].stars {
+        assert_eq!(band.stars[i].row, RowKind::Sub(0));
+        assert_eq!(band.stars[i].step.key, key("s1", "c1"));
+    }
     assert_eq!(
         band.stars
             .iter()
@@ -316,7 +323,14 @@ fn turn_titles_come_from_the_live_prompt_and_matching_cards() {
     let model = model_with(vec![a], vec![(k, tl)], false);
     let mut cards = CardsModel::new();
     cards.on_push(card("c1", "s1", NOW - 102_000, "Fix the bug"));
-    let c = sky_chart(&model, &cards, &project(), SkyWindow::Min10, NOW);
+    let c = sky_chart(
+        &model,
+        &cards,
+        &project(),
+        SkyWindow::Min10,
+        NOW,
+        UiLang::En,
+    );
     let turns = &c.bands[0].turns;
     assert_eq!(turns[0].title.as_deref(), Some("Fix the bug"));
     assert_eq!(turns[1].title.as_deref(), Some("Add sky chart"));

@@ -96,6 +96,8 @@ pub struct SubLane {
     pub key: AgentKey,
     pub label: String,
     pub spawn_x: Option<f32>,
+    /// Indexes into the parent `SkyBand.stars`, in step order.
+    pub stars: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,15 +231,15 @@ fn ticks(now_ms: u64, window: SkyWindow) -> Vec<Tick> {
     out
 }
 
-fn one_line(text: &str) -> Option<String> {
-    let (display, _) = prompt_display(text, UiLang::En);
+fn one_line(text: &str, lang: UiLang) -> Option<String> {
+    let (display, _) = prompt_display(text, lang);
     let clean = sanitize_single_line(first_non_empty_line(&display))
         .trim()
         .to_string();
     (!clean.is_empty()).then_some(clean)
 }
 
-fn card_title(cards: &CardsModel, session_id: &str, start_ms: u64) -> Option<String> {
+fn card_title(cards: &CardsModel, session_id: &str, start_ms: u64, lang: UiLang) -> Option<String> {
     cards
         .items()
         .iter()
@@ -246,7 +248,7 @@ fn card_title(cards: &CardsModel, session_id: &str, start_ms: u64) -> Option<Str
                 && c.agent_id.is_empty()
                 && c.started_ms.abs_diff(start_ms) <= TITLE_MATCH_MS
         })
-        .and_then(|c| one_line(&c.prompt))
+        .and_then(|c| one_line(&c.prompt, lang))
 }
 
 fn band_rank(status: Status) -> u8 {
@@ -302,6 +304,7 @@ struct BandInput<'a> {
     cards: &'a CardsModel,
     now_ms: u64,
     window: SkyWindow,
+    lang: UiLang,
 }
 
 fn primary_turns(
@@ -330,9 +333,17 @@ fn primary_turns(
         let first = stars.len();
         stars.extend(built);
         let title = if is_live {
-            agent.prompt.as_ref().and_then(|p| one_line(&p.text))
+            agent
+                .prompt
+                .as_ref()
+                .and_then(|p| one_line(&p.text, input.lang))
         } else if slice.titled {
-            card_title(input.cards, &agent.key.session_id, slice.start_ms)
+            card_title(
+                input.cards,
+                &agent.key.session_id,
+                slice.start_ms,
+                input.lang,
+            )
         } else {
             None
         };
@@ -399,6 +410,7 @@ fn sub_lanes(
         if built.is_empty() {
             continue;
         }
+        let first = stars.len();
         stars.extend(built);
         lanes.push(SubLane {
             key: child.key.clone(),
@@ -407,6 +419,7 @@ fn sub_lanes(
                 .clone()
                 .unwrap_or_else(|| short8(&child.key.agent_id)),
             spawn_x: spawns.get(lane_idx).copied(),
+            stars: (first..stars.len()).collect(),
         });
     }
     lanes
@@ -452,6 +465,7 @@ pub fn sky_chart(
     project: &ProjectId,
     window: SkyWindow,
     now_ms: u64,
+    lang: UiLang,
 ) -> SkyChart {
     let mut agents: Vec<&AgentStatus> = model
         .agents()
@@ -480,6 +494,7 @@ pub fn sky_chart(
                     cards,
                     now_ms,
                     window,
+                    lang,
                 },
             )
         })
