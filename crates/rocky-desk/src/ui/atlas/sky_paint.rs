@@ -1,14 +1,13 @@
 //! Sky chart geometry in pixels and the canvas drawing of its lines.
 //!
-//! Everything here works in plot coordinates: x as a fraction of the plot
-//! width (plus a pixel offset), y in pixels from the top of the plot.
+//! Everything here works in plot pixels from the plot's top left, on the
+//! drawable width `d` the time scale maps onto.
 
-use gpui::{Bounds, Hsla, PathBuilder, Pixels, Point, Window, fill, point, px, rgb, size};
+use gpui::{Bounds, Hsla, PathBuilder, Pixels, Point, Window, point, px, rgb};
 
 use crate::atlas_model::sky::{RowKind, SkyBand, SkyChart, Turn};
-use crate::ui::tooltip::{
-    BORDER_SUBTLE, ROW_HOVER_BG, STATUS_WORKING, TEXT_DARK, TEXT_DIM, TEXT_MUTED,
-};
+use crate::atlas_model::time_scale::BREAK_W;
+use crate::ui::tooltip::{BORDER_SUBTLE, STATUS_WORKING, TEXT_DARK, TEXT_DIM, TEXT_MUTED};
 
 pub const ROW_H: f32 = 35.0;
 /// Title strip above a band with stars: turn titles and the earlier note.
@@ -70,16 +69,15 @@ pub(super) fn row_y(band_top: f32, row: RowKind) -> f32 {
     band_top + TITLE_H + (row_index(row) as f32 + 0.5) * ROW_H
 }
 
-/// One end of a line: x as a plot fraction plus a pixel offset.
+/// One end of a line, in plot pixels.
 #[derive(Clone, Copy)]
 pub(super) struct Pt {
     x: f32,
-    dx: f32,
     y: f32,
 }
 
 fn pt(x: f32, y: f32) -> Pt {
-    Pt { x, dx: 0.0, y }
+    Pt { x, y }
 }
 
 /// One straight line to paint.
@@ -116,14 +114,14 @@ pub(super) fn dashed(mut s: Seg) -> Seg {
 
 /// A line between two points given in plot pixels from the plot's top left.
 pub(super) fn line(from: (f32, f32), to: (f32, f32), width: f32, color: u32) -> Seg {
-    let at = |(x, y): (f32, f32)| Pt { x: 0.0, dx: x, y };
-    seg(at(from), at(to), width, color)
+    seg(pt(from.0, from.1), pt(to.0, to.1), width, color)
 }
 
 /// Tick lines, row guides, and band separators, drawn under everything else.
-fn grid_segs(chart: &SkyChart, tops: &[f32], height: f32) -> Vec<Seg> {
+fn grid_segs(chart: &SkyChart, tops: &[f32], (d, height): (f32, f32)) -> Vec<Seg> {
     let mut out: Vec<Seg> = chart
-        .ticks
+        .scale
+        .ticks(d)
         .iter()
         .map(|t| faint(seg(pt(t.x, 0.0), pt(t.x, height), 1.0, BORDER_SUBTLE), 0.5))
         .collect();
@@ -131,11 +129,11 @@ fn grid_segs(chart: &SkyChart, tops: &[f32], height: f32) -> Vec<Seg> {
         if band.quiet.is_none() {
             for i in 0..PRIMARY_ROWS + band.subs.len() {
                 let y = top + TITLE_H + (i as f32 + 0.5) * ROW_H;
-                out.push(dashed(seg(pt(0.0, y), pt(1.0, y), 1.0, BORDER_SUBTLE)));
+                out.push(dashed(seg(pt(0.0, y), pt(d, y), 1.0, BORDER_SUBTLE)));
             }
         }
         let bottom = top + band_height(band);
-        out.push(seg(pt(0.0, bottom), pt(1.0, bottom), 1.0, BORDER_SUBTLE));
+        out.push(seg(pt(0.0, bottom), pt(d, bottom), 1.0, BORDER_SUBTLE));
     }
     out
 }
@@ -150,23 +148,24 @@ fn turn_line(live: bool) -> (f32, u32) {
 }
 
 /// Whether the turn a subagent spawned in is live: the last turn that began
-/// at or before `spawn_x`, else the band's first turn.
-fn spawn_turn_live(band: &SkyBand, spawn_x: f32) -> bool {
-    let start_x = |t: &&Turn| t.stars.first().map(|&i| band.stars[i].x);
+/// at or before `spawn_ms`, else the band's first turn.
+fn spawn_turn_live(band: &SkyBand, spawn_ms: u64) -> bool {
+    let started = |t: &&Turn| t.stars.first().map(|&i| band.stars[i].step.ms);
     band.turns
         .iter()
-        .rfind(|t| start_x(t).is_some_and(|x| x <= spawn_x))
+        .rfind(|t| started(t).is_some_and(|ms| ms <= spawn_ms))
         .or_else(|| band.turns.first())
         .is_some_and(|t| t.live)
 }
 
 /// Constellation lines of each turn and the spawn links of subagents.
-fn link_segs(chart: &SkyChart, tops: &[f32]) -> Vec<Seg> {
+fn link_segs(chart: &SkyChart, tops: &[f32], d: f32) -> Vec<Seg> {
     let mut out = Vec::new();
+    let x_of = |ms: u64| chart.scale.x(ms, d);
     for (band, &top) in chart.bands.iter().zip(tops) {
         let at = |i: usize| {
             let star = &band.stars[i];
-            pt(star.x, row_y(top, star.row))
+            pt(x_of(star.step.ms), row_y(top, star.row))
         };
         for turn in &band.turns {
             let (width, color) = turn_line(turn.live);
@@ -177,58 +176,52 @@ fn link_segs(chart: &SkyChart, tops: &[f32]) -> Vec<Seg> {
             );
         }
         for (lane_idx, lane) in band.subs.iter().enumerate() {
-            let (Some(spawn_x), Some(&first)) = (lane.spawn_x, lane.stars.first()) else {
+            let (Some(spawn_ms), Some(&first)) = (lane.spawn_ms, lane.stars.first()) else {
                 continue;
             };
-            let from = pt(spawn_x, row_y(top, RowKind::Cmd));
-            let to = pt(band.stars[first].x, row_y(top, RowKind::Sub(lane_idx)));
-            let (_, color) = turn_line(spawn_turn_live(band, spawn_x));
+            let from = pt(x_of(spawn_ms), row_y(top, RowKind::Cmd));
+            let to = pt(
+                x_of(band.stars[first].step.ms),
+                row_y(top, RowKind::Sub(lane_idx)),
+            );
+            let (_, color) = turn_line(spawn_turn_live(band, spawn_ms));
             out.push(dashed(seg(from, to, 1.0, color)));
         }
     }
     out
 }
 
-/// The `//` mark where the scale changes, at the top of the plot.
-fn break_segs() -> Vec<Seg> {
-    let split = 1.0 - crate::atlas_model::sky::RECENT_SHARE_OF_WIDTH;
-    [-BREAK_SLASH_W, 0.0]
+/// The `//` mark centered in each break, at the top of the plot.
+fn break_segs(chart: &SkyChart, d: f32) -> Vec<Seg> {
+    chart
+        .scale
+        .breaks(d)
         .into_iter()
-        .map(|dx| {
-            let from = Pt {
-                x: split,
-                dx,
-                y: BREAK_H + 2.0,
-            };
-            let to = Pt {
-                x: split,
-                dx: dx + BREAK_SLASH_W,
-                y: 2.0,
-            };
-            seg(from, to, 1.2, TEXT_MUTED)
+        .flat_map(|b| {
+            let center = b.x + BREAK_W / 2.0;
+            [-BREAK_SLASH_W, 0.0].map(|dx| {
+                let from = pt(center + dx, BREAK_H + 2.0);
+                let to = pt(center + dx + BREAK_SLASH_W, 2.0);
+                seg(from, to, 1.2, TEXT_MUTED)
+            })
         })
         .collect()
 }
 
 /// Every line of the chart, in paint order.
-pub(super) fn sky_segments(chart: &SkyChart) -> Vec<Seg> {
+pub(super) fn sky_segments(chart: &SkyChart, d: f32) -> Vec<Seg> {
     let tops = band_tops(chart);
     let height = plot_height(chart);
-    let mut out = grid_segs(chart, &tops, height);
-    out.push(seg(pt(1.0, 0.0), pt(1.0, height), MERIDIAN_W, TEXT_DARK));
-    out.extend(link_segs(chart, &tops));
-    out.extend(break_segs());
+    let mut out = grid_segs(chart, &tops, (d, height));
+    out.push(seg(pt(d, 0.0), pt(d, height), MERIDIAN_W, TEXT_DARK));
+    out.extend(link_segs(chart, &tops, d));
+    out.extend(break_segs(chart, d));
     out
 }
 
 fn stroke(bounds: Bounds<Pixels>, s: &Seg, window: &mut Window) {
-    let w = f32::from(bounds.size.width);
-    let at = |p: Pt| -> Point<Pixels> {
-        point(
-            bounds.origin.x + px(p.x * w + p.dx),
-            bounds.origin.y + px(p.y),
-        )
-    };
+    let at =
+        |p: Pt| -> Point<Pixels> { point(bounds.origin.x + px(p.x), bounds.origin.y + px(p.y)) };
     let mut path = PathBuilder::stroke(px(s.width));
     if s.dashed {
         path = path.dash_array(&[px(DASH_ON), px(DASH_OFF)]);
@@ -238,14 +231,6 @@ fn stroke(bounds: Bounds<Pixels>, s: &Seg, window: &mut Window) {
     if let Ok(path) = path.build() {
         window.paint_path(path, Hsla::from(rgb(s.color)).opacity(s.alpha));
     }
-}
-
-/// Paints the shaded old part, then every line.
-pub(super) fn paint_sky(bounds: Bounds<Pixels>, segs: &[Seg], window: &mut Window) {
-    let old_w = bounds.size.width * (1.0 - crate::atlas_model::sky::RECENT_SHARE_OF_WIDTH);
-    let shade = Bounds::new(bounds.origin, size(old_w, bounds.size.height));
-    window.paint_quad(fill(shade, Hsla::from(rgb(ROW_HOVER_BG))));
-    paint_segs(bounds, segs, window);
 }
 
 /// Strokes every line, in order.
@@ -263,6 +248,7 @@ mod tests {
     use crate::atlas_model::SkyWindow;
     use crate::atlas_model::StepRef;
     use crate::atlas_model::sky::{RowKind, SkyBand, SkyChart, Star, StarKind, SubLane, Turn};
+    use crate::atlas_model::time_scale::TimeScale;
     use crate::ui::tooltip::{STATUS_WORKING, TEXT_DIM};
 
     fn key(agent: &str) -> AgentKey {
@@ -272,13 +258,14 @@ mod tests {
         }
     }
 
-    fn star(agent: &str, x: f32, row: RowKind, kind: StarKind) -> Star {
+    const NOW: u64 = 1_000_000;
+
+    fn star(agent: &str, ms: u64, row: RowKind, kind: StarKind) -> Star {
         Star {
             step: StepRef {
                 key: key(agent),
-                ms: (x * 1000.0) as u64,
+                ms,
             },
-            x,
             row,
             radius: 2.5,
             kind,
@@ -295,7 +282,8 @@ mod tests {
         };
         SkyChart {
             window: SkyWindow::Min10,
-            ticks: vec![],
+            now_ms: NOW,
+            scale: TimeScale::build(&[NOW - 20_000, NOW - 10_000], SkyWindow::Min10, NOW),
             bands: vec![SkyBand {
                 key: key(""),
                 harness: None,
@@ -304,13 +292,13 @@ mod tests {
                 subs: vec![SubLane {
                     key: key("c"),
                     label: "c".into(),
-                    spawn_x: Some(0.4),
+                    spawn_ms: Some(NOW - 18_000),
                     stars: vec![2],
                 }],
                 stars: vec![
-                    star("", 0.2, RowKind::Cmd, StarKind::Plain),
-                    star("", 0.8, RowKind::Cmd, parent_kind),
-                    star("c", 0.5, RowKind::Sub(0), StarKind::Plain),
+                    star("", NOW - 20_000, RowKind::Cmd, StarKind::Plain),
+                    star("", NOW - 10_000, RowKind::Cmd, parent_kind),
+                    star("c", NOW - 15_000, RowKind::Sub(0), StarKind::Plain),
                 ],
                 turns: vec![Turn {
                     stars: vec![0, 1],
@@ -326,7 +314,7 @@ mod tests {
 
     fn spawn_link(chart: &SkyChart) -> Seg {
         let tops = super::band_tops(chart);
-        *link_segs(chart, &tops)
+        *link_segs(chart, &tops, 400.0)
             .iter()
             .find(|s| s.dashed)
             .expect("spawn link")

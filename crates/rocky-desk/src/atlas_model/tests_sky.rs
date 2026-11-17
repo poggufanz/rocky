@@ -85,13 +85,20 @@ fn chart(
 }
 
 #[test]
-fn x_frac_splits_the_window_seventy_thirty() {
-    let w = SkyWindow::Min10;
-    assert_eq!(x_frac(NOW, NOW, w), Some(1.0));
-    assert_eq!(x_frac(NOW - 600_000, NOW, w), Some(0.0));
-    assert!((x_frac(NOW - 180_000, NOW, w).unwrap() - 0.3).abs() < 1e-4);
-    assert_eq!(x_frac(NOW - 600_001, NOW, w), None);
-    assert_eq!(x_frac(NOW + 5_000, NOW, w), Some(1.0));
+fn steps_older_than_the_window_are_not_drawn() {
+    let k = key("s1", "");
+    let tl = vec![
+        turn_start(NOW - 700_000),
+        tool(NOW - 600_001, "Read", Outcome::Ok),
+        tool(NOW - 600_000, "Read", Outcome::Ok),
+    ];
+    let c = chart(
+        vec![agent("s1", "", Status::Idle, NOW - 590_000)],
+        vec![(k, tl)],
+        false,
+    );
+    let ms: Vec<u64> = c.bands[0].stars.iter().map(|s| s.step.ms).collect();
+    assert_eq!(ms, vec![NOW - 600_000]);
 }
 
 #[test]
@@ -202,12 +209,14 @@ fn subagent_lane_only_when_the_tree_setting_is_on() {
     let band = &on.bands[0];
     assert_eq!(band.subs.len(), 1);
     assert_eq!(band.subs[0].key, key("s1", "c1"));
-    let spawn_x = band.subs[0].spawn_x.expect("spawn inside the window");
-    let first_star = band.stars[band.subs[0].stars[0]].x;
+    let spawn_ms = band.subs[0].spawn_ms.expect("subagent started");
+    let first_star = band.stars[band.subs[0].stars[0]].step.ms;
     assert!(
-        spawn_x < first_star,
-        "spawn {spawn_x} before star {first_star}"
+        spawn_ms < first_star,
+        "spawn {spawn_ms} before star {first_star}"
     );
+    let d = 800.0;
+    assert!(on.scale.x(spawn_ms, d) < on.scale.x(first_star, d));
     assert_eq!(band.subs[0].stars.len(), 1);
     for &i in &band.subs[0].stars {
         assert_eq!(band.stars[i].row, RowKind::Sub(0));
@@ -252,7 +261,8 @@ fn future_entries_clamp_to_the_right_edge() {
         vec![(k, tl)],
         false,
     );
-    assert_eq!(c.bands[0].stars[0].x, 1.0);
+    let ms = c.bands[0].stars[0].step.ms;
+    assert_eq!(c.scale.x(ms, 800.0), 800.0);
 }
 
 #[test]
@@ -271,10 +281,18 @@ fn needs_you_agent_shows_a_waiting_star() {
 }
 
 #[test]
-fn ticks_align_to_wall_clock() {
-    let c = chart(vec![], vec![], false);
-    assert!(c.ticks.iter().all(|t| t.ms % 60_000 == 0));
-    assert!(c.ticks.len() >= 9);
+fn ticks_align_to_wall_clock_inside_the_drawn_spans() {
+    let k = key("s1", "");
+    let mut tl = vec![turn_start(NOW - 310_000)];
+    tl.extend((0..=10).map(|i| tool(NOW - 300_000 + i * 30_000, "Read", Outcome::Ok)));
+    let c = chart(
+        vec![agent("s1", "", Status::Idle, NOW)],
+        vec![(k, tl)],
+        false,
+    );
+    let ticks = c.scale.ticks(800.0);
+    assert!(ticks.len() >= 4);
+    assert!(ticks.iter().all(|t| t.ms % 60_000 == 0));
 }
 
 fn card(id: &str, session: &str, started_ms: u64, prompt: &str) -> Card {
@@ -422,7 +440,8 @@ fn running_last_step_makes_a_running_star_and_a_live_turn() {
     );
     let band = &c.bands[0];
     assert_eq!(band.stars.last().unwrap().kind, StarKind::Running);
-    assert_eq!(band.stars.last().unwrap().x, 1.0);
+    let last = band.stars.last().unwrap().step.ms;
+    assert_eq!(c.scale.x(last, 800.0), 800.0);
     assert!(band.turns.last().unwrap().live);
 }
 
@@ -443,6 +462,6 @@ fn subagent_without_a_spawn_entry_starts_at_its_first_entry() {
         true,
     );
     let lane = &c.bands[0].subs[0];
-    let star_x = c.bands[0].stars[lane.stars[0]].x;
-    assert_eq!(lane.spawn_x, Some(star_x));
+    let first = c.bands[0].stars[lane.stars[0]].step.ms;
+    assert_eq!(lane.spawn_ms, Some(first));
 }

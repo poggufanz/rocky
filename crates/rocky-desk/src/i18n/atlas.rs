@@ -17,6 +17,7 @@ pub enum AtlasMsg {
     },
     Window(SkyWindow),
     Quiet {
+        window: String,
         last: String,
         action: Option<String>,
     },
@@ -28,9 +29,7 @@ pub enum AtlasMsg {
     LegendFailed,
     LegendRunning,
     LegendLines,
-    LegendScale {
-        recent: String,
-    },
+    LegendGaps,
     LegendRows,
     ClickStar,
     OpenProject {
@@ -77,9 +76,6 @@ pub enum AtlasMsg {
     RowEdit,
     RowRead,
     RowCmd,
-    Minutes {
-        n: u64,
-    },
 }
 
 pub fn atlas_text(lang: UiLang, msg: &AtlasMsg) -> String {
@@ -98,9 +94,15 @@ fn atlas_en(msg: &AtlasMsg) -> String {
         AtlasMsg::Window(SkyWindow::Min10) => "10 min".into(),
         AtlasMsg::Window(SkyWindow::Min30) => "30 min".into(),
         AtlasMsg::Window(SkyWindow::Hours2) => "2 hours".into(),
-        AtlasMsg::Quiet { last, action } => match action {
-            Some(action) => format!("no steps in this window. Last step {last}, {action}"),
-            None => format!("no steps in this window. Last step {last}"),
+        AtlasMsg::Quiet {
+            window,
+            last,
+            action,
+        } => match action {
+            Some(action) => {
+                format!("No steps in the last {window}. Last step {last}, {action}")
+            }
+            None => format!("No steps in the last {window}. Last step {last}"),
         },
         AtlasMsg::Earlier { at, edits } => format!(
             "earlier: turn {at}, {edits} {}",
@@ -112,9 +114,9 @@ fn atlas_en(msg: &AtlasMsg) -> String {
         AtlasMsg::LegendLines => {
             "Lines join one turn's steps in order. Blue: the turn running now.".into()
         }
-        AtlasMsg::LegendScale { recent } => format!(
-            "The last {recent} are drawn wider; the shaded part and the // mark show where the scale changes."
-        ),
+        AtlasMsg::LegendGaps => {
+            "Long idle gaps are shortened; a // mark shows how much time is hidden.".into()
+        }
         AtlasMsg::LegendRows => {
             "Rows: what kind of step. Line: the order the agent took them.".into()
         }
@@ -144,7 +146,6 @@ fn atlas_en(msg: &AtlasMsg) -> String {
         AtlasMsg::RowEdit => "edit".into(),
         AtlasMsg::RowRead => "read".into(),
         AtlasMsg::RowCmd => "cmd".into(),
-        AtlasMsg::Minutes { n } => format!("{n} min"),
     }
 }
 
@@ -157,11 +158,17 @@ fn atlas_id(msg: &AtlasMsg) -> String {
         AtlasMsg::Window(SkyWindow::Min10) => "10 mnt".into(),
         AtlasMsg::Window(SkyWindow::Min30) => "30 mnt".into(),
         AtlasMsg::Window(SkyWindow::Hours2) => "2 jam".into(),
-        AtlasMsg::Quiet { last, action } => match action {
+        AtlasMsg::Quiet {
+            window,
+            last,
+            action,
+        } => match action {
             Some(action) => {
-                format!("tidak ada langkah di rentang ini. Langkah terakhir {last}, {action}")
+                format!(
+                    "Tidak ada langkah dalam {window} terakhir. Langkah terakhir {last}, {action}"
+                )
             }
-            None => format!("tidak ada langkah di rentang ini. Langkah terakhir {last}"),
+            None => format!("Tidak ada langkah dalam {window} terakhir. Langkah terakhir {last}"),
         },
         AtlasMsg::Earlier { at, edits } => format!("sebelumnya: turn {at}, {edits} edit"),
         AtlasMsg::LegendSize => {
@@ -173,9 +180,10 @@ fn atlas_id(msg: &AtlasMsg) -> String {
             "Garis menyambung langkah satu turn sesuai urutan. Biru: turn yang sedang berjalan."
                 .into()
         }
-        AtlasMsg::LegendScale { recent } => format!(
-            "{recent} terakhir digambar lebih lebar; bagian berarsir dan tanda // menunjukkan pergantian skala."
-        ),
+        AtlasMsg::LegendGaps => {
+            "Jeda panjang dipersingkat; tanda // menunjukkan berapa lama waktu yang disembunyikan."
+                .into()
+        }
         AtlasMsg::LegendRows => "Baris: jenis langkah. Garis: urutan yang diambil agent.".into(),
         AtlasMsg::ClickStar => "Klik langkah untuk melihat detailnya.".into(),
         AtlasMsg::OpenProject { name } => format!("Buka {name}"),
@@ -200,6 +208,5 @@ fn atlas_id(msg: &AtlasMsg) -> String {
         AtlasMsg::RowEdit => "edit".into(),
         AtlasMsg::RowRead => "baca".into(),
         AtlasMsg::RowCmd => "cmd".into(),
-        AtlasMsg::Minutes { n } => format!("{n} mnt"),
     }
 }

@@ -1,6 +1,7 @@
-//! Sky chart geometry: every agent step of one project as a star placed by time.
+//! Timeline model: every agent step of one project as a dot placed by time.
 
 use super::constellation::step_label;
+use super::time_scale::TimeScale;
 use super::{ProjectId, SkyWindow, StepRef, project_id};
 use crate::cards_model::{CardsModel, first_non_empty_line, prompt_display, sanitize_single_line};
 use crate::i18n::UiLang;
@@ -8,39 +9,12 @@ use crate::now_model::tool_label;
 use crate::view::{Model, action_target, short8};
 use rocky_proto::pipe::{AgentKey, AgentStatus, Outcome, Status, TimelineEntry, TimelineKind};
 
-/// Share of the window, counted back from now, that gets the wide right part of the plot.
-pub const RECENT_SHARE_OF_WINDOW: f32 = 0.3;
-/// Share of the plot width given to that recent part.
-pub const RECENT_SHARE_OF_WIDTH: f32 = 0.7;
 /// Radius of the one star that is still in flight.
 pub const LIVE_RADIUS: f32 = 4.5;
 
 const SHORT_MS: u64 = 1_000;
 const LONG_MS: u64 = 10_000;
 const TITLE_MATCH_MS: u64 = 5_000;
-/// The old part of the plot spans `[0, OLD_SHARE_OF_WIDTH)`.
-const OLD_SHARE_OF_WIDTH: f64 = 1.0 - RECENT_SHARE_OF_WIDTH as f64;
-
-/// Position of `t_ms` as a fraction of plot width; `None` before the window start.
-pub fn x_frac(t_ms: u64, now_ms: u64, window: SkyWindow) -> Option<f32> {
-    let span = window.secs() * 1000;
-    let start = now_ms.saturating_sub(span);
-    if t_ms < start {
-        return None;
-    }
-    if t_ms >= now_ms {
-        return Some(1.0);
-    }
-    let split = now_ms - (f64::from(RECENT_SHARE_OF_WINDOW) * span as f64) as u64;
-    let x = if t_ms < split {
-        OLD_SHARE_OF_WIDTH * (t_ms - start) as f64 / (split - start).max(1) as f64
-    } else {
-        OLD_SHARE_OF_WIDTH
-            + f64::from(RECENT_SHARE_OF_WIDTH) * (t_ms - split) as f64
-                / (now_ms - split).max(1) as f64
-    };
-    Some(x as f32)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
@@ -77,7 +51,6 @@ pub fn magnitude(dur_ms: Option<u64>) -> f32 {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Star {
     pub step: StepRef,
-    pub x: f32,
     pub row: RowKind,
     pub radius: f32,
     pub kind: StarKind,
@@ -98,7 +71,8 @@ pub struct Turn {
 pub struct SubLane {
     pub key: AgentKey,
     pub label: String,
-    pub spawn_x: Option<f32>,
+    /// When the subagent started, if it ever did.
+    pub spawn_ms: Option<u64>,
     /// Indexes into the parent `SkyBand.stars`, in step order.
     pub stars: Vec<usize>,
 }
@@ -129,15 +103,10 @@ pub struct SkyBand {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Tick {
-    pub x: f32,
-    pub ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct SkyChart {
     pub window: SkyWindow,
-    pub ticks: Vec<Tick>,
+    pub now_ms: u64,
+    pub scale: TimeScale,
     pub bands: Vec<SkyBand>,
 }
 
@@ -202,28 +171,6 @@ pub(crate) fn star_kind(
 
 pub(crate) fn is_live_status(status: Status) -> bool {
     matches!(status, Status::Working | Status::NeedsYou)
-}
-
-fn tick_step_secs(window: SkyWindow) -> u64 {
-    match window {
-        SkyWindow::Min10 => 60,
-        SkyWindow::Min30 => 300,
-        SkyWindow::Hours2 => 900,
-    }
-}
-
-fn ticks(now_ms: u64, window: SkyWindow) -> Vec<Tick> {
-    let step = tick_step_secs(window) * 1000;
-    let start = now_ms.saturating_sub(window.secs() * 1000);
-    let mut out = Vec::new();
-    let mut ms = start.div_ceil(step) * step;
-    while ms <= now_ms {
-        if let Some(x) = x_frac(ms, now_ms, window) {
-            out.push(Tick { x, ms });
-        }
-        ms += step;
-    }
-    out
 }
 
 fn one_line(text: &str, lang: UiLang) -> Option<String> {
@@ -307,15 +254,13 @@ fn turn_stars(
     window: SkyWindow,
     root: Option<&str>,
 ) -> Vec<Star> {
-    let in_window: Vec<(&TimelineEntry, f32)> = steps
-        .iter()
-        .filter_map(|e| x_frac(e.ms, now_ms, window).map(|x| (*e, x)))
-        .collect();
-    let live_idx = live_status.and_then(|_| in_window.iter().rposition(|(e, _)| is_pending(e)));
+    let start = now_ms.saturating_sub(window.secs() * 1000);
+    let in_window: Vec<&TimelineEntry> = steps.iter().copied().filter(|e| e.ms >= start).collect();
+    let live_idx = live_status.and_then(|_| in_window.iter().rposition(|e| is_pending(e)));
     in_window
         .iter()
         .enumerate()
-        .map(|(i, (entry, x))| {
+        .map(|(i, entry)| {
             let status = live_status.unwrap_or(Status::Idle);
             let kind = star_kind(entry, live_idx == Some(i), status);
             let live_star = matches!(kind, StarKind::Running | StarKind::Waiting);
@@ -324,7 +269,6 @@ fn turn_stars(
                     key: key.clone(),
                     ms: entry.ms,
                 },
-                x: *x,
                 row: row_override.unwrap_or_else(|| row_of(entry.tool_name.as_deref())),
                 radius: if live_star {
                     LIVE_RADIUS
@@ -446,7 +390,7 @@ fn sub_lanes(
                 .agent_type
                 .clone()
                 .unwrap_or_else(|| short8(&child.key.agent_id)),
-            spawn_x: spawn_ms(entries).and_then(|ms| x_frac(ms, input.now_ms, input.window)),
+            spawn_ms: spawn_ms(entries),
             stars: (first..stars.len()).collect(),
         });
     }
@@ -523,7 +467,7 @@ pub fn sky_chart(
     now_ms: u64,
     lang: UiLang,
 ) -> SkyChart {
-    let bands = band_agents(model, project)
+    let bands: Vec<SkyBand> = band_agents(model, project)
         .into_iter()
         .map(|agent| {
             build_band(
@@ -538,9 +482,14 @@ pub fn sky_chart(
             )
         })
         .collect();
+    let times: Vec<u64> = bands
+        .iter()
+        .flat_map(|b| b.stars.iter().map(|s| s.step.ms))
+        .collect();
     SkyChart {
         window,
-        ticks: ticks(now_ms, window),
+        now_ms,
+        scale: TimeScale::build(&times, window, now_ms),
         bands,
     }
 }

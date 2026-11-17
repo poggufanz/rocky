@@ -2,20 +2,19 @@
 //! one band per session, with constellation lines joining a turn's steps.
 
 use gpui::prelude::*;
-use gpui::{Context, Div, FontWeight, SharedString, Stateful, canvas, div, px, relative, rgb};
+use gpui::{Context, Div, FontWeight, SharedString, Stateful, canvas, div, px, rgb};
 
 use super::sky_labels::{
-    CAPTION_MAX_W, EARLIER_NOTE_W, Placed, Side, TICK_LABEL_W, visible_captions, visible_ticks,
-    visible_titles,
+    Axis, CAPTION_MAX_W, EARLIER_NOTE_W, Placed, Side, TICK_LABEL_W, visible_captions,
+    visible_ticks, visible_titles,
 };
 use super::sky_paint::{
-    Seg, band_height, band_tops, paint_sky, plot_height, row_y, sky_segments, title_y,
+    Seg, band_height, band_tops, paint_segs, plot_height, row_y, sky_segments, title_y,
 };
 use super::star::{hit_box, hit_side, legend_swatches, star_caption};
 use super::{AtlasAction, OnAtlasAction};
-use crate::atlas_model::sky::{
-    LIVE_RADIUS, RECENT_SHARE_OF_WINDOW, RowKind, SkyBand, SkyChart, Star, StarKind, Turn,
-};
+use crate::atlas_model::sky::{LIVE_RADIUS, RowKind, SkyBand, SkyChart, Star, StarKind, Turn};
+use crate::atlas_model::time_scale::{BREAK_W, hidden_text};
 use crate::atlas_model::{SkyWindow, StepRef};
 use crate::clock::local_hhmm;
 use crate::i18n::{AtlasMsg, UiLang, atlas_text};
@@ -48,13 +47,6 @@ const WINDOWS: [(SkyWindow, &str); 3] = [
     (SkyWindow::Hours2, "120"),
 ];
 
-/// Minutes of the recent, wide part of the plot, as copy ("3 min").
-pub(super) fn recent_span_label(lang: UiLang, window: SkyWindow) -> String {
-    let secs = window.secs() as f32 * RECENT_SHARE_OF_WINDOW;
-    let n = (secs / 60.0).round() as u64;
-    atlas_text(lang, &AtlasMsg::Minutes { n })
-}
-
 /// The Sky chart card for `chart`; `avail_w` is the card's inner width. `repo` names the project in the subtitle.
 #[allow(clippy::too_many_arguments)]
 pub fn sky_card<T: 'static>(
@@ -69,7 +61,7 @@ pub fn sky_card<T: 'static>(
     card_shell()
         .child(header(lang, chart.window, repo, cx, on))
         .child(plot_scroller().child(plot_row(lang, chart, selected, plot_width(avail_w), cx, on)))
-        .child(legend(lang, chart.window))
+        .child(legend(lang))
 }
 
 /// The padded, bordered card both atlas views sit in.
@@ -219,16 +211,28 @@ pub(super) fn mono_text(size: f32, color: u32) -> Div {
 }
 
 fn tick_strip(lang: UiLang, chart: &SkyChart, d: f32) -> Div {
-    let ticks = visible_ticks(&chart.ticks, d).into_iter().map(|t| {
+    let breaks = chart.scale.breaks(d);
+    let ticks = chart.scale.ticks(d);
+    let ticks = visible_ticks(&ticks, &breaks, d).into_iter().map(|t| {
         mono_text(10.5, TEXT_MUTED)
             .absolute()
             .top(px(3.0))
-            .left(relative(t.x))
-            .ml(px(-TICK_LABEL_W / 2.0))
+            .left(px(t.x - TICK_LABEL_W / 2.0))
             .w(px(TICK_LABEL_W))
             .flex()
             .justify_center()
             .child(local_hhmm(t.ms))
+    });
+    let gaps = breaks.iter().map(|b| {
+        mono_text(10.5, TEXT_MUTED)
+            .absolute()
+            .top(px(3.0))
+            .left(px(b.x))
+            .w(px(BREAK_W))
+            .flex()
+            .justify_center()
+            .italic()
+            .child(hidden_text(b.hidden_ms))
     });
     let now = mono_text(10.5, TEXT_DARK)
         .absolute()
@@ -238,6 +242,7 @@ fn tick_strip(lang: UiLang, chart: &SkyChart, d: f32) -> Div {
     div().relative().h(px(TICK_STRIP_H)).child(
         drawable_layer()
             .children(ticks)
+            .children(gaps)
             .child(now.child(atlas_text(lang, &AtlasMsg::Now))),
     )
 }
@@ -316,10 +321,11 @@ fn plot_body<T: 'static>(
     cx: &mut Context<T>,
     on: OnAtlasAction<T>,
 ) -> Div {
-    let segs: Vec<Seg> = sky_segments(chart);
+    let d = drawable_width(plot_w);
+    let segs: Vec<Seg> = sky_segments(chart, d);
     let lines = canvas(
         move |_, _, _| (),
-        move |bounds, (), window, _| paint_sky(bounds, &segs, window),
+        move |bounds, (), window, _| paint_segs(bounds, &segs, window),
     )
     .absolute()
     .top_0()
@@ -327,18 +333,22 @@ fn plot_body<T: 'static>(
     .size_full();
     let mut layer = drawable_layer().child(lines);
     for (band_idx, (band, top)) in chart.bands.iter().zip(band_tops(chart)).enumerate() {
-        layer = layer.children(band_notes(lang, band, top));
-        layer = layer.children(band_captions(lang, band, top, plot_w));
+        layer = layer.children(band_notes(lang, band, top, chart.window));
+        let axis = Axis {
+            scale: &chart.scale,
+            d,
+        };
+        layer = layer.children(band_captions(lang, band, top, axis));
         for (i, star) in band.stars.iter().enumerate() {
-            let y = row_y(top, star.row);
+            let at = (axis.x(star), row_y(top, star.row));
             let on_it = selected == Some(&star.step);
-            layer = layer.child(star_button(band_idx, i, star, y, on_it, cx, on));
+            layer = layer.child(star_button(band_idx, i, star, at, on_it, cx, on));
         }
     }
     plot_surface(height).child(layer)
 }
 
-/// The part of the plot x fractions map onto, with a gutter right of now.
+/// The part of the plot the time scale maps onto, with a gutter right of now.
 fn drawable_layer() -> Div {
     div()
         .absolute()
@@ -358,19 +368,19 @@ fn drawable_width(plot_w: f32) -> f32 {
     plot_w - plot_gutter()
 }
 
-/// One-line text hung from plot fraction `x`: its left edge at `x`, or its
+/// One-line text hung from plot px `x` of the drawable width `d`: its left edge at `x`, or its
 /// right edge when `side` is right. Text past `max_w` ends in an ellipsis.
-fn hung(text: Div, x: f32, top: f32, (side, max_w): (Side, f32)) -> Div {
+fn hung(text: Div, (x, d): (f32, f32), top: f32, (side, max_w): (Side, f32)) -> Div {
     let frame = div().absolute().top(px(top)).max_w(px(max_w)).flex();
     let frame = match side {
-        Side::Right => frame.right(relative(1.0 - x)).justify_end(),
-        Side::Left => frame.left(relative(x)),
+        Side::Right => frame.right(px(d - x)).justify_end(),
+        Side::Left => frame.left(px(x)),
     };
     frame.child(text.min_w_0().truncate())
 }
 
 /// Quiet and earlier notes of one band.
-fn band_notes(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
+fn band_notes(lang: UiLang, band: &SkyBand, top: f32, window: SkyWindow) -> Vec<Div> {
     let note = |text: String, y: f32| {
         div()
             .absolute()
@@ -384,6 +394,7 @@ fn band_notes(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
     let mut out = Vec::new();
     if let Some(q) = &band.quiet {
         let msg = AtlasMsg::Quiet {
+            window: atlas_text(lang, &AtlasMsg::Window(window)),
             last: local_hhmm(q.last_ms),
             action: q.action.clone(),
         };
@@ -408,7 +419,7 @@ fn band_notes(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
     out
 }
 
-fn turn_title(turn: &Turn, band: &SkyBand, top: f32, placed: &Placed) -> Option<Div> {
+fn turn_title(turn: &Turn, band: &SkyBand, top: f32, ax: Axis<'_>, placed: &Placed) -> Option<Div> {
     let title = turn.title.clone()?;
     let first = &band.stars[*turn.stars.first()?];
     let el = div()
@@ -417,10 +428,19 @@ fn turn_title(turn: &Turn, band: &SkyBand, top: f32, placed: &Placed) -> Option<
         .text_size(px(12.5))
         .text_color(rgb(TEXT_BODY))
         .child(title);
-    Some(hung(el, first.x, title_y(top), (placed.side, placed.max_w)))
+    Some(hung(
+        el,
+        (ax.x(first), ax.d),
+        title_y(top),
+        (placed.side, placed.max_w),
+    ))
 }
 
-fn star_caption_for(star: &Star, lang: UiLang, top: f32, placed: &Placed) -> Option<Div> {
+fn star_caption_for(
+    star: &Star,
+    (lang, top, ax): (UiLang, f32, Axis<'_>),
+    placed: &Placed,
+) -> Option<Div> {
     let label = star.label.clone()?;
     let y = row_y(top, star.row);
     let (text, color, above) = match star.kind {
@@ -439,29 +459,32 @@ fn star_caption_for(star: &Star, lang: UiLang, top: f32, placed: &Placed) -> Opt
         y + star.radius + 5.0
     };
     let side_w = (placed.side, placed.max_w.min(CAPTION_MAX_W));
-    Some(hung(star_caption(text, color), star.x, y, side_w))
+    Some(hung(
+        star_caption(text, color),
+        (ax.x(star), ax.d),
+        y,
+        side_w,
+    ))
 }
 
 /// Turn titles and failed or live star captions of one band that fit.
-fn band_captions(lang: UiLang, band: &SkyBand, top: f32, plot_w: f32) -> Vec<Div> {
-    let d = drawable_width(plot_w);
-    let caps = visible_captions(band, d);
-    let titles = visible_titles(band, d, &caps)
+fn band_captions(lang: UiLang, band: &SkyBand, top: f32, ax: Axis<'_>) -> Vec<Div> {
+    let caps = visible_captions(band, ax);
+    let titles = visible_titles(band, ax, &caps)
         .into_iter()
-        .filter_map(|p| turn_title(&band.turns[p.idx], band, top, &p));
+        .filter_map(|p| turn_title(&band.turns[p.idx], band, top, ax, &p));
     let captions = caps
         .iter()
-        .filter_map(|p| star_caption_for(&band.stars[p.idx], lang, top, p));
+        .filter_map(|p| star_caption_for(&band.stars[p.idx], (lang, top, ax), p));
     titles.chain(captions).collect()
 }
 
-/// The clickable box of a star, centered on the star's position.
-fn star_hit_box(star: &Star, y: f32, selected: bool) -> Div {
+/// The clickable box of a star, centered on the star's position `(x, y)`.
+fn star_hit_box(star: &Star, (x, y): (f32, f32), selected: bool) -> Div {
     let side = hit_side(star.radius);
     hit_box(star.kind, star.radius, selected)
         .absolute()
-        .left(relative(star.x))
-        .ml(px(-side / 2.0))
+        .left(px(x - side / 2.0))
         .top(px(y - side / 2.0))
 }
 
@@ -469,13 +492,13 @@ fn star_button<T: 'static>(
     band_idx: usize,
     star_idx: usize,
     star: &Star,
-    y: f32,
+    at: (f32, f32),
     selected: bool,
     cx: &mut Context<T>,
     on: OnAtlasAction<T>,
 ) -> Stateful<Div> {
     let step = star.step.clone();
-    star_hit_box(star, y, selected)
+    star_hit_box(star, at, selected)
         .id(SharedString::from(format!(
             "atlas-star-{band_idx}-{star_idx}"
         )))
@@ -486,7 +509,7 @@ fn star_button<T: 'static>(
         }))
 }
 
-fn legend(lang: UiLang, window: SkyWindow) -> Div {
+fn legend(lang: UiLang) -> Div {
     let note = |msg: AtlasMsg| {
         div()
             .text_size(px(11.5))
@@ -499,9 +522,7 @@ fn legend(lang: UiLang, window: SkyWindow) -> Div {
         .gap(px(4.0))
         .child(legend_swatches(lang))
         .child(note(AtlasMsg::LegendLines))
-        .child(note(AtlasMsg::LegendScale {
-            recent: recent_span_label(lang, window),
-        }))
+        .child(note(AtlasMsg::LegendGaps))
         .child(note(AtlasMsg::ClickStar))
 }
 
@@ -512,14 +533,14 @@ mod tests {
 
     use super::{
         PLOT_MIN_W, drawable_width, plot_gutter, plot_scroller, plot_surface, plot_width,
-        recent_span_label, star_hit_box,
+        star_hit_box,
     };
     use crate::atlas_model::SkyWindow;
     use crate::atlas_model::StepRef;
     use crate::atlas_model::sky::{
         LIVE_RADIUS, QuietNote, RowKind, SkyBand, SkyChart, Star, StarKind, SubLane,
     };
-    use crate::i18n::UiLang;
+    use crate::atlas_model::time_scale::TimeScale;
     use crate::ui::atlas::sky_paint::{ROW_H, TITLE_H, band_height, plot_height, row_y, title_y};
 
     fn key() -> AgentKey {
@@ -539,7 +560,7 @@ mod tests {
                 .map(|_| SubLane {
                     key: key(),
                     label: "x".into(),
-                    spawn_x: None,
+                    spawn_ms: None,
                     stars: vec![],
                 })
                 .collect(),
@@ -556,7 +577,6 @@ mod tests {
     fn star(radius: f32) -> Star {
         Star {
             step: StepRef { key: key(), ms: 1 },
-            x: 0.5,
             row: RowKind::Edit,
             radius,
             kind: StarKind::Plain,
@@ -579,7 +599,8 @@ mod tests {
         assert_eq!(band_height(&band(false, 1)), 180.0);
         let chart = SkyChart {
             window: SkyWindow::Min10,
-            ticks: vec![],
+            now_ms: 0,
+            scale: TimeScale::build(&[], SkyWindow::Min10, 0),
             bands: vec![band(true, 0), band(false, 0)],
         };
         assert_eq!(plot_height(&chart), 47.0 + 145.0);
@@ -619,19 +640,10 @@ mod tests {
 
     #[test]
     fn small_stars_still_get_a_clickable_box() {
-        let mut hit = star_hit_box(&star(2.5), 40.0, false);
+        let mut hit = star_hit_box(&star(2.5), (30.0, 40.0), false);
         let size = hit.style().size.clone();
         assert_eq!(size.width, size.height);
         assert!(size.width.is_some());
         assert!(hit.style().corner_radii.top_left.is_some());
-    }
-
-    #[test]
-    fn recent_span_is_thirty_percent_of_the_window() {
-        let label = |w| recent_span_label(UiLang::En, w);
-        assert_eq!(label(SkyWindow::Min10), "3 min");
-        assert_eq!(label(SkyWindow::Min30), "9 min");
-        assert_eq!(label(SkyWindow::Hours2), "36 min");
-        assert_eq!(recent_span_label(UiLang::Id, SkyWindow::Min10), "3 mnt");
     }
 }

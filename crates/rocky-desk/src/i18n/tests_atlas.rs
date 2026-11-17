@@ -25,19 +25,21 @@ fn atlas_copy_renders_en_and_id() {
     check(AtlasMsg::Window(SkyWindow::Hours2), "2 hours", "2 jam");
     check(
         AtlasMsg::Quiet {
+            window: s("10 min"),
             last: s("4m ago"),
             action: Some(s("cargo test")),
         },
-        "no steps in this window. Last step 4m ago, cargo test",
-        "tidak ada langkah di rentang ini. Langkah terakhir 4m ago, cargo test",
+        "No steps in the last 10 min. Last step 4m ago, cargo test",
+        "Tidak ada langkah dalam 10 min terakhir. Langkah terakhir 4m ago, cargo test",
     );
     check(
         AtlasMsg::Quiet {
+            window: s("10 min"),
             last: s("4m ago"),
             action: None,
         },
-        "no steps in this window. Last step 4m ago",
-        "tidak ada langkah di rentang ini. Langkah terakhir 4m ago",
+        "No steps in the last 10 min. Last step 4m ago",
+        "Tidak ada langkah dalam 10 min terakhir. Langkah terakhir 4m ago",
     );
     check(
         AtlasMsg::Earlier {
@@ -68,9 +70,9 @@ fn atlas_copy_renders_en_and_id() {
         "Garis menyambung langkah satu turn sesuai urutan. Biru: turn yang sedang berjalan.",
     );
     check(
-        AtlasMsg::LegendScale { recent: s("3 min") },
-        "The last 3 min are drawn wider; the shaded part and the // mark show where the scale changes.",
-        "3 min terakhir digambar lebih lebar; bagian berarsir dan tanda // menunjukkan pergantian skala.",
+        AtlasMsg::LegendGaps,
+        "Long idle gaps are shortened; a // mark shows how much time is hidden.",
+        "Jeda panjang dipersingkat; tanda // menunjukkan berapa lama waktu yang disembunyikan.",
     );
     check(
         AtlasMsg::LegendRows,
@@ -151,5 +153,4 @@ fn chart_row_names_and_scale_unit_render_en_and_id() {
     check(AtlasMsg::RowEdit, "edit", "edit");
     check(AtlasMsg::RowRead, "read", "baca");
     check(AtlasMsg::RowCmd, "cmd", "cmd");
-    check(AtlasMsg::Minutes { n: 9 }, "9 min", "9 mnt");
 }
