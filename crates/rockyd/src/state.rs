@@ -160,8 +160,10 @@ impl StatusState {
     /// Records which harness produced a session's events, so every agent of
     /// that session reports it. Called before `apply` by the event sources.
     pub fn set_session_harness(&mut self, session_id: &str, harness: &str) {
-        self.harness
-            .insert(session_id.to_string(), harness.to_string());
+        if self.harness.get(session_id).map(String::as_str) != Some(harness) {
+            self.harness
+                .insert(session_id.to_string(), harness.to_string());
+        }
     }
 
     pub fn session_repo(&self, session_id: &str) -> Option<&RepoInfo> {
@@ -438,7 +440,18 @@ impl StatusState {
         for key in &removed {
             self.agents.remove(key);
         }
+        self.forget_harness_of(&removed);
         Changes { upserted, removed }
+    }
+
+    /// Drops the harness of every session in `removed` that has no agent left.
+    fn forget_harness_of(&mut self, removed: &[AgentKey]) {
+        for key in removed {
+            let alive = self.agents.keys().any(|k| k.session_id == key.session_id);
+            if !alive {
+                self.harness.remove(&key.session_id);
+            }
+        }
     }
 
     /// Pairs a fresh child with the main agent's one unpaired Agent/Task call

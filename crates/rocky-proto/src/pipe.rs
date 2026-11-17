@@ -689,6 +689,8 @@ mod tests {
             agent: a,
         });
         assert!(!line.contains("harness"));
+        let back = decode::<ServerMsg>(line.trim_end()).unwrap();
+        assert!(matches!(back, ServerMsg::Status { agent, .. } if agent.harness.is_none()));
     }
 
     #[test]

@@ -157,6 +157,10 @@ fn replay_rebuilds_state_and_timeline() {
     let main = main_key("S1");
     assert_eq!(state.get(&main).unwrap().status, Status::Working);
     assert_eq!(
+        state.get(&main).unwrap().harness.as_deref(),
+        Some("claude-code")
+    );
+    assert_eq!(
         kinds(&state, &main),
         vec![
             TimelineKind::SessionStart,

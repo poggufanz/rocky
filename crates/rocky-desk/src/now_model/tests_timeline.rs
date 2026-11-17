@@ -5,7 +5,7 @@ use super::*;
 use crate::view::Model;
 
 #[test]
-fn model_caches_active_timelines_without_open_and_drops_on_completion() {
+fn model_caches_active_timelines_and_drops_on_completion() {
     let mut model = Model::new();
     let k1 = key("S1", "");
     let k2 = key("S2", "");
@@ -171,7 +171,7 @@ fn timeline_fetch_debounces_500ms_flushes_trailing_and_resets() {
 }
 
 #[test]
-fn timeline_fetch_debounces_expansion_after_automatic_fetch() {
+fn timeline_fetch_debounces_wanted_request_after_automatic_fetch() {
     let k1 = key("S1", "");
     let mut model = Model::new();
     let mut fetch = TimelineFetch::new();
@@ -225,7 +225,7 @@ fn timeline_fetch_debounces_expansion_after_automatic_fetch() {
 }
 
 #[test]
-fn timeline_fetch_leaves_non_primary_child_expansions_unthrottled() {
+fn timeline_fetch_leaves_non_primary_child_requests_unthrottled() {
     let k_main = key("S1", "");
     let k_child = key("S1", "sub-1");
     let mut model = Model::new();

@@ -490,6 +490,7 @@ mod tests {
 
         let agents = state.agents();
         assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].harness.as_deref(), Some("claude-code"));
         let agents_json = serde_json::to_string(&agents).unwrap();
         assert!(!agents_json.contains("SECRET_PROMPT_TEXT"), "{agents_json}");
         assert!(!agents_json.contains(r#""prompt""#), "{agents_json}");

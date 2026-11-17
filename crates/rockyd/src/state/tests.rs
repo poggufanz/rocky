@@ -970,3 +970,16 @@ fn agents_carry_the_harness_of_their_session() {
     st.apply(&ev("SessionStart", "S2", None), 3, &mut repo);
     assert_eq!(st.get(&main_key("S2")).unwrap().harness, None);
 }
+
+#[test]
+fn a_sessions_harness_is_forgotten_when_its_last_agent_leaves() {
+    let mut st = StatusState::new();
+    st.set_session_harness("S1", "codex");
+    st.set_session_harness("S1", "codex");
+    st.apply(&ev("SessionStart", "S1", None), 1, &mut repo);
+    st.apply(&ev("SessionEnd", "S1", None), 100, &mut repo);
+    assert_eq!(st.harness.len(), 1);
+    st.tick(100 + ENDED_REMOVE_MS);
+    assert_eq!(st.get(&main_key("S1")), None);
+    assert!(st.harness.is_empty(), "{:?}", st.harness);
+}
