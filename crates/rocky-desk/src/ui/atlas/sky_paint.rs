@@ -12,8 +12,12 @@ use crate::ui::tooltip::{
 
 pub const ROW_H: f32 = 35.0;
 /// Padding a band adds around its rows: 6 px above and 6 px below.
-pub(super) const BAND_PAD: f32 = 12.0;
-const BAND_TOP_PAD: f32 = BAND_PAD / 2.0;
+/// Title strip above a band with stars: turn titles and the earlier note.
+pub(super) const TITLE_H: f32 = 18.0;
+/// Foot below the last row, room for a failed caption.
+pub(super) const FOOT_H: f32 = 22.0;
+/// Padding of a quiet band, which is one row tall.
+const QUIET_PAD: f32 = 12.0;
 /// Rows every band with steps has before its subagent lanes.
 const PRIMARY_ROWS: usize = 3;
 const DASH_ON: f32 = 3.0;
@@ -33,12 +37,10 @@ fn row_index(row: RowKind) -> usize {
 
 /// Height of one band: its rows, or one row for a band with only a quiet note.
 pub(super) fn band_height(band: &SkyBand) -> f32 {
-    let rows = if band.quiet.is_some() {
-        1
-    } else {
-        PRIMARY_ROWS + band.subs.len()
-    };
-    rows as f32 * ROW_H + BAND_PAD
+    if band.quiet.is_some() {
+        return ROW_H + QUIET_PAD;
+    }
+    TITLE_H + (PRIMARY_ROWS + band.subs.len()) as f32 * ROW_H + FOOT_H
 }
 
 pub(super) fn plot_height(chart: &SkyChart) -> f32 {
@@ -60,8 +62,13 @@ pub(super) fn band_tops(chart: &SkyChart) -> Vec<f32> {
 }
 
 /// Vertical center of `row` in a band whose top edge is `band_top`.
+/// Top of a turn title inside its band's title strip.
+pub(super) fn title_y(band_top: f32) -> f32 {
+    band_top + 1.0
+}
+
 pub(super) fn row_y(band_top: f32, row: RowKind) -> f32 {
-    band_top + BAND_TOP_PAD + (row_index(row) as f32 + 0.5) * ROW_H
+    band_top + TITLE_H + (row_index(row) as f32 + 0.5) * ROW_H
 }
 
 /// One end of a line: x as a plot fraction plus a pixel offset.
@@ -118,7 +125,7 @@ fn grid_segs(chart: &SkyChart, tops: &[f32], height: f32) -> Vec<Seg> {
     for (band, top) in chart.bands.iter().zip(tops) {
         if band.quiet.is_none() {
             for i in 0..PRIMARY_ROWS + band.subs.len() {
-                let y = top + BAND_TOP_PAD + (i as f32 + 0.5) * ROW_H;
+                let y = top + TITLE_H + (i as f32 + 0.5) * ROW_H;
                 out.push(dashed(seg(pt(0.0, y), pt(1.0, y), 1.0, BORDER_SUBTLE)));
             }
         }

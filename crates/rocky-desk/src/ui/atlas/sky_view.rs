@@ -4,7 +4,9 @@
 use gpui::prelude::*;
 use gpui::{Context, Div, FontWeight, SharedString, Stateful, canvas, div, px, relative, rgb};
 
-use super::sky_paint::{Seg, band_height, band_tops, paint_sky, plot_height, row_y, sky_segments};
+use super::sky_paint::{
+    Seg, band_height, band_tops, paint_sky, plot_height, row_y, sky_segments, title_y,
+};
 use super::star::{legend_swatches, star as draw_star, star_box, star_caption};
 use super::{AtlasAction, OnAtlasAction};
 use crate::atlas_model::sky::{
@@ -15,8 +17,8 @@ use crate::clock::local_hhmm;
 use crate::i18n::{AtlasMsg, UiLang, atlas_text};
 use crate::ui::harness::{HarnessKind, session_badge};
 use crate::ui::tooltip::{
-    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, STATUS_FAILED, STATUS_NEEDS_YOU, STATUS_WORKING,
-    SURFACE_SUBTLE, TEXT_BODY, TEXT_DARK, TEXT_MUTED, mono_font,
+    BORDER_LIGHT, BORDER_SUBTLE, CARD_BG, ROW_HOVER_BG, STATUS_FAILED, STATUS_NEEDS_YOU,
+    STATUS_WORKING, SURFACE_SUBTLE, TEXT_BODY, TEXT_DARK, TEXT_MUTED, mono_font,
 };
 
 pub const BAND_LABEL_W: f32 = 64.0;
@@ -367,7 +369,14 @@ fn band_notes(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
             at: local_hhmm(e.start_ms),
             edits: e.edits,
         };
-        out.push(note(atlas_text(lang, &msg), band_height(band) - 17.0));
+        out.push(note(
+            atlas_text(lang, &msg),
+            if band.quiet.is_some() {
+                band_height(band) - 17.0
+            } else {
+                title_y(0.0)
+            },
+        ));
     }
     out
 }
@@ -375,7 +384,7 @@ fn band_notes(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
 fn turn_title(turn: &Turn, band: &SkyBand, top: f32) -> Option<Div> {
     let title = turn.title.clone()?;
     let first = &band.stars[*turn.stars.first()?];
-    let y = row_y(top, first.row) - first.radius - 22.0;
+    let y = title_y(top);
     let el = div()
         .top(px(y))
         .max_w(px(TITLE_MAX_W))
@@ -433,6 +442,7 @@ fn star_hit_box(star: &Star, y: f32, selected: bool) -> Div {
         .ml(px(-side / 2.0))
         .top(px(y - side / 2.0))
         .size(px(side))
+        .rounded_full()
         .flex()
         .items_center()
         .justify_center()
@@ -454,6 +464,7 @@ fn star_button<T: 'static>(
             "atlas-star-{band_idx}-{star_idx}"
         )))
         .cursor_pointer()
+        .hover(|s| s.bg(rgb(ROW_HOVER_BG)))
         .on_click(cx.listener(move |this, _, window, cx| {
             on(this, AtlasAction::SelectStep(step.clone()), window, cx);
         }))
@@ -488,7 +499,7 @@ mod tests {
     use crate::atlas_model::StepRef;
     use crate::atlas_model::sky::{QuietNote, RowKind, SkyBand, SkyChart, Star, StarKind, SubLane};
     use crate::i18n::UiLang;
-    use crate::ui::atlas::sky_paint::{ROW_H, band_height, plot_height, row_y};
+    use crate::ui::atlas::sky_paint::{ROW_H, TITLE_H, band_height, plot_height, row_y, title_y};
 
     fn key() -> AgentKey {
         AgentKey {
@@ -542,20 +553,28 @@ mod tests {
 
     #[test]
     fn quiet_band_is_one_row_tall() {
-        assert_eq!(band_height(&band(true, 0)), ROW_H + 12.0);
-        assert_eq!(band_height(&band(false, 2)), 5.0 * ROW_H + 12.0);
+        assert_eq!(band_height(&band(true, 0)), 47.0);
+        assert_eq!(band_height(&band(false, 0)), 145.0);
+        assert_eq!(band_height(&band(false, 1)), 180.0);
         let chart = SkyChart {
             window: SkyWindow::Min10,
             ticks: vec![],
             bands: vec![band(true, 0), band(false, 0)],
         };
-        assert_eq!(plot_height(&chart), (ROW_H + 12.0) + (3.0 * ROW_H + 12.0));
+        assert_eq!(plot_height(&chart), 47.0 + 145.0);
     }
 
     #[test]
     fn rows_stack_from_the_band_top() {
-        assert_eq!(row_y(100.0, RowKind::Edit), 100.0 + 6.0 + ROW_H / 2.0);
-        assert_eq!(row_y(100.0, RowKind::Sub(1)), 100.0 + 6.0 + 4.5 * ROW_H);
+        assert_eq!(row_y(100.0, RowKind::Edit), 100.0 + TITLE_H + ROW_H / 2.0);
+        assert_eq!(row_y(100.0, RowKind::Sub(1)), 100.0 + TITLE_H + 4.5 * ROW_H);
+        assert!(row_y(100.0, RowKind::Edit) - ROW_H / 2.0 >= 100.0 + TITLE_H);
+    }
+
+    #[test]
+    fn turn_title_sits_inside_the_title_strip() {
+        let y = title_y(100.0);
+        assert!((100.0..100.0 + TITLE_H).contains(&y));
     }
 
     #[test]
@@ -564,6 +583,7 @@ mod tests {
         let size = hit.style().size.clone();
         assert_eq!(size.width, size.height);
         assert!(size.width.is_some());
+        assert!(hit.style().corner_radii.top_left.is_some());
     }
 
     #[test]
