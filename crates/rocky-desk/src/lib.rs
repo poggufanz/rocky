@@ -1,5 +1,6 @@
 pub mod app;
 pub mod assets;
+pub mod atlas_model;
 pub mod autostart;
 pub mod capture_lines;
 pub mod card_detail_model;
