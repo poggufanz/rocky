@@ -85,10 +85,12 @@ pub(crate) fn default_turn(model: &Model, project: &ProjectId) -> Option<(AgentK
 }
 
 fn turn_exists(model: &Model, project: &ProjectId, pick: &(AgentKey, u64)) -> bool {
-    let in_project = model
-        .agents()
-        .get(&pick.0)
-        .is_some_and(|a| project_id(&a.repo) == *project);
+    // Only primary agents have turns to show; a subagent's steps hang off its parent.
+    let in_project = pick.0.agent_id.is_empty()
+        && model
+            .agents()
+            .get(&pick.0)
+            .is_some_and(|a| project_id(&a.repo) == *project);
     in_project
         && model
             .timeline(&pick.0)

@@ -204,7 +204,10 @@ fn subagent_lane_only_when_the_tree_setting_is_on() {
     assert_eq!(band.subs[0].key, key("s1", "c1"));
     let spawn_x = band.subs[0].spawn_x.expect("spawn inside the window");
     let first_star = band.stars[band.subs[0].stars[0]].x;
-    assert!(spawn_x < first_star, "spawn {spawn_x} before star {first_star}");
+    assert!(
+        spawn_x < first_star,
+        "spawn {spawn_x} before star {first_star}"
+    );
     assert_eq!(band.subs[0].stars.len(), 1);
     for &i in &band.subs[0].stars {
         assert_eq!(band.stars[i].row, RowKind::Sub(0));

@@ -4,7 +4,7 @@ use super::constellation::{default_turn, step_label};
 use super::sky::{StarKind, TurnSlice, is_live_status, split_turns, turn_kinds};
 use super::{ProjectId, StepRef};
 use crate::view::Model;
-use rocky_proto::pipe::{AgentStatus, Status};
+use rocky_proto::pipe::{AgentKey, AgentStatus, Status};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -49,13 +49,13 @@ fn live_status(agent: &AgentStatus, live: bool) -> Option<Status> {
     live.then_some(agent.status)
 }
 
-/// The step to select first: the running or waiting step of the first live
-/// band, else the newest failed step of the default turn, else its last step.
-pub fn default_step(model: &Model, project: &ProjectId) -> Option<StepRef> {
-    let (key, start) = default_turn(model, project)?;
-    let agent = model.agents().get(&key)?;
-    let slices = split_turns(model.timeline(&key)?);
-    let idx = slices.iter().position(|s| s.start_ms == start)?;
+/// The step to select when a turn is shown: the running or waiting step, else
+/// the newest failed step, else the last step of the turn that began at
+/// `start_ms`.
+pub fn turn_step(model: &Model, key: &AgentKey, start_ms: u64) -> Option<StepRef> {
+    let agent = model.agents().get(key)?;
+    let slices = split_turns(model.timeline(key)?);
+    let idx = slices.iter().position(|s| s.start_ms == start_ms)?;
     let slice = &slices[idx];
     let live = is_live_status(agent.status) && idx + 1 == slices.len();
     let kinds = turn_kinds(&slice.steps, live_status(agent, live));
@@ -65,9 +65,15 @@ pub fn default_step(model: &Model, project: &ProjectId) -> Option<StepRef> {
         .or_else(|| kinds.iter().rposition(|k| *k == StarKind::Failed))
         .or_else(|| slice.steps.len().checked_sub(1))?;
     Some(StepRef {
-        key,
+        key: key.clone(),
         ms: slice.steps[pick].ms,
     })
+}
+
+/// The step to select first: [`turn_step`] of the default turn.
+pub fn default_step(model: &Model, project: &ProjectId) -> Option<StepRef> {
+    let (key, start) = default_turn(model, project)?;
+    turn_step(model, &key, start)
 }
 
 /// Detail of `step`; `None` when it is no longer in its agent's timeline.

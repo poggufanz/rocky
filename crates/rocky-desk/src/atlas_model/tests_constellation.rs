@@ -355,3 +355,20 @@ fn working_subagent_last_pending_step_is_running_in_star_and_detail() {
     let d = step_detail(&model, &last.step, None).expect("detail");
     assert_eq!(d.outcome, StepOutcome::Running { since_ms: 126 });
 }
+
+#[test]
+fn a_picked_turn_of_a_subagent_falls_back_to_the_default_turn() {
+    let parent = vec![turn_start(100), tool(110, "Read", "a.rs", Outcome::Ok)];
+    let child = vec![tool(115, "Grep", "x", Outcome::Ok)];
+    let model = model_with(
+        vec![
+            agent("s1", "", Status::Idle, 150),
+            agent("s1", "c1", Status::Idle, 146),
+        ],
+        vec![(key("s1", ""), parent), (key("s1", "c1"), child)],
+        true,
+    );
+    let pick = (key("s1", "c1"), 115);
+    let v = view(&model, Some(&pick)).expect("turn");
+    assert_eq!(v.key, key("s1", ""));
+}

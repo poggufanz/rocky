@@ -179,7 +179,8 @@ fn controller_wanted_working_subagent_upserts_share_the_cooldown() {
         1_000,
     );
     assert_eq!(drain_timelines(&rx), vec![k_main]);
-    ctl.model.set_wanted(std::collections::BTreeSet::from([k_child.clone()]));
+    ctl.model
+        .set_wanted(std::collections::BTreeSet::from([k_child.clone()]));
 
     // The first Working upsert asks at once; the next one 100 ms later waits.
     apply_at(
@@ -212,7 +213,8 @@ fn controller_snapshot_asks_a_wanted_working_subagent_once() {
         session_id: "S1".to_string(),
         agent_id: "sub-1".to_string(),
     };
-    ctl.model.set_wanted(std::collections::BTreeSet::from([k_child.clone()]));
+    ctl.model
+        .set_wanted(std::collections::BTreeSet::from([k_child.clone()]));
     apply_at(
         &mut ctl,
         working_snapshot(vec![
@@ -393,4 +395,105 @@ fn sky_card_width_respects_the_sidebar_and_the_column_cap() {
         1400.0 - 248.0 - 24.0 - 30.0
     );
     assert_eq!(atlas_wiring::sky_avail_width(2400.0, false), 1200.0 - 30.0);
+}
+
+fn turn_start_entry(ms: u64) -> TimelineEntry {
+    TimelineEntry {
+        ms,
+        kind: TimelineKind::TurnStart,
+        tool_name: None,
+        text: None,
+        outcome: None,
+        dur_ms: None,
+    }
+}
+
+/// Two turns of one idle session: steps 110 and 120, then 210 and 220.
+fn two_turn_model() -> (Model, AgentKey) {
+    use crate::atlas_model::test_support::model_with;
+    let agent = test_agent("S1", Status::Idle, 1_000);
+    let key = agent.key.clone();
+    let entries = vec![
+        turn_start_entry(100),
+        tool_step(110),
+        tool_step(120),
+        turn_start_entry(200),
+        tool_step(210),
+        tool_step(220),
+    ];
+    (
+        model_with(vec![agent], vec![(key.clone(), entries)], true),
+        key,
+    )
+}
+
+#[test]
+fn atlas_show_turn_selects_a_step_of_that_turn_for_detail_and_keys() {
+    use crate::atlas_model::AtlasState;
+    use crate::ui::atlas::AtlasAction;
+    let (model, key) = two_turn_model();
+    let mut state = AtlasState {
+        project: Some(atlas_project()),
+        step: Some(step_at(&key, 220)),
+        turn: Some((key.clone(), 200)),
+        ..AtlasState::default()
+    };
+
+    atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::ShowTurn(key.clone(), 100));
+    assert_eq!(state.step, Some(step_at(&key, 120)));
+    assert_eq!(state.turn, Some((key.clone(), 100)));
+
+    atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::StepBy(false));
+    assert_eq!(state.step, Some(step_at(&key, 110)));
+}
+
+#[test]
+fn atlas_switching_to_constellation_pins_the_selected_steps_turn() {
+    use crate::atlas_model::{AtlasLayout, AtlasState};
+    use crate::ui::atlas::AtlasAction;
+    let (model, key) = two_turn_model();
+    let mut state = AtlasState {
+        project: Some(atlas_project()),
+        step: Some(step_at(&key, 110)),
+        ..AtlasState::default()
+    };
+
+    atlas_wiring::apply_atlas_action(
+        &mut state,
+        &model,
+        &AtlasAction::SetLayout(AtlasLayout::Constellation),
+    );
+    assert_eq!(state.turn, Some((key, 100)));
+}
+
+#[test]
+fn atlas_selecting_a_subagent_star_keeps_the_primary_turn() {
+    use crate::atlas_model::test_support::model_with;
+    use crate::atlas_model::{AtlasLayout, AtlasState};
+    use crate::ui::atlas::AtlasAction;
+    let parent = test_agent("S1", Status::Idle, 1_000);
+    let child = test_agent_with_id("S1", "sub-1", Status::Idle, 1_000);
+    let (pk, ck) = (parent.key.clone(), child.key.clone());
+    let model = model_with(
+        vec![parent, child],
+        vec![
+            (pk.clone(), vec![turn_start_entry(100), tool_step(110)]),
+            (ck.clone(), vec![tool_step(115)]),
+        ],
+        true,
+    );
+    let mut state = AtlasState {
+        project: Some(atlas_project()),
+        layout: AtlasLayout::Constellation,
+        turn: Some((pk.clone(), 100)),
+        ..AtlasState::default()
+    };
+
+    atlas_wiring::apply_atlas_action(
+        &mut state,
+        &model,
+        &AtlasAction::SelectStep(step_at(&ck, 115)),
+    );
+    assert_eq!(state.step, Some(step_at(&ck, 115)));
+    assert_eq!(state.turn, Some((pk, 100)));
 }

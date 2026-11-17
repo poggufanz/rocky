@@ -7,7 +7,7 @@ use gpui::{
 
 use super::{Controller, DeskView, now_ms};
 use crate::atlas_model::constellation::constellation;
-use crate::atlas_model::detail::{StepDetail, default_step, neighbor, step_detail};
+use crate::atlas_model::detail::{StepDetail, default_step, neighbor, step_detail, turn_step};
 use crate::atlas_model::projects::{ProjectRow, default_project, needs_you_bars, projects};
 use crate::atlas_model::sky::sky_chart;
 use crate::atlas_model::{AtlasLayout, AtlasState, ProjectId, SkyWindow, StepRef, wanted_keys};
@@ -64,6 +64,17 @@ fn current_step(state: &AtlasState, model: &Model) -> Option<StepRef> {
         .or_else(|| default_step(model, state.project.as_ref()?))
 }
 
+/// Shows the turn of the selected step in the Constellation. A subagent's step
+/// leaves the shown turn alone, since its lane hangs off the primary turn.
+fn pin_turn(state: &mut AtlasState, model: &Model) {
+    let Some(step) = state.step.as_ref().filter(|s| s.key.agent_id.is_empty()) else {
+        return;
+    };
+    if let Some(detail) = step_detail(model, step, None) {
+        state.turn = Some((step.key.clone(), detail.turn_start_ms));
+    }
+}
+
 /// Pure part of an atlas action: moves selection state, never touches the UI.
 pub(super) fn apply_atlas_action(state: &mut AtlasState, model: &Model, action: &AtlasAction) {
     match action {
@@ -72,19 +83,22 @@ pub(super) fn apply_atlas_action(state: &mut AtlasState, model: &Model, action: 
             state.step = None;
             state.turn = None;
         }
-        AtlasAction::SetLayout(layout) => state.layout = *layout,
+        AtlasAction::SetLayout(layout) => {
+            state.layout = *layout;
+            if *layout == AtlasLayout::Constellation {
+                pin_turn(state, model);
+            }
+        }
         AtlasAction::SetWindow(window) => state.window = *window,
         AtlasAction::SelectStep(step) => {
-            if state.layout == AtlasLayout::Constellation
-                && let Some(detail) = step_detail(model, step, None)
-            {
-                state.turn = Some((step.key.clone(), detail.turn_start_ms));
-            }
             state.step = Some(step.clone());
+            if state.layout == AtlasLayout::Constellation {
+                pin_turn(state, model);
+            }
         }
         AtlasAction::ShowTurn(key, start_ms) => {
             state.turn = Some((key.clone(), *start_ms));
-            state.step = None;
+            state.step = turn_step(model, key, *start_ms);
         }
         AtlasAction::StepBy(forward) => {
             if let Some(next) =
