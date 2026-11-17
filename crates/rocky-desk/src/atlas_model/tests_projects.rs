@@ -1,5 +1,5 @@
-use super::ProjectId;
 use super::projects::*;
+use super::{ProjectId, SkyWindow, wanted_keys};
 use rocky_proto::pipe::{Action, AgentKey, AgentStatus, RepoInfo, Status};
 use std::collections::BTreeMap;
 
@@ -147,4 +147,32 @@ fn quiet_project_reports_seconds_since_newest_event() {
         rows[0].state,
         ProjectState::Quiet { idle_secs: 1000 }
     ));
+}
+
+#[test]
+fn wanted_keys_follow_window_and_subagent_setting() {
+    let now = 10_000_000;
+    let min = 60_000;
+    let all = map([
+        agent("s1", "", Status::Idle, Some("C:/p/rocky"), now - 5 * min),
+        agent("s1", "sub", Status::Idle, Some("C:/p/rocky"), now - min),
+        agent("s2", "", Status::Idle, Some("C:/p/rocky"), now - 20 * min),
+        agent("s3", "", Status::Idle, Some("C:/p/other"), now),
+    ]);
+    let project = ProjectId("C:/p/rocky".into());
+    let k = |s: &str, a: &str| AgentKey {
+        session_id: s.into(),
+        agent_id: a.into(),
+    };
+    let ten = wanted_keys(&all, &project, SkyWindow::Min10, now, true);
+    assert_eq!(ten, [k("s1", ""), k("s1", "sub")].into_iter().collect());
+    let thirty = wanted_keys(&all, &project, SkyWindow::Min30, now, true);
+    assert_eq!(
+        thirty,
+        [k("s1", ""), k("s1", "sub"), k("s2", "")]
+            .into_iter()
+            .collect()
+    );
+    let flat = wanted_keys(&all, &project, SkyWindow::Min10, now, false);
+    assert_eq!(flat, [k("s1", "")].into_iter().collect());
 }

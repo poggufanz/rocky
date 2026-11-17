@@ -638,3 +638,46 @@ fn desk_ignores_card_messages() {
         .is_empty()
     );
 }
+
+#[test]
+fn wanted_idle_session_keeps_its_timeline() {
+    let mut m = Model::new();
+    m.apply(snapshot(vec![agent("s1", "", Status::Idle)]));
+    let k = key("s1", "");
+    assert_eq!(m.set_wanted(BTreeSet::from([k.clone()])), vec![k.clone()]);
+    m.apply(timeline_msg(
+        k.clone(),
+        vec![entry(1, TimelineKind::Tool, Some("Bash"), None, None)],
+    ));
+    assert!(m.timeline(&k).is_some());
+    m.set_wanted(BTreeSet::new());
+    assert!(m.timeline(&k).is_none());
+}
+
+#[test]
+fn upsert_of_a_wanted_idle_key_asks_for_its_timeline_again() {
+    let mut m = Model::new();
+    m.apply(snapshot(vec![agent("s1", "", Status::Idle)]));
+    let k = key("s1", "");
+    m.set_wanted(BTreeSet::from([k.clone()]));
+    let asked = m.apply(ServerMsg::Status {
+        op: StatusOp::Upsert,
+        agent: agent("s1", "", Status::Idle),
+    });
+    assert_eq!(asked, vec![k]);
+}
+
+#[test]
+fn set_wanted_skips_active_primaries_and_already_wanted_keys() {
+    let mut m = Model::new();
+    m.apply(snapshot(vec![
+        agent("s1", "", Status::Working),
+        agent("s2", "", Status::Idle),
+    ]));
+    let (a, b) = (key("s1", ""), key("s2", ""));
+    assert_eq!(
+        m.set_wanted(BTreeSet::from([a.clone(), b.clone()])),
+        vec![b.clone()]
+    );
+    assert!(m.set_wanted(BTreeSet::from([a, b])).is_empty());
+}

@@ -48,6 +48,8 @@ pub struct Model {
     /// Agent rows whose timeline is expanded, and the entries last received.
     open: BTreeSet<AgentKey>,
     timelines: BTreeMap<AgentKey, Vec<TimelineEntry>>,
+    /// Keys the chart draws; their timelines are kept like open rows.
+    wanted: BTreeSet<AgentKey>,
     /// Ids of `set` messages awaiting their ack.
     sent: BTreeSet<u64>,
     /// Error from the last failed `set`, shown until the next settings broadcast.
@@ -95,7 +97,9 @@ impl Model {
                     let key = agent.key.clone();
                     self.agents.insert(key.clone(), agent);
                     self.retain_timelines();
-                    if self.open.contains(&key) {
+                    let wanted_idle =
+                        self.wanted.contains(&key) && !self.active_primary_keys().contains(&key);
+                    if self.open.contains(&key) || wanted_idle {
                         vec![key]
                     } else {
                         Vec::new()
@@ -176,6 +180,20 @@ impl Model {
             .unwrap_or_default()
     }
 
+    /// Stores the keys the chart needs timelines for. Returns the newly added
+    /// keys that are not active primaries, which the caller requests.
+    pub fn set_wanted(&mut self, keys: BTreeSet<AgentKey>) -> Vec<AgentKey> {
+        let active = self.active_primary_keys();
+        let added = keys
+            .iter()
+            .filter(|k| !self.wanted.contains(*k) && !active.contains(*k))
+            .cloned()
+            .collect();
+        self.wanted = keys;
+        self.retain_timelines();
+        added
+    }
+
     fn close(&mut self, key: &AgentKey) {
         self.open.remove(key);
         self.timelines.remove(key);
@@ -221,6 +239,7 @@ impl Model {
         let active = self.active_primary_keys();
         self.timelines.retain(|k, _| {
             active.contains(k)
+                || self.wanted.contains(k)
                 || (self.open.contains(k)
                     && self
                         .agents
@@ -233,11 +252,12 @@ impl Model {
         if self.active_primary_keys().contains(key) {
             return true;
         }
-        self.open.contains(key)
-            && self
-                .agents
-                .get(key)
-                .is_none_or(|a| is_active_status(a.status))
+        self.wanted.contains(key)
+            || self.open.contains(key)
+                && self
+                    .agents
+                    .get(key)
+                    .is_none_or(|a| is_active_status(a.status))
     }
 
     pub(crate) fn subagent_tree_enabled(&self) -> bool {

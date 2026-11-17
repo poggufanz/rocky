@@ -1,9 +1,12 @@
 //! Pure projections behind the agents star atlas: no UI types here.
 
-use rocky_proto::pipe::{AgentKey, RepoInfo};
+use rocky_proto::pipe::{AgentKey, AgentStatus, RepoInfo};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod projects;
 
+#[cfg(test)]
+pub mod test_support;
 #[cfg(test)]
 mod tests_projects;
 
@@ -59,4 +62,23 @@ pub struct AtlasState {
     pub window: SkyWindow,
     pub step: Option<StepRef>,
     pub turn: Option<(AgentKey, u64)>,
+}
+
+/// Keys of every agent in `project` that was active inside the window, so the
+/// chart can draw them. Subagents count only when `subagents` is set.
+pub fn wanted_keys(
+    agents: &BTreeMap<AgentKey, AgentStatus>,
+    project: &ProjectId,
+    window: SkyWindow,
+    now_ms: u64,
+    subagents: bool,
+) -> BTreeSet<AgentKey> {
+    let span = window.secs() * 1000;
+    agents
+        .values()
+        .filter(|a| subagents || a.key.agent_id.is_empty())
+        .filter(|a| project_id(&a.repo) == *project)
+        .filter(|a| a.last_event_ms + span >= now_ms)
+        .map(|a| a.key.clone())
+        .collect()
 }
