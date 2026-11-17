@@ -3,11 +3,15 @@
 use rocky_proto::pipe::{AgentKey, AgentStatus, RepoInfo};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod constellation;
+pub mod detail;
 pub mod projects;
 pub mod sky;
 
 #[cfg(test)]
 pub mod test_support;
+#[cfg(test)]
+mod tests_constellation;
 #[cfg(test)]
 mod tests_projects;
 #[cfg(test)]

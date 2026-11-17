@@ -198,7 +198,7 @@ pub(crate) fn star_kind(
     }
 }
 
-fn is_live_status(status: Status) -> bool {
+pub(crate) fn is_live_status(status: Status) -> bool {
     matches!(status, Status::Working | Status::NeedsYou)
 }
 
@@ -249,6 +249,37 @@ fn card_title(cards: &CardsModel, session_id: &str, start_ms: u64, lang: UiLang)
                 && c.started_ms.abs_diff(start_ms) <= TITLE_MATCH_MS
         })
         .and_then(|c| one_line(&c.prompt, lang))
+}
+
+/// Title of one turn: the live turn uses the agent's current prompt, a titled
+/// past turn looks up its prompt card, an untitled turn has none.
+pub(crate) fn turn_title(
+    agent: &AgentStatus,
+    cards: &CardsModel,
+    is_live: bool,
+    titled: bool,
+    start_ms: u64,
+    lang: UiLang,
+) -> Option<String> {
+    if is_live {
+        agent.prompt.as_ref().and_then(|p| one_line(&p.text, lang))
+    } else if titled {
+        card_title(cards, &agent.key.session_id, start_ms, lang)
+    } else {
+        None
+    }
+}
+
+/// Kinds of the steps of one turn, in step order. `live_status` is the agent's
+/// status when this is the turn it is still working in.
+pub(crate) fn turn_kinds(steps: &[&TimelineEntry], live_status: Option<Status>) -> Vec<StarKind> {
+    let live_idx = live_status.and_then(|_| steps.iter().rposition(|e| is_pending(e)));
+    let status = live_status.unwrap_or(Status::Idle);
+    steps
+        .iter()
+        .enumerate()
+        .map(|(i, e)| star_kind(e, live_idx == Some(i), status))
+        .collect()
 }
 
 fn band_rank(status: Status) -> u8 {
@@ -332,21 +363,14 @@ fn primary_turns(
         );
         let first = stars.len();
         stars.extend(built);
-        let title = if is_live {
-            agent
-                .prompt
-                .as_ref()
-                .and_then(|p| one_line(&p.text, input.lang))
-        } else if slice.titled {
-            card_title(
-                input.cards,
-                &agent.key.session_id,
-                slice.start_ms,
-                input.lang,
-            )
-        } else {
-            None
-        };
+        let title = turn_title(
+            agent,
+            input.cards,
+            is_live,
+            slice.titled,
+            slice.start_ms,
+            input.lang,
+        );
         turns.push(Turn {
             stars: (first..stars.len()).collect(),
             live: is_live,
@@ -458,6 +482,24 @@ fn build_band(model: &Model, input: &BandInput<'_>) -> SkyBand {
     }
 }
 
+/// Primary agents of the project in band order: working, then needs you, then
+/// the rest, newest first.
+pub(crate) fn band_agents<'a>(model: &'a Model, project: &ProjectId) -> Vec<&'a AgentStatus> {
+    let mut agents: Vec<&AgentStatus> = model
+        .agents()
+        .values()
+        .filter(|a| a.key.agent_id.is_empty() && project_id(&a.repo) == *project)
+        .collect();
+    agents.sort_by_key(|a| {
+        (
+            band_rank(a.status),
+            std::cmp::Reverse(a.last_event_ms),
+            a.key.clone(),
+        )
+    });
+    agents
+}
+
 /// Projects the project's agents and timelines into chart geometry.
 pub fn sky_chart(
     model: &Model,
@@ -467,24 +509,7 @@ pub fn sky_chart(
     now_ms: u64,
     lang: UiLang,
 ) -> SkyChart {
-    let mut agents: Vec<&AgentStatus> = model
-        .agents()
-        .values()
-        .filter(|a| a.key.agent_id.is_empty() && project_id(&a.repo) == *project)
-        .collect();
-    agents.sort_by(|a, b| {
-        (
-            band_rank(a.status),
-            std::cmp::Reverse(a.last_event_ms),
-            &a.key,
-        )
-            .cmp(&(
-                band_rank(b.status),
-                std::cmp::Reverse(b.last_event_ms),
-                &b.key,
-            ))
-    });
-    let bands = agents
+    let bands = band_agents(model, project)
         .into_iter()
         .map(|agent| {
             build_band(
