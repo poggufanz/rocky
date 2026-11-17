@@ -6,9 +6,11 @@
 use rocky_proto::pipe::{GapReason, Outcome, Status, TimelineKind};
 use rocky_proto::settings::Lang;
 
+mod atlas;
 mod cards;
 mod setup;
 
+pub use atlas::{AtlasMsg, atlas_text};
 pub use cards::{CardMsg, card_samples, card_text, label_chip, label_full, reason_text};
 #[cfg(test)]
 use setup::setup_samples;
@@ -715,5 +717,7 @@ fn gap_id(count: u64, from: &str, to: &str, reason: GapReason) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_atlas;
 #[cfg(test)]
 mod tests_now;

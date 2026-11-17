@@ -1,5 +1,6 @@
 //! GPUI render trees. Decisions live in pure modules; these only draw them.
 
+pub mod atlas;
 pub mod block_diff;
 pub mod card_detail;
 pub mod cards_view;
