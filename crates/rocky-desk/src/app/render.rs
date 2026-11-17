@@ -19,6 +19,7 @@ use crate::ui::consent::consent_screen;
 use crate::ui::flow_view::flow_section;
 use crate::ui::modal::card_modal;
 use crate::ui::notices::notices_card;
+use crate::ui::settings_kit as kit;
 use crate::ui::setup_settings::removed_screen;
 use crate::ui::title_bar::{Tab, title_bar};
 use crate::ui::tooltip::{SURFACE_SUBTLE, TEXT_DARK};
@@ -171,14 +172,13 @@ impl DeskView {
             let page = page
                 .child(self.settings_panel(cx))
                 .child(self.setup_panel(cx))
-                .child(
-                    div()
-                        .id(SharedString::from("quit"))
-                        .text_sm()
-                        .cursor_pointer()
-                        .child(tr(lang, &Msg::MenuQuit))
-                        .on_click(cx.listener(|this, _, _, cx| this.quit(cx))),
-                );
+                .child(div().flex().justify_end().pt_1().pb_3().child(kit::button(
+                    SharedString::from("quit"),
+                    tr(lang, &Msg::MenuQuit),
+                    kit::Weight::Normal,
+                    true,
+                    cx.listener(|this, _, _, cx| this.quit(cx)),
+                )));
             return scroll_page("settings", page);
         }
 

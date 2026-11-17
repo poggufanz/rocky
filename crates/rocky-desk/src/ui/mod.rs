@@ -11,6 +11,7 @@ pub mod modal;
 pub mod motion;
 pub mod notices;
 pub mod repo_banner;
+pub mod settings_kit;
 pub mod setup_settings;
 pub mod status;
 pub mod title_bar;

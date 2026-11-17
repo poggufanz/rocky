@@ -468,3 +468,152 @@ fn successful_repo_purge_requests_cards_refresh_while_failure_does_not() {
     assert!(allow.send_repo_list);
     assert!(!allow.refresh_cards);
 }
+
+#[test]
+fn harness_rows_carry_a_tone_and_the_foreign_path() {
+    let plan = [plan_target("claude-code", TargetState::Ok)];
+    let ok = harness_rows(&plan, &[], &SetupHealth::default(), &hhmm);
+    assert_eq!(ok[0].tone, Tone::Ok);
+    assert_eq!(ok[0].foreign_path, None);
+    assert_eq!(ok[0].error, None);
+
+    let foreign = harness_rows(
+        &plan,
+        &[],
+        &setup_with(vec![live("claude-code", TargetState::Foreign, None)]),
+        &hhmm,
+    );
+    assert_eq!(foreign[0].tone, Tone::Warn);
+    assert_eq!(
+        foreign[0].foreign_path.as_deref(),
+        Some("C:/h/claude-code.json")
+    );
+
+    let mut failed = live("claude-code", TargetState::Error, None);
+    failed.error = Some("disk full".into());
+    let failed = harness_rows(&plan, &[], &setup_with(vec![failed]), &hhmm);
+    assert_eq!(failed[0].tone, Tone::Bad);
+    assert_eq!(failed[0].error.as_deref(), Some("disk full"));
+
+    let off = harness_rows(
+        &plan,
+        &["claude-code".into()],
+        &SetupHealth::default(),
+        &hhmm,
+    );
+    assert_eq!(off[0].tone, Tone::Neutral);
+    let missing = harness_rows(
+        &[plan_target("codex", TargetState::Missing)],
+        &[],
+        &SetupHealth::default(),
+        &hhmm,
+    );
+    assert_eq!(missing[0].tone, Tone::Neutral);
+}
+
+#[test]
+fn shell_target_leaves_the_harness_rows() {
+    let rows = harness_rows(
+        &[
+            plan_target("claude-code", TargetState::Ok),
+            plan_target(SHELL_HARNESS, TargetState::Ok),
+        ],
+        &[],
+        &SetupHealth::default(),
+        &hhmm,
+    );
+    let (tools, shell) = split_shell(rows);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].harness, "claude-code");
+    assert_eq!(shell.unwrap().paths, vec!["C:/h/shell.json".to_string()]);
+    let (_, none) = split_shell(Vec::new());
+    assert!(none.is_none());
+}
+
+#[test]
+fn harness_names_read_like_the_tools() {
+    assert_eq!(harness_name("claude-code"), "Claude Code");
+    assert_eq!(harness_name("codex"), "Codex");
+    assert_eq!(harness_name("copilot-cli"), "Copilot CLI");
+    assert_eq!(harness_name("gemini-cli"), "Gemini CLI");
+    assert_eq!(harness_name("opencode"), "opencode");
+    assert_eq!(harness_name("new-tool"), "new-tool");
+}
+
+#[test]
+fn home_short_replaces_only_the_home_prefix() {
+    let home = Some(r"C:\Users\me");
+    assert_eq!(
+        home_short(r"C:\Users\me\.codex\config.toml", home),
+        r"~\.codex\config.toml"
+    );
+    // Case and separator differ on Windows paths; the rest keeps its spelling.
+    if cfg!(windows) {
+        assert_eq!(home_short("c:/users/me/work/App", home), "~/work/App");
+    }
+    // A sibling folder that only starts with the same letters stays whole.
+    assert_eq!(
+        home_short(r"C:\Users\me2\x.json", home),
+        r"C:\Users\me2\x.json"
+    );
+    assert_eq!(home_short(r"C:\Users\me", home), "~");
+    assert_eq!(home_short("/tmp/x", None), "/tmp/x");
+    assert_eq!(home_short("/home/me/x", Some("/home/me/")), "~/x");
+}
+
+#[test]
+fn home_short_text_shortens_every_home_path_in_a_sentence() {
+    let home = Some(r"C:\Users\me");
+    assert_eq!(
+        home_short_text(r"C:\Users\me\.claude.json has a rocky server", home),
+        r"~\.claude.json has a rocky server"
+    );
+    assert_eq!(
+        home_short_text(r"C:\Users\me\a and C:\Users\me\b", home),
+        r"~\a and ~\b"
+    );
+    assert_eq!(
+        home_short_text(r"C:\Users\me2\x stays", home),
+        r"C:\Users\me2\x stays"
+    );
+    assert_eq!(home_short_text("no path here", home), "no path here");
+    assert_eq!(home_short_text(r"C:\Users\me\x", None), r"C:\Users\me\x");
+}
+
+#[test]
+fn repo_rows_carry_capture_tone_and_error() {
+    let repos = [
+        repo("C:/work/ok", RepoDecisionState::Allowed, 0),
+        repo("C:/work/bad", RepoDecisionState::Allowed, 0),
+        repo("C:/work/part", RepoDecisionState::Allowed, 0),
+        repo("C:/work/new", RepoDecisionState::Undecided, 0),
+        repo("C:/work/no", RepoDecisionState::Declined, 0),
+    ];
+    let cap = |root: &str, state: CaptureState, error: Option<&str>| CaptureHealth {
+        root: root.into(),
+        state,
+        last_reconcile_ms: None,
+        error: error.map(str::to_string),
+    };
+    let capture = [
+        cap("C:/work/ok", CaptureState::Ok, None),
+        cap(
+            "C:/work/bad",
+            CaptureState::Failed,
+            Some("Git could not list the files"),
+        ),
+        cap("C:/work/part", CaptureState::Partial, None),
+    ];
+    let rows = repo_rows(&repos, &[], &capture);
+    assert_eq!(rows[0].tone, Tone::Ok);
+    assert_eq!(rows[0].capture_error, None);
+    assert_eq!(rows[1].tone, Tone::Bad);
+    assert_eq!(rows[1].capture, Some(setup_msg(SetupMsg::CaptureFailed)));
+    assert_eq!(
+        rows[1].capture_error.as_deref(),
+        Some("Git could not list the files")
+    );
+    assert_eq!(rows[2].tone, Tone::Warn);
+    assert_eq!(rows[3].tone, Tone::Warn);
+    assert_eq!(rows[4].tone, Tone::Neutral);
+}

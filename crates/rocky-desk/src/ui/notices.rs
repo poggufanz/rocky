@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::{Context, Div, FontWeight, SharedString, Window, div, px, rgb};
 
 use crate::i18n::{CardMsg, Msg, UiLang, card_text, tr};
+use crate::setup_settings::home_short_text;
 use crate::ui::status::dot_el;
 use crate::ui::tooltip::{
     BORDER_SUBTLE, NOTICE_DOT, ROW_HOVER_BG, TEXT_DARK, TEXT_MUTED, TEXT_SUBTLE, card_container,
@@ -21,7 +22,9 @@ pub fn notices_card<T: 'static>(
     on_toggle: OnToggle<T>,
 ) -> Div {
     let title = card_text(lang, &CardMsg::SetupNotes { n: warnings.len() });
-    let summary = warnings.first().map(|w| tr(lang, w)).unwrap_or_default();
+    let home = std::env::home_dir().map(|p| p.to_string_lossy().into_owned());
+    let line = |w: &Msg| home_short_text(&tr(lang, w), home.as_deref());
+    let summary = warnings.first().map(line).unwrap_or_default();
     let toggle_label = card_text(lang, if open { &CardMsg::Hide } else { &CardMsg::Show });
 
     let head = div()
@@ -79,7 +82,7 @@ pub fn notices_card<T: 'static>(
             .text_size(px(12.0))
             .text_color(rgb(TEXT_SUBTLE));
         for w in warnings {
-            body = body.child(div().child(tr(lang, w)));
+            body = body.child(div().child(line(w)));
         }
         card = card.child(body);
     }
