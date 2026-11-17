@@ -163,10 +163,10 @@ fn sub_model(tree: bool) -> Model {
         tool(110, "Read", "a.rs", Outcome::Ok),
         tool(120, "Read", "b.rs", Outcome::Ok),
         tool(130, "Read", "c.rs", Outcome::Ok),
-        entry(140, TimelineKind::SubagentStart, None, None),
         tool(150, "Read", "d.rs", Outcome::Ok),
     ];
     let child = vec![
+        entry(140, TimelineKind::SubagentStart, None, None),
         tool(145, "Grep", "x", Outcome::Ok),
         tool(146, "Grep", "y", Outcome::Ok),
     ];
@@ -332,10 +332,10 @@ fn working_subagent_last_pending_step_is_running_in_star_and_detail() {
     let parent = vec![
         turn_start(100),
         tool(110, "Read", "a.rs", Outcome::Ok),
-        entry(120, TimelineKind::SubagentStart, None, None),
         tool(130, "Read", "b.rs", Outcome::Ok),
     ];
     let child = vec![
+        entry(120, TimelineKind::SubagentStart, None, None),
         tool(125, "Grep", "x", Outcome::Ok),
         tool(126, "Bash", "cargo test", Outcome::Pending),
     ];

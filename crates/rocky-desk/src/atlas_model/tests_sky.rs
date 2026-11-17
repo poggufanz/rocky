@@ -184,13 +184,15 @@ fn subagent_lane_only_when_the_tree_setting_is_on() {
                     key("s1", ""),
                     vec![
                         turn_start(NOW - 60_000),
-                        entry(NOW - 50_000, TimelineKind::SubagentStart, None, None),
                         tool(NOW - 20_000, "Read", Outcome::Ok),
                     ],
                 ),
                 (
                     key("s1", "c1"),
-                    vec![tool(NOW - 40_000, "Grep", Outcome::Ok)],
+                    vec![
+                        entry(NOW - 50_000, TimelineKind::SubagentStart, None, None),
+                        tool(NOW - 40_000, "Grep", Outcome::Ok),
+                    ],
                 ),
             ],
             tree,
@@ -200,7 +202,9 @@ fn subagent_lane_only_when_the_tree_setting_is_on() {
     let band = &on.bands[0];
     assert_eq!(band.subs.len(), 1);
     assert_eq!(band.subs[0].key, key("s1", "c1"));
-    assert!(band.subs[0].spawn_x.is_some());
+    let spawn_x = band.subs[0].spawn_x.expect("spawn inside the window");
+    let first_star = band.stars[band.subs[0].stars[0]].x;
+    assert!(spawn_x < first_star, "spawn {spawn_x} before star {first_star}");
     assert_eq!(band.subs[0].stars.len(), 1);
     for &i in &band.subs[0].stars {
         assert_eq!(band.stars[i].row, RowKind::Sub(0));
@@ -348,13 +352,13 @@ fn working_subagent_last_pending_step_is_running() {
                 key("s1", ""),
                 vec![
                     turn_start(NOW - 60_000),
-                    entry(NOW - 50_000, TimelineKind::SubagentStart, None, None),
                     tool(NOW - 20_000, "Read", Outcome::Ok),
                 ],
             ),
             (
                 key("s1", "c1"),
                 vec![
+                    entry(NOW - 50_000, TimelineKind::SubagentStart, None, None),
                     tool(NOW - 40_000, "Grep", Outcome::Ok),
                     tool(NOW - 30_000, "Bash", Outcome::Pending),
                 ],
@@ -420,4 +424,25 @@ fn running_last_step_makes_a_running_star_and_a_live_turn() {
     assert_eq!(band.stars.last().unwrap().kind, StarKind::Running);
     assert_eq!(band.stars.last().unwrap().x, 1.0);
     assert!(band.turns.last().unwrap().live);
+}
+
+#[test]
+fn subagent_without_a_spawn_entry_starts_at_its_first_entry() {
+    let c = chart(
+        vec![
+            agent("s1", "", Status::Working, NOW - 10_000),
+            agent("s1", "c1", Status::Idle, NOW - 10_000),
+        ],
+        vec![
+            (key("s1", ""), vec![turn_start(NOW - 60_000)]),
+            (
+                key("s1", "c1"),
+                vec![tool(NOW - 40_000, "Grep", Outcome::Ok)],
+            ),
+        ],
+        true,
+    );
+    let lane = &c.bands[0].subs[0];
+    let star_x = c.bands[0].stars[lane.stars[0]].x;
+    assert_eq!(lane.spawn_x, Some(star_x));
 }

@@ -416,18 +416,12 @@ fn earlier_note(slices: &[TurnSlice<'_>], start: u64) -> Option<EarlierNote> {
 fn sub_lanes(
     model: &Model,
     parent: &AgentStatus,
-    parent_entries: &[TimelineEntry],
     input: &BandInput<'_>,
     stars: &mut Vec<Star>,
 ) -> Vec<SubLane> {
     if !model.subagent_tree_enabled() {
         return Vec::new();
     }
-    let spawns: Vec<f32> = parent_entries
-        .iter()
-        .filter(|e| e.kind == TimelineKind::SubagentStart)
-        .filter_map(|e| x_frac(e.ms, input.now_ms, input.window))
-        .collect();
     let mut lanes = Vec::new();
     for child in model
         .agents()
@@ -460,11 +454,21 @@ fn sub_lanes(
                 .agent_type
                 .clone()
                 .unwrap_or_else(|| short8(&child.key.agent_id)),
-            spawn_x: spawns.get(lane_idx).copied(),
+            spawn_x: spawn_ms(entries).and_then(|ms| x_frac(ms, input.now_ms, input.window)),
             stars: (first..stars.len()).collect(),
         });
     }
     lanes
+}
+
+/// When a subagent started: its own first `SubagentStart` (the daemon records
+/// that event under the child), else its first entry.
+pub(crate) fn spawn_ms(entries: &[TimelineEntry]) -> Option<u64> {
+    entries
+        .iter()
+        .find(|e| e.kind == TimelineKind::SubagentStart)
+        .or_else(|| entries.first())
+        .map(|e| e.ms)
 }
 
 fn quiet_note(agent: &AgentStatus) -> QuietNote {
@@ -485,7 +489,7 @@ fn build_band(model: &Model, input: &BandInput<'_>) -> SkyBand {
     let slices = split_turns(entries);
     let mut stars = Vec::new();
     let turns = primary_turns(input, &slices, &mut stars);
-    let subs = sub_lanes(model, agent, entries, input, &mut stars);
+    let subs = sub_lanes(model, agent, input, &mut stars);
     let start = input.now_ms.saturating_sub(input.window.secs() * 1000);
     SkyBand {
         key: agent.key.clone(),

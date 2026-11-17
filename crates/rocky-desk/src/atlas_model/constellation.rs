@@ -1,8 +1,8 @@
 //! Constellation geometry: one turn's steps, evenly spaced in order.
 
 use super::sky::{
-    LIVE_RADIUS, RowKind, StarKind, band_agents, is_live_status, magnitude, row_of, split_turns,
-    turn_kinds, turn_title,
+    LIVE_RADIUS, RowKind, StarKind, band_agents, is_live_status, magnitude, row_of, spawn_ms,
+    split_turns, turn_kinds, turn_title,
 };
 use super::{ProjectId, StepRef, project_id};
 use crate::cards_model::CardsModel;
@@ -142,18 +142,6 @@ fn sub_lanes(
     }
     let (start, end) = turn;
     let root = parent.repo.root.as_deref();
-    let mut steps_before = 0usize;
-    let mut spawn_after: Vec<usize> = Vec::new();
-    for e in model.timeline(&parent.key).unwrap_or(&[]) {
-        if !in_turn(e.ms, start, end) {
-            continue;
-        }
-        if is_step(e) {
-            steps_before += 1;
-        } else if e.kind == TimelineKind::SubagentStart {
-            spawn_after.push(steps_before);
-        }
-    }
     let mut lanes: Vec<CSub> = Vec::new();
     let children = model.agents().values().filter(|a| {
         a.key.session_id == parent.key.session_id
@@ -162,17 +150,15 @@ fn sub_lanes(
                 .timeline(&a.key)
                 .is_some_and(|t| t.iter().any(|e| is_step(e) && e.ms >= start))
     });
-    for (i, child) in children.enumerate() {
+    for child in children {
         let entries = model.timeline(&child.key).unwrap_or(&[]);
         let steps: Vec<&TimelineEntry> = entries
             .iter()
             .filter(|e| is_step(e) && in_turn(e.ms, start, end))
             .collect();
         let Some(first) = steps.first() else { continue };
-        let after_n = spawn_after
-            .get(i)
-            .copied()
-            .unwrap_or_else(|| parent_steps.iter().filter(|e| e.ms < first.ms).count());
+        let spawned = spawn_ms(entries).unwrap_or(first.ms);
+        let after_n = parent_steps.iter().filter(|e| e.ms < spawned).count();
         let reaches_latest = end.is_none_or(|e| !entries.iter().any(|x| is_step(x) && x.ms >= e));
         let live = is_live_status(child.status) && reaches_latest;
         let kinds = turn_kinds(&steps, live.then_some(child.status));
