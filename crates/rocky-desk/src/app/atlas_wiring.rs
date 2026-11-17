@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use super::{Controller, DeskView, now_ms};
-use crate::atlas_model::constellation::constellation;
+use crate::atlas_model::constellation::{constellation, turn_exists};
 use crate::atlas_model::detail::{StepDetail, default_step, neighbor, step_detail, turn_step};
 use crate::atlas_model::projects::{ProjectRow, default_project, needs_you_bars, projects};
 use crate::atlas_model::sky::sky_chart;
@@ -41,16 +41,33 @@ pub(super) fn sky_avail_width(viewport_w: f32, narrow: bool) -> f32 {
     column - 2.0 * (CARD_PAD + CARD_BORDER)
 }
 
-/// The selected step when it still exists, else the project's default step.
-fn resolve_detail(state: &AtlasState, model: &Model, home: Option<&str>) -> Option<StepDetail> {
+/// The step to use when none is selected. While the Constellation shows a
+/// pinned turn that still exists, that turn's step, or none when it has no
+/// steps; never another turn's. Otherwise the project's default step.
+fn fallback_step(state: &AtlasState, model: &Model) -> Option<StepRef> {
+    let project = state.project.as_ref()?;
+    if state.layout == AtlasLayout::Constellation
+        && let Some(pick) = state
+            .turn
+            .as_ref()
+            .filter(|p| turn_exists(model, project, p))
+    {
+        return turn_step(model, &pick.0, pick.1);
+    }
+    default_step(model, project)
+}
+
+/// The selected step when it still exists, else the fallback step.
+pub(super) fn resolve_detail(
+    state: &AtlasState,
+    model: &Model,
+    home: Option<&str>,
+) -> Option<StepDetail> {
     let picked = state
         .step
         .as_ref()
         .and_then(|s| step_detail(model, s, home));
-    picked.or_else(|| {
-        let step = default_step(model, state.project.as_ref()?)?;
-        step_detail(model, &step, home)
-    })
+    picked.or_else(|| step_detail(model, &fallback_step(state, model)?, home))
 }
 
 /// The step key presses and arrow buttons move from.
@@ -59,9 +76,7 @@ fn current_step(state: &AtlasState, model: &Model) -> Option<StepRef> {
         .step
         .as_ref()
         .filter(|s| step_detail(model, s, None).is_some());
-    known
-        .cloned()
-        .or_else(|| default_step(model, state.project.as_ref()?))
+    known.cloned().or_else(|| fallback_step(state, model))
 }
 
 /// Shows the turn of the selected step in the Constellation. A subagent's step

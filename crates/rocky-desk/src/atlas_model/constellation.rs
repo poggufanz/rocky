@@ -84,7 +84,7 @@ pub(crate) fn default_turn(model: &Model, project: &ProjectId) -> Option<(AgentK
         .or_else(|| agents.iter().find_map(|a| newest_turn(a)))
 }
 
-fn turn_exists(model: &Model, project: &ProjectId, pick: &(AgentKey, u64)) -> bool {
+pub(crate) fn turn_exists(model: &Model, project: &ProjectId, pick: &(AgentKey, u64)) -> bool {
     // Only primary agents have turns to show; a subagent's steps hang off its parent.
     let in_project = pick.0.agent_id.is_empty()
         && model

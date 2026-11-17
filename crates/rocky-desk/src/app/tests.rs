@@ -497,3 +497,29 @@ fn atlas_selecting_a_subagent_star_keeps_the_primary_turn() {
     assert_eq!(state.step, Some(step_at(&ck, 115)));
     assert_eq!(state.turn, Some((pk, 100)));
 }
+
+#[test]
+fn atlas_show_turn_without_steps_shows_no_detail_and_keys_do_nothing() {
+    use crate::atlas_model::test_support::model_with;
+    use crate::atlas_model::{AtlasLayout, AtlasState};
+    use crate::ui::atlas::AtlasAction;
+    let agent = test_agent("S1", Status::Idle, 1_000);
+    let key = agent.key.clone();
+    let entries = vec![turn_start_entry(100), turn_start_entry(200), tool_step(210)];
+    let model = model_with(vec![agent], vec![(key.clone(), entries)], true);
+    let mut state = AtlasState {
+        project: Some(atlas_project()),
+        layout: AtlasLayout::Constellation,
+        step: Some(step_at(&key, 210)),
+        turn: Some((key.clone(), 200)),
+        ..AtlasState::default()
+    };
+
+    atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::ShowTurn(key.clone(), 100));
+    assert_eq!(state.step, None);
+    assert!(atlas_wiring::resolve_detail(&state, &model, None).is_none());
+
+    atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::StepBy(true));
+    atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::StepBy(false));
+    assert_eq!(state.step, None);
+}
