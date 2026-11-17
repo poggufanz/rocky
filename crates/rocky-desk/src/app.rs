@@ -36,7 +36,6 @@ use crate::setup_settings::SetupSettings;
 use crate::spawn::daemon_exe_name;
 use crate::ui::cards_view::CardAction;
 use crate::ui::flow_view::FlowHover;
-use crate::ui::now_view::NowAction;
 use crate::ui::title_bar::Tab;
 use crate::view::{Conn, Model};
 
@@ -130,18 +129,6 @@ impl Controller {
             }
         }
         requests
-    }
-
-    /// Toggles row expansion, debouncing active primary keys and sending child expansions directly.
-    fn toggle_open(&mut self, key: &AgentKey, now_ms: u64) {
-        if let Some(key) = self.model.toggle_open(key)
-            && self.model.accepts_timeline(&key)
-        {
-            let active_keys = self.model.active_primary_keys();
-            if self.timeline_fetch.on_open(&key, &active_keys, now_ms) {
-                self.request_timeline(key);
-            }
-        }
     }
 
     /// Dispatches deferred active timeline requests whose cooldown has elapsed.
@@ -238,8 +225,6 @@ struct DeskView {
     block_diff: Option<DiffModel>,
     /// Whether the Notices collapsible card is expanded.
     notices_open: bool,
-    /// Whether the idle sessions disclosure inside Now is expanded.
-    idle_open: bool,
     /// Current query text inside the change cards search box.
     search: SearchInput,
     /// 300 ms debounce state driving card search requests.
@@ -401,24 +386,9 @@ impl DeskView {
         cx.notify();
     }
 
-    fn on_now_action(&mut self, action: NowAction, window: &mut Window, cx: &mut Context<Self>) {
-        match action {
-            NowAction::ToggleNotices => {
-                self.notices_open = !self.notices_open;
-                cx.notify();
-            }
-            NowAction::ToggleAgent(key) => {
-                self.ctl.toggle_open(&key, now_ms());
-                cx.notify();
-            }
-            NowAction::ToggleIdle => {
-                self.idle_open = !self.idle_open;
-                cx.notify();
-            }
-            NowAction::OpenCard(card_id) => {
-                self.on_card_action(CardAction::OpenDetail(card_id), window, cx);
-            }
-        }
+    fn on_toggle_notices(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.notices_open = !self.notices_open;
+        cx.notify();
     }
 }
 

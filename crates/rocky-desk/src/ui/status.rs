@@ -1,11 +1,10 @@
-//! Status dot, pill, chip, and color helpers shared by the Now view and the atlas.
+//! Status dot, pill, chip, and color helpers shared by the atlas and settings.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Div, FontWeight, SharedString, div, px, rgb};
+use gpui::{Div, FontWeight, div, px, rgb};
 use rocky_proto::pipe::Status;
 
 use crate::i18n::{Msg, UiLang, tr};
-use crate::ui::motion;
 use crate::ui::tooltip::{
     CHIP_BG, CHIP_FG, CHIP_HIGH_BG, CHIP_HIGH_FG, CHIP_NEEDS_YOU_BG, CHIP_NEEDS_YOU_FG,
     CHIP_WORKING_BG, CHIP_WORKING_FG, STATUS_DONE, STATUS_FAILED, STATUS_IDLE, STATUS_NEEDS_YOU,
@@ -19,16 +18,6 @@ pub(crate) fn dot_el(color: u32) -> Div {
         .rounded_full()
         .flex_shrink_0()
         .bg(rgb(color))
-}
-
-pub(crate) fn status_dot(status: Status, pulse_id: Option<SharedString>) -> AnyElement {
-    let dot = dot_el(status_dot_color(status));
-    match pulse_id {
-        Some(id) if matches!(status, Status::NeedsYou | Status::Working) => {
-            motion::pulse(dot, id).into_any_element()
-        }
-        _ => dot.into_any_element(),
-    }
 }
 
 pub(crate) fn status_pill(lang: UiLang, status: Status) -> Div {

@@ -9,7 +9,7 @@ pub mod flow_view;
 pub mod harness;
 pub mod modal;
 pub mod motion;
-pub mod now_view;
+pub mod notices;
 pub mod repo_banner;
 pub mod setup_settings;
 pub mod status;

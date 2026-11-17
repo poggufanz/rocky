@@ -18,7 +18,7 @@ use crate::ui::card_detail::card_detail_view;
 use crate::ui::consent::consent_screen;
 use crate::ui::flow_view::flow_section;
 use crate::ui::modal::card_modal;
-use crate::ui::now_view::notices_card;
+use crate::ui::notices::notices_card;
 use crate::ui::setup_settings::removed_screen;
 use crate::ui::title_bar::{Tab, title_bar};
 use crate::ui::tooltip::{SURFACE_SUBTLE, TEXT_DARK};
@@ -159,7 +159,7 @@ impl DeskView {
                 &warnings,
                 self.notices_open,
                 cx,
-                Self::on_now_action,
+                Self::on_toggle_notices,
             ));
         }
 

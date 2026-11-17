@@ -230,7 +230,6 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                 card_detail: None,
                 block_diff: None,
                 notices_open: false,
-                idle_open: false,
                 search: SearchInput::default(),
                 search_debounce: Debounce::default(),
                 search_focus: cx.focus_handle(),
