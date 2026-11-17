@@ -164,15 +164,29 @@ fn wanted_keys_follow_window_and_subagent_setting() {
         session_id: s.into(),
         agent_id: a.into(),
     };
-    let ten = wanted_keys(&all, &project, SkyWindow::Min10, now, true);
+    let ten = wanted_keys(&all, &project, Some(SkyWindow::Min10), now, true);
     assert_eq!(ten, [k("s1", ""), k("s1", "sub")].into_iter().collect());
-    let thirty = wanted_keys(&all, &project, SkyWindow::Min30, now, true);
+    let thirty = wanted_keys(&all, &project, Some(SkyWindow::Min30), now, true);
     assert_eq!(
         thirty,
         [k("s1", ""), k("s1", "sub"), k("s2", "")]
             .into_iter()
             .collect()
     );
-    let flat = wanted_keys(&all, &project, SkyWindow::Min10, now, false);
+    let flat = wanted_keys(&all, &project, Some(SkyWindow::Min10), now, false);
     assert_eq!(flat, [k("s1", "")].into_iter().collect());
+    let everything = wanted_keys(&all, &project, None, now, false);
+    assert_eq!(everything, [k("s1", ""), k("s2", "")].into_iter().collect());
+}
+
+#[test]
+fn only_the_sky_layout_limits_wanted_sessions_to_its_window() {
+    use super::{AtlasLayout, AtlasState};
+    let sky = AtlasState::default();
+    assert_eq!(sky.wanted_window(), Some(SkyWindow::Min10));
+    let constellation = AtlasState {
+        layout: AtlasLayout::Constellation,
+        ..AtlasState::default()
+    };
+    assert_eq!(constellation.wanted_window(), None);
 }

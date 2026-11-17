@@ -98,18 +98,23 @@ pub(super) fn apply_atlas_action(state: &mut AtlasState, model: &Model, action: 
 }
 
 impl Controller {
-    /// Marks the project's recent sessions as wanted and asks for the
-    /// timelines that are newly needed. Repeated calls ask only once.
+    /// Marks the project's sessions the map draws as wanted and asks for the
+    /// timelines that are newly needed. Repeated calls ask only once. Working
+    /// rows go through the 500 ms scheduler like active primaries.
     pub(super) fn sync_atlas_timelines(
         &mut self,
         project: &ProjectId,
-        window: SkyWindow,
+        window: Option<SkyWindow>,
         now_ms: u64,
     ) {
         let subagents = self.model.subagent_tree_enabled();
         let keys = wanted_keys(self.model.agents(), project, window, now_ms, subagents);
-        for key in self.model.set_wanted(keys) {
-            self.request_timeline(key);
+        let added = self.model.set_wanted(keys);
+        let active = self.model.active_timeline_keys();
+        for key in added {
+            if self.timeline_fetch.on_wanted(&key, &active, now_ms) {
+                self.request_timeline(key);
+            }
         }
     }
 }
@@ -196,7 +201,7 @@ impl DeskView {
         let mut last_event = None;
         if let Some(project) = &project {
             self.ctl
-                .sync_atlas_timelines(project, self.atlas.window, now);
+                .sync_atlas_timelines(project, self.atlas.wanted_window(), now);
             let row = rows.iter().find(|r| &r.id == project);
             last_event = row.map(|r| r.last_event_ms);
             let name = row.and_then(|r| r.name.clone());

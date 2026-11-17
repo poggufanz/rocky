@@ -41,21 +41,12 @@ fn model_caches_active_timelines_without_open_and_drops_on_completion() {
 
     assert!(model.timeline(&k1).is_some());
     assert!(model.timeline(&k2).is_none());
-    // Legacy timeline_rows remains empty while row is collapsed.
-    assert!(model.timeline_rows(&k1, &crate::clock::utc_hhmm).is_empty());
 
     // Preserved across Snapshot while still active.
     model.apply(snapshot(vec![agent("S1", "", Status::NeedsYou, 60_000)]));
     assert!(model.timeline(&k1).is_some());
 
-    // Expanding and collapsing keeps cache while S1 stays active.
-    model.toggle_open(&k1);
-    assert!(model.timeline(&k1).is_some());
-    model.toggle_open(&k1);
-    assert!(model.timeline(&k1).is_some());
-
-    // Expanding S1 then transitioning it to Done drops its cached timeline.
-    model.toggle_open(&k1);
+    // Transitioning S1 to Done drops its cached timeline.
     model.apply(ServerMsg::Status {
         op: StatusOp::Upsert,
         agent: agent("S1", "", Status::Done, 70_000),
@@ -208,9 +199,8 @@ fn timeline_fetch_debounces_expansion_after_automatic_fetch() {
             .collect(),
     ));
 
-    // Expanding at t = 1_100 must not send another request inside 500 ms, while cached steps remain visible.
-    let opened = model.toggle_open(&k1).expect("row should open");
-    assert!(!fetch.on_open(&opened, &model.active_primary_keys(), 1_100));
+    // Wanting the key at t = 1_100 must not send another request inside 500 ms, while cached steps remain visible.
+    assert!(!fetch.on_wanted(&k1, &model.active_primary_keys(), 1_100));
 
     assert!(fetch.poll(&model.active_primary_keys(), 1_499).is_empty());
     assert_eq!(
@@ -218,10 +208,8 @@ fn timeline_fetch_debounces_expansion_after_automatic_fetch() {
         vec![k1.clone()]
     );
 
-    // Expanding outside the cooldown sends immediately and records last_sent for subsequent upserts.
-    model.toggle_open(&k1);
-    let reopened = model.toggle_open(&k1).expect("row should reopen");
-    assert!(fetch.on_open(&reopened, &model.active_primary_keys(), 2_100));
+    // Wanting outside the cooldown sends immediately and records last_sent for subsequent upserts.
+    assert!(fetch.on_wanted(&k1, &model.active_primary_keys(), 2_100));
 
     let upsert = ServerMsg::Status {
         op: StatusOp::Upsert,
@@ -253,14 +241,14 @@ fn timeline_fetch_leaves_non_primary_child_expansions_unthrottled() {
         vec![k_main.clone()]
     );
 
-    // Expanding a non-primary child sends immediately and never enters cooldown or pending.
-    assert!(fetch.on_open(&k_child, &model.active_primary_keys(), 1_000));
-    assert!(fetch.on_open(&k_child, &model.active_primary_keys(), 1_200));
+    // Wanting a non-primary child sends immediately and never enters cooldown or pending.
+    assert!(fetch.on_wanted(&k_child, &model.active_primary_keys(), 1_000));
+    assert!(fetch.on_wanted(&k_child, &model.active_primary_keys(), 1_200));
     assert!(fetch.poll(&model.active_primary_keys(), 1_500).is_empty());
 
-    // Active main rows still respect the 500 ms expansion cooldown and trailing flush.
-    assert!(fetch.on_open(&k_main, &model.active_primary_keys(), 1_600));
-    assert!(!fetch.on_open(&k_main, &model.active_primary_keys(), 1_700));
+    // Active main rows still respect the 500 ms wanted cooldown and trailing flush.
+    assert!(fetch.on_wanted(&k_main, &model.active_primary_keys(), 1_600));
+    assert!(!fetch.on_wanted(&k_main, &model.active_primary_keys(), 1_700));
     assert_eq!(
         fetch.poll(&model.active_primary_keys(), 2_100),
         vec![k_main]

@@ -70,13 +70,10 @@ impl TimelineFetch {
         }
     }
 
-    /// Requests a timeline fetch on row expansion while enforcing the 500 ms per-key cooldown
-    /// for active primary agents.
-    ///
-    /// Active primary keys inside cooldown are queued for trailing flush on [`Self::poll`], while
-    /// any already-cached timeline stays visible immediately. Non-primary keys bypass the
-    /// scheduler so child/subagent expansions stay direct with no cooldown.
-    pub fn on_open(
+    /// Asks for a newly wanted key's timeline, enforcing the 500 ms cooldown for
+    /// active keys: a key inside its cooldown is queued for [`Self::poll`] and
+    /// returns `false`. Keys outside `active_keys` bypass the scheduler.
+    pub fn on_wanted(
         &mut self,
         key: &AgentKey,
         active_keys: &BTreeSet<AgentKey>,
@@ -84,6 +81,7 @@ impl TimelineFetch {
     ) -> bool {
         self.prune_inactive(active_keys, now_ms);
         if active_keys.contains(key) {
+            self.active.insert(key.clone());
             self.request_or_defer(key, now_ms)
         } else {
             true

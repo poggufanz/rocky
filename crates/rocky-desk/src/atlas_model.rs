@@ -71,21 +71,29 @@ pub struct AtlasState {
     pub turn: Option<(AgentKey, u64)>,
 }
 
-/// Keys of every agent in `project` that was active inside the window, so the
-/// chart can draw them. Subagents count only when `subagents` is set.
+impl AtlasState {
+    /// The window that limits which sessions the map needs timelines for: the
+    /// Sky chart draws only its window, the Constellation any session.
+    pub fn wanted_window(&self) -> Option<SkyWindow> {
+        (self.layout == AtlasLayout::Sky).then_some(self.window)
+    }
+}
+
+/// Keys of every agent in `project` that the map draws: those active inside
+/// `window`, or all of them when `window` is `None`. Subagents count only when
+/// `subagents` is set.
 pub fn wanted_keys(
     agents: &BTreeMap<AgentKey, AgentStatus>,
     project: &ProjectId,
-    window: SkyWindow,
+    window: Option<SkyWindow>,
     now_ms: u64,
     subagents: bool,
 ) -> BTreeSet<AgentKey> {
-    let span = window.secs() * 1000;
     agents
         .values()
         .filter(|a| subagents || a.key.agent_id.is_empty())
         .filter(|a| project_id(&a.repo) == *project)
-        .filter(|a| a.last_event_ms + span >= now_ms)
+        .filter(|a| window.is_none_or(|w| a.last_event_ms + w.secs() * 1000 >= now_ms))
         .map(|a| a.key.clone())
         .collect()
 }

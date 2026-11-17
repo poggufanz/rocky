@@ -160,7 +160,7 @@ fn controller_requests_active_timeline_once_and_flushes_trailing_at_cooldown() {
 }
 
 #[test]
-fn controller_open_child_status_upsert_inside_cooldown_still_sends() {
+fn controller_wanted_working_subagent_upserts_share_the_cooldown() {
     let (mut ctl, rx) = test_controller();
     let k_main = AgentKey {
         session_id: "S1".to_string(),
@@ -170,7 +170,49 @@ fn controller_open_child_status_upsert_inside_cooldown_still_sends() {
         session_id: "S1".to_string(),
         agent_id: "sub-1".to_string(),
     };
+    apply_at(
+        &mut ctl,
+        working_snapshot(vec![
+            test_agent("S1", Status::Working, 900),
+            test_agent_with_id("S1", "sub-1", Status::Idle, 950),
+        ]),
+        1_000,
+    );
+    assert_eq!(drain_timelines(&rx), vec![k_main]);
+    ctl.model.set_wanted(std::collections::BTreeSet::from([k_child.clone()]));
 
+    // The first Working upsert asks at once; the next one 100 ms later waits.
+    apply_at(
+        &mut ctl,
+        upsert(test_agent_with_id("S1", "sub-1", Status::Working, 2_000)),
+        2_000,
+    );
+    assert_eq!(drain_timelines(&rx), vec![k_child.clone()]);
+    apply_at(
+        &mut ctl,
+        upsert(test_agent_with_id("S1", "sub-1", Status::Working, 2_100)),
+        2_100,
+    );
+    assert!(drain_timelines(&rx).is_empty());
+
+    ctl.poll_timelines(2_499);
+    assert!(drain_timelines(&rx).is_empty());
+    ctl.poll_timelines(2_500);
+    assert_eq!(drain_timelines(&rx), vec![k_child]);
+}
+
+#[test]
+fn controller_snapshot_asks_a_wanted_working_subagent_once() {
+    let (mut ctl, rx) = test_controller();
+    let k_main = AgentKey {
+        session_id: "S1".to_string(),
+        agent_id: String::new(),
+    };
+    let k_child = AgentKey {
+        session_id: "S1".to_string(),
+        agent_id: "sub-1".to_string(),
+    };
+    ctl.model.set_wanted(std::collections::BTreeSet::from([k_child.clone()]));
     apply_at(
         &mut ctl,
         working_snapshot(vec![
@@ -179,19 +221,30 @@ fn controller_open_child_status_upsert_inside_cooldown_still_sends() {
         ]),
         1_000,
     );
-    assert_eq!(drain_timelines(&rx), vec![k_main]);
+    let mut asked = drain_timelines(&rx);
+    asked.sort();
+    assert_eq!(asked, vec![k_main, k_child]);
+}
 
-    ctl.model.toggle_open(&k_child);
-    apply_at(
-        &mut ctl,
-        upsert(test_agent_with_id("S1", "sub-1", Status::Working, 1_200)),
-        1_200,
-    );
-    assert_eq!(
-        drain_timelines(&rx),
-        vec![k_child.clone()],
-        "open child status upsert inside 500 ms must send directly"
-    );
+#[test]
+fn constellation_asks_for_the_timeline_of_a_session_idle_past_the_sky_window() {
+    use crate::atlas_model::{AtlasLayout, AtlasState};
+    let now = 10_000_000;
+    let idle = test_agent("S1", Status::Idle, now - 20 * 60_000);
+    let key = idle.key.clone();
+    let mut asked = Vec::new();
+    for layout in [AtlasLayout::Sky, AtlasLayout::Constellation] {
+        let (mut ctl, rx) = test_controller();
+        apply_at(&mut ctl, working_snapshot(vec![idle.clone()]), now);
+        let state = AtlasState {
+            layout,
+            ..AtlasState::default()
+        };
+        ctl.sync_atlas_timelines(&atlas_project(), state.wanted_window(), now);
+        asked.push(drain_timelines(&rx));
+    }
+    assert!(asked[0].is_empty(), "the Sky chart does not draw it");
+    assert_eq!(asked[1], vec![key]);
 }
 
 fn atlas_project() -> crate::atlas_model::ProjectId {
@@ -290,10 +343,10 @@ fn atlas_sync_requests_idle_session_timelines_once() {
     );
     drain_timelines(&rx);
 
-    ctl.sync_atlas_timelines(&atlas_project(), SkyWindow::Min10, 100_000);
+    ctl.sync_atlas_timelines(&atlas_project(), Some(SkyWindow::Min10), 100_000);
     assert_eq!(drain_timelines(&rx), vec![key]);
 
-    ctl.sync_atlas_timelines(&atlas_project(), SkyWindow::Min10, 100_500);
+    ctl.sync_atlas_timelines(&atlas_project(), Some(SkyWindow::Min10), 100_500);
     assert!(drain_timelines(&rx).is_empty());
 }
 
@@ -313,7 +366,7 @@ fn atlas_sync_before_connect_is_requested_by_the_next_snapshot() {
     };
     ctl.outbox = None;
     ctl.model.apply(snapshot.clone());
-    ctl.sync_atlas_timelines(&atlas_project(), SkyWindow::Min10, 100_000);
+    ctl.sync_atlas_timelines(&atlas_project(), Some(SkyWindow::Min10), 100_000);
     assert!(drain_timelines(&rx).is_empty());
 
     ctl.outbox = Some(late_tx);

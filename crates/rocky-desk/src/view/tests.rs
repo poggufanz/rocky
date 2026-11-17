@@ -363,79 +363,11 @@ fn entry(
 }
 
 #[test]
-fn opening_a_row_requests_its_timeline() {
-    let mut m = Model::new();
-    let a = key("S1", "");
-    assert_eq!(m.toggle_open(&a), Some(a.clone()));
-    assert!(m.is_open(&a));
-    assert_eq!(m.toggle_open(&a), None);
-    assert!(!m.is_open(&a));
-}
-
-#[test]
-fn upsert_for_open_key_rerequests() {
-    let a = key("S1", "");
-    let b = key("S2", "");
-    let mut m = Model::new();
-    m.toggle_open(&a);
-    assert_eq!(
-        m.apply(ServerMsg::Status {
-            op: StatusOp::Upsert,
-            agent: agent("S1", "", Status::Working),
-        }),
-        vec![a.clone()]
-    );
-    assert_eq!(
-        m.apply(ServerMsg::Status {
-            op: StatusOp::Upsert,
-            agent: agent("S2", "", Status::Working),
-        }),
-        Vec::<AgentKey>::new()
-    );
-    assert!(m.agents().contains_key(&b));
-}
-
-#[test]
-fn settings_rerequests_every_open_timeline() {
-    let a = key("S1", "");
-    let b = key("S2", "");
-    let mut m = Model::new();
-    m.toggle_open(&a);
-    m.toggle_open(&b);
-    assert_eq!(
-        m.apply(ServerMsg::Settings {
-            settings: Settings::default(),
-        }),
-        vec![a, b]
-    );
-}
-
-#[test]
-fn snapshot_rerequests_present_keys_and_closes_missing() {
-    let a = key("S1", "");
-    let b = key("S2", "");
-    let mut m = Model::new();
-    m.toggle_open(&a);
-    m.toggle_open(&b);
-    m.apply(timeline_msg(
-        b.clone(),
-        vec![entry(1_000, TimelineKind::TurnStart, None, None, None)],
-    ));
-    assert_eq!(
-        m.apply(snapshot(vec![agent("S1", "", Status::Working)])),
-        vec![a.clone()]
-    );
-    assert!(m.is_open(&a));
-    assert!(!m.is_open(&b));
-    assert!(m.timeline_rows(&b, &crate::clock::utc_hhmm).is_empty());
-}
-
-#[test]
 fn removed_agent_closes_its_timeline() {
     let a = key("S1", "");
     let mut m = Model::new();
     m.apply(snapshot(vec![agent("S1", "", Status::Working)]));
-    m.toggle_open(&a);
+    m.set_wanted(BTreeSet::from([a.clone()]));
     m.apply(timeline_msg(
         a.clone(),
         vec![entry(
@@ -446,7 +378,7 @@ fn removed_agent_closes_its_timeline() {
             Some(Outcome::Ok),
         )],
     ));
-    assert_eq!(m.timeline_rows(&a, &crate::clock::utc_hhmm).len(), 1);
+    assert!(m.timeline(&a).is_some());
     assert_eq!(
         m.apply(ServerMsg::Status {
             op: StatusOp::Remove,
@@ -454,8 +386,7 @@ fn removed_agent_closes_its_timeline() {
         }),
         Vec::<AgentKey>::new()
     );
-    assert!(!m.is_open(&a));
-    assert!(m.timeline_rows(&a, &crate::clock::utc_hhmm).is_empty());
+    assert!(m.timeline(&a).is_none());
     assert_eq!(
         m.apply(ServerMsg::Status {
             op: StatusOp::Upsert,
@@ -473,36 +404,14 @@ fn timeline_reply_for_closed_key_is_dropped() {
         a.clone(),
         vec![entry(1_000, TimelineKind::TurnStart, None, None, None)],
     ));
-    assert!(m.timeline_rows(&a, &crate::clock::utc_hhmm).is_empty());
-}
-
-#[test]
-fn timeline_rows_map_kinds_and_outcomes() {
-    let a = key("S1", "");
-    let mut m = Model::new();
-    m.toggle_open(&a);
-    m.apply(timeline_msg(
-        a.clone(),
-        vec![entry(
-            50_520_000,
-            TimelineKind::Tool,
-            Some("Bash"),
-            Some("npm test"),
-            Some(Outcome::Pending),
-        )],
-    ));
-    let rows = m.timeline_rows(&a, &crate::clock::utc_hhmm);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].time, "14:02");
-    assert_eq!(en(&rows[0].text), "Bash npm test");
-    assert_eq!(rows[0].outcome, Some(Outcome::Pending));
+    assert!(m.timeline(&a).is_none());
 }
 
 #[test]
 fn timeline_entry_copy_reads_for_each_kind() {
     let a = key("S1", "");
     let mut m = Model::new();
-    m.toggle_open(&a);
+    m.set_wanted(BTreeSet::from([a.clone()]));
     m.apply(timeline_msg(
         a.clone(),
         vec![
@@ -536,8 +445,17 @@ fn timeline_entry_copy_reads_for_each_kind() {
             entry(10_000, TimelineKind::SessionEnd, None, None, None),
         ],
     ));
-    let rows = m.timeline_rows(&a, &crate::clock::utc_hhmm);
-    let text: Vec<String> = rows.iter().map(|r| en(&r.text)).collect();
+    let msgs: Vec<Msg> = m
+        .timeline(&a)
+        .expect("wanted timeline kept")
+        .iter()
+        .map(|e| Msg::TimelineEntry {
+            kind: e.kind,
+            tool: e.tool_name.clone(),
+            text: e.text.clone(),
+        })
+        .collect();
+    let text: Vec<String> = msgs.iter().map(en).collect();
     assert_eq!(
         text,
         vec![
@@ -553,8 +471,8 @@ fn timeline_entry_copy_reads_for_each_kind() {
             "session ended",
         ]
     );
-    assert_eq!(tr(UiLang::Id, &rows[0].text), "sesi dimulai");
-    assert_eq!(tr(UiLang::Id, &rows[2].text), "Bash");
+    assert_eq!(tr(UiLang::Id, &msgs[0]), "sesi dimulai");
+    assert_eq!(tr(UiLang::Id, &msgs[2]), "Bash");
     assert_eq!(en(&Msg::Outcome(Outcome::Ok)), "ok");
     assert_eq!(id(&Msg::Outcome(Outcome::Failed)), "gagal");
     assert_eq!(id(&Msg::Outcome(Outcome::Pending)), "tertunda");
@@ -683,21 +601,6 @@ fn set_wanted_skips_active_primaries_and_already_wanted_keys() {
 }
 
 #[test]
-fn closing_a_wanted_idle_row_keeps_its_timeline() {
-    let mut m = Model::new();
-    m.apply(snapshot(vec![agent("s1", "", Status::Idle)]));
-    let k = key("s1", "");
-    m.set_wanted(BTreeSet::from([k.clone()]));
-    m.toggle_open(&k);
-    m.apply(timeline_msg(
-        k.clone(),
-        vec![entry(1, TimelineKind::Tool, Some("Bash"), None, None)],
-    ));
-    m.toggle_open(&k);
-    assert!(m.timeline(&k).is_some());
-}
-
-#[test]
 fn snapshot_rerequests_wanted_keys() {
     let mut m = Model::new();
     let k = key("s2", "");
@@ -709,13 +612,27 @@ fn snapshot_rerequests_wanted_keys() {
 }
 
 #[test]
-fn snapshot_returns_a_key_both_open_and_wanted_once() {
+fn upsert_of_a_wanted_working_key_leaves_the_request_to_the_scheduler() {
     let mut m = Model::new();
-    let k = key("s2", "");
-    m.toggle_open(&k);
+    m.apply(snapshot(vec![agent("s1", "sub", Status::Idle)]));
+    let k = key("s1", "sub");
     m.set_wanted(BTreeSet::from([k.clone()]));
+    let asked = m.apply(ServerMsg::Status {
+        op: StatusOp::Upsert,
+        agent: agent("s1", "sub", Status::Working),
+    });
+    assert!(asked.is_empty());
+    assert!(m.active_timeline_keys().contains(&k));
+}
 
-    let again = m.apply(snapshot(vec![agent("s2", "", Status::Idle)]));
-
-    assert_eq!(again, vec![k]);
+#[test]
+fn settings_broadcast_requests_nothing() {
+    let mut m = Model::new();
+    m.set_wanted(BTreeSet::from([key("s1", "")]));
+    assert!(
+        m.apply(ServerMsg::Settings {
+            settings: Settings::default(),
+        })
+        .is_empty()
+    );
 }

@@ -118,7 +118,7 @@ impl Controller {
         legacy_requests: Vec<AgentKey>,
         now_ms: u64,
     ) -> Vec<AgentKey> {
-        let active_keys = self.model.active_primary_keys();
+        let active_keys = self.model.active_timeline_keys();
         let mut requests = self.timeline_fetch.on_msg(msg, &active_keys, now_ms);
         for key in legacy_requests {
             if !active_keys.contains(&key)
@@ -133,7 +133,7 @@ impl Controller {
 
     /// Dispatches deferred active timeline requests whose cooldown has elapsed.
     fn poll_timelines(&mut self, now_ms: u64) {
-        let active_keys = self.model.active_primary_keys();
+        let active_keys = self.model.active_timeline_keys();
         for key in self.timeline_fetch.poll(&active_keys, now_ms) {
             self.request_timeline(key);
         }
