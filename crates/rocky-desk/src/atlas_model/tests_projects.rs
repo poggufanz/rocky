@@ -41,8 +41,34 @@ fn map<const N: usize>(list: [AgentStatus; N]) -> BTreeMap<AgentKey, AgentStatus
     list.into_iter().map(|a| (a.key.clone(), a)).collect()
 }
 
+fn outside_repo(session: &str, folder: &str, last_ms: u64) -> AgentStatus {
+    let mut a = agent(session, "", Status::Idle, None, last_ms);
+    a.repo.name = folder.into();
+    a
+}
+
 #[test]
-fn sessions_group_by_main_root_and_outside_repo_is_one_project() {
+fn sessions_outside_a_repo_group_by_their_folder() {
+    let rows = projects(
+        &map([
+            outside_repo("s1", "rocky-cli", 900),
+            outside_repo("s2", "rocky-cli", 800),
+            outside_repo("s3", "notes", 700),
+        ]),
+        1_000,
+    );
+    assert_eq!(rows.len(), 2);
+    let cli = rows
+        .iter()
+        .find(|r| r.name.as_deref() == Some("rocky-cli"))
+        .unwrap();
+    assert_eq!(cli.sessions.len(), 2);
+    assert!(rows.iter().any(|r| r.name.as_deref() == Some("notes")));
+    assert!(rows.iter().all(|r| !r.id.0.is_empty()));
+}
+
+#[test]
+fn sessions_group_by_main_root_and_sessions_without_cwd_are_one_project() {
     let rows = projects(
         &map([
             agent("s1", "", Status::Working, Some("C:/p/rocky"), 900),

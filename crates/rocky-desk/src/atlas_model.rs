@@ -18,17 +18,20 @@ mod tests_projects;
 mod tests_sky;
 
 /// Stable identity of a project: the main checkout root, else the repo
-/// root, else empty for sessions outside any repo.
+/// root, else the folder name for a session outside any repo, else empty
+/// when the daemon has no cwd for the session yet.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectId(pub String);
 
 pub fn project_id(repo: &RepoInfo) -> ProjectId {
-    ProjectId(
-        repo.main_root
-            .clone()
-            .or_else(|| repo.root.clone())
-            .unwrap_or_default(),
-    )
+    // ponytail: folders outside a repo group by basename only (the daemon sends
+    // no full cwd); two same-named folders merge, send cwd if that bites.
+    let id = match repo.main_root.as_ref().or(repo.root.as_ref()) {
+        Some(root) => root.clone(),
+        None if repo.name.is_empty() => String::new(),
+        None => format!("folder:{}", repo.name),
+    };
+    ProjectId(id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
