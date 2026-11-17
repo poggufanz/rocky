@@ -471,3 +471,28 @@ fn atlas_sync_requests_idle_session_timelines_once() {
     ctl.sync_atlas_timelines(&atlas_project(), SkyWindow::Min10, 100_500);
     assert!(drain_timelines(&rx).is_empty());
 }
+
+#[test]
+fn atlas_sync_before_connect_is_requested_by_the_next_snapshot() {
+    use crate::atlas_model::SkyWindow;
+    let (mut ctl, rx) = test_controller();
+    let (late_tx, late_rx) = mpsc::channel();
+    let agent = test_agent("S1", Status::Idle, 99_000);
+    let key = agent.key.clone();
+    let snapshot = ServerMsg::Snapshot {
+        agents: vec![agent],
+        aggregate: Status::Idle,
+        health: Health::default(),
+        settings: Settings::default(),
+        repo_pending: Vec::new(),
+    };
+    ctl.outbox = None;
+    ctl.model.apply(snapshot.clone());
+    ctl.sync_atlas_timelines(&atlas_project(), SkyWindow::Min10, 100_000);
+    assert!(drain_timelines(&rx).is_empty());
+
+    ctl.outbox = Some(late_tx);
+    apply_at(&mut ctl, snapshot, 100_500);
+
+    assert_eq!(drain_timelines(&late_rx), vec![key]);
+}

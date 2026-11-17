@@ -64,7 +64,7 @@ impl Model {
     /// Applies one daemon message and returns the timeline keys to (re)request.
     ///
     /// Keys come back for an upsert of an open row, for every open row on a
-    /// settings broadcast, and for every open row a snapshot still carries.
+    /// settings broadcast, and for every open or wanted row a snapshot still carries.
     /// Rows that disappear close on the spot and are not requested again.
     pub fn apply(&mut self, msg: ServerMsg) -> Vec<AgentKey> {
         match msg {
@@ -79,7 +79,16 @@ impl Model {
                 self.settings = Some(settings);
                 self.open.retain(|k| self.agents.contains_key(k));
                 self.retain_timelines();
-                self.open.iter().cloned().collect()
+                // A snapshot follows every (re)connect, so open and wanted rows
+                // both ask again; a set keeps a row in both lists to one request.
+                let again: BTreeSet<AgentKey> = self
+                    .open
+                    .iter()
+                    .chain(&self.wanted)
+                    .filter(|k| self.agents.contains_key(*k))
+                    .cloned()
+                    .collect();
+                again.into_iter().collect()
             }
             ServerMsg::Settings { settings } => {
                 self.settings = Some(settings);

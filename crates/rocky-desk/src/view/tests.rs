@@ -696,3 +696,26 @@ fn closing_a_wanted_idle_row_keeps_its_timeline() {
     m.toggle_open(&k);
     assert!(m.timeline(&k).is_some());
 }
+
+#[test]
+fn snapshot_rerequests_wanted_keys() {
+    let mut m = Model::new();
+    let k = key("s2", "");
+    m.set_wanted(BTreeSet::from([k.clone()]));
+
+    let again = m.apply(snapshot(vec![agent("s2", "", Status::Idle)]));
+
+    assert_eq!(again, vec![k]);
+}
+
+#[test]
+fn snapshot_returns_a_key_both_open_and_wanted_once() {
+    let mut m = Model::new();
+    let k = key("s2", "");
+    m.toggle_open(&k);
+    m.set_wanted(BTreeSet::from([k.clone()]));
+
+    let again = m.apply(snapshot(vec![agent("s2", "", Status::Idle)]));
+
+    assert_eq!(again, vec![k]);
+}
