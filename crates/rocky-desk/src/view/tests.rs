@@ -31,6 +31,7 @@ fn agent(session: &str, agent_id: &str, status: Status) -> AgentStatus {
             branch: Some("main".into()),
         },
         prompt: None,
+        harness: None,
     }
 }
 

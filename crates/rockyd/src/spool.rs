@@ -196,6 +196,7 @@ impl Ingestor {
                                     recv_ms: rec.recv_ms,
                                 });
                             }
+                            state.set_session_harness(&ev.session_id, &rec.harness);
                             if let ApplyOutcome::Changed(c) = state.apply(&ev, rec.recv_ms, repo_of)
                             {
                                 for key in c.upserted {

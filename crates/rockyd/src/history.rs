@@ -238,12 +238,17 @@ pub fn replay(
                 srcs.insert(src);
             }
             match line.body {
-                HistoryBody::Event { recv_ms, event, .. } => {
+                HistoryBody::Event {
+                    harness,
+                    recv_ms,
+                    event,
+                } => {
                     let event = HookEvent {
                         prompt: None,
                         ..event
                     };
                     let event = state.prepare(event);
+                    state.set_session_harness(&event.session_id, &harness);
                     state.apply(&event, recv_ms, repo_of);
                 }
                 HistoryBody::Gap(gap) => {

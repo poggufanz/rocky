@@ -951,3 +951,22 @@ fn prompts_switch_clears_held_drops_off_events_and_accepts_next_when_on() {
     assert_eq!(st.set_prompt("S1", 40, next.clone()), Some(main_key("S1")));
     assert_eq!(st.get(&main_key("S1")).unwrap().prompt, Some(next));
 }
+
+#[test]
+fn agents_carry_the_harness_of_their_session() {
+    let mut st = StatusState::new();
+    st.set_session_harness("S1", "codex");
+    st.apply(&ev("SessionStart", "S1", None), 1, &mut repo);
+    st.apply(&ev("SubagentStart", "S1", Some("sub-1")), 2, &mut repo);
+    assert_eq!(
+        st.get(&main_key("S1")).unwrap().harness.as_deref(),
+        Some("codex")
+    );
+    assert_eq!(
+        st.get(&key("S1", "sub-1")).unwrap().harness.as_deref(),
+        Some("codex")
+    );
+    // A session the daemon never saw a harness for stays None.
+    st.apply(&ev("SessionStart", "S2", None), 3, &mut repo);
+    assert_eq!(st.get(&main_key("S2")).unwrap().harness, None);
+}

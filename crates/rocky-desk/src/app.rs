@@ -477,6 +477,7 @@ mod tests {
                 branch: Some("main".to_string()),
             },
             prompt: None,
+            harness: None,
         }
     }
 

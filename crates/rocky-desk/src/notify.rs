@@ -290,6 +290,7 @@ mod tests {
                 branch: Some("main".into()),
             },
             prompt: None,
+            harness: None,
         }
     }
 
