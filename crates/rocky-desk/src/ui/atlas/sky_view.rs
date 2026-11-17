@@ -23,8 +23,17 @@ use crate::ui::tooltip::{
 };
 
 pub const BAND_LABEL_W: f32 = 64.0;
-/// Narrow enough that the default window shows the whole plot, "now" included.
-pub const PLOT_MIN_W: f32 = 480.0;
+/// Floor for very narrow windows; the plot otherwise fills the card.
+pub const PLOT_MIN_W: f32 = 280.0;
+/// Padding of the card on each side.
+pub const CARD_PAD: f32 = 14.0;
+/// Border of the card on each side.
+pub const CARD_BORDER: f32 = 1.0;
+
+/// Width of the plot for a card whose inner width is `avail_w`.
+pub fn plot_width(avail_w: f32) -> f32 {
+    (avail_w - BAND_LABEL_W).max(PLOT_MIN_W)
+}
 
 const TICK_STRIP_H: f32 = 20.0;
 const TITLE_MAX_W: f32 = 360.0;
@@ -55,20 +64,22 @@ pub(super) fn recent_span_label(lang: UiLang, window: SkyWindow) -> String {
     atlas_text(lang, &AtlasMsg::Minutes { n })
 }
 
-/// The Sky chart card for `chart`. `repo` names the project in the subtitle.
+/// The Sky chart card for `chart`; `avail_w` is the card's inner width. `repo` names the project in the subtitle.
 /// The chart's geometry is already anchored to now, so `_now_ms` is unused here.
+#[allow(clippy::too_many_arguments)]
 pub fn sky_card<T: 'static>(
     lang: UiLang,
     chart: &SkyChart,
     repo: &str,
     selected: Option<&StepRef>,
     _now_ms: u64,
+    avail_w: f32,
     cx: &mut Context<T>,
     on: OnAtlasAction<T>,
 ) -> Div {
     card_shell()
         .child(header(lang, chart.window, repo, cx, on))
-        .child(plot_scroller().child(plot_row(lang, chart, selected, cx, on)))
+        .child(plot_scroller().child(plot_row(lang, chart, selected, plot_width(avail_w), cx, on)))
         .child(legend(lang, chart.window))
 }
 
@@ -78,7 +89,7 @@ pub(super) fn card_shell() -> Div {
         .flex()
         .flex_col()
         .gap(px(10.0))
-        .p(px(14.0))
+        .p(px(CARD_PAD))
         .rounded(px(10.0))
         .bg(rgb(CARD_BG))
         .border_1()
@@ -184,6 +195,7 @@ fn plot_row<T: 'static>(
     lang: UiLang,
     chart: &SkyChart,
     selected: Option<&StepRef>,
+    plot_w: f32,
     cx: &mut Context<T>,
     on: OnAtlasAction<T>,
 ) -> Div {
@@ -198,13 +210,13 @@ fn plot_row<T: 'static>(
     let plot = div()
         .flex()
         .flex_col()
-        .flex_1()
-        .min_w(px(PLOT_MIN_W))
+        .flex_none()
+        .w(px(plot_w))
         .child(tick_strip(lang, chart))
-        .child(plot_body(lang, chart, selected, height, cx, on));
+        .child(plot_body(lang, chart, selected, (height, plot_w), cx, on));
     div()
         .flex()
-        .min_w(px(BAND_LABEL_W + PLOT_MIN_W))
+        .min_w(px(BAND_LABEL_W + plot_w))
         .child(labels)
         .child(plot)
 }
@@ -315,7 +327,7 @@ fn plot_body<T: 'static>(
     lang: UiLang,
     chart: &SkyChart,
     selected: Option<&StepRef>,
-    height: f32,
+    (height, plot_w): (f32, f32),
     cx: &mut Context<T>,
     on: OnAtlasAction<T>,
 ) -> Div {
@@ -331,7 +343,7 @@ fn plot_body<T: 'static>(
     let mut layer = drawable_layer().child(lines);
     for (band_idx, (band, top)) in chart.bands.iter().zip(band_tops(chart)).enumerate() {
         layer = layer.children(band_notes(lang, band, top));
-        layer = layer.children(band_captions(lang, band, top));
+        layer = layer.children(band_captions(lang, band, top, plot_w));
         for (i, star) in band.stars.iter().enumerate() {
             let y = row_y(top, star.row);
             let on_it = selected == Some(&star.step);
@@ -493,8 +505,8 @@ fn star_caption_for(star: &Star, lang: UiLang, top: f32) -> Option<Div> {
 }
 
 /// Turn titles and failed or live star captions of one band.
-fn band_captions(lang: UiLang, band: &SkyBand, top: f32) -> Vec<Div> {
-    let titles = visible_titles(band, PLOT_MIN_W)
+fn band_captions(lang: UiLang, band: &SkyBand, top: f32, plot_w: f32) -> Vec<Div> {
+    let titles = visible_titles(band, plot_w)
         .into_iter()
         .filter_map(|i| turn_title(&band.turns[i], band, top));
     let captions = band
@@ -560,8 +572,8 @@ mod tests {
     use rocky_proto::pipe::{AgentKey, Status};
 
     use super::{
-        BAND_LABEL_W, PLOT_MIN_W, Side, drawable_width, label_side, plot_gutter, plot_scroller,
-        plot_surface, recent_span_label, star_hit_box, visible_titles,
+        PLOT_MIN_W, Side, drawable_width, label_side, plot_gutter, plot_scroller, plot_surface,
+        plot_width, recent_span_label, star_hit_box, visible_titles,
     };
     use crate::atlas_model::SkyWindow;
     use crate::atlas_model::StepRef;
@@ -704,9 +716,9 @@ mod tests {
     }
 
     #[test]
-    fn plot_fits_a_default_window_without_scrolling() {
-        // A 933 px window leaves about 617 px inside the chart card.
-        const { assert!(BAND_LABEL_W + PLOT_MIN_W <= 617.0) };
+    fn plot_fits_a_narrow_card_and_keeps_a_floor() {
+        assert_eq!(plot_width(401.0), 337.0);
+        assert_eq!(plot_width(100.0), PLOT_MIN_W);
     }
 
     #[test]

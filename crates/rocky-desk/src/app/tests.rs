@@ -321,3 +321,23 @@ fn atlas_sync_before_connect_is_requested_by_the_next_snapshot() {
 
     assert_eq!(drain_timelines(&late_rx), vec![key]);
 }
+
+#[test]
+fn sky_plot_fits_the_card_in_a_narrow_window() {
+    use crate::ui::atlas::sky_view::{BAND_LABEL_W, plot_width};
+    // A 455 px window is narrow: no sidebar column, 12 px page padding, 14 px
+    // card padding and a 1 px border on each side.
+    let avail = atlas_wiring::sky_avail_width(455.0, true);
+    assert_eq!(avail, 455.0 - 24.0 - 30.0);
+    assert!(plot_width(avail) + BAND_LABEL_W <= avail);
+}
+
+#[test]
+fn sky_card_width_respects_the_sidebar_and_the_column_cap() {
+    // Wide: the sidebar takes 224 + 24 px; the column caps at 1200.
+    assert_eq!(
+        atlas_wiring::sky_avail_width(1400.0, false),
+        1400.0 - 248.0 - 24.0 - 30.0
+    );
+    assert_eq!(atlas_wiring::sky_avail_width(2400.0, false), 1200.0 - 30.0);
+}

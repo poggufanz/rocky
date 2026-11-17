@@ -12,7 +12,7 @@ use crate::ui::status::{failures_chip, status_pill};
 use crate::ui::tooltip::{BORDER_LIGHT, CARD_BG, ROW_HOVER_BG, TEXT_DARK, TEXT_MUTED, TEXT_SUBTLE};
 use rocky_proto::pipe::Status;
 
-const SIDEBAR_WIDTH: f32 = 224.0;
+pub(crate) const SIDEBAR_WIDTH: f32 = 224.0;
 const STRIP_ROW_WIDTH: f32 = 220.0;
 const BADGE_ICON: f32 = 14.0;
 

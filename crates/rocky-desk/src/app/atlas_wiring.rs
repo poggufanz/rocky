@@ -15,7 +15,8 @@ use crate::i18n::{AtlasMsg, Msg, UiLang, atlas_text, tr};
 use crate::settings_view::View;
 use crate::ui::atlas::constellation_view::constellation_card;
 use crate::ui::atlas::detail_view::{detail_card, status_bar};
-use crate::ui::atlas::sky_view::sky_card;
+use crate::ui::atlas::sidebar::SIDEBAR_WIDTH;
+use crate::ui::atlas::sky_view::{CARD_BORDER, CARD_PAD, sky_card};
 use crate::ui::atlas::{AtlasAction, needs_you_bar, project_header, sidebar};
 use crate::ui::cards_view::{CardAction, cards_section};
 use crate::ui::title_bar::Tab;
@@ -26,6 +27,19 @@ use crate::view::Model;
 const NARROW_BELOW: f32 = 760.0;
 /// Widest the atlas column grows.
 const MAX_ATLAS_W: f32 = 1200.0;
+/// Padding of the scrolling column and of the sidebar wrapper (`p_3`), per side.
+const PAGE_PAD: f32 = 12.0;
+
+/// Inner width of the Sky chart card for a window `viewport_w` wide.
+pub(super) fn sky_avail_width(viewport_w: f32, narrow: bool) -> f32 {
+    let sidebar = if narrow {
+        0.0
+    } else {
+        SIDEBAR_WIDTH + 2.0 * PAGE_PAD
+    };
+    let column = (viewport_w - sidebar - 2.0 * PAGE_PAD).min(MAX_ATLAS_W);
+    column - 2.0 * (CARD_PAD + CARD_BORDER)
+}
 
 /// The selected step when it still exists, else the project's default step.
 fn resolve_detail(state: &AtlasState, model: &Model, home: Option<&str>) -> Option<StepDetail> {
@@ -168,7 +182,8 @@ impl DeskView {
         let rows = projects(self.ctl.model.agents(), now);
         let project = resolve_project(self.atlas.project.as_ref(), &rows);
         self.atlas.project = project.clone();
-        let narrow = f32::from(window.viewport_size().width) < NARROW_BELOW;
+        let viewport_w = f32::from(window.viewport_size().width);
+        let narrow = viewport_w < NARROW_BELOW;
         let side = sidebar(
             lang,
             &rows,
@@ -185,7 +200,7 @@ impl DeskView {
             let row = rows.iter().find(|r| &r.id == project);
             last_event = row.map(|r| r.last_event_ms);
             let name = row.and_then(|r| r.name.clone());
-            column = self.atlas_body(column, project, name, narrow, now, cx);
+            column = self.atlas_body(column, project, name, viewport_w, now, cx);
         }
         let column = column.child(cards_section(
             lang,
@@ -207,11 +222,13 @@ impl DeskView {
         mut column: Div,
         project: &ProjectId,
         name: Option<String>,
-        narrow: bool,
+        viewport_w: f32,
         now: u64,
         cx: &mut Context<Self>,
     ) -> Div {
         let lang = self.ctl.ui_lang;
+        let narrow = viewport_w < NARROW_BELOW;
+        let avail_w = sky_avail_width(viewport_w, narrow);
         let (bars, rest) = needs_you_bars(self.ctl.model.agents(), Some(project), now);
         for bar in &bars {
             column = column.child(needs_you_bar(lang, bar, cx, Self::on_atlas_action));
@@ -230,7 +247,14 @@ impl DeskView {
         let home = self.home_dir.as_deref();
         let detail = resolve_detail(&self.atlas, &self.ctl.model, home);
         let selected = detail.as_ref().map(|d| d.step.clone());
-        column = column.child(self.map_card(lang, project, &title, selected.as_ref(), now, cx));
+        column = column.child(self.map_card(
+            lang,
+            project,
+            &title,
+            selected.as_ref(),
+            (now, avail_w),
+            cx,
+        ));
         column.child(detail_card(
             lang,
             detail.as_ref(),
@@ -242,13 +266,14 @@ impl DeskView {
     }
 
     /// The Sky chart or Constellation card for the current layout.
+    #[allow(clippy::too_many_arguments)]
     fn map_card(
         &self,
         lang: UiLang,
         project: &ProjectId,
         title: &str,
         selected: Option<&StepRef>,
-        now: u64,
+        (now, avail_w): (u64, f32),
         cx: &mut Context<Self>,
     ) -> Div {
         let model = &self.ctl.model;
@@ -261,6 +286,7 @@ impl DeskView {
                     title,
                     selected,
                     now,
+                    avail_w,
                     cx,
                     Self::on_atlas_action,
                 )
