@@ -139,3 +139,12 @@ fn atlas_copy_renders_en_and_id() {
     check(AtlasMsg::KeyLayout, "layout", "tata letak");
     check(AtlasMsg::KeyFind, "find file", "cari file");
 }
+
+#[test]
+fn chart_row_names_and_scale_unit_render_en_and_id() {
+    check(AtlasMsg::Now, "now", "kini");
+    check(AtlasMsg::RowEdit, "edit", "edit");
+    check(AtlasMsg::RowRead, "read", "baca");
+    check(AtlasMsg::RowCmd, "cmd", "cmd");
+    check(AtlasMsg::Minutes { n: 9 }, "9 min", "9 mnt");
+}

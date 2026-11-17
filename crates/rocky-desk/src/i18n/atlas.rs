@@ -70,6 +70,13 @@ pub enum AtlasMsg {
     KeyStep,
     KeyLayout,
     KeyFind,
+    Now,
+    RowEdit,
+    RowRead,
+    RowCmd,
+    Minutes {
+        n: u64,
+    },
 }
 
 pub fn atlas_text(lang: UiLang, msg: &AtlasMsg) -> String {
@@ -129,6 +136,11 @@ fn atlas_en(msg: &AtlasMsg) -> String {
         AtlasMsg::KeyStep => "step".into(),
         AtlasMsg::KeyLayout => "layout".into(),
         AtlasMsg::KeyFind => "find file".into(),
+        AtlasMsg::Now => "now".into(),
+        AtlasMsg::RowEdit => "edit".into(),
+        AtlasMsg::RowRead => "read".into(),
+        AtlasMsg::RowCmd => "cmd".into(),
+        AtlasMsg::Minutes { n } => format!("{n} min"),
     }
 }
 
@@ -179,5 +191,10 @@ fn atlas_id(msg: &AtlasMsg) -> String {
         AtlasMsg::KeyStep => "langkah".into(),
         AtlasMsg::KeyLayout => "tata letak".into(),
         AtlasMsg::KeyFind => "cari file".into(),
+        AtlasMsg::Now => "kini".into(),
+        AtlasMsg::RowEdit => "edit".into(),
+        AtlasMsg::RowRead => "baca".into(),
+        AtlasMsg::RowCmd => "cmd".into(),
+        AtlasMsg::Minutes { n } => format!("{n} mnt"),
     }
 }

@@ -15,6 +15,9 @@ use crate::ui::tooltip::{
 };
 
 pub mod sidebar;
+pub mod sky_paint;
+pub mod sky_view;
+pub mod star;
 
 pub use sidebar::sidebar;
 

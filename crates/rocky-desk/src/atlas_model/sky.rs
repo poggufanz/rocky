@@ -1,5 +1,6 @@
 //! Sky chart geometry: every agent step of one project as a star placed by time.
 
+use super::constellation::step_label;
 use super::{ProjectId, SkyWindow, StepRef, project_id};
 use crate::cards_model::{CardsModel, first_non_empty_line, prompt_display, sanitize_single_line};
 use crate::i18n::UiLang;
@@ -80,6 +81,8 @@ pub struct Star {
     pub row: RowKind,
     pub radius: f32,
     pub kind: StarKind,
+    /// Tool and target, set only for failed, running, and waiting stars.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +293,17 @@ fn band_rank(status: Status) -> u8 {
     }
 }
 
+/// `"{tool} {target}"` for a step, the target shortened like the constellation's labels.
+fn star_label(entry: &TimelineEntry, root: Option<&str>) -> String {
+    let tool = tool_label(entry.tool_name.as_deref().unwrap_or(""));
+    let target = step_label(entry, root, None);
+    if target.is_empty() || Some(target.as_str()) == entry.tool_name.as_deref() {
+        tool
+    } else {
+        format!("{tool} {target}")
+    }
+}
+
 /// Stars of one agent's steps that fall in the window. `live` is the turn the
 /// agent is still working in; its one pending step is the live star.
 fn turn_stars(
@@ -299,6 +313,7 @@ fn turn_stars(
     live_status: Option<Status>,
     now_ms: u64,
     window: SkyWindow,
+    root: Option<&str>,
 ) -> Vec<Star> {
     let in_window: Vec<(&TimelineEntry, f32)> = steps
         .iter()
@@ -325,6 +340,7 @@ fn turn_stars(
                     magnitude(entry.dur_ms)
                 },
                 kind,
+                label: (kind != StarKind::Plain).then(|| star_label(entry, root)),
             }
         })
         .collect()
@@ -360,6 +376,7 @@ fn primary_turns(
             is_live.then_some(agent.status),
             input.now_ms,
             input.window,
+            agent.repo.root.as_deref(),
         );
         let first = stars.len();
         stars.extend(built);
@@ -430,6 +447,7 @@ fn sub_lanes(
             is_live_status(child.status).then_some(child.status),
             input.now_ms,
             input.window,
+            parent.repo.root.as_deref(),
         );
         if built.is_empty() {
             continue;

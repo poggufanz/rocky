@@ -373,3 +373,32 @@ fn working_subagent_last_pending_step_is_running() {
     assert_eq!(subs[1].kind, StarKind::Running);
     assert_eq!(subs[1].radius, LIVE_RADIUS);
 }
+
+#[test]
+fn only_failed_and_live_stars_carry_a_label() {
+    let k = key("s1", "");
+    let mut failed = tool(NOW - 40_000, "Bash", Outcome::Failed);
+    failed.text = Some("cargo check".into());
+    let mut running = tool(NOW - 30_000, "Edit", Outcome::Pending);
+    running.text = Some(format!("{ROOT}/src/a.rs"));
+    let tl = vec![
+        turn_start(NOW - 60_000),
+        tool(NOW - 50_000, "Read", Outcome::Ok),
+        failed,
+        running,
+    ];
+    let c = chart(
+        vec![agent("s1", "", Status::Working, NOW - 30_000)],
+        vec![(k, tl)],
+        false,
+    );
+    let labels: Vec<_> = c.bands[0].stars.iter().map(|s| s.label.clone()).collect();
+    assert_eq!(
+        labels,
+        [
+            None,
+            Some("cmd cargo check".to_string()),
+            Some("edit src/a.rs".to_string())
+        ]
+    );
+}
