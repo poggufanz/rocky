@@ -16,6 +16,7 @@ use gpui_tray::Tray;
 use rocky_proto::pipe::{AgentKey, ClientMsg, ServerMsg, Status};
 use rocky_proto::settings::Lang;
 
+use crate::atlas_model::AtlasState;
 use crate::card_detail_model::{DetailModel, DiffModel};
 use crate::cards_model::CardsModel;
 use crate::client::Outbox;
@@ -39,6 +40,7 @@ use crate::ui::now_view::NowAction;
 use crate::ui::title_bar::Tab;
 use crate::view::{Conn, Model};
 
+mod atlas_wiring;
 mod autostart_wiring;
 mod cards_wiring;
 mod consent_wiring;
@@ -260,6 +262,8 @@ struct DeskView {
     main_tab: Tab,
     /// Flow row under the pointer, whose strands are drawn forward.
     flow_hover: Option<FlowHover>,
+    /// Star atlas selection: project, layout, window, step, and turn.
+    atlas: AtlasState,
     /// Focus inside the card modal, so Escape reaches it.
     modal_focus: FocusHandle,
     /// Focus on the window root, so Tab and Escape reach the desk's key

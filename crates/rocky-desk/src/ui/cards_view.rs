@@ -10,6 +10,7 @@ use gpui::{
     StyledText, Window, div, px, rgb,
 };
 
+use crate::atlas_model::ProjectId;
 use crate::cards_model::{CardRow, CardsModel, FileChip};
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::search_input::SearchInput;
@@ -54,6 +55,7 @@ pub(crate) fn section_title(text: String) -> Div {
 pub fn cards_section<T: 'static>(
     lang: UiLang,
     cards: &CardsModel,
+    project: Option<&ProjectId>,
     search: &SearchInput,
     search_focus: &FocusHandle,
     window: &Window,
@@ -83,7 +85,10 @@ pub fn cards_section<T: 'static>(
             )),
     );
 
-    let rows = cards.rows(lang);
+    let rows = match project {
+        Some(project) => cards.rows_for(lang, project),
+        None => cards.rows(lang),
+    };
     if rows.is_empty() {
         let copy = cards.empty_msg();
         section = section.child(

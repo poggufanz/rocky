@@ -15,6 +15,7 @@ use crate::ui::tooltip::{
 };
 
 pub mod constellation_view;
+pub mod detail_view;
 pub mod sidebar;
 pub mod sky_paint;
 pub mod sky_view;

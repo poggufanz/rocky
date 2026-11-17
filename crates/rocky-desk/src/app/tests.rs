@@ -368,3 +368,106 @@ fn controller_open_child_status_upsert_inside_cooldown_still_sends() {
     );
     assert_eq!(drain_timelines(&rx), vec![k_s2_child]);
 }
+
+fn atlas_project() -> crate::atlas_model::ProjectId {
+    crate::atlas_model::ProjectId("/repos/rocky".to_string())
+}
+
+fn tool_step(ms: u64) -> TimelineEntry {
+    TimelineEntry {
+        ms,
+        kind: TimelineKind::Tool,
+        tool_name: Some("Edit".to_string()),
+        text: Some("src/a.rs".to_string()),
+        outcome: Some(Outcome::Ok),
+        dur_ms: Some(10),
+    }
+}
+
+fn step_at(key: &AgentKey, ms: u64) -> crate::atlas_model::StepRef {
+    crate::atlas_model::StepRef {
+        key: key.clone(),
+        ms,
+    }
+}
+
+#[test]
+fn atlas_select_project_resets_step_and_turn() {
+    use crate::atlas_model::{AtlasState, ProjectId};
+    use crate::ui::atlas::AtlasAction;
+    let (ctl, _rx) = test_controller();
+    let key = AgentKey {
+        session_id: "S1".to_string(),
+        agent_id: String::new(),
+    };
+    let mut state = AtlasState {
+        project: Some(atlas_project()),
+        step: Some(step_at(&key, 100)),
+        turn: Some((key.clone(), 50)),
+        ..AtlasState::default()
+    };
+    let other = ProjectId("/repos/other".to_string());
+
+    atlas_wiring::apply_atlas_action(
+        &mut state,
+        &ctl.model,
+        &AtlasAction::SelectProject(other.clone()),
+    );
+
+    assert_eq!(state.project, Some(other));
+    assert_eq!(state.step, None);
+    assert_eq!(state.turn, None);
+}
+
+#[test]
+fn atlas_step_by_moves_inside_the_turn() {
+    use crate::atlas_model::AtlasState;
+    use crate::atlas_model::test_support::model_with;
+    use crate::ui::atlas::AtlasAction;
+    let agent = test_agent("S1", Status::Idle, 1_000);
+    let key = agent.key.clone();
+    let model = model_with(
+        vec![agent],
+        vec![(
+            key.clone(),
+            vec![tool_step(100), tool_step(200), tool_step(300)],
+        )],
+        true,
+    );
+    let mut state = AtlasState {
+        step: Some(step_at(&key, 200)),
+        ..AtlasState::default()
+    };
+
+    atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::StepBy(true));
+    assert_eq!(state.step, Some(step_at(&key, 300)));
+
+    atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::StepBy(true));
+    assert_eq!(state.step, Some(step_at(&key, 300)));
+}
+
+#[test]
+fn atlas_sync_requests_idle_session_timelines_once() {
+    use crate::atlas_model::SkyWindow;
+    let (mut ctl, rx) = test_controller();
+    let agent = test_agent("S1", Status::Idle, 99_000);
+    let key = agent.key.clone();
+    apply_at(
+        &mut ctl,
+        ServerMsg::Snapshot {
+            agents: vec![agent],
+            aggregate: Status::Idle,
+            health: Health::default(),
+            settings: Settings::default(),
+            repo_pending: Vec::new(),
+        },
+        100_000,
+    );
+    drain_timelines(&rx);
+
+    ctl.sync_atlas_timelines(&atlas_project(), SkyWindow::Min10, 100_000);
+    assert_eq!(drain_timelines(&rx), vec![key]);
+
+    ctl.sync_atlas_timelines(&atlas_project(), SkyWindow::Min10, 100_500);
+    assert!(drain_timelines(&rx).is_empty());
+}

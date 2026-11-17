@@ -987,3 +987,23 @@ fn file_chips_with_one_name_keep_their_folder() {
         vec![".claude/settings.json", "home/settings.json", "a.rs"]
     );
 }
+
+#[test]
+fn rows_for_keeps_only_cards_of_the_project() {
+    let mut cards = CardsModel::new();
+    let mut other = sample_card("other", 2_000, Some(2_100));
+    other.main_root = None;
+    other.root = "/work/other".to_string();
+    cards.request_first_page(1);
+    cards.on_cards(
+        1,
+        vec![sample_card("mine", 1_000, Some(1_100)), other],
+        None,
+    );
+
+    let project = crate::atlas_model::ProjectId("/work/rocky".to_string());
+    let rows = cards.rows_for(UiLang::En, &project);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].card_id, "mine");
+}

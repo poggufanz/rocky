@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use rocky_proto::cards::Card;
 use rocky_proto::pipe::ClientMsg;
 
+use crate::atlas_model::ProjectId;
 use crate::i18n::{CardMsg, UiLang};
 pub(crate) use rows::{
     block_kind, block_status, first_non_empty_line, format_symbol, last_path_segment,
@@ -257,6 +258,20 @@ impl CardsModel {
         out
     }
 
+    /// Like [`Self::rows`], but only the cards that belong to `project`.
+    pub fn rows_for(&self, lang: UiLang, project: &ProjectId) -> Vec<CardRow> {
+        let mine: HashSet<&str> = self
+            .items
+            .iter()
+            .filter(|c| card_project(c) == *project)
+            .map(|c| c.card_id.as_str())
+            .collect();
+        self.rows(lang)
+            .into_iter()
+            .filter(|row| mine.contains(row.card_id.as_str()))
+            .collect()
+    }
+
     fn apply_push(&mut self, card: Card) -> bool {
         if let Some(existing) = self.items.iter_mut().find(|c| c.card_id == card.card_id) {
             if card.rev > existing.rev {
@@ -296,6 +311,11 @@ fn upsert_by_rev(cards: &mut Vec<Card>, card: Card) {
     } else {
         cards.push(card);
     }
+}
+
+/// The project a card belongs to: its main checkout, else its root.
+fn card_project(card: &Card) -> ProjectId {
+    ProjectId(card.main_root.clone().unwrap_or_else(|| card.root.clone()))
 }
 
 fn emit_subtree(

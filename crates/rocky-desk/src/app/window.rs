@@ -236,6 +236,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                 search_focus: cx.focus_handle(),
                 main_tab: Default::default(),
                 flow_hover: None,
+                atlas: Default::default(),
                 modal_focus: cx.focus_handle(),
                 // Ordered before every control (they use 0) and never a stop
                 // itself, so the first Tab lands on the first title bar tab.
