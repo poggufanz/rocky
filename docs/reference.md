@@ -247,16 +247,20 @@ Rocky's memory is evidence. A model answer is not, and the surface says so every
 
 ## `rocky teach` (v0.7.x, implemented)
 
-Ask why one selection of code exists, from a witness or from assembled local evidence:
+Ask why one selection of code exists, looking up an `explain` record first, then local change cards, and then assembled local evidence:
 
 ```bash
 rocky teach src/core/memory.ts:307   # line 307 plus the three lines around it
-rocky teach src/core/memory.ts       # whole file, witness lookup only
+rocky teach src/core/memory.ts       # whole file, explain record or change card (no ladder)
 printf 'const rows = await loadRows();' | rocky teach --stdin src/core/memory.ts
 rocky teach src/core/memory.ts:307 --ladder   # also print every hop, expanded
 ```
 
-`rocky teach <file>:<line>` reads the file once, slices the selection (the line plus three lines on each side, clamped to the file), and asks memory for an `explain` record whose written hunk matches the selection — exact content hash first, token similarity second. A match renders the witness card: the writing agent's own `code` paragraph (why this code shape) and `business` paragraph (what concern it serves), quoted as hearsay with source and age. When the witness `code` paragraph shares no token with the selection's hop-1 construct finding, the card appends one labeled `form` rung (catalog or ast) so witness text and assembly never blend. On a miss, Rocky assembles a deterministic why-ladder from the file itself — construct catalog, enclosing function, callee definition, nearest comment, tests and first `git log -L` commit — and renders the summary card with one compact evidence line naming the sources used; `--ladder` also prints the full hop-by-hop view. `rocky teach <file>` is witness-only (newest explain for the file, no ladder), and `rocky teach --stdin <file>` matches the piped snippet (bounded read, same 2 MB cap as the gate-event stdin reader) against the file. No witness and no ladder rungs is a first-class honest state: no reason has been recorded yet. Ladder output is rendered, never written to memory, and assembled answers never masquerade as witness testimony. Every flow outcome exits 0.
+`rocky teach <file>:<line>` reads the file once, slices the selection (the line plus three lines on each side, clamped to the file), and checks sources in order: `explain` record → change card → evidence ladder. First, it asks memory for an `explain` record whose written hunk matches the selection — exact content hash first, token similarity second. A match renders the witness card: the writing agent's own `code` paragraph (why this code shape) and `business` paragraph (what concern it serves), quoted as hearsay with source and age. When the witness `code` paragraph shares no token with the selection's hop-1 construct finding, the card appends one labeled `form` rung (catalog or ast) so witness text and assembly never blend.
+
+When no `explain` record matches, `rocky teach` reads local desk change cards for the file and matches blocks by content similarity, then symbol name, then line range (or newest block for whole-file `rocky teach <file>`). A matched card renders `<subject>, changed by <agent> on <date> (from change card)` with `Asked: "<prompt title>"`, `Changed: <labels>`, `Agent said: "<quote>"` (or `No agent words recorded for this edit.`), and `The code has changed since this card; matched by <function name|line|file>.` on non-content matches, followed by `Recorded, not verified.` (and `Change card coverage incomplete (<reason>).` when card reading stopped early). All card answer strings pass through secret redaction and single-line terminal sanitization.
+
+When neither an `explain` record nor a change card matches, Rocky assembles a deterministic why-ladder from the file itself — construct catalog, enclosing function, callee definition, nearest comment, tests and first `git log -L` commit — and renders the summary card with one compact evidence line naming the sources used; `--ladder` also prints the full hop-by-hop view. `rocky teach <file>` skips the ladder (explain record or change card only), and `rocky teach --stdin <file>` matches the piped snippet (bounded read, same 2 MB cap as the gate-event stdin reader) against the file. No matching `explain` record, change card, or ladder rung prints `No reason recorded for this code. No change card or local evidence matched it.` Ladder output is rendered, never written to memory, and assembled or change-card answers never masquerade as witness testimony. Every flow outcome exits 0.
 
 ## `rocky watch` (v0.3, implemented)
 

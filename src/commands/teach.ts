@@ -3,17 +3,20 @@ import { readFileSync, statSync } from "node:fs";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import { loadMemoryChecked, type MemoryLoadResult } from "../core/memory-read.js";
 import { teachLookup } from "../core/teach.js";
+import { teachFromCards } from "../core/teach-cards.js";
 import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../core/teach-ladder.js";
 import { gitProvenanceChain } from "../core/git-diff.js";
-import { gapRungFor, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
+import { gapRungFor, renderCardTeach, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
+import { cardsForFile, type CardsForFile } from "../desk/cards-read.js";
 import { block, detail, heading, say } from "../ui/rocky.js";
+import { safeTerminalLine } from "../ui/sanitize.js";
 import { matchConcepts } from "../core/concepts.js";
 import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { analyzeExplainDecision, formatDecisionLine } from "../ai/explain-decision.js";
 
-const EMPTY_STATE = "No reason recorded yet. The authoring agent records one when it writes the code; ask the agent to explain it.";
+const EMPTY_STATE = "No reason recorded for this code. No change card or local evidence matched it.";
 const USAGE = "rocky teach <file>[:<line>] [--stdin] [--ladder] [--quiet]";
 const SELECTION_PAD = 3;
 const TEACH_STDIN_CAP_BYTES = 2 * 1024 * 1024;
@@ -24,6 +27,7 @@ export interface TeachDeps {
   heading?: (line: string) => void;
   block?: (lines: string[]) => void;
   detail?: (line: string) => void;
+  readCards?: (file: string) => CardsForFile;
 }
 
 interface TeachArgs {
@@ -177,6 +181,26 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
     printBlock([...card.lines]);
     printDetail(card.evidence);
     await explainDecisionDetail(file, snippet, hit.record.id, hit.record.snippet ?? hit.record.code, "teach", printDetail);
+    csPointerFor(file, snippet, quiet, printDetail);
+    return 0;
+  }
+
+  let foundCards: CardsForFile | undefined;
+  try {
+    foundCards = deps.readCards ? deps.readCards(file) : cardsForFile(file, { cwd: process.cwd() });
+  } catch {
+    foundCards = undefined;
+  }
+  const cardHit = foundCards === undefined ? undefined : teachFromCards(foundCards, { snippet, line });
+  if (cardHit !== undefined && foundCards !== undefined) {
+    const sanitize = (s: string): string => safeTerminalLine(redactSecretsAtBoundary(s));
+    const card = renderCardTeach(cardHit);
+    printHeading(sanitize(card.header));
+    printBlock(card.lines.map(sanitize));
+    printDetail(sanitize(card.evidence));
+    if (foundCards.coverage.complete === false) {
+      printDetail(sanitize(`Change card coverage incomplete (${foundCards.coverage.reason ?? "unknown"}).`));
+    }
     csPointerFor(file, snippet, quiet, printDetail);
     return 0;
   }

@@ -7,13 +7,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { teach, type TeachDeps } from "../commands/teach.js";
+import type { CardsForFile, StoredBlock, StoredCard } from "../desk/cards-read.js";
 import { recordExplain } from "../core/memory.js";
 import { loadMemoryChecked, MAX_SUPPORTED_MEMORY_RECORDS } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { validateOutputLine } from "../ui/phrases.js";
 import { failureLines, failureLinesPastByteCap } from "./memory-cap-fixture.js";
 
-const EMPTY_STATE = "No reason recorded yet. The authoring agent records one when it writes the code; ask the agent to explain it.";
+const EMPTY_STATE = "No reason recorded for this code. No change card or local evidence matched it.";
 const WITNESS_HEADER = "Witnessed: an agent stated why, and rocky recorded it.";
 const LADDER_HEADER = "Assembled from evidence, not witnessed.";
 
@@ -345,4 +346,191 @@ test("rocky teach over the record cap says it on stderr, and --quiet does not", 
   const quiet = rockyTeach(home, ["--quiet", `${path}:2`]);
   assert.equal(quiet.status, 0, quiet.stderr);
   assert.ok(!quiet.stderr.includes(COVERAGE_PREFIX), quiet.stderr);
+});
+
+function inlineCardsForFile(
+  file: string,
+  options: {
+    prompt?: string;
+    after?: string;
+    symbolName?: string;
+    quoteText?: string;
+    coverage?: CardsForFile["coverage"];
+  } = {},
+): CardsForFile {
+  const block: StoredBlock = {
+    seq: 1,
+    path: file,
+    symbol: { kind: "function", name: options.symbolName ?? "greetUser" },
+    labels: [{ id: "body_changed" }],
+    importance: "medium",
+    via: "edit",
+    before: null,
+    after: options.after ?? 'export function greetUser(name: string) {\n  return "hello " + name;\n}',
+    recorded: true,
+    line: 1,
+    added: 3,
+    removed: 0,
+    quote: options.quoteText === undefined ? { text: "greets a user by name", shared: true } : { text: options.quoteText, shared: true },
+  };
+  const card: StoredCard = {
+    v: 1,
+    card_id: "card-1",
+    rev: 1,
+    root: process.cwd(),
+    agent_type: "claude-code",
+    started_ms: Date.UTC(2026, 10, 18, 12, 0, 0),
+    ended_ms: Date.UTC(2026, 10, 18, 12, 1, 0),
+    prompt: options.prompt ?? "Add user greeting helper",
+    blocks: [block],
+  };
+  return {
+    cards: [card],
+    matched: new Map([[card.card_id, [block]]]),
+    coverage: options.coverage ?? { complete: true, skipped: 0 },
+  };
+}
+
+test("teach falls back to change cards when no explain record matches", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lines = [
+    "export function greetUser(name: string) {",
+    '  return "hello " + name;',
+    "}",
+  ];
+  const path = fixture(home, "greet.ts", lines);
+  const found = inlineCardsForFile(path, { after: lines.join("\n") });
+  const { sayLines, headingLines, blockLines, detailLines, deps } = sinks();
+  assert.equal(await teach([`${path}:2`], { ...deps, readCards: () => found }), 0);
+  assert.deepEqual(headingLines, ["greetUser, changed by claude-code on 2026-11-18 (from change card)"]);
+  assert.ok(blockLines.includes('Asked: "Add user greeting helper"'), blockLines.join("\n"));
+  assert.ok(blockLines.includes("Changed: body changed"), blockLines.join("\n"));
+  assert.ok(blockLines.includes('Agent said: "greets a user by name"'), blockLines.join("\n"));
+  assert.deepEqual(detailLines, ["Recorded, not verified."]);
+  assert.deepEqual(sayLines, []);
+});
+
+test("teach still prefers a matching explain record over a matching change card", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const { path, lines } = feedFixture(home, "witness-over-card.ts");
+  const selection = lines.slice(4, 11).join("\n");
+  recordExplain({
+    cwd: process.cwd(),
+    path,
+    source: "agent:claude-code",
+    code: "documents only, no duplicates",
+    business: "journal accepts DOCENTRY documents only",
+    snippet: selection,
+  }, resolveRockyPaths());
+  const found = inlineCardsForFile(path, { after: selection, symbolName: "loadFeed" });
+  let cardReads = 0;
+  const { headingLines, blockLines, deps } = sinks();
+  assert.equal(
+    await teach([`${path}:8`], {
+      ...deps,
+      readCards: () => {
+        cardReads += 1;
+        return found;
+      },
+    }),
+    0,
+  );
+  assert.equal(cardReads, 0);
+  assert.deepEqual(headingLines, [WITNESS_HEADER]);
+  assert.ok(blockLines.includes("code: documents only, no duplicates"));
+  assert.ok(blockLines.includes("business: journal accepts DOCENTRY documents only"));
+});
+
+test("teach falls through to ladder when readCards throws", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const path = fixture(home, "card-throw-ladder.ts", ASYNC_FIXTURE);
+  const baseline = sinks();
+  assert.equal(await teach([`${path}:2`], baseline.deps), 0);
+
+  const thrown = sinks();
+  assert.equal(
+    await teach([`${path}:2`], {
+      ...thrown.deps,
+      readCards: () => {
+        throw new Error("card read failed");
+      },
+    }),
+    0,
+  );
+  assert.deepEqual(thrown.sayLines, baseline.sayLines);
+  assert.deepEqual(thrown.headingLines, [LADDER_HEADER]);
+  assert.deepEqual(thrown.headingLines, baseline.headingLines);
+  assert.deepEqual(thrown.blockLines, baseline.blockLines);
+  assert.deepEqual(thrown.detailLines, baseline.detailLines);
+});
+
+test("teach speaks the new empty state when neither change cards nor ladder rungs match", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const path = fixture(home, "no-cards-no-ladder.ts", [""]);
+  const emptyCards: CardsForFile = { cards: [], matched: new Map(), coverage: { complete: true, skipped: 0 } };
+  const { sayLines, headingLines, blockLines, detailLines, deps } = sinks();
+  assert.equal(await teach([`${path}:1`], { ...deps, readCards: () => emptyCards }), 0);
+  assert.deepEqual(sayLines, [EMPTY_STATE]);
+  assert.deepEqual(validateOutputLine(EMPTY_STATE), []);
+  assert.deepEqual(headingLines, []);
+  assert.deepEqual(blockLines, []);
+  assert.deepEqual(detailLines, []);
+});
+
+test("teach strips terminal escapes and redacts secrets in change card output", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lines = [
+    "export function greetUser(name: string) {",
+    '  return "hello " + name;',
+    "}",
+  ];
+  const path = fixture(home, "sanitize-card.ts", lines);
+  const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+  const found = inlineCardsForFile(path, {
+    after: lines.join("\n"),
+    prompt: `Fix \u001b[31m${token}\u001b[0m handling`,
+  });
+  const { headingLines, blockLines, detailLines, deps } = sinks();
+  assert.equal(await teach([`${path}:2`], { ...deps, readCards: () => found }), 0);
+  const rendered = [...headingLines, ...blockLines, ...detailLines].join("\n");
+  assert.ok(!rendered.includes("\u001b"), rendered);
+  assert.ok(!rendered.includes(token), rendered);
+  assert.ok(blockLines.includes('Asked: "Fix [redacted github token] handling"'), blockLines.join("\n"));
+});
+
+test("teach prints coverage incomplete detail when change card coverage is incomplete", async (t) => {
+  const home = freshHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lines = [
+    "export function greetUser(name: string) {",
+    '  return "hello " + name;',
+    "}",
+  ];
+  const path = fixture(home, "incomplete-card.ts", lines);
+  const found = inlineCardsForFile(path, {
+    after: lines.join("\n"),
+    coverage: { complete: false, reason: "line-cap", skipped: 1 },
+  });
+  const { detailLines, deps } = sinks();
+  assert.equal(await teach([`${path}:2`], { ...deps, readCards: () => found }), 0);
+  assert.deepEqual(detailLines, [
+    "Recorded, not verified.",
+    "Change card coverage incomplete (line-cap).",
+  ]);
+
+  const noReason = inlineCardsForFile(path, {
+    after: lines.join("\n"),
+    coverage: { complete: false, skipped: 1 },
+  });
+  const second = sinks();
+  assert.equal(await teach([`${path}:2`], { ...second.deps, readCards: () => noReason }), 0);
+  assert.deepEqual(second.detailLines, [
+    "Recorded, not verified.",
+    "Change card coverage incomplete (unknown).",
+  ]);
 });
