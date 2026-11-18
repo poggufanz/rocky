@@ -1,5 +1,7 @@
+import { labelChip, promptTitle } from "../desk/card-text.js";
 import { tokens } from "./fingerprint.js";
 import type { TeachHit } from "./teach.js";
+import type { CardMatch, CardTeachHit } from "./teach-cards.js";
 import type { LadderResult, Rung } from "./teach-ladder.js";
 
 export interface TeachCard {
@@ -11,6 +13,13 @@ export interface TeachCard {
 
 const WITNESS_HEADER = "Witnessed: an agent stated why, and rocky recorded it.";
 const LADDER_HEADER = "Assembled from evidence, not witnessed.";
+const CARD_EVIDENCE = "Recorded, not verified.";
+
+const CARD_MATCH_LABEL: Readonly<Record<Exclude<CardMatch, "content">, string>> = {
+  symbol: "function name",
+  line: "line",
+  file: "file",
+};
 
 /**
  * When a witness exists but its `code` paragraph shares no token with the
@@ -54,6 +63,40 @@ export function renderWitnessCard(hit: TeachHit, gapRung?: Rung): TeachCard {
     header: WITNESS_HEADER,
     lines,
     evidence: `source: ${hit.record.source} · ${ageLabel(hit.record.ts, Date.now())}${hasPointer ? "" : " · unknown"}`,
+    expandable: false,
+  };
+}
+
+/** Format a teach answer card from a matched change card block. */
+export function renderCardTeach(hit: CardTeachHit): TeachCard {
+  const { card, block, match } = hit;
+  const subject = block.symbol?.name && block.symbol.name.length > 0 ? block.symbol.name : block.path;
+  const agent = card.agent_type && card.agent_type.length > 0 ? card.agent_type : "an agent";
+  const date = new Date(card.started_ms).toISOString().slice(0, 10);
+
+  const lines: string[] = [];
+  const title = promptTitle(card.prompt);
+  if (title.length > 0) {
+    lines.push(`Asked: "${title}"`);
+  }
+  if (block.labels.length > 0) {
+    const kind = block.symbol?.kind ?? null;
+    lines.push(`Changed: ${block.labels.map((label) => labelChip(label, kind)).join(", ")}`);
+  }
+  const quoteText = block.quote?.text;
+  if (quoteText !== undefined && quoteText.length > 0) {
+    lines.push(`Agent said: "${quoteText}"`);
+  } else {
+    lines.push("No agent words recorded for this edit.");
+  }
+  if (match !== "content") {
+    lines.push(`The code has changed since this card; matched by ${CARD_MATCH_LABEL[match]}.`);
+  }
+
+  return {
+    header: `${subject}, changed by ${agent} on ${date} (from change card)`,
+    lines,
+    evidence: CARD_EVIDENCE,
     expandable: false,
   };
 }

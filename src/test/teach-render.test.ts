@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ageLabel, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
+import { ageLabel, renderCardTeach, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
 import type { ExplainRecord } from "../core/memory-read.js";
 import type { TeachHit } from "../core/teach.js";
+import type { CardTeachHit } from "../core/teach-cards.js";
 import type { LadderResult } from "../core/teach-ladder.js";
+import type { StoredBlock, StoredCard } from "../desk/cards-read.js";
 import { validateOutputLine } from "../ui/phrases.js";
 
 const WITNESS_HEADER = "Witnessed: an agent stated why, and rocky recorded it.";
@@ -179,4 +181,129 @@ test("exhausted provenance adds a disclosure line in english", () => {
 test("witness card with zero pointers marks unknown", () => {
   const card = renderWitnessCard(witnessHit(), undefined);
   assert.match(card.evidence, /source: /);
+});
+
+const CAUSAL_WORDS = /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i;
+
+function makeCard(overrides: Partial<StoredCard> = {}): StoredCard {
+  return {
+    v: 1,
+    card_id: "c1",
+    rev: 1,
+    root: "/work",
+    started_ms: Date.UTC(2026, 10, 18, 9, 30, 0),
+    ended_ms: Date.UTC(2026, 10, 18, 9, 35, 0),
+    agent_type: "claude-code",
+    prompt: "Add guard for empty token",
+    blocks: [],
+    ...overrides,
+  };
+}
+
+function makeBlock(overrides: Partial<StoredBlock> = {}): StoredBlock {
+  return {
+    seq: 1,
+    path: "src/auth.ts",
+    symbol: { kind: "function", name: "verifyToken" },
+    labels: [{ id: "guard_added" }, { id: "call_added", args: { name: "reject" } }],
+    importance: "high",
+    quote: { text: "Checking empty tokens upfront.", shared: true },
+    ...overrides,
+  };
+}
+
+function cardHit(
+  overrides: {
+    card?: Partial<StoredCard>;
+    block?: Partial<StoredBlock>;
+    match?: CardTeachHit["match"];
+    score?: number;
+  } = {},
+): CardTeachHit {
+  const block = makeBlock(overrides.block);
+  const card = makeCard({ blocks: [block], ...overrides.card });
+  return {
+    card,
+    block,
+    match: overrides.match ?? "content",
+    score: overrides.score ?? 0.9,
+  };
+}
+
+test("renderCardTeach renders full content hit with prompt, labels, and quote", () => {
+  const rendered = renderCardTeach(cardHit());
+  assert.equal(rendered.header, "verifyToken, changed by claude-code on 2026-11-18 (from change card)");
+  assert.deepEqual(rendered.lines, [
+    'Asked: "Add guard for empty token"',
+    "Changed: new guard, calls reject",
+    'Agent said: "Checking empty tokens upfront."',
+  ]);
+  assert.equal(rendered.evidence, "Recorded, not verified.");
+  assert.equal(rendered.expandable, false);
+});
+
+test("renderCardTeach uses fallback line when quote is missing", () => {
+  const rendered = renderCardTeach(cardHit({ block: { quote: undefined } }));
+  assert.equal(rendered.lines[2], "No agent words recorded for this edit.");
+});
+
+test("renderCardTeach appends mismatch notice for symbol, line, and file matches", () => {
+  const symbolRendered = renderCardTeach(cardHit({ match: "symbol" }));
+  assert.equal(
+    symbolRendered.lines[symbolRendered.lines.length - 1],
+    "The code has changed since this card; matched by function name.",
+  );
+
+  const lineRendered = renderCardTeach(cardHit({ match: "line" }));
+  assert.equal(
+    lineRendered.lines[lineRendered.lines.length - 1],
+    "The code has changed since this card; matched by line.",
+  );
+
+  const fileRendered = renderCardTeach(cardHit({ match: "file" }));
+  assert.equal(
+    fileRendered.lines[fileRendered.lines.length - 1],
+    "The code has changed since this card; matched by file.",
+  );
+});
+
+test("renderCardTeach falls back to path and generic agent when symbol and agent_type are absent", () => {
+  const rendered = renderCardTeach(
+    cardHit({
+      card: { agent_type: undefined },
+      block: { symbol: undefined, labels: [{ id: "symbol_added" }] },
+    }),
+  );
+  assert.ok(rendered.header.startsWith("src/auth.ts, changed by an agent on "));
+  assert.equal(rendered.header, "src/auth.ts, changed by an agent on 2026-11-18 (from change card)");
+  assert.equal(rendered.lines[1], "Changed: new file");
+});
+
+test("renderCardTeach omits Asked and Changed lines when prompt and labels are empty", () => {
+  const rendered = renderCardTeach(
+    cardHit({
+      card: { prompt: "   " },
+      block: { labels: [], quote: null },
+      match: "line",
+    }),
+  );
+  assert.deepEqual(rendered.lines, [
+    "No agent words recorded for this edit.",
+    "The code has changed since this card; matched by line.",
+  ]);
+});
+
+test("renderCardTeach rocky-written lines contain no causal words and pass output validation", () => {
+  const rendered = renderCardTeach(
+    cardHit({
+      card: { agent_type: undefined, prompt: "" },
+      block: { symbol: undefined, labels: [], quote: undefined },
+      match: "symbol",
+    }),
+  );
+  const rockyLines = [rendered.header, ...rendered.lines, rendered.evidence];
+  for (const line of rockyLines) {
+    assert.doesNotMatch(line, CAUSAL_WORDS);
+    assert.deepEqual(validateOutputLine(line), []);
+  }
 });
