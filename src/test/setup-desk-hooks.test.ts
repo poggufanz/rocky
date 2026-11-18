@@ -20,6 +20,7 @@ import {
   DESK_HOOK_ASYNC,
   buildDeskHookEntries,
   deskHookCommand,
+  hasOwnedDeskHooks,
   installDeskHooks,
   mergeDeskHooks,
   removeDeskHooks,
@@ -27,8 +28,10 @@ import {
 } from "../setup/desk-hooks.js";
 import {
   agentHooksStatus,
+  hasOwnedAgentHooks,
   installClaudeAgentHooks,
   mergeClaudeHooks,
+  removeAgentEventHooks,
   removeClaudeHooks,
   rockyGateHookCommand,
   rockyHookCommand,
@@ -543,4 +546,109 @@ test("agent hooks: --yes with uninstall prints no install note", async (t) => {
   assert.ok(output.stderr.includes("claude-code agent hooks: unchanged"), output.stderr);
   assert.ok(!output.stderr.includes(HOOK_INSTALL_YES_NOTE), output.stderr);
   assert.equal(asked(), 0);
+});
+
+test("removeAgentEventHooks drops canonical and bare agent-event hooks, keeps gate and foreign", () => {
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
+  const base = mergeClaudeHooks({}, command, gateCommand);
+  const baseHooks = base.hooks as Record<string, unknown[]>;
+  const input: Record<string, unknown> = {
+    hooks: {
+      ...baseHooks,
+      Stop: [
+        ...(baseHooks.Stop ?? []),
+        {
+          hooks: [
+            { type: "command", command: "foreign-tool" },
+            { type: "command", command: "rocky hook agent-event claude-code" },
+          ],
+        },
+      ],
+    },
+  };
+
+  const output = removeAgentEventHooks(input);
+  const hooks = output.hooks as Record<string, unknown[]>;
+
+  assert.deepEqual(hooks.PreToolUse, baseHooks.PreToolUse);
+  assert.equal(hooks.UserPromptSubmit, undefined);
+  assert.equal(hooks.PostToolUse, undefined);
+  assert.deepEqual(hooks.Stop, [{ hooks: [{ type: "command", command: "foreign-tool" }] }]);
+  assert.equal(JSON.stringify(output).includes("hook agent-event claude-code"), false);
+});
+
+test("desk install removes agent-event hooks and keeps the gate", async (t) => {
+  const value = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, command, gateCommand))}\n`);
+  const details: string[] = [];
+
+  const result = await installDeskHooks({ settingsPath: value.settings }, {
+    hookBin,
+    fileExists: (path) => path === hookBin,
+    confirmation: { async confirm() { return true; } },
+    detail: (message) => details.push(message),
+  });
+
+  assert.equal(result.status, "written");
+  const after = JSON.parse(readFileSync(value.settings, "utf8")) as Record<string, unknown>;
+  const hooks = after.hooks as Record<string, Array<{ matcher?: unknown; hooks: Array<{ command?: unknown }> }>>;
+  for (const event of DESK_EVENTS) {
+    assert.ok(Array.isArray(hooks[event]) && hooks[event].length > 0, event);
+  }
+  assert.ok(hooks.PreToolUse.some((group) =>
+    group.matcher === "Edit|Write|MultiEdit" && group.hooks[0]?.command === gateCommand));
+  assert.equal(hasOwnedAgentHooks(after), false);
+  assert.equal(JSON.stringify(after).includes("hook agent-event claude-code"), false);
+  assert.ok(
+    details.includes(
+      'Desk hooks replace rocky\'s Claude Code agent hooks, so this write also removes the "hook agent-event claude-code" entries. rocky setup --agent-hooks puts them back.',
+    ),
+    JSON.stringify(details),
+  );
+});
+
+test("desk uninstall does not put agent-event hooks back", async (t) => {
+  const { home, fallback } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
+  writeFileSync(fallback, `${JSON.stringify(mergeClaudeHooks({}, command, gateCommand))}\n`);
+  const dependencies = commandDependencies(home, {}, hookBin);
+
+  const installed = await captureStderr(() => setup(["--desk-hooks", hookBin], dependencies));
+  assert.equal(installed.code, 0, installed.stderr);
+
+  const uninstalled = await captureStderr(() => setup(["--uninstall-desk-hooks"], dependencies));
+  assert.equal(uninstalled.code, 0, uninstalled.stderr);
+  const after = JSON.parse(readFileSync(fallback, "utf8")) as Record<string, unknown>;
+  const hooks = after.hooks as Record<string, Array<{ matcher?: unknown; hooks: Array<{ command?: unknown }> }>>;
+  assert.equal(hasOwnedAgentHooks(after), false);
+  assert.equal(JSON.stringify(after).includes("hook agent-event claude-code"), false);
+  assert.equal(hasOwnedDeskHooks(after), false);
+  assert.deepEqual(hooks.PreToolUse, [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: gateCommand }] }]);
+  assert.ok(
+    uninstalled.stderr.includes(
+      "Rocky's Claude Code agent hooks are not put back. Run rocky setup --agent-hooks to hear Claude Code without the desk.",
+    ),
+    uninstalled.stderr,
+  );
+});
+
+test("setup --status reports agent hooks retired when desk hooks are installed", async (t) => {
+  const { home } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+  const dependencies = commandDependencies(home, {}, hookBin);
+
+  const installed = await captureStderr(() => setup(["--desk-hooks", hookBin], dependencies));
+  assert.equal(installed.code, 0, installed.stderr);
+
+  const status = await captureStderr(() => setup(["--status"], dependencies));
+  assert.equal(status.code, 0, status.stderr);
+  assert.ok(status.stderr.includes("claude-code agent hooks: retired (desk hooks installed)"), status.stderr);
+  assert.ok(!status.stderr.includes("claude-code agent hooks: absent"), status.stderr);
 });

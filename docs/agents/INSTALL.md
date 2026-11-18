@@ -92,7 +92,7 @@ Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if ab
 }
 ```
 
-The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional advisory hook — it prints `{}` or an `additionalContext` note (prompt clarity or failure-cycle) and never denies an edit; omit that block to skip it.
+The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional advisory hook — it prints `{}` or an `additionalContext` note (prompt clarity or failure-cycle) and never denies an edit; omit that block to skip it. When desk hooks are installed in the same settings file, setup removes the three `agent-event` entries and keeps the `PreToolUse` entry; removing desk hooks does not put them back (run `rocky setup --agent-hooks` if needed).
 
 ## Step 4 — Codex, manual config *(human approval)*
 

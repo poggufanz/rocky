@@ -5,6 +5,7 @@ import {
   mergeClaudeHooks,
   ownedClaudeHookProjection,
   prepareMutation,
+  removeAgentEventHooks,
   removeClaudeHooks,
   rockyGateHookCommand,
   rockyHookCommand,
@@ -70,69 +71,85 @@ function stateOf(
   return { state: "error", detail: result.detail };
 }
 
+type DeskResolution =
+  | { status: "ready"; command: string }
+  | { status: "refused"; detail: string };
+
+function resolveDeskCommand(deskHookBin: string | undefined): DeskResolution | undefined {
+  if (deskHookBin === undefined) return undefined;
+  try {
+    return { status: "ready", command: deskHookCommand(deskHookBin) };
+  } catch (error) {
+    return { status: "refused", detail: messageOf(error) ?? "desk hook path is unusable" };
+  }
+}
+
+function buildAgentSide(
+  value: Record<string, unknown>,
+  paths: Paths,
+  gateCommand: string | undefined,
+  retire: boolean,
+): Record<string, unknown> {
+  const merged = mergeClaudeHooks(
+    value,
+    rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
+    gateCommand,
+  );
+  return retire ? removeAgentEventHooks(merged) : merged;
+}
+
 /** Read-only plan for the Claude Code settings file; never recovers or writes. */
 export function inspectClaudeSettings(settingsPath: string, paths: Paths): AutoTargetReport[] {
-  const { deskHookBin } = paths;
+  const desk = resolveDeskCommand(paths.deskHookBin);
+  const deskCommand = desk?.status === "ready" ? desk.command : undefined;
+  const retire = deskCommand !== undefined;
   let value: Record<string, unknown>;
   try {
     value = prepareMutation(settingsPath).read.value;
   } catch (error) {
-    return refusedReports(settingsPath, deskHookBin !== undefined, messageOf(error));
+    return refusedReports(settingsPath, desk !== undefined, messageOf(error));
   }
   try {
     const ownedGate = hasOwnedGateGroup(value);
     const gateCommand = ownedGate ? rockyGateHookCommand(paths.nodePath, paths.entryPath) : undefined;
-    const agentMerged = mergeClaudeHooks(
-      value,
-      rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
-      gateCommand,
-    );
+    const agentMerged = buildAgentSide(value, paths, gateCommand, retire);
     const agentState: AutoState = JSON.stringify(ownedClaudeHookProjection(value))
         === JSON.stringify(ownedClaudeHookProjection(agentMerged))
       ? "ok"
       : hasOwnedAgentHooks(value) || ownedGate ? "stale" : "missing";
     const reports = [report("agent-hooks", settingsPath, agentState)];
-    if (deskHookBin !== undefined) {
-      let deskState: AutoState;
-      let deskDetail: string | undefined;
-      try {
-        const deskMerged = mergeDeskHooks(value, deskHookCommand(deskHookBin), DESK_HOOK_ASYNC);
-        deskState = JSON.stringify(ownedDeskHookProjection(value)) === JSON.stringify(ownedDeskHookProjection(deskMerged))
-          ? "ok"
-          : hasOwnedDeskHooks(value) ? "stale" : "missing";
-      } catch (error) {
-        deskState = "refused";
-        deskDetail = messageOf(error);
-      }
-      reports.push(report("desk-hooks", settingsPath, deskState, deskDetail));
+    if (desk?.status === "ready") {
+      const deskMerged = mergeDeskHooks(value, desk.command, DESK_HOOK_ASYNC);
+      const deskState: AutoState = JSON.stringify(ownedDeskHookProjection(value))
+          === JSON.stringify(ownedDeskHookProjection(deskMerged))
+        ? "ok"
+        : hasOwnedDeskHooks(value) ? "stale" : "missing";
+      reports.push(report("desk-hooks", settingsPath, deskState));
+    } else if (desk?.status === "refused") {
+      reports.push(report("desk-hooks", settingsPath, "refused", desk.detail));
     } else if (hasOwnedDeskHooks(value)) {
       reports.push(report("desk-hooks", settingsPath, "stale", MISSING_DESK_BINARY));
     }
     return reports;
   } catch (error) {
-    return refusedReports(settingsPath, deskHookBin !== undefined || hasOwnedDeskHooks(value), messageOf(error));
+    return refusedReports(settingsPath, desk !== undefined || hasOwnedDeskHooks(value), messageOf(error));
   }
 }
 
 /**
- * Write Rocky's agent hooks, a kept rationale gate, and desk hooks in one
- * transaction. A pending transaction is recovered first, and the existing
- * PreToolUse gate is refreshed only when it is already Rocky's.
+ * Write Rocky's agent hooks (or retire them when desk hooks validate), a kept
+ * rationale gate, and desk hooks in one transaction. A pending transaction is
+ * recovered first, and the existing PreToolUse gate is refreshed only when it
+ * is already Rocky's.
  */
 export function applyClaudeSettings(
   settingsPath: string,
   paths: Paths,
   options: ApplyClaudeSettingsOptions = {},
 ): AutoTargetReport[] {
-  const { deskHookBin } = paths;
-  let desk: { status: "ready"; command: string } | { status: "refused"; detail: string } | undefined;
-  if (deskHookBin !== undefined) {
-    try {
-      desk = { status: "ready", command: deskHookCommand(deskHookBin) };
-    } catch (error) {
-      desk = { status: "refused", detail: messageOf(error) ?? "desk hook path is unusable" };
-    }
-  }
+  const desk = resolveDeskCommand(paths.deskHookBin);
+  const deskCommand = desk?.status === "ready" ? desk.command : undefined;
+  const retire = deskCommand !== undefined;
 
   let current: CurrentConfig;
   try {
@@ -148,12 +165,8 @@ export function applyClaudeSettings(
     const gateCommand = hasOwnedGateGroup(current.read.value)
       ? rockyGateHookCommand(paths.nodePath, paths.entryPath)
       : undefined;
-    const merged = mergeClaudeHooks(
-      current.read.value,
-      rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
-      gateCommand,
-    );
-    const withDesk = desk?.status === "ready" ? mergeDeskHooks(merged, desk.command, DESK_HOOK_ASYNC) : merged;
+    const merged = buildAgentSide(current.read.value, paths, gateCommand, retire);
+    const withDesk = deskCommand !== undefined ? mergeDeskHooks(merged, deskCommand, DESK_HOOK_ASYNC) : merged;
     ({ state, detail } = stateOf(
       settingsPath,
       current,
@@ -204,16 +217,13 @@ export function removeClaudeSettings(settingsPath: string): AutoTargetReport[] {
 
 /** Paste-ready settings values for the manual setup path. */
 export function claudeSettingsSnippets(paths: Paths, keptGate: boolean): string[] {
-  const snippets = [JSON.stringify(rockyHookCommand("claude-code", paths.nodePath, paths.entryPath))];
-  if (keptGate) snippets.push(JSON.stringify(rockyGateHookCommand(paths.nodePath, paths.entryPath)));
-  if (paths.deskHookBin !== undefined) {
-    // A refused desk target (unsafe or vanished binary) writes no bytes, and
-    // callers still need the agent snippets; the target report carries why.
-    try {
-      snippets.push(JSON.stringify(deskHookCommand(paths.deskHookBin)));
-    } catch {
-      // Omitted on purpose: there is no desk command to expect.
-    }
+  const desk = resolveDeskCommand(paths.deskHookBin);
+  const deskCommand = desk?.status === "ready" ? desk.command : undefined;
+  const snippets: string[] = [];
+  if (deskCommand === undefined) {
+    snippets.push(JSON.stringify(rockyHookCommand("claude-code", paths.nodePath, paths.entryPath)));
   }
+  if (keptGate) snippets.push(JSON.stringify(rockyGateHookCommand(paths.nodePath, paths.entryPath)));
+  if (deskCommand !== undefined) snippets.push(JSON.stringify(deskCommand));
   return snippets;
 }

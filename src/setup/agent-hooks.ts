@@ -437,6 +437,11 @@ function isRockyHook(value: JsonObject): boolean {
     && (isRockyClaudeHookCommand(command) || isRockyGateHookCommand(command));
 }
 
+function isRockyAgentHook(value: JsonObject): boolean {
+  const command = hookCommand(value);
+  return command !== undefined && isRockyClaudeHookCommand(command);
+}
+
 export function stripOwnedGroups(groups: readonly unknown[], isOwned: (hook: JsonObject) => boolean): unknown[] {
   const kept: unknown[] = [];
   for (const groupValue of groups) {
@@ -533,6 +538,11 @@ export function removeOwnedHooks(
 /** Remove Rocky-owned groups while preserving all foreign configuration. */
 export function removeClaudeHooks(existing: Record<string, unknown>): Record<string, unknown> {
   return removeOwnedHooks(existing, isRockyHook);
+}
+
+/** Remove Rocky agent-event groups while preserving the gate and all foreign configuration. */
+export function removeAgentEventHooks(existing: Record<string, unknown>): Record<string, unknown> {
+  return removeOwnedHooks(existing, isRockyAgentHook);
 }
 
 function ownedHookGroupsByEvent(

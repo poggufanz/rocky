@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import {
   defaultConfirmation,
+  hasOwnedAgentHooks,
   hasOwnedHookCommand,
   inspectCurrent,
   operationDetail,
@@ -9,6 +10,7 @@ import {
   parseQuotedCommandPath,
   prepareMutation,
   quotePath,
+  removeAgentEventHooks,
   requireSafeAbsolutePath,
   removeOwnedHooks,
   resolveTarget,
@@ -48,6 +50,8 @@ export const DESK_EVENTS = [
 export const DESK_HOOK_ASYNC = true;
 
 const DESK_HOOK_CONFIRMATION = "Install desk hooks for Claude Code now?";
+const DESK_RETIRE_NOTICE =
+  'Desk hooks replace rocky\'s Claude Code agent hooks, so this write also removes the "hook agent-event claude-code" entries. rocky setup --agent-hooks puts them back.';
 const GENERIC_ERROR = operationDetail(new Error("desk hooks"), "desk hooks");
 /** The two tool events carry a wildcard matcher; the rest carry none. */
 
@@ -89,6 +93,16 @@ function isRockyDeskHook(value: JsonObject): boolean {
 /** True when any event holds a desk hook, wherever its binary path points. */
 export function hasOwnedDeskHooks(root: Record<string, unknown>): boolean {
   return hasOwnedHookCommand(root, isRockyDeskHookCommand);
+}
+
+/** True when `settingsPath` is readable and holds at least one desk hook; false on any read error. */
+export function hasDeskHooksAt(settingsPath: string): boolean {
+  try {
+    const current = inspectCurrent(settingsPath);
+    return current.read.status === "valid" && hasOwnedDeskHooks(current.read.value);
+  } catch {
+    return false;
+  }
 }
 
 /** Projection of the desk family; agent and gate groups are foreign here. */
@@ -165,9 +179,12 @@ export async function installDeskHooks(
   try {
     resolved = resolveTarget(target, options);
     command = commandFor(options);
-    inspectCurrent(resolved.settingsPath, true);
-    (options.detail ?? ((message: string) => process.stderr.write(`${message}\n`)))
-      (JSON.stringify(buildDeskHookEntries(command, DESK_HOOK_ASYNC), null, 2));
+    const current = inspectCurrent(resolved.settingsPath, true);
+    const emit = options.detail ?? ((message: string) => process.stderr.write(`${message}\n`));
+    emit(JSON.stringify(buildDeskHookEntries(command, DESK_HOOK_ASYNC), null, 2));
+    if (current.read.status === "valid" && hasOwnedAgentHooks(current.read.value)) {
+      emit(DESK_RETIRE_NOTICE);
+    }
   } catch (error) {
     return { status: "error", detail: describeFailure(error) };
   }
@@ -183,7 +200,7 @@ export async function installDeskHooks(
 
   try {
     const current = prepareMutation(resolved.settingsPath);
-    const merged = mergeDeskHooks(current.read.value, command, DESK_HOOK_ASYNC);
+    const merged = mergeDeskHooks(removeAgentEventHooks(current.read.value), command, DESK_HOOK_ASYNC);
     return writeMutation(resolved.settingsPath, current, merged, options, "desk hooks");
   } catch (error) {
     return { status: "error", detail: describeFailure(error) };
