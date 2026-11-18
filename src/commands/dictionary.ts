@@ -812,18 +812,23 @@ function truncateUtf8WithEllipsis(value: string, maxBytes: number): string {
   return `${truncateUtf8(value, maxBytes - ellipsisBytes).value}\u2026`;
 }
 
+const UNNAMED_SEQUENCE_FIELD = "(unnamed)";
+
+/** Sanitize one sequence sentence field for terminal output, falling back when stripping leaves it blank. */
+function sanitizeSequenceField(value: string): string {
+  const safe = terminalSafe(value, MAX_OUTPUT_LINE_BYTES);
+  return safe.trim().length > 0 ? safe : UNNAMED_SEQUENCE_FIELD;
+}
+
 /** Format a card's sequence line within MAX_OUTPUT_LINE_BYTES without clipping fixed clauses. */
 function formatCardSequence(card: StoredCard): string | undefined {
   const parts = sequenceSentenceParts(card);
   if (!parts) return undefined;
 
-  const fullCmd = terminalSafe(parts.command, MAX_OUTPUT_LINE_BYTES);
-  const fullEditHead = terminalSafe(parts.editHead, MAX_OUTPUT_LINE_BYTES);
-  if (fullCmd.length === 0 || fullEditHead.length === 0) return undefined;
-
-  const rawErr = parts.errorName !== undefined ? terminalSafe(parts.errorName, MAX_OUTPUT_LINE_BYTES) : "";
-  const hasErr = rawErr.trim().length > 0;
-  const fullErr = hasErr ? rawErr : "";
+  const fullCmd = sanitizeSequenceField(parts.command);
+  const fullEditHead = sanitizeSequenceField(parts.editHead);
+  const hasErr = parts.errorName !== undefined;
+  const fullErr = parts.errorName !== undefined ? sanitizeSequenceField(parts.errorName) : "";
 
   const prefix = `${CARD_BLOCK_INDENT}Sequence: \``;
   const failMid = `\` failed (exit ${parts.exitCode}).`;
