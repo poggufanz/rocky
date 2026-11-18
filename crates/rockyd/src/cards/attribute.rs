@@ -17,6 +17,7 @@ use rocky_proto::paths::{canonical_path, repo_id};
 use rocky_proto::pipe::CaptureState;
 
 use crate::capture::CaptureResult;
+use crate::cards::sequence::match_sequence;
 use crate::cards::store::{Before, ObjectRead, Version};
 use crate::cards::transcript::TranscriptRead;
 use crate::cards::windows::{ToolKind, ToolWindow, Turn, TurnEnd};
@@ -377,6 +378,7 @@ pub fn build_card(
         user_home_abs.as_ref(),
         cwd,
     );
+    let sequence = match_sequence(&flow, &card_blocks);
     let (reads, reads_more) = build_reads(
         &input.turn.windows,
         session_root_abs.as_ref(),
@@ -429,7 +431,7 @@ pub fn build_card(
         coverage,
         reads,
         reads_more,
-        sequence: None,
+        sequence,
     }
 }
 
