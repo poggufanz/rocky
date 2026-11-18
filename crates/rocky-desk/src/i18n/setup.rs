@@ -432,7 +432,8 @@ pub fn setup_en(m: &SetupMsg) -> String {
                 .to_string()
         }
         SetupMsg::SettingsToolTextNote => {
-            "Commands and paths agents ran, with secrets redacted.".to_string()
+            "Commands and paths agents ran, and one error line from failed commands, with secrets redacted."
+                .to_string()
         }
         SetupMsg::SettingsCardsNote => {
             "One card per agent turn with the files it changed.".to_string()
@@ -591,7 +592,8 @@ pub fn setup_id(m: &SetupMsg) -> String {
                 .to_string()
         }
         SetupMsg::SettingsToolTextNote => {
-            "Command dan path yang dijalankan agent, dengan rahasia disamarkan.".to_string()
+            "Command dan path yang dijalankan agent, serta satu baris error dari command yang gagal, dengan rahasia disamarkan."
+                .to_string()
         }
         SetupMsg::SettingsCardsNote => {
             "Satu kartu per turn agent berisi file yang diubahnya.".to_string()

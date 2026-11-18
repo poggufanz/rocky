@@ -119,7 +119,19 @@ Only these fields are kept from a hook payload: `session_id`, `cwd`,
 `tool_input.file_path` / `tool_input.notebook_path` (merged into
 `target_path`), `tool_input.command` / `tool_input.description` (kept as
 `command` and `description`: cut to scan cap, redacted, then controls mapped to
-spaces, ≤200 chars, absent when `desk/tool-text-off` exists), and `prompt`
+spaces, ≤200 chars, absent when `desk/tool-text-off` exists), `exit_code` and
+`error_head` (only on `PostToolUseFailure` from `Bash` or `PowerShell`, when
+`is_interrupt` is not `true` and `error` is a string: `error` is scanned up to
+`16 KiB` at a char boundary while `tool_response` and all other lines are
+dropped; `exit_code` is a signed 32-bit integer parsed from a leading
+`Exit code <N>` line and is still captured when `desk/tool-text-off` exists;
+`error_head` picks the first remaining non-empty line naming one failing check
+(`(?i)^(✗|✘|✖|×|not ok\b)|\bexpected\b|\bassert|\bpanicked\b|^error(\[|:)`), else the
+first line matching
+`(?i)error|exception|fail|fatal|cannot|unable|not found|missing|denied|refused|invalid|unexpected|undefined|panic|traceback`,
+else the last non-empty line, then is redacted like `command`, maps
+controls to spaces, caps at 200 chars, and is absent when `desk/tool-text-off`
+exists), and `prompt`
 (only when `hook_event_name` is `UserPromptSubmit` and the value is a string,
 absent when `desk/cards-off` exists: cut to `16 KiB` at a char boundary,
 redacted with prefix-fragment scrubbing when cut, then controls `<= 0x1f` and
@@ -180,8 +192,10 @@ the daemon syncs both markers from the settings it loaded (defaults when the
 file is missing or unreadable), and a `set` of `tool_text` or `cards` syncs
 them again, so they match the settings in use. Turning `tool_text` off also
 drops the command text and subagent descriptions from agents already in
-memory, and clears the text of timeline entries that came from a tool input
-(a command, or a subagent description). Path text stays. Every `settings`
+memory, clears the text of timeline entries that came from a tool input
+(a command, or a subagent description), and drops `command`, `description`, and
+`error_head` on ingest and replay while keeping `exit_code` (numbers only). Path
+text stays. Every `settings`
 broadcast makes the desk re-request its open timelines, so cleared text
 disappears there too. Turning `cards` off creates `desk/cards-off` so the hook
 stops recording new `prompt` values, clears every `AgentStatus.prompt` held in
@@ -243,8 +257,9 @@ Rules:
   `health.gaps` from the segments, then seeds the ingestor with every `src`
   seen so those spool files are deleted without being applied again.
 - **Tool text.** Segments written while tool text was on keep that text until
-  they age out or history is turned off. Replay drops it when `tool_text` is
-  off, so it never returns to memory, statuses, or timelines.
+  they age out or history is turned off. Replay drops `command`, `description`,
+  and `error_head` (keeping `exit_code`) when `tool_text` is off, so tool text
+  never returns to memory, statuses, or timelines.
 - **Off.** When the daemon starts with `history` off, and whenever the
   setting changes to off, every accepted segment is deleted. While off,
   nothing is appended.
@@ -639,7 +654,7 @@ One JSON object per line:
 | `importance` | string | Maximum block importance across all attributed blocks for the turn (computed before the `30`-block truncation, so omitted overflow blocks count): `"none"`, `"low"`, `"medium"`, or `"high"`. |
 | `blocks` | `Block[]` | Attributed file/symbol changes, capped at `30` entries per card. |
 | `more_count` | integer | Number of overflow blocks omitted beyond `30` (`#[serde(default)]`). |
-| `flow` | `FlowStep[]` | Chronological Bash and edit steps, capped at `100` entries per card. |
+| `flow` | `FlowStep[]` | Chronological command (`Bash`/`PowerShell`) and edit steps, capped at `100` entries per card. |
 | `flow_more` | integer | Number of overflow steps omitted beyond `100` (`#[serde(default)]`). |
 | `outside_count` | integer | Observed repo edits during the turn not attributed to agent tools. |
 | `coverage` | `Coverage` | Capture and attribution completeness summary. |
@@ -690,7 +705,12 @@ lines per side (files over `1 MiB` receive `too_large` instead).
 
 #### `FlowStep`
 
-`{ "kind": "cmd" \| "edit", "text": string, "ok": bool, "dur_ms": u64, "seqs": u32[] }`
+`{ "kind": "cmd" \| "edit", "text": string, "ok": bool, "dur_ms": u64, "seqs": u32[], "exit_code"?: i32, "error"?: string }`
+
+`exit_code` (integer, may be negative) and `error` (bounded, redacted single error
+line) are optional and omitted when absent. Only failed command (`kind: "cmd"`)
+steps carry them, with `error` absent when `desk/tool-text-off` suppressed
+`error_head` or no non-empty error line remained.
 
 #### `Coverage`
 

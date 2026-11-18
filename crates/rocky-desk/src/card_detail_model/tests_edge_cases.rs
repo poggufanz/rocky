@@ -55,6 +55,8 @@ fn edit_step_titles_and_single_sided_line_facts() {
             ok: true,
             dur_ms: 1_500,
             seqs: vec![1],
+            exit_code: None,
+            error: None,
         },
         FlowStep {
             kind: FlowKind::Edit,
@@ -62,6 +64,8 @@ fn edit_step_titles_and_single_sided_line_facts() {
             ok: true,
             dur_ms: 500,
             seqs: vec![2],
+            exit_code: None,
+            error: None,
         },
         FlowStep {
             kind: FlowKind::Edit,
@@ -69,6 +73,8 @@ fn edit_step_titles_and_single_sided_line_facts() {
             ok: true,
             dur_ms: 0,
             seqs: vec![3, 4],
+            exit_code: None,
+            error: None,
         },
     ];
     card.flow_more = 2;
@@ -139,6 +145,8 @@ fn single_line_fields_sanitize_controls_while_detail_keeps_prompt_and_quote() {
         ok: true,
         dur_ms: 2_000,
         seqs: vec![1],
+        exit_code: None,
+        error: None,
     }];
 
     model.on_detail(1, card, Vec::new(), UiLang::En);

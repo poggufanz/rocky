@@ -466,3 +466,22 @@ fn cards_off_marker_keeps_prompt_out_of_spool() {
         "{text}"
     );
 }
+
+#[test]
+fn post_tool_use_failure_bash_reaches_spool() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = br#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"npm test"},"error":"Exit code 1\nError: Cannot find module 'express'\nSECRET_SECOND_LINE","is_interrupt":false}"#;
+    let (code, out, err) = run(&["desk-hook", "claude-code"], payload, home.path());
+    assert_eq!((code, out.len(), err.len()), (0, 0, 0));
+    let files = spool_files(home.path());
+    assert_eq!(files.len(), 1);
+    let text = String::from_utf8(fs::read(&files[0]).unwrap()).unwrap();
+    assert!(text.contains("\"exit_code\":1"), "{text}");
+    assert!(!text.contains("SECRET_SECOND_LINE"), "{text}");
+    let ev = event(read_record(&files[0]));
+    assert_eq!(ev.exit_code, Some(1));
+    assert_eq!(
+        ev.error_head.as_deref(),
+        Some("Error: Cannot find module 'express'")
+    );
+}

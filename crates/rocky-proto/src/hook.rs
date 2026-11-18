@@ -5,7 +5,11 @@
 //! before serialization. Bash `command` and the tool `description` are captured
 //! through [`bound_tool_text`]: redacted, controls mapped to spaces, at most
 //! [`TOOL_TEXT_MAX_CHARS`](crate::redact::TOOL_TEXT_MAX_CHARS) characters, and
-//! absent when the `desk/tool-text-off` marker exists. On `UserPromptSubmit`,
+//! absent when the `desk/tool-text-off` marker exists. On `PostToolUseFailure`
+//! from `Bash` or `PowerShell`, `exit_code` and one bounded, redacted
+//! `error_head` line survive (`error_head` is dropped under `desk/tool-text-off`;
+//! both are empty when `is_interrupt` is `true`), while every other line of
+//! `error` and all of `tool_response` are dropped. On `UserPromptSubmit`,
 //! `prompt` is captured through [`bound_prompt`]: redacted, controls other than
 //! `\n` and `\t` mapped to spaces, at most
 //! [`PROMPT_MAX_CHARS`](crate::redact::PROMPT_MAX_CHARS) characters, and absent
@@ -13,13 +17,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::failure::{is_command_tool, parse_command_failure};
 use crate::redact::{bound_prompt, bound_tool_text};
 
 pub const STDIN_CAP: usize = 8 * 1024 * 1024;
 pub const ID_CAP: usize = 256;
 pub const PATH_CAP: usize = 4096;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HookEvent {
     pub hook_event_name: String,
     pub session_id: String,
@@ -47,6 +52,10 @@ pub struct HookEvent {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_head: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
 }
@@ -83,6 +92,8 @@ struct Raw {
     notification_type: Option<String>,
     tool_input: Option<RawToolInput>,
     prompt: Option<serde_json::Value>,
+    error: Option<serde_json::Value>,
+    is_interrupt: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +156,17 @@ pub fn parse_hook_payload(bytes: &[u8], capture: Capture) -> Result<HookEvent, D
     } else {
         None
     };
+    let (exit_code, error_head) = if raw.hook_event_name == "PostToolUseFailure"
+        && raw.is_interrupt != Some(true)
+        && raw.tool_name.as_deref().is_some_and(is_command_tool)
+    {
+        match raw.error.as_ref().and_then(|v| v.as_str()) {
+            Some(err_str) => parse_command_failure(err_str, capture.tool_text),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
     Ok(HookEvent {
         hook_event_name: cut(raw.hook_event_name, ID_CAP, &mut truncated),
         session_id: cut(raw.session_id, ID_CAP, &mut truncated),
@@ -160,6 +182,8 @@ pub fn parse_hook_payload(bytes: &[u8], capture: Capture) -> Result<HookEvent, D
         command,
         description,
         prompt,
+        exit_code,
+        error_head,
         truncated,
     })
 }
@@ -283,7 +307,7 @@ mod tests {
     }
     #[test]
     fn user_prompt_submit_still_drops_edit_content() {
-        let raw = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"fix it","tool_input":{"file_path":"a.ts","old_string":"SECRET_OLD","new_string":"SECRET_NEW","content":"SECRET_CONTENT"},"tool_response":"SECRET_RESPONSE"}"#;
+        let raw = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"fix it","tool_input":{"file_path":"a.ts","old_string":"SECRET_OLD","new_string":"SECRET_NEW","content":"SECRET_CONTENT"},"tool_response":"SECRET_RESPONSE","error":"SECRET_ERROR","is_interrupt":false}"#;
         let e = parse_hook_payload(raw.as_bytes(), ALL_CAPTURE).unwrap();
         assert_eq!(e.prompt.as_deref(), Some("fix it"));
         let out = serde_json::to_string(&e).unwrap();
@@ -292,10 +316,13 @@ mod tests {
             "SECRET_NEW",
             "SECRET_CONTENT",
             "SECRET_RESPONSE",
+            "SECRET_ERROR",
             "old_string",
             "new_string",
             "content",
             "tool_response",
+            "error",
+            "is_interrupt",
         ] {
             assert!(!out.contains(forbidden), "{forbidden} leaked: {out}");
         }
@@ -396,5 +423,72 @@ mod tests {
             !out.contains("prompt") && !out.contains("fix the cart"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn post_tool_use_failure_bash_captures_exit_and_head() {
+        let raw = r#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"npm test"},"error":"Exit code 1\nError: Cannot find module 'express'\nSECRET_SECOND_LINE","is_interrupt":false}"#;
+        let e = parse_hook_payload(raw.as_bytes(), ALL_CAPTURE).unwrap();
+        assert_eq!(e.exit_code, Some(1));
+        assert_eq!(
+            e.error_head.as_deref(),
+            Some("Error: Cannot find module 'express'")
+        );
+        let out = serde_json::to_string(&e).unwrap();
+        assert!(
+            !out.contains("SECRET_SECOND_LINE") && !out.contains("\"error\""),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn interrupt_sets_nothing() {
+        let raw = r#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"npm test"},"error":"Exit code 1\nError: Cannot find module 'express'\nSECRET_SECOND_LINE","is_interrupt":true}"#;
+        let e = parse_hook_payload(raw.as_bytes(), ALL_CAPTURE).unwrap();
+        assert_eq!((e.exit_code, e.error_head), (None, None));
+    }
+
+    #[test]
+    fn non_command_tool_sets_nothing() {
+        let raw = r#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Edit","tool_use_id":"t1","error":"String to replace not found","is_interrupt":false}"#;
+        let e = parse_hook_payload(raw.as_bytes(), ALL_CAPTURE).unwrap();
+        assert_eq!((e.exit_code, e.error_head), (None, None));
+    }
+
+    #[test]
+    fn success_event_sets_nothing() {
+        let raw = r#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"npm test"},"error":"Exit code 1\nError: oops"}"#;
+        let e = parse_hook_payload(raw.as_bytes(), ALL_CAPTURE).unwrap();
+        assert_eq!((e.exit_code, e.error_head), (None, None));
+    }
+
+    #[test]
+    fn tool_text_off_keeps_exit_code_only() {
+        let raw = r#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"npm test"},"error":"Exit code 1\nError: Cannot find module 'express'","is_interrupt":false}"#;
+        let e = parse_hook_payload(
+            raw.as_bytes(),
+            Capture {
+                tool_text: false,
+                prompt: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(e.exit_code, Some(1));
+        assert_eq!(e.error_head, None);
+        assert_eq!(e.command, None);
+    }
+
+    #[test]
+    fn non_string_error_is_dropped() {
+        let raw = r#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Bash","tool_use_id":"t1","error":{"a":1},"is_interrupt":false}"#;
+        let e = parse_hook_payload(raw.as_bytes(), ALL_CAPTURE).unwrap();
+        assert_eq!((e.exit_code, e.error_head), (None, None));
+    }
+
+    #[test]
+    fn old_record_without_new_fields_deserializes() {
+        let e: crate::hook::HookEvent =
+            serde_json::from_str(r#"{"hook_event_name":"Stop","session_id":"s"}"#).unwrap();
+        assert_eq!((e.exit_code, e.error_head), (None, None));
     }
 }

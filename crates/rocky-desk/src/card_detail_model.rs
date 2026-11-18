@@ -154,6 +154,8 @@ pub struct Step {
     pub kind: FlowKind,
     pub title: String,
     pub dur: String,
+    pub exit: Option<String>,
+    pub error: Option<String>,
     pub subs: Vec<(String, String)>,
 }
 
@@ -483,11 +485,23 @@ fn build_step(
     block_by_seq: &HashMap<u32, &Block>,
     lang: UiLang,
 ) -> Step {
+    let failed_cmd = !step.ok && step.kind == FlowKind::Cmd;
+    let exit = failed_cmd
+        .then_some(step.exit_code)
+        .flatten()
+        .map(|code| format!("exit {code}"));
+    let error = failed_cmd
+        .then_some(step.error.as_deref())
+        .flatten()
+        .map(|s| sanitize_single_line(s).trim().to_string())
+        .filter(|s| !s.is_empty());
     Step {
         ok: step.ok,
         kind: step.kind,
         title: build_step_title(step, block_by_seq),
         dur: format_step_dur(step.dur_ms),
+        exit,
+        error,
         subs: build_step_subs(step, card_root, block_by_seq, lang),
     }
 }

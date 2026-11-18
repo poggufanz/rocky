@@ -110,6 +110,32 @@ describe("scrubRepoCards", () => {
     assert.deepEqual(parsed.flow.map((s: { text: string }) => s.text), ["ran cmd in /work/app2/x"]);
   });
 
+  it("drops a failed flow step whose error names the root and keeps one that does not", () => {
+    const purgedStep = {
+      kind: "cmd",
+      text: "npm test",
+      ok: false,
+      dur_ms: 5,
+      seqs: [],
+      exit_code: 1,
+      error: "Error: Cannot find module '/work/app/src/x.js'",
+    };
+    const keptStep = {
+      kind: "cmd",
+      text: "npm run lint",
+      ok: false,
+      dur_ms: 5,
+      seqs: [],
+      exit_code: 1,
+      error: "Error: Cannot find module '/work/other/src/y.js'",
+    };
+    const line = card("c1", [block(0, "/work/app/a.ts"), block(1, "/work/other/b.ts")], [purgedStep, keptStep]);
+    const path = write("x.jsonl", `${line}\n`);
+    scrubRepoCards(["/work/app"], { rockyHome: home.dir(), platform: "linux" });
+    const parsed = JSON.parse(readFileSync(path, "utf8").trim());
+    assert.deepEqual(parsed.flow, [keptStep]);
+  });
+
   it("drops the whole line when every block matches", () => {
     const keep = card("keep", [block(0, "/work/other/x.ts")], []);
     const gone = card("gone", [block(0, "/work/app/a.ts"), block(1, "/work/app/b.ts")], [step("edit", [0, 1])]);

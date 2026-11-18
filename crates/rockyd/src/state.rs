@@ -92,6 +92,7 @@ impl StatusState {
         if !self.tool_text {
             ev.command = None;
             ev.description = None;
+            ev.error_head = None;
         }
         if !self.prompts_enabled {
             ev.prompt = None;

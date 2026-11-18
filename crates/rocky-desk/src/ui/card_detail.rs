@@ -357,6 +357,19 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
         content = content.pb(px(8.0));
     }
 
+    let mut meta = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .flex_shrink_0()
+        .text_size(px(11.0))
+        .font_family(mono_font())
+        .whitespace_nowrap();
+    if let Some(exit) = &step.exit {
+        meta = meta.child(div().text_color(rgb(DIFF_DEL_FG)).child(exit.clone()));
+    }
+    meta = meta.child(div().text_color(rgb(TEXT_DIM)).child(step.dur.clone()));
+
     content = content.child(
         div()
             .flex()
@@ -364,16 +377,21 @@ fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
             .items_center()
             .gap_2()
             .child(title)
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .font_family(mono_font())
-                    .text_color(rgb(TEXT_DIM))
-                    .whitespace_nowrap()
-                    .flex_shrink_0()
-                    .child(step.dur.clone()),
-            ),
+            .child(meta),
     );
+
+    if let Some(error) = &step.error {
+        content = content.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .pl(px(8.0))
+                .text_size(px(11.0))
+                .font_family(mono_font())
+                .text_color(rgb(TEXT_DIM))
+                .child(error.clone()),
+        );
+    }
 
     for (sub_label, fact) in &step.subs {
         let mut sub = div()

@@ -216,6 +216,10 @@ pub struct FlowStep {
     pub ok: bool,
     pub dur_ms: u64,
     pub seqs: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Overall capture completeness of a card.
@@ -534,5 +538,30 @@ mod tests {
                 "shared prompt-kinds vectors missing kind {required:?}"
             );
         }
+    }
+
+    #[test]
+    fn flow_step_without_new_fields_deserializes() {
+        let step: FlowStep = serde_json::from_str(
+            r#"{"kind":"cmd","text":"npm test","ok":false,"dur_ms":5,"seqs":[]}"#,
+        )
+        .expect("deserialize legacy FlowStep");
+        assert_eq!(step.kind, FlowKind::Cmd);
+        assert_eq!(step.text, "npm test");
+        assert!(!step.ok);
+        assert_eq!(step.dur_ms, 5);
+        assert!(step.seqs.is_empty());
+        assert_eq!(step.exit_code, None);
+        assert_eq!(step.error, None);
+
+        let serialized = serde_json::to_string(&step).expect("serialize FlowStep");
+        assert!(
+            !serialized.contains("exit_code"),
+            "unexpected exit_code key: {serialized}"
+        );
+        assert!(
+            !serialized.contains("error"),
+            "unexpected error key: {serialized}"
+        );
     }
 }
