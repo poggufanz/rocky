@@ -41,6 +41,7 @@ fn event(name: &str, sid: &str) -> HookEvent {
         description: None,
         prompt: None,
         truncated: false,
+        ..Default::default()
     }
 }
 

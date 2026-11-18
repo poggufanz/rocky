@@ -1,5 +1,6 @@
 // rocky-proto: shared protocol types for rockyd / rocky-hook / rocky-desk.
 pub mod cards;
+pub mod failure;
 pub mod history;
 pub mod hook;
 pub mod paths;

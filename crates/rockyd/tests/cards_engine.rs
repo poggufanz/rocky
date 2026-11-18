@@ -223,6 +223,7 @@ fn base_event(name: &str, session_id: &str, cwd: &str, transcript: Option<&Path>
         description: None,
         prompt: None,
         truncated: false,
+        ..Default::default()
     }
 }
 

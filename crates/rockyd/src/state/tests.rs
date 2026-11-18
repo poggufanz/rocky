@@ -18,6 +18,7 @@ fn ev(name: &str, sid: &str, aid: Option<&str>) -> HookEvent {
         description: None,
         prompt: None,
         truncated: false,
+        ..Default::default()
     }
 }
 

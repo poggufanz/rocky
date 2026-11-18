@@ -736,6 +736,7 @@ mod tests {
             description: None,
             prompt: None,
             truncated: false,
+            ..Default::default()
         }
     }
 
