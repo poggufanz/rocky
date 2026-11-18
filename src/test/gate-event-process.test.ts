@@ -14,9 +14,9 @@ const entry = join(packageRoot, "dist", "index.js");
 // Hang guard only, not part of any assertion: Node startup alone can take seconds on a loaded runner.
 const PROCESS_TIMEOUT_MS = 30_000;
 
-/** Every switch that changes the gate's decision, so a developer's own shell cannot change a verdict here. */
+/** Advisory switches cleared per test, so a developer's own shell cannot change a verdict here. */
 const GATE_SWITCHES = [
-  "ROCKY_GATE_OVERRIDE", "ROCKY_GATE_MODE", "ROCKY_RATIONALE_GATE", "ROCKY_CYCLE_ADVISORY",
+  "ROCKY_CYCLE_ADVISORY", "ROCKY_CLARITY_ADVISORY",
   "NODE_OPTIONS", "NODE_TEST_CONTEXT",
 ] as const;
 
@@ -50,11 +50,11 @@ function runGateEvent(sandbox: GateSandbox, stdin: string): SpawnSyncReturns<str
   });
 }
 
-test("hook gate-event prints the deny decision for an edit with no stated reason, and exits 0", (t) => {
+test("hook gate-event prints {} for a first edit with no stated reason, and exits 0", (t) => {
   const sandbox = gateSandbox(t);
   const file = join(sandbox.work, "app.ts");
   const payload = JSON.stringify({
-    session_id: "gate-process-deny",
+    session_id: "gate-process-first",
     hook_event_name: "PreToolUse",
     tool_name: "Edit",
     tool_input: { file_path: file },
@@ -64,15 +64,30 @@ test("hook gate-event prints the deny decision for an edit with no stated reason
   const result = runGateEvent(sandbox, payload);
 
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "{}");
+});
+
+test("hook gate-event prints advisory additionalContext without permissionDecision, and exits 0", (t) => {
+  const sandbox = gateSandbox(t);
+  const file = join(sandbox.work, "app.ts");
+  const payload = JSON.stringify({
+    session_id: "gate-process-advisory",
+    hook_event_name: "PreToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: file },
+    cwd: sandbox.work,
+    rationale: "it is broken, this thing does that stuff with those things and it fails",
+  });
+
+  const result = runGateEvent(sandbox, payload);
+
+  assert.equal(result.status, 0, result.stderr);
   const decision = JSON.parse(result.stdout) as {
-    hookSpecificOutput?: { hookEventName?: string; permissionDecision?: string; permissionDecisionReason?: string };
+    hookSpecificOutput?: Record<string, unknown>;
   };
   assert.equal(decision.hookSpecificOutput?.hookEventName, "PreToolUse");
-  assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");
-  // The reason is the instruction the agent follows next: the command that states why, and the file it is for.
-  const reason = decision.hookSpecificOutput?.permissionDecisionReason ?? "";
-  assert.match(reason, /rocky hook agent-event claude-code --rationale/u);
-  assert.ok(reason.includes(file), `the reason must name the file: ${reason}`);
+  assert.equal("permissionDecision" in (decision.hookSpecificOutput ?? {}), false);
+  assert.match(String(decision.hookSpecificOutput?.additionalContext ?? ""), /^rocky: Prompt is vague/);
 });
 
 test("hook gate-event allows with {} and exits 0 on garbage or empty stdin", (t) => {

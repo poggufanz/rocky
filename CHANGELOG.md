@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+The PreToolUse hook (`rocky hook gate-event`) no longer blocks edits or asks an agent to record a reason first. Prompt-clarity and failure-cycle notes now reach the agent as `additionalContext`. `ROCKY_GATE_MODE`, `ROCKY_RATIONALE_GATE`, and `ROCKY_GATE_OVERRIDE` are gone. `rocky hook agent-event generic --rationale` and `rocky why --add` still record a stated reason.
+
 `rocky why`, `rocky teach` (and MCP `teach_lookup`), and MCP `why_file` now surface a change card's `sequence` (stating command and edit order, not cause) when present.
 
 `rocky teach` and MCP `teach_lookup` answer from change cards (matched by function name, line, or whole file) when no explain record matches.

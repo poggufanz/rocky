@@ -381,7 +381,7 @@ export function printCodexAgentHooks(command = rockyHookCommand("codex")): void 
   detail(codexConfigSnippet(command));
   say("Codex config is TOML, and rocky does not edit it. Paste the snippet above into your Codex config yourself.");
   detail("Trust warning: review and trust changed command hooks through Codex /hooks before they run.");
-  detail("The rationale gate needs Claude Code hooks. Other agents use the notify lane, which cannot deny.");
+  detail("The advisory PreToolUse hook needs Claude Code hooks. Other agents use the notify lane.");
 }
 
 /** Build the exact Claude Code event groups owned by Rocky. */

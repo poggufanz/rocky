@@ -20,7 +20,6 @@ The useful part is local and deterministic. Rocky has no telemetry and no JavaSc
 | --- | --- |
 | **Failure memory** a failed build becomes a fingerprint; when the same error returns, Rocky says it has recorded it before and that it went green again after — never a fix it did not record. Evidence, not a guess. | ![Rocky remembers a failed build and its fix](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-loop.gif) |
 | **`rocky dash`** opens a local page in your browser: every remembered change to one file, side by side, the agent's stated reason next to the diff that landed. | ![rocky dash compare view](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-dash.gif) |
-| **Rationale gate** an editing agent must state why before it touches a file. No stated reason, no edit; deny-once, fail-open. | ![PreToolUse rationale gate denying an unexplained edit](https://raw.githubusercontent.com/poggufanz/rocky/main/assets/demo-gate.gif) |
 
 ## Install
 
@@ -95,11 +94,11 @@ The first run fails and Rocky remembers it; the second run works, and Rocky know
 | Nervous System | Supported Claude Code and Codex hooks record bounded intent, path, excerpt, and stated-rationale evidence. |
 | Dictionary | `rocky what`, `rocky how`, `rocky why`, `rocky digest`, `rocky quiz`, and `rocky export` turn remembered changes back into plain explanations. |
 | `rocky mcp` | Exposes bounded memory and knowledge tools over local stdio, with sanitized output by default. |
-| Rationale gate | A concept lexicon (`rocky concepts`) plus a PreToolUse gate that nudges an editing agent to state why before touching a file; deny-once, fail-open. |
+| Concepts & advisory gate | A concept lexicon (`rocky concepts`) plus an advisory PreToolUse hook (`rocky hook gate-event`) that prints `{}` or an `additionalContext` note and never denies. |
 | Host setup | `rocky setup` registers supported hosts after consent; `rocky setup --remove` also removes a voice skill left by an older release (refuses while desk consent is approved). |
 | `rocky hook` | Manage the optional Bash, WSL, and PowerShell shell hooks. |
 | `rocky model` | Configure optional loopback Ollama (`status\|use\|off`). |
-| `rocky hook gate-event`, `rocky hook agent-event generic` | PreToolUse rationale-gate enforcement and the universal agent notify endpoint. |
+| `rocky hook gate-event`, `rocky hook agent-event generic` | Advisory PreToolUse hook endpoint and the universal agent notify endpoint. |
 
 Setup stays explicit:
 
@@ -134,7 +133,7 @@ Stated-rationale evidence arrives through four lanes, ranked by fidelity:
 | `notify` | Any agent calling `rocky hook agent-event <adapter> --rationale "<text>"` | summary |
 | `human` | You, via `rocky why --add "<text>" [--files a.ts,b.ts]` | summary |
 
-An unlinked file has no rationale evidence yet; that is a first-class honest state, not a gap Rocky papers over. The DSH log adapter needs Node 22.15 or newer at runtime for built-in zstd support — on an older Node it feature-detects the gap, skips DSH logs, and discloses that instead of guessing. `rocky setup --agent-hooks` installs a PreToolUse rationale gate by default (`rocky hook gate-event claude-code`): it denies once per session per file when no rationale evidence exists yet, then fails open for that file every time after. Opt out at install with `--no-rationale-gate`, or at runtime with `ROCKY_RATIONALE_GATE=off`. Codex and other non-Claude-Code agents have no deny hook at all; they reach the `notify` lane only.
+An unlinked file has no rationale evidence yet; that is a first-class honest state, not a gap Rocky papers over. The DSH log adapter needs Node 22.15 or newer at runtime for built-in zstd support — on an older Node it feature-detects the gap, skips DSH logs, and discloses that instead of guessing. `rocky setup --agent-hooks` installs the advisory PreToolUse hook by default (`rocky hook gate-event claude-code`): it prints `{}` or an `additionalContext` note (prompt clarity or failure-cycle) and never denies an edit. Opt out at install with `--no-rationale-gate`. Codex and other non-Claude-Code agents use the `notify` lane.
 
 Change cards record one summary per agent turn or subagent (`file › symbol` blocks, logic labels, the agent's own words, and a step timeline), shown in the desktop app's "Done" list, `rocky why`, and MCP `why_file`. Labels come from AST/syntax-tree and file analysis, not AI; the stated "why" is always a quote of the agent, recorded and not verified; and code appears only in the desktop app for repositories with capture consent. Turn change cards off anytime with the **Change cards** switch in desk Settings.
 
