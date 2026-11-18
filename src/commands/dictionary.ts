@@ -13,7 +13,7 @@ import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, isVerbose, phrase, prompt as rockyPrompt, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 import { formatGitDiffLines, resolveGitDiff, type GitDiffOptions, type GitDiffResult } from "../core/git-diff.js";
-import { labelChip, promptTitle, sequenceSentence } from "../desk/card-text.js";
+import { labelChip, promptTitle, sequenceSentenceParts } from "../desk/card-text.js";
 import { cardsForFile, type CardsForFile, type StoredBlock, type StoredCard } from "../desk/cards-read.js";
 import { CliUsageError, parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
 
@@ -34,6 +34,9 @@ const MIN_CARD_SYMBOL_BYTES = 96;
 const MIN_CARD_CHIP_BYTES = 72;
 const MIN_CARD_BASH_BYTES = 72;
 const MIN_CARD_QUOTE_BYTES = 213;
+const MIN_CARD_SEQ_CMD_BYTES = 64;
+const MIN_CARD_SEQ_EDIT_BYTES = 96;
+const MIN_CARD_SEQ_ERR_BYTES = 64;
 const CARD_BLOCK_INDENT = "         ";
 const CARD_BLOCK_QUOTE_PREFIX = ' Agent said: "';
 const CARD_BLOCK_QUOTE_SUFFIX = '". Recorded, not verified.';
@@ -800,6 +803,60 @@ function formatCardBlock(block: StoredBlock): string {
   return terminalSafe(`${CARD_BLOCK_INDENT}${symbol}: ${chip}.${quoteClause}${bashClause}`, MAX_OUTPUT_LINE_BYTES);
 }
 
+/** Truncate UTF-8 text to fit maxBytes, appending a trailing ellipsis when shortened. */
+function truncateUtf8WithEllipsis(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const ellipsisBytes = Buffer.byteLength("\u2026", "utf8");
+  if (maxBytes < ellipsisBytes) return truncateUtf8(value, maxBytes).value;
+  return `${truncateUtf8(value, maxBytes - ellipsisBytes).value}\u2026`;
+}
+
+/** Format a card's sequence line within MAX_OUTPUT_LINE_BYTES without clipping fixed clauses. */
+function formatCardSequence(card: StoredCard): string | undefined {
+  const parts = sequenceSentenceParts(card);
+  if (!parts) return undefined;
+
+  const fullCmd = terminalSafe(parts.command, MAX_OUTPUT_LINE_BYTES);
+  const fullEditHead = terminalSafe(parts.editHead, MAX_OUTPUT_LINE_BYTES);
+  if (fullCmd.length === 0 || fullEditHead.length === 0) return undefined;
+
+  const rawErr = parts.errorName !== undefined ? terminalSafe(parts.errorName, MAX_OUTPUT_LINE_BYTES) : "";
+  const hasErr = rawErr.trim().length > 0;
+  const fullErr = hasErr ? rawErr : "";
+
+  const prefix = `${CARD_BLOCK_INDENT}Sequence: \``;
+  const failMid = `\` failed (exit ${parts.exitCode}).`;
+  const errPrefix = " The error names ";
+  const errSuffix = ".";
+  const editPrefix = " Edited ";
+  const editMoreSuffix = parts.moreEdits > 0 ? ` and ${parts.moreEdits} more` : "";
+  const editSuffix = ". `";
+  const passSuffix = "` passed.";
+
+  const fixedBytes = Buffer.byteLength(
+    `${prefix}${failMid}${hasErr ? `${errPrefix}${errSuffix}` : ""}${editPrefix}${editMoreSuffix}${editSuffix}${passSuffix}`,
+    "utf8",
+  );
+  const variableBudget = Math.max(0, MAX_OUTPUT_LINE_BYTES - fixedBytes);
+  const [cmdTotalBudget = 0, editBudget = 0, errBudget = 0] = allocateByteBudgets(variableBudget, [
+    { desired: Buffer.byteLength(fullCmd, "utf8") * 2, floor: MIN_CARD_SEQ_CMD_BYTES * 2 },
+    { desired: Buffer.byteLength(fullEditHead, "utf8"), floor: MIN_CARD_SEQ_EDIT_BYTES },
+    { desired: hasErr ? Buffer.byteLength(fullErr, "utf8") : 0, floor: hasErr ? MIN_CARD_SEQ_ERR_BYTES : 0 },
+  ]);
+
+  const cmd = truncateUtf8WithEllipsis(fullCmd, Math.floor(cmdTotalBudget / 2));
+  const editHead = truncateUtf8WithEllipsis(fullEditHead, editBudget);
+  const errClause = hasErr
+    ? `${errPrefix}${truncateUtf8WithEllipsis(fullErr, errBudget)}${errSuffix}`
+    : "";
+
+  return terminalSafe(
+    `${prefix}${cmd}${failMid}${errClause}${editPrefix}${editHead}${editMoreSuffix}${editSuffix}${cmd}${passSuffix}`,
+    MAX_OUTPUT_LINE_BYTES,
+  );
+}
+
 /** Format the summary line for a single change card. */
 function formatCardHeader(card: StoredCard, now: number): string {
   const time = formatCardTime(card.ended_ms ?? card.started_ms, now);
@@ -840,9 +897,9 @@ function sayChangeCards(
       if (seq && seq.pattern === "fix_after_fail") {
         const editSet = new Set(seq.edit_seqs);
         if (blocks.some((block) => editSet.has(block.seq))) {
-          const sentence = sequenceSentence(card);
-          if (sentence !== undefined) {
-            support(terminalSafe(`${CARD_BLOCK_INDENT}Sequence: ${sentence}`, MAX_OUTPUT_LINE_BYTES));
+          const seqLine = formatCardSequence(card);
+          if (seqLine !== undefined) {
+            support(seqLine);
           }
         }
       }

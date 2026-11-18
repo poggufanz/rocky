@@ -9,6 +9,9 @@ export type PromptKind =
 
 const SEQUENCE_CMD_MAX_CHARS = 80;
 const CONTROL_OR_LINE_SEP_RE = /\r\n|[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu;
+// Match Rust char::is_whitespace (Unicode White_Space), which preserves U+FEFF unlike JS \s/trim().
+const UNICODE_WHITESPACE_RUN_RE = /\p{White_Space}+/u;
+const UNICODE_EDGE_WHITESPACE_RE = /^\p{White_Space}+|\p{White_Space}+$/gu;
 
 const STATIC_LABEL_CHIPS: ReadonlyMap<string, string> = new Map<string, string>([
   ["params_changed", "parameters changed"],
@@ -132,18 +135,17 @@ function cutToLimit(value: string, maxChars: number): string {
 
 function normalizeAndCutCommand(command: string): string {
   const clean = sanitizeSingleLine(command);
-  const normalized = clean.trim().split(/\s+/u).filter((part) => part.length > 0).join(" ");
+  const normalized = clean.split(UNICODE_WHITESPACE_RUN_RE).filter((part) => part.length > 0).join(" ");
   return cutToLimit(normalized, SEQUENCE_CMD_MAX_CHARS);
 }
 
 function formatSequenceSymbol(symbol: StoredBlock["symbol"]): string | undefined {
   if (!symbol) return undefined;
   const name = sanitizeSingleLine(symbol.name);
-  if (name.length === 0) return undefined;
-  if ((symbol.kind === "function" || symbol.kind === "method") && !name.endsWith("()")) {
-    return `${name}()`;
-  }
-  return name;
+  const formatted = (symbol.kind === "function" || symbol.kind === "method") && !name.endsWith("()")
+    ? `${name}()`
+    : name;
+  return formatted.length > 0 ? formatted : undefined;
 }
 
 function blockHead(block: StoredBlock): string {
@@ -152,8 +154,17 @@ function blockHead(block: StoredBlock): string {
   return symbol !== undefined ? `${path} \u203a ${symbol}` : path;
 }
 
-/** Render the English order-only sentence for a card's sequence pattern, if resolvable. */
-export function sequenceSentence(card: StoredCard): string | undefined {
+/** Normalized parts of an English sequence sentence, if resolvable against card blocks. */
+export interface SequenceSentenceParts {
+  readonly command: string;
+  readonly exitCode: number;
+  readonly errorName?: string;
+  readonly editHead: string;
+  readonly moreEdits: number;
+}
+
+/** Extract normalized English sequence sentence parts, if resolvable against card blocks. */
+export function sequenceSentenceParts(card: StoredCard): SequenceSentenceParts | undefined {
   const seq = card.sequence;
   if (!seq || seq.pattern !== "fix_after_fail") return undefined;
   const cmd = normalizeAndCutCommand(seq.command);
@@ -178,11 +189,24 @@ export function sequenceSentence(card: StoredCard): string | undefined {
   const firstHead = blockHead(firstBlock);
   if (firstHead.length === 0) return undefined;
 
-  const more = resolved.length - 1;
-  const edits = more > 0 ? `${firstHead} and ${more} more` : firstHead;
   const errName = typeof seq.error_names === "string"
-    ? sanitizeSingleLine(seq.error_names).trim()
+    ? sanitizeSingleLine(seq.error_names).replace(UNICODE_EDGE_WHITESPACE_RE, "")
     : "";
-  const errClause = errName.length > 0 ? ` The error names ${errName}.` : "";
-  return `\`${cmd}\` failed (exit ${seq.exit_code}).${errClause} Edited ${edits}. \`${cmd}\` passed.`;
+
+  return {
+    command: cmd,
+    exitCode: seq.exit_code,
+    ...(errName.length > 0 ? { errorName: errName } : {}),
+    editHead: firstHead,
+    moreEdits: resolved.length - 1,
+  };
+}
+
+/** Render the English order-only sentence for a card's sequence pattern, if resolvable. */
+export function sequenceSentence(card: StoredCard): string | undefined {
+  const parts = sequenceSentenceParts(card);
+  if (!parts) return undefined;
+  const edits = parts.moreEdits > 0 ? `${parts.editHead} and ${parts.moreEdits} more` : parts.editHead;
+  const errClause = parts.errorName !== undefined ? ` The error names ${parts.errorName}.` : "";
+  return `\`${parts.command}\` failed (exit ${parts.exitCode}).${errClause} Edited ${edits}. \`${parts.command}\` passed.`;
 }

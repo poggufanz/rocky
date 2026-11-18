@@ -946,3 +946,72 @@ test("why prints Sequence line only when edit_seqs touches a matched block for t
   assert.equal(safeSeqLine.includes("\u001b"), false);
   assert.equal(safeSeqLine.includes("\u202e"), false);
 });
+
+test("why keeps Sequence fixed clauses and passing outcome under the 512-byte limit for multibyte and long fields", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+
+  // 80-character command with 75 4-byte U+20000 characters (305 bytes per command occurrence).
+  const multibyteCmd = `echo ${"\u{20000}".repeat(75)}`;
+  const multibyteCard = makeCard({
+    card_id: "card-seq-multibyte",
+    blocks: [makeBlock({ seq: 1, path: "src/auth.ts", symbol: null })],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: multibyteCmd,
+      exit_code: 1,
+      edit_seqs: [1],
+    },
+  });
+  const multibyteSinks = makeSinks();
+  assert.equal(
+    why(["src/auth.ts"], {
+      ...multibyteSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([multibyteCard]),
+    }),
+    0,
+  );
+  const mbLine = multibyteSinks.outLines.find((line) => line.includes("Sequence:")) ?? "";
+  assert.ok(mbLine.length > 0);
+  assert.ok(Buffer.byteLength(mbLine, "utf8") <= 512, `byte length was ${Buffer.byteLength(mbLine, "utf8")}`);
+  assert.ok(mbLine.endsWith("\u2026` passed."), mbLine);
+  assert.ok(mbLine.includes("`echo "), mbLine);
+  assert.ok(mbLine.includes("failed (exit 1). Edited src/auth.ts."), mbLine);
+  assert.deepEqual(validateOutputLine(mbLine.trim()), []);
+
+  // Long ASCII path and error_names with an 80-character ASCII command.
+  const longAsciiCmd = "c".repeat(80);
+  const longPath = `src/${"nested/".repeat(40)}auth.ts`;
+  const longErr = `${"longerror_".repeat(30)}auth.ts`;
+  const longFieldsCard = makeCard({
+    card_id: "card-seq-long-fields",
+    blocks: [makeBlock({ seq: 1, path: longPath, symbol: null })],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: longAsciiCmd,
+      exit_code: 2,
+      edit_seqs: [1],
+      error_names: longErr,
+    },
+  });
+  const longSinks = makeSinks();
+  assert.equal(
+    why([longPath], {
+      ...longSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([longFieldsCard]),
+    }),
+    0,
+  );
+  const longLine = longSinks.outLines.find((line) => line.includes("Sequence:")) ?? "";
+  assert.ok(longLine.length > 0);
+  assert.ok(Buffer.byteLength(longLine, "utf8") <= 512, `byte length was ${Buffer.byteLength(longLine, "utf8")}`);
+  assert.ok(longLine.endsWith(`\`${longAsciiCmd}\` passed.`), longLine);
+  assert.ok(longLine.includes(`\`${longAsciiCmd}\` failed (exit 2). The error names `), longLine);
+  assert.ok(longLine.includes(" Edited "), longLine);
+  assert.deepEqual(validateOutputLine(longLine.trim()), []);
+});

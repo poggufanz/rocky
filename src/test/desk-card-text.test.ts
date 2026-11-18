@@ -238,3 +238,62 @@ test("sequenceSentence returns undefined when sequence is absent, empty cmd, or 
     undefined,
   );
 });
+
+test("sequenceSentence preserves U+FEFF like Rust whitespace rules and renders empty function/method names as ()", () => {
+  const feffLine = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      {
+        pattern: "fix_after_fail",
+        command: "\uFEFFnpm\uFEFF \u00A0test\uFEFF\u3000",
+        exit_code: 1,
+        edit_seqs: [1],
+        error_names: "\u00A0\uFEFFauth.ts\uFEFF\u3000",
+      },
+    ),
+  );
+  assert.equal(
+    feffLine,
+    "`\uFEFFnpm\uFEFF test\uFEFF` failed (exit 1). The error names \uFEFFauth.ts\uFEFF. Edited src/auth.ts. `\uFEFFnpm\uFEFF test\uFEFF` passed.",
+  );
+
+  const feffTokenLine = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      {
+        pattern: "fix_after_fail",
+        command: "\uFEFFnpm\u3000\uFEFF",
+        exit_code: 1,
+        edit_seqs: [1],
+      },
+    ),
+  );
+  assert.equal(
+    feffTokenLine,
+    "`\uFEFFnpm \uFEFF` failed (exit 1). Edited src/auth.ts. `\uFEFFnpm \uFEFF` passed.",
+  );
+
+  const emptyFn = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "function", name: "" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(emptyFn, "`npm test` failed (exit 1). Edited src/auth.ts \u203a (). `npm test` passed.");
+
+  const emptyMethod = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "method", name: "" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(emptyMethod, "`npm test` failed (exit 1). Edited src/auth.ts \u203a (). `npm test` passed.");
+
+  const emptyStruct = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "struct", name: "" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(emptyStruct, "`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.");
+});
