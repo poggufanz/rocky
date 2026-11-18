@@ -1227,3 +1227,69 @@ fn card_without_sequence_has_no_sequence_line() {
     };
     assert_eq!(view.sequence_line, None);
 }
+
+#[test]
+fn sequence_sentence_names_first_edit_in_chronological_order_and_deduplicates() {
+    let mut card = sample_card("c-seq-order", 1_000, Some(5_000));
+    // Stored in capture order [1, 2], while edit_seqs carries chronological order [2, 1].
+    card.blocks = vec![
+        sample_block(1, "src/later_started.ts", Vec::new()),
+        sample_block(2, "src/earlier_started.ts", Vec::new()),
+    ];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![2, 1],
+        error_names: None,
+    });
+
+    let (mut model, _) = DetailModel::open("c-seq-order".to_string(), 1);
+    model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        view.sequence_line.as_deref(),
+        Some(
+            "`npm test` failed (exit 1). Edited src/earlier_started.ts and 1 more. `npm test` passed."
+        )
+    );
+
+    // Duplicate seqs and a missing seq before/between resolvable ones are ignored/deduplicated.
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![99, 2, 2, 1, 1],
+        error_names: None,
+    });
+    let (mut dedup_model, _) = DetailModel::open("c-seq-order".to_string(), 2);
+    dedup_model.on_detail(2, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(dedup_view) = dedup_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        dedup_view.sequence_line.as_deref(),
+        Some(
+            "`npm test` failed (exit 1). Edited src/earlier_started.ts and 1 more. `npm test` passed."
+        )
+    );
+}
+
+#[test]
+fn sequence_sentence_is_none_when_no_edit_seq_resolves_to_block() {
+    let mut card = sample_card("c-seq-missing-blocks", 1_000, Some(5_000));
+    card.blocks = vec![sample_block(1, "src/other.ts", Vec::new())];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![2, 3],
+        error_names: None,
+    });
+
+    let (mut model, _) = DetailModel::open("c-seq-missing-blocks".to_string(), 1);
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(view.sequence_line, None);
+}

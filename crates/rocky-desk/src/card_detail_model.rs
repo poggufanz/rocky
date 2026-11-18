@@ -1,6 +1,6 @@
 //! Pure view-model for change card detail, execution timeline, and paged block diffs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rocky_proto::cards::{Block, Card, CoverageState, FlowKind, FlowStep, Importance, Sequence};
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, SnippetLine};
@@ -343,7 +343,7 @@ fn build_detail_view(card: &Card, snippets: &[BlockSnippet], lang: UiLang) -> De
     });
 
     let (prompt, prompt_is_notice) = prompt_display(&card.prompt, lang);
-    let sequence_line = build_sequence_line(card, lang);
+    let sequence_line = build_sequence_line(card, &block_by_seq, lang);
 
     DetailView {
         prompt,
@@ -358,7 +358,11 @@ fn build_detail_view(card: &Card, snippets: &[BlockSnippet], lang: UiLang) -> De
     }
 }
 
-fn build_sequence_line(card: &Card, lang: UiLang) -> Option<String> {
+fn build_sequence_line(
+    card: &Card,
+    block_by_seq: &HashMap<u32, &Block>,
+    lang: UiLang,
+) -> Option<String> {
     let seq = card.sequence.as_ref()?;
     match seq {
         Sequence::FixAfterFail {
@@ -371,13 +375,18 @@ fn build_sequence_line(card: &Card, lang: UiLang) -> Option<String> {
             if cmd.is_empty() {
                 return None;
             }
-            let mut edits_iter = card.blocks.iter().filter(|b| edit_seqs.contains(&b.seq));
-            let first_block = edits_iter.next()?;
+            let mut seen = HashSet::new();
+            let mut resolved = edit_seqs
+                .iter()
+                .copied()
+                .filter(|seq| seen.insert(*seq))
+                .filter_map(|seq| block_by_seq.get(&seq).copied());
+            let first_block = resolved.next()?;
             let first_head = block_head(first_block);
             if first_head.is_empty() {
                 return None;
             }
-            let more = edits_iter.count();
+            let more = resolved.count();
             let edits = if more > 0 {
                 card_text(
                     lang,
