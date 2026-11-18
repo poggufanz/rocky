@@ -508,6 +508,8 @@ fn timeline_steps_with_subs_and_facts() {
             kind: FlowKind::Cmd,
             title: "cargo test -p rocky-desk".to_string(),
             dur: "8s".to_string(),
+            exit: None,
+            error: None,
             subs: Vec::new(),
         }
     );
@@ -518,6 +520,8 @@ fn timeline_steps_with_subs_and_facts() {
             kind: FlowKind::Edit,
             title: "src/auth.rs \u{203a} login".to_string(),
             dur: "1m 5s".to_string(),
+            exit: None,
+            error: None,
             subs: vec![
                 (
                     "guard baru".to_string(),
@@ -987,4 +991,75 @@ fn detail_prompt_formats_harness_envelopes_and_plain_prompts() {
     );
     assert_eq!(mid.prompt, "see <command-name>/x</command-name> in docs");
     assert!(!mid.prompt_is_notice);
+}
+
+#[test]
+fn failed_step_shows_exit_and_error() {
+    let (mut model, _) = DetailModel::open("c-fail".to_string(), 1);
+    let mut card = sample_card("c-fail", 1_000, Some(5_000));
+    card.flow = vec![FlowStep {
+        kind: FlowKind::Cmd,
+        text: "npm test".to_string(),
+        ok: false,
+        dur_ms: 4_000,
+        seqs: Vec::new(),
+        exit_code: Some(1),
+        error: Some("Error: x\u{7}".into()),
+    }];
+
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    let step = &view.timeline[0];
+    assert_eq!(step.exit.as_deref(), Some("exit 1"));
+    assert_eq!(step.error.as_deref(), Some("Error: x"));
+}
+
+#[test]
+fn ok_step_has_neither() {
+    let (mut model, _) = DetailModel::open("c-ok".to_string(), 1);
+    let mut card = sample_card("c-ok", 1_000, Some(3_000));
+    card.flow = vec![FlowStep {
+        kind: FlowKind::Cmd,
+        text: "cargo check".to_string(),
+        ok: true,
+        dur_ms: 2_000,
+        seqs: Vec::new(),
+        exit_code: None,
+        error: None,
+    }];
+
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    let step = &view.timeline[0];
+    assert_eq!(step.exit, None);
+    assert_eq!(step.error, None);
+}
+
+#[test]
+fn old_flow_step_renders_unchanged() {
+    let (mut model, _) = DetailModel::open("c-old-fail".to_string(), 1);
+    let mut card = sample_card("c-old-fail", 1_000, Some(4_000));
+    card.flow = vec![FlowStep {
+        kind: FlowKind::Cmd,
+        text: "cargo test".to_string(),
+        ok: false,
+        dur_ms: 3_000,
+        seqs: Vec::new(),
+        exit_code: None,
+        error: None,
+    }];
+
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    let step = &view.timeline[0];
+    assert_eq!(step.exit, None);
+    assert_eq!(step.error, None);
+    assert_eq!(step.title, "cargo test");
+    assert_eq!(step.dur, "3s");
 }
