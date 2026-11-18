@@ -425,7 +425,7 @@ export interface ProjectedTeachCard {
   lines: readonly string[];
   evidence: string;
   expandable: boolean;
-  match: "hash" | "similarity" | "ladder";
+  match: "hash" | "similarity" | "ladder" | "card";
   recordId?: string;
   source?: string;
   provenance?: { commit: string; author: string; date: string; subject: string };
@@ -436,12 +436,12 @@ export interface ProjectedTeachCard {
  * Project a teach card (header/lines/evidence from the renderers) plus the
  * match kind and, for a witness, the record id and source label. Under
  * sanitized exposure every string is redacted and the record id stays opaque;
- * the witness cwd is never projected. Assumed evidence (ladder) carries no
- * record id at all.
+ * the witness cwd is never projected. Assumed evidence (ladder) and change
+ * cards carry no record id at all.
  */
 export function projectExplain(
   card: { header: string; lines: readonly string[]; evidence: string; expandable: boolean },
-  match: "hash" | "similarity" | "ladder",
+  match: "hash" | "similarity" | "ladder" | "card",
   record: ExplainRecord | undefined,
   exposure: Exposure,
   provenance?: { commit: string; author: string; date: string; subject: string },

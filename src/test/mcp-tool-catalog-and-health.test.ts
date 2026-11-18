@@ -191,6 +191,9 @@ test("MCP catalog exports one versioned thirteen-tool source and registry order 
     recallWithAi: disabledRecallWithAi,
   });
   assert.deepEqual(registry.list().map((definition) => definition.name), expectedCatalog);
+  const teach = registry.list().find((definition) => definition.name === "teach_lookup");
+  assert.ok(teach !== undefined);
+  assert.match(teach.description, /change card/i);
 });
 
 test("health rejects legacy four-tool servers and accepts exact thirteen plus foreign extras", async () => {
