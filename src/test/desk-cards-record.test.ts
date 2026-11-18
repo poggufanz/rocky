@@ -76,6 +76,44 @@ test("validateCard rejects non-objects and wrong versions", () => {
   assert.equal(validateCard(card({ v: 2 })), false);
 });
 
+test("parseCardLine accepts flow steps with optional exit_code and error", () => {
+  const stepWithFailure = { kind: "cmd", text: "npm test", ok: false, dur_ms: 120, seqs: [], exit_code: 1, error: "Error: x" };
+  const stepWithNegativeExit = { kind: "cmd", text: "pwsh", ok: false, dur_ms: 50, seqs: [], exit_code: -1, error: null };
+  const stepWithoutFailure = { kind: "cmd", text: "npm run build", ok: true, dur_ms: 80, seqs: [1] };
+  const stepWithNulls = { kind: "cmd", text: "pwsh", ok: false, dur_ms: 30, seqs: [], exit_code: null, error: null };
+
+  const parsed = parseCardLine(
+    Buffer.from(JSON.stringify(card({ flow: [stepWithFailure, stepWithNegativeExit, stepWithoutFailure, stepWithNulls] }))),
+  );
+  assert.equal(parsed.kind, "card");
+  if (parsed.kind === "card") {
+    assert.equal(parsed.card.flow?.[0]?.exit_code, 1);
+    assert.equal(parsed.card.flow?.[0]?.error, "Error: x");
+    assert.equal(parsed.card.flow?.[1]?.exit_code, -1);
+    assert.equal(parsed.card.flow?.[1]?.error, null);
+    assert.equal(parsed.card.flow?.[2]?.exit_code, undefined);
+    assert.equal(parsed.card.flow?.[2]?.error, undefined);
+    assert.equal(parsed.card.flow?.[3]?.exit_code, null);
+    assert.equal(parsed.card.flow?.[3]?.error, null);
+  }
+});
+
+test("parseCardLine rejects flow steps with wrong exit_code or error types", () => {
+  const baseStep = { kind: "cmd", text: "npm test", ok: false, dur_ms: 120, seqs: [] };
+  assert.equal(
+    parseCardLine(Buffer.from(JSON.stringify(card({ flow: [{ ...baseStep, exit_code: "1" }] })))).kind,
+    "invalid",
+  );
+  assert.equal(
+    parseCardLine(Buffer.from(JSON.stringify(card({ flow: [{ ...baseStep, exit_code: 1.5 }] })))).kind,
+    "invalid",
+  );
+  assert.equal(
+    parseCardLine(Buffer.from(JSON.stringify(card({ flow: [{ ...baseStep, error: 5 }] })))).kind,
+    "invalid",
+  );
+});
+
 test("collapseDotSegments handles drives, unc, dots, and escapes", () => {
   assert.deepEqual(collapseDotSegments("C:\\a\\.\\b\\..\\c"), { prefix: "C:/", segments: ["a", "c"], hadEscape: false });
   assert.deepEqual(collapseDotSegments("../x"), { prefix: "", segments: ["x"], hadEscape: true });

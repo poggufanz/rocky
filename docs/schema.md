@@ -119,7 +119,17 @@ Only these fields are kept from a hook payload: `session_id`, `cwd`,
 `tool_input.file_path` / `tool_input.notebook_path` (merged into
 `target_path`), `tool_input.command` / `tool_input.description` (kept as
 `command` and `description`: cut to scan cap, redacted, then controls mapped to
-spaces, ≤200 chars, absent when `desk/tool-text-off` exists), and `prompt`
+spaces, ≤200 chars, absent when `desk/tool-text-off` exists), `exit_code` and
+`error_head` (only on `PostToolUseFailure` from `Bash` or `PowerShell`, when
+`is_interrupt` is not `true` and `error` is a string: `error` is scanned up to
+`16 KiB` at a char boundary while `tool_response` and all other lines are
+dropped; `exit_code` is a signed 32-bit integer parsed from a leading
+`Exit code <N>` line and is still captured when `desk/tool-text-off` exists;
+`error_head` picks the first remaining non-empty line matching
+`(?i)error|exception|fail|fatal|cannot|unable|not found|missing|denied|refused|invalid|unexpected|undefined|panic|traceback`
+or falls back to the last non-empty line, then is redacted like `command`, maps
+controls to spaces, caps at 200 chars, and is absent when `desk/tool-text-off`
+exists), and `prompt`
 (only when `hook_event_name` is `UserPromptSubmit` and the value is a string,
 absent when `desk/cards-off` exists: cut to `16 KiB` at a char boundary,
 redacted with prefix-fragment scrubbing when cut, then controls `<= 0x1f` and
@@ -639,7 +649,7 @@ One JSON object per line:
 | `importance` | string | Maximum block importance across all attributed blocks for the turn (computed before the `30`-block truncation, so omitted overflow blocks count): `"none"`, `"low"`, `"medium"`, or `"high"`. |
 | `blocks` | `Block[]` | Attributed file/symbol changes, capped at `30` entries per card. |
 | `more_count` | integer | Number of overflow blocks omitted beyond `30` (`#[serde(default)]`). |
-| `flow` | `FlowStep[]` | Chronological Bash and edit steps, capped at `100` entries per card. |
+| `flow` | `FlowStep[]` | Chronological command (`Bash`/`PowerShell`) and edit steps, capped at `100` entries per card. |
 | `flow_more` | integer | Number of overflow steps omitted beyond `100` (`#[serde(default)]`). |
 | `outside_count` | integer | Observed repo edits during the turn not attributed to agent tools. |
 | `coverage` | `Coverage` | Capture and attribution completeness summary. |
@@ -690,7 +700,12 @@ lines per side (files over `1 MiB` receive `too_large` instead).
 
 #### `FlowStep`
 
-`{ "kind": "cmd" \| "edit", "text": string, "ok": bool, "dur_ms": u64, "seqs": u32[] }`
+`{ "kind": "cmd" \| "edit", "text": string, "ok": bool, "dur_ms": u64, "seqs": u32[], "exit_code"?: i32, "error"?: string }`
+
+`exit_code` (integer, may be negative) and `error` (bounded, redacted single error
+line) are optional and omitted when absent. Only failed command (`kind: "cmd"`)
+steps carry them, with `error` absent when `desk/tool-text-off` suppressed
+`error_head` or no non-empty error line remained.
 
 #### `Coverage`
 

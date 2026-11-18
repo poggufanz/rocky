@@ -50,6 +50,8 @@ export interface StoredFlowStep {
   ok: boolean;
   dur_ms: number;
   seqs: number[];
+  exit_code?: number | null;
+  error?: string | null;
 }
 
 export interface StoredCoverage {
@@ -87,8 +89,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isSafeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
 function isSafeNonNegInt(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return isSafeInt(value) && value >= 0;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -144,14 +150,19 @@ function isValidBlock(value: unknown): value is StoredBlock {
 
 function isValidFlowStep(value: unknown): value is StoredFlowStep {
   if (!isPlainObject(value)) return false;
-  return (
-    typeof value.kind === "string" &&
-    typeof value.text === "string" &&
-    typeof value.ok === "boolean" &&
-    isSafeNonNegInt(value.dur_ms) &&
-    Array.isArray(value.seqs) &&
-    value.seqs.every(isSafeNonNegInt)
-  );
+  if (
+    typeof value.kind !== "string" ||
+    typeof value.text !== "string" ||
+    typeof value.ok !== "boolean" ||
+    !isSafeNonNegInt(value.dur_ms) ||
+    !Array.isArray(value.seqs) ||
+    !value.seqs.every(isSafeNonNegInt)
+  ) {
+    return false;
+  }
+  if (value.exit_code !== undefined && value.exit_code !== null && !isSafeInt(value.exit_code)) return false;
+  if (value.error !== undefined && value.error !== null && typeof value.error !== "string") return false;
+  return true;
 }
 
 function isValidCoverageField(value: unknown): value is StoredCoverage {

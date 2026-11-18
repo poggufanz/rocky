@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+Failed commands on change cards now show their exit code and one redacted error line, and PowerShell commands appear in the card sequence.
+
 Desk: the Agents tab is now a project sidebar with two views of agent steps (Timeline by time, Turn steps by order), a step detail panel, and harness icons. The daemon now reports each agent's harness.
 
 Desk Settings are grouped into General, What Rocky records, Notifications, Agent tools, Repos, and Remove. Each setting has a switch and a one-line note on what it does. Agent tools and repos show a colored status chip and their config path or folder with the home folder written as `~`. Repos show only the actions that apply, so an allowed repo offers **Stop recording** and **Delete history**. Remove Rocky sits in its own red card. The shell row now uses the shell hook switch; before, it showed a harness switch the setup engine does not accept for the shell. Paths in the setup notes banner also start with `~`.
