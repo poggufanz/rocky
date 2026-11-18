@@ -148,10 +148,19 @@ function formatSequenceSymbol(symbol: StoredBlock["symbol"]): string | undefined
   return formatted.length > 0 ? formatted : undefined;
 }
 
-function blockHead(block: StoredBlock): string {
+interface EditHeadEntry {
+  readonly path: string;
+  readonly head: string;
+  readonly isFileLevel: boolean;
+}
+
+function blockHeadParts(block: StoredBlock): EditHeadEntry {
   const path = sanitizeSingleLine(block.path);
   const symbol = formatSequenceSymbol(block.symbol);
-  return symbol !== undefined ? `${path} \u203a ${symbol}` : path;
+  if (symbol === undefined) {
+    return { path, head: path, isFileLevel: true };
+  }
+  return { path, head: `${path} \u203a ${symbol}`, isFileLevel: false };
 }
 
 /** Normalized parts of an English sequence sentence, if resolvable against card blocks. */
@@ -176,21 +185,31 @@ export function sequenceSentenceParts(card: StoredCard): SequenceSentenceParts |
   }
 
   const seenSeqs = new Set<number>();
-  const seenHeads = new Set<string>();
-  let firstHead: string | undefined;
+  const entries: EditHeadEntry[] = [];
+  const fileLevelPaths = new Set<string>();
   for (const editSeq of seq.edit_seqs) {
     if (seenSeqs.has(editSeq)) continue;
     seenSeqs.add(editSeq);
     const block = blockBySeq.get(editSeq);
     if (block === undefined) continue;
-    const head = blockHead(block);
-    if (firstHead === undefined) {
-      if (head.length === 0) return undefined;
-      firstHead = head;
-    }
-    seenHeads.add(head);
+    const entry = blockHeadParts(block);
+    if (entries.length === 0 && entry.head.length === 0) return undefined;
+    entries.push(entry);
+    if (entry.isFileLevel) fileLevelPaths.add(entry.path);
   }
-  if (firstHead === undefined) return undefined;
+  if (entries.length === 0) return undefined;
+
+  const seenLabels = new Set<string>();
+  let firstLabel: string | undefined;
+  for (const entry of entries) {
+    const label = fileLevelPaths.has(entry.path) ? entry.path : entry.head;
+    if (firstLabel === undefined) {
+      if (label.length === 0) return undefined;
+      firstLabel = label;
+    }
+    seenLabels.add(label);
+  }
+  if (firstLabel === undefined) return undefined;
 
   const errName = typeof seq.error_names === "string"
     ? sanitizeSingleLine(seq.error_names).replace(UNICODE_EDGE_WHITESPACE_RE, "")
@@ -200,8 +219,8 @@ export function sequenceSentenceParts(card: StoredCard): SequenceSentenceParts |
     command: cmd,
     exitCode: seq.exit_code,
     ...(errName.length > 0 ? { errorName: errName } : {}),
-    editHead: firstHead,
-    moreEdits: seenHeads.size - 1,
+    editHead: firstLabel,
+    moreEdits: seenLabels.size - 1,
   };
 }
 

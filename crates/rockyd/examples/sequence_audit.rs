@@ -231,8 +231,8 @@ fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
                 return None;
             }
             let mut seen_seqs = HashSet::new();
-            let mut seen_heads = HashSet::new();
-            let mut first_head: Option<String> = None;
+            let mut entries: Vec<(String, String)> = Vec::new();
+            let mut file_level_paths = HashSet::new();
             for &edit_seq in edit_seqs {
                 if !seen_seqs.insert(edit_seq) {
                     continue;
@@ -240,17 +240,36 @@ fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
                 let Some(block) = block_by_seq.get(&edit_seq).copied() else {
                     continue;
                 };
-                let head = block_head(block);
-                if first_head.is_none() {
-                    if head.is_empty() {
+                let (path, is_file_level, head) = block_head_parts(block);
+                if entries.is_empty() && head.is_empty() {
+                    return None;
+                }
+                if is_file_level {
+                    file_level_paths.insert(path.clone());
+                }
+                entries.push((path, head));
+            }
+            if entries.is_empty() {
+                return None;
+            }
+            let mut seen_labels = HashSet::new();
+            let mut first_label: Option<String> = None;
+            for (path, head) in entries {
+                let label = if file_level_paths.contains(&path) {
+                    path
+                } else {
+                    head
+                };
+                if first_label.is_none() {
+                    if label.is_empty() {
                         return None;
                     }
-                    first_head = Some(head.clone());
+                    first_label = Some(label.clone());
                 }
-                seen_heads.insert(head);
+                seen_labels.insert(label);
             }
-            let first = escape_markdown(&first_head?);
-            let more = seen_heads.len().saturating_sub(1);
+            let first = escape_markdown(&first_label?);
+            let more = seen_labels.len().saturating_sub(1);
             let edits = if more == 0 {
                 first
             } else {
@@ -280,13 +299,15 @@ fn format_symbol(symbol: Option<&BlockSymbol>) -> Option<String> {
     }
 }
 
-fn block_head(block: &Block) -> String {
+fn block_head_parts(block: &Block) -> (String, bool, String) {
     let path = sanitize_single_line(&block.path);
     let symbol = format_symbol(block.symbol.as_ref()).filter(|s| !s.is_empty());
-    match symbol {
+    let is_file_level = symbol.is_none();
+    let head = match symbol {
         Some(sym) => format!("{path} \u{203a} {sym}"),
-        None => path,
-    }
+        None => path.clone(),
+    };
+    (path, is_file_level, head)
 }
 
 fn normalize_and_cut_command(command: &str) -> String {
@@ -619,6 +640,155 @@ mod tests {
         assert_eq!(
             render_sequence_en(&diff_files, diff_files.sequence.as_ref().unwrap()).as_deref(),
             Some("`npm test` failed (exit 1). Edited src/a.js and 1 more. `npm test` passed.")
+        );
+    }
+
+    #[test]
+    fn folds_symbol_labels_into_file_level_edit_label() {
+        let sym = |kind: SymbolKind, name: &str| {
+            Some(BlockSymbol {
+                kind,
+                name: name.to_string(),
+                container: None,
+                exported: false,
+                nth: 0,
+            })
+        };
+
+        // dbe20e88 shape: [src/cli.js, src/cli.js > USAGE (const), src/cli.js]
+        let dbe = sample_card(
+            vec![
+                sample_block(1, "src/cli.js", None),
+                sample_block(2, "src/cli.js", sym(SymbolKind::Const, "USAGE")),
+                sample_block(3, "src/cli.js", None),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2, 3],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&dbe, dbe.sequence.as_ref().unwrap()).as_deref(),
+            Some("`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.")
+        );
+
+        let file_then_sym = sample_card(
+            vec![
+                sample_block(1, "a.js", None),
+                sample_block(2, "a.js", sym(SymbolKind::Function, "f")),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&file_then_sym, file_then_sym.sequence.as_ref().unwrap()).as_deref(),
+            Some("`npm test` failed (exit 1). Edited a.js. `npm test` passed.")
+        );
+
+        let sym_then_file = sample_card(
+            vec![
+                sample_block(1, "a.js", sym(SymbolKind::Function, "f")),
+                sample_block(2, "a.js", None),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&sym_then_file, sym_then_file.sequence.as_ref().unwrap()).as_deref(),
+            Some("`npm test` failed (exit 1). Edited a.js. `npm test` passed.")
+        );
+
+        let two_syms = sample_card(
+            vec![
+                sample_block(1, "a.js", sym(SymbolKind::Function, "f")),
+                sample_block(2, "a.js", sym(SymbolKind::Function, "g")),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&two_syms, two_syms.sequence.as_ref().unwrap()).as_deref(),
+            Some(
+                "`npm test` failed (exit 1). Edited a.js \u{203a} f() and 1 more. `npm test` passed."
+            )
+        );
+
+        let file_and_other = sample_card(
+            vec![
+                sample_block(1, "a.js", None),
+                sample_block(2, "b.js", sym(SymbolKind::Function, "h")),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&file_and_other, file_and_other.sequence.as_ref().unwrap())
+                .as_deref(),
+            Some("`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.")
+        );
+
+        let ordered_other_first = sample_card(
+            vec![
+                sample_block(1, "b.js", sym(SymbolKind::Function, "h")),
+                sample_block(2, "a.js", sym(SymbolKind::Function, "f")),
+                sample_block(3, "a.js", None),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2, 3],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(
+                &ordered_other_first,
+                ordered_other_first.sequence.as_ref().unwrap()
+            )
+            .as_deref(),
+            Some(
+                "`npm test` failed (exit 1). Edited b.js \u{203a} h() and 1 more. `npm test` passed."
+            )
+        );
+
+        let folded_first_pos = sample_card(
+            vec![
+                sample_block(1, "a.js", sym(SymbolKind::Function, "f")),
+                sample_block(2, "b.js", sym(SymbolKind::Function, "h")),
+                sample_block(3, "a.js", None),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2, 3],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(
+                &folded_first_pos,
+                folded_first_pos.sequence.as_ref().unwrap()
+            )
+            .as_deref(),
+            Some("`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.")
         );
     }
 }

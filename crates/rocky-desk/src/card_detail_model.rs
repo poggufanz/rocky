@@ -376,8 +376,8 @@ fn build_sequence_line(
                 return None;
             }
             let mut seen_seqs = HashSet::new();
-            let mut seen_heads = HashSet::new();
-            let mut first_head: Option<String> = None;
+            let mut entries: Vec<(String, String)> = Vec::new();
+            let mut file_level_paths = HashSet::new();
             for &edit_seq in edit_seqs {
                 if !seen_seqs.insert(edit_seq) {
                     continue;
@@ -385,27 +385,46 @@ fn build_sequence_line(
                 let Some(block) = block_by_seq.get(&edit_seq).copied() else {
                     continue;
                 };
-                let head = block_head(block);
-                if first_head.is_none() {
-                    if head.is_empty() {
+                let (path, symbol, head) = block_head_parts(block);
+                if entries.is_empty() && head.is_empty() {
+                    return None;
+                }
+                if symbol.is_none() {
+                    file_level_paths.insert(path.clone());
+                }
+                entries.push((path, head));
+            }
+            if entries.is_empty() {
+                return None;
+            }
+            let mut seen_labels = HashSet::new();
+            let mut first_label: Option<String> = None;
+            for (path, head) in entries {
+                let label = if file_level_paths.contains(&path) {
+                    path
+                } else {
+                    head
+                };
+                if first_label.is_none() {
+                    if label.is_empty() {
                         return None;
                     }
-                    first_head = Some(head.clone());
+                    first_label = Some(label.clone());
                 }
-                seen_heads.insert(head);
+                seen_labels.insert(label);
             }
-            let first_head = first_head?;
-            let more = seen_heads.len().saturating_sub(1);
+            let first_label = first_label?;
+            let more = seen_labels.len().saturating_sub(1);
             let edits = if more > 0 {
                 card_text(
                     lang,
                     &CardMsg::SequenceEditsMore {
-                        first: first_head,
+                        first: first_label,
                         more,
                     },
                 )
             } else {
-                first_head
+                first_label
             };
             let error_names = error_names
                 .as_deref()

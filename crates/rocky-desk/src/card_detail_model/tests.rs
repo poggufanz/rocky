@@ -1419,3 +1419,147 @@ fn sequence_sentence_deduplicates_by_rendered_label_en_and_id() {
         Some("`npm test` gagal (exit 1). src/a.js dan 1 lainnya diedit. `npm test` lulus.")
     );
 }
+
+#[test]
+fn sequence_sentence_folds_symbol_labels_into_file_level_en_and_id() {
+    let render =
+        |id: &str, blocks: Vec<Block>, edit_seqs: Vec<u32>, lang: UiLang| -> Option<String> {
+            let mut card = sample_card(id, 1_000, Some(5_000));
+            card.blocks = blocks;
+            card.sequence = Some(Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs,
+                error_names: None,
+            });
+            let (mut model, _) = DetailModel::open(id.to_string(), 1);
+            model.on_detail(1, card, Vec::new(), lang);
+            let DetailState::Ready(view) = model.state() else {
+                panic!("expected Ready state");
+            };
+            view.sequence_line.clone()
+        };
+
+    let sym_block = |seq: u32, path: &str, kind: SymbolKind, name: &str| {
+        let mut b = sample_block(seq, path, Vec::new());
+        b.symbol = Some(BlockSymbol {
+            kind,
+            name: name.to_string(),
+            container: None,
+            exported: false,
+            nth: 0,
+        });
+        b
+    };
+
+    // dbe20e88 shape: [src/cli.js, src/cli.js > USAGE (const), src/cli.js]
+    let dbe_blocks = vec![
+        sample_block(1, "src/cli.js", Vec::new()),
+        sym_block(2, "src/cli.js", SymbolKind::Const, "USAGE"),
+        sample_block(3, "src/cli.js", Vec::new()),
+    ];
+    assert_eq!(
+        render("c-dbe", dbe_blocks.clone(), vec![1, 2, 3], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-dbe", dbe_blocks, vec![1, 2, 3], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/cli.js diedit. `npm test` lulus.")
+    );
+
+    // a.js + a.js > f() -> no "and N more" / "dan N lainnya".
+    let file_then_sym = vec![
+        sample_block(1, "a.js", Vec::new()),
+        sym_block(2, "a.js", SymbolKind::Function, "f"),
+    ];
+    assert_eq!(
+        render("c-fts", file_then_sym.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-fts", file_then_sym, vec![1, 2], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js diedit. `npm test` lulus.")
+    );
+
+    // a.js > f() + a.js -> no "and N more" / "dan N lainnya".
+    let sym_then_file = vec![
+        sym_block(1, "a.js", SymbolKind::Function, "f"),
+        sample_block(2, "a.js", Vec::new()),
+    ];
+    assert_eq!(
+        render("c-stf", sym_then_file.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-stf", sym_then_file, vec![1, 2], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js diedit. `npm test` lulus.")
+    );
+
+    // a.js > f() + a.js > g() -> "and 1 more" / "dan 1 lainnya".
+    let two_syms = vec![
+        sym_block(1, "a.js", SymbolKind::Function, "f"),
+        sym_block(2, "a.js", SymbolKind::Function, "g"),
+    ];
+    assert_eq!(
+        render("c-2sym", two_syms.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js \u{203a} f() and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-2sym", two_syms, vec![1, 2], UiLang::Id).as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). a.js \u{203a} f() dan 1 lainnya diedit. `npm test` lulus."
+        )
+    );
+
+    // a.js + b.js > h() -> "and 1 more" / "dan 1 lainnya".
+    let file_and_other = vec![
+        sample_block(1, "a.js", Vec::new()),
+        sym_block(2, "b.js", SymbolKind::Function, "h"),
+    ];
+    assert_eq!(
+        render("c-fao", file_and_other.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-fao", file_and_other, vec![1, 2], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js dan 1 lainnya diedit. `npm test` lulus.")
+    );
+
+    // Ordering: b.js > h() + a.js > f() + a.js -> "b.js > h() and 1 more" / "dan 1 lainnya".
+    let ordered_other_first = vec![
+        sym_block(1, "b.js", SymbolKind::Function, "h"),
+        sym_block(2, "a.js", SymbolKind::Function, "f"),
+        sample_block(3, "a.js", Vec::new()),
+    ];
+    assert_eq!(
+        render(
+            "c-ord",
+            ordered_other_first.clone(),
+            vec![1, 2, 3],
+            UiLang::En
+        )
+        .as_deref(),
+        Some("`npm test` failed (exit 1). Edited b.js \u{203a} h() and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-ord", ordered_other_first, vec![1, 2, 3], UiLang::Id).as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). b.js \u{203a} h() dan 1 lainnya diedit. `npm test` lulus."
+        )
+    );
+
+    // Ordering: a.js > f() + b.js > h() + a.js -> folded a.js keeps first position of a.js.
+    let folded_first_pos = vec![
+        sym_block(1, "a.js", SymbolKind::Function, "f"),
+        sym_block(2, "b.js", SymbolKind::Function, "h"),
+        sample_block(3, "a.js", Vec::new()),
+    ];
+    assert_eq!(
+        render("c-pos", folded_first_pos.clone(), vec![1, 2, 3], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-pos", folded_first_pos, vec![1, 2, 3], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js dan 1 lainnya diedit. `npm test` lulus.")
+    );
+}

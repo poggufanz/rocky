@@ -353,3 +353,86 @@ test("sequenceSentence deduplicates by rendered edit label and counts remaining 
   );
   assert.doesNotMatch(diffFilesWithRepeat!, BANNED_WORDS);
 });
+
+test("sequenceSentence folds symbol labels into a file-level label for the same path", () => {
+  const dbe20e88 = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "src/cli.js"),
+        seqBlock(2, "src/cli.js", { kind: "const", name: "USAGE" }),
+        seqBlock(3, "src/cli.js"),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(dbe20e88, "`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.");
+  assert.doesNotMatch(dbe20e88!, BANNED_WORDS);
+
+  const fileThenSym = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "a.js"), seqBlock(2, "a.js", { kind: "function", name: "f" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(fileThenSym, "`npm test` failed (exit 1). Edited a.js. `npm test` passed.");
+  assert.doesNotMatch(fileThenSym!, BANNED_WORDS);
+
+  const symThenFile = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "a.js", { kind: "function", name: "f" }), seqBlock(2, "a.js")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(symThenFile, "`npm test` failed (exit 1). Edited a.js. `npm test` passed.");
+  assert.doesNotMatch(symThenFile!, BANNED_WORDS);
+
+  const twoSymsSameFile = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "a.js", { kind: "function", name: "f" }),
+        seqBlock(2, "a.js", { kind: "function", name: "g" }),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    twoSymsSameFile,
+    "`npm test` failed (exit 1). Edited a.js \u203a f() and 1 more. `npm test` passed.",
+  );
+
+  const fileAndOtherSym = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "a.js"), seqBlock(2, "b.js", { kind: "function", name: "h" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(fileAndOtherSym, "`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.");
+
+  const orderedOtherFirst = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "b.js", { kind: "function", name: "h" }),
+        seqBlock(2, "a.js", { kind: "function", name: "f" }),
+        seqBlock(3, "a.js"),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(
+    orderedOtherFirst,
+    "`npm test` failed (exit 1). Edited b.js \u203a h() and 1 more. `npm test` passed.",
+  );
+  assert.doesNotMatch(orderedOtherFirst!, BANNED_WORDS);
+
+  const foldedPositionFirst = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "a.js", { kind: "function", name: "f" }),
+        seqBlock(2, "b.js", { kind: "function", name: "h" }),
+        seqBlock(3, "a.js"),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(foldedPositionFirst, "`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.");
+});

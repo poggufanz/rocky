@@ -1228,3 +1228,70 @@ test("why deduplicates Sequence edit labels so repeated edits to one file or sym
   assert.deepEqual(validateOutputLine(diffSeqLine!.trim()), []);
   assert.doesNotMatch(diffSeqLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
 });
+
+test("why folds Sequence symbol labels into a file-level label for the same path", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const renderCase = (blocks: ReturnType<typeof makeBlock>[], edit_seqs: number[], matchedBlock: ReturnType<typeof makeBlock>) => {
+    const card = makeCard({
+      card_id: "card-seq-fold",
+      blocks,
+      sequence: {
+        pattern: "fix_after_fail",
+        command: "npm test",
+        exit_code: 1,
+        edit_seqs,
+      },
+    });
+    const result: CardsForFile = {
+      cards: [card],
+      matched: new Map([[card.card_id, [matchedBlock]]]),
+      coverage: { complete: true, skipped: 0 },
+    };
+    const sinks = makeSinks();
+    assert.equal(
+      why([matchedBlock.path], {
+        ...sinks,
+        load: () => [],
+        coverage: () => completeCoverage(),
+        now,
+        cards: () => result,
+      }),
+      0,
+    );
+    const seqLine = sinks.outLines.find((line) => line.includes("Sequence:"));
+    assert.ok(seqLine);
+    assert.deepEqual(validateOutputLine(seqLine.trim()), []);
+    assert.doesNotMatch(seqLine, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+    return seqLine;
+  };
+
+  // dbe20e88 shape: file-level, symbol, file-level for src/cli.js -> single file-level label.
+  const cli1 = makeBlock({ seq: 1, path: "src/cli.js", symbol: null });
+  const cli2 = makeBlock({
+    seq: 2,
+    path: "src/cli.js",
+    symbol: { kind: "const", name: "USAGE", container: null, exported: false },
+  });
+  const cli3 = makeBlock({ seq: 3, path: "src/cli.js", symbol: null });
+  assert.equal(
+    renderCase([cli1, cli2, cli3], [1, 2, 3], cli1),
+    "         Sequence: `npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.",
+  );
+
+  // Ordering and cross-file check: b.js > h() + a.js > f() + a.js -> b.js > h() and 1 more.
+  const bH = makeBlock({
+    seq: 1,
+    path: "b.js",
+    symbol: { kind: "function", name: "h", container: null, exported: false },
+  });
+  const aF = makeBlock({
+    seq: 2,
+    path: "a.js",
+    symbol: { kind: "function", name: "f", container: null, exported: false },
+  });
+  const aFile = makeBlock({ seq: 3, path: "a.js", symbol: null });
+  assert.equal(
+    renderCase([bH, aF, aFile], [1, 2, 3], bH),
+    "         Sequence: `npm test` failed (exit 1). Edited b.js \u203a h() and 1 more. `npm test` passed.",
+  );
+});
