@@ -11,9 +11,20 @@ pub const ERROR_SCAN_BYTES: usize = 16 * 1024;
 
 const SIGNAL_PATTERN: &str = "(?i)error|exception|fail|fatal|cannot|unable|not found|missing|denied|refused|invalid|unexpected|undefined|panic|traceback";
 
+/// Lines that name one failing check (assertion marks, TAP `not ok`, expected/actual,
+/// panics). Preferred over `SIGNAL_PATTERN`, which also matches runner summaries such as
+/// `1 failing` that say less about what broke.
+const ASSERTION_PATTERN: &str =
+    r"(?i)^(✗|✘|✖|×|not ok\b)|\bexpected\b|\bassert|\bpanicked\b|^error(\[|:)";
+
 fn signal_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(SIGNAL_PATTERN).expect("signal pattern is valid"))
+}
+
+fn assertion_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(ASSERTION_PATTERN).expect("assertion pattern is valid"))
 }
 
 fn parse_exit_code_line(line: &str) -> Option<i32> {
@@ -60,19 +71,26 @@ pub fn parse_command_failure(error: &str, keep_text: bool) -> (Option<i32>, Opti
     }
 
     let mut fallback: Option<&str> = None;
-    let mut chosen: Option<&str> = None;
+    let mut signal: Option<&str> = None;
+    let mut assertion: Option<&str> = None;
     for line in first_remaining.into_iter().chain(lines) {
         if line.is_empty() {
             continue;
         }
-        if signal_regex().is_match(line) {
-            chosen = Some(line);
+        if assertion_regex().is_match(line) {
+            assertion = Some(line);
             break;
+        }
+        if signal.is_none() && signal_regex().is_match(line) {
+            signal = Some(line);
         }
         fallback = Some(line);
     }
 
-    let error_head = chosen.or(fallback).map(|line| bound_tool_text(line).0);
+    let error_head = assertion
+        .or(signal)
+        .or(fallback)
+        .map(|line| bound_tool_text(line).0);
     (exit_code, error_head)
 }
 
@@ -90,7 +108,31 @@ mod tests {
     }
     #[test]
     fn signal_line_beats_banner() {
-        let e = "Exit code 1\n> rocky@1.0.0 test\n> node scripts/test.mjs\n✗ auth.test.ts rejects expired token: expected 401, got 200\n1 failing";
+        let e = "Exit code 1\n> rocky@1.0.0 test\n> node scripts/test.mjs\n✗ auth.test.ts rejects expired session: expected 401, got 200\n1 failing";
+        assert_eq!(
+            parse_command_failure(e, true).1.as_deref(),
+            Some("✗ auth.test.ts rejects expired session: expected 401, got 200")
+        );
+    }
+    #[test]
+    fn assertion_line_beats_runner_summary_after_it() {
+        let e = "Exit code 1\nnot ok 3 - rejects expired token\n# tests 12\n# fail 1";
+        assert_eq!(
+            parse_command_failure(e, true).1.as_deref(),
+            Some("not ok 3 - rejects expired token")
+        );
+    }
+    #[test]
+    fn rust_panic_line_beats_test_result_summary() {
+        let e = "Exit code 101\nrunning 3 tests\nthread 'parses' panicked at src/lib.rs:9:5:\ntest result: FAILED. 2 passed; 1 failed";
+        assert_eq!(
+            parse_command_failure(e, true).1.as_deref(),
+            Some("thread 'parses' panicked at src/lib.rs:9:5:")
+        );
+    }
+    #[test]
+    fn summary_line_still_chosen_when_nothing_stronger() {
+        let e = "Exit code 1\n> rocky@1.0.0 test\n1 failing";
         assert_eq!(
             parse_command_failure(e, true).1.as_deref(),
             Some("1 failing")

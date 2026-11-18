@@ -125,9 +125,11 @@ spaces, ≤200 chars, absent when `desk/tool-text-off` exists), `exit_code` and
 `16 KiB` at a char boundary while `tool_response` and all other lines are
 dropped; `exit_code` is a signed 32-bit integer parsed from a leading
 `Exit code <N>` line and is still captured when `desk/tool-text-off` exists;
-`error_head` picks the first remaining non-empty line matching
-`(?i)error|exception|fail|fatal|cannot|unable|not found|missing|denied|refused|invalid|unexpected|undefined|panic|traceback`
-or falls back to the last non-empty line, then is redacted like `command`, maps
+`error_head` picks the first remaining non-empty line naming one failing check
+(`(?i)^(✗|✘|✖|×|not ok\b)|\bexpected\b|\bassert|\bpanicked\b|^error(\[|:)`), else the
+first line matching
+`(?i)error|exception|fail|fatal|cannot|unable|not found|missing|denied|refused|invalid|unexpected|undefined|panic|traceback`,
+else the last non-empty line, then is redacted like `command`, maps
 controls to spaces, caps at 200 chars, and is absent when `desk/tool-text-off`
 exists), and `prompt`
 (only when `hook_event_name` is `UserPromptSubmit` and the value is a string,
