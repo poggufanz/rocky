@@ -1298,6 +1298,8 @@ mod tests {
                 ok: true,
                 dur_ms: 10,
                 seqs: Vec::new(),
+                exit_code: None,
+                error: None,
             })
             .collect()
     }

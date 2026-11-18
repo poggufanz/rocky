@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use rocky_proto::failure::is_command_tool;
 use rocky_proto::hook::HookEvent;
 use rocky_proto::paths::canonical_path;
 use rocky_proto::pipe::{AgentKey, RepoInfo};
@@ -38,6 +39,8 @@ pub struct ToolWindow {
     pub pre_ms: u64,
     pub post_ms: Option<u64>,
     pub ok: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub error_head: Option<String>,
 }
 
 /// Lifecycle state of a tracked turn.
@@ -333,6 +336,8 @@ impl Tracker {
                     pre_ms: recv_ms,
                     post_ms: None,
                     ok: None,
+                    exit_code: None,
+                    error_head: None,
                 };
                 if let Some(turn) = self.turns.get_mut(&turn_id) {
                     fill_metadata(turn, ev, repo);
@@ -582,7 +587,7 @@ fn agent_key(ev: &HookEvent) -> AgentKey {
 fn classify_tool(name: &str) -> ToolKind {
     match name {
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => ToolKind::Edit,
-        "Bash" => ToolKind::Bash,
+        _ if is_command_tool(name) => ToolKind::Bash,
         _ => ToolKind::Other,
     }
 }
@@ -618,6 +623,14 @@ fn close_window_at(
     }
     if window.command.is_none() && ev.command.is_some() {
         window.command = ev.command.clone();
+    }
+    if !ok && window.kind == ToolKind::Bash {
+        if window.exit_code.is_none() && ev.exit_code.is_some() {
+            window.exit_code = ev.exit_code;
+        }
+        if window.error_head.is_none() && ev.error_head.is_some() {
+            window.error_head = ev.error_head.clone();
+        }
     }
     let kind = window.kind;
     let target_path = window.target_path.clone();
@@ -698,10 +711,12 @@ fn path_under_root(target: &str, root: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use rocky_proto::hook::HookEvent;
     use rocky_proto::pipe::{AgentKey, RepoInfo};
 
-    use super::{PromptIn, ToolKind, Tracker, TrackerSignal, TurnEnd};
+    use super::{PromptIn, ToolKind, Tracker, TrackerSignal, TurnEnd, classify_tool};
 
     fn repo(root: Option<&str>) -> RepoInfo {
         RepoInfo {
@@ -1786,5 +1801,69 @@ mod tests {
                 .map(|t| t.started_ms),
             Some(3_000)
         );
+    }
+
+    #[test]
+    fn powershell_counts_as_command() {
+        assert_eq!(classify_tool("PowerShell"), ToolKind::Bash);
+
+        let mut tracker = Tracker::new();
+        let r = repo(Some("C:/repo"));
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 1_000, &r);
+        tracker.on_event(
+            &tool_ev(
+                "PreToolUse",
+                "S1",
+                None,
+                "PowerShell",
+                "ps-1",
+                None,
+                Some("Get-ChildItem"),
+            ),
+            1_200,
+            &r,
+        );
+        tracker.on_event(
+            &tool_ev("PostToolUse", "S1", None, "PowerShell", "ps-1", None, None),
+            1_500,
+            &r,
+        );
+        tracker.on_event(&ev("Stop", "S1", None), 2_000, &r);
+
+        let turn = tracker
+            .closed_turn(&key("S1", ""))
+            .expect("closed turn")
+            .clone();
+        let card = crate::cards::attribute::build_card(
+            &crate::cards::attribute::BuildInput {
+                turn,
+                card_id: "card-ps".to_string(),
+                rev: 1,
+                session_root: Some("C:/repo".to_string()),
+                recorded: true,
+                versions: Vec::new(),
+                results: Vec::new(),
+                other_bash: Vec::new(),
+                other_edits: Vec::new(),
+                versions_through_ms: u64::MAX,
+                quotes: crate::cards::transcript::TranscriptRead {
+                    quotes: BTreeMap::new(),
+                    first_user_text: None,
+                    complete: true,
+                },
+                gaps: Vec::new(),
+                capture_state: None,
+                store_error: false,
+                tail_cut: false,
+                user_home: None,
+                parent_card_id: None,
+            },
+            &|_| crate::cards::store::ObjectRead::Missing,
+            &|_| None,
+        );
+        assert_eq!(card.flow.len(), 1);
+        assert_eq!(card.flow[0].kind, rocky_proto::cards::FlowKind::Cmd);
+        assert_eq!(card.flow[0].text, "Get-ChildItem");
+        assert!(card.flow[0].ok);
     }
 }

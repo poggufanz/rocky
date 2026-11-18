@@ -482,6 +482,8 @@ fn timeline_steps_with_subs_and_facts() {
             ok: true,
             dur_ms: 8_000,
             seqs: Vec::new(),
+            exit_code: None,
+            error: None,
         },
         FlowStep {
             kind: FlowKind::Edit,
@@ -489,6 +491,8 @@ fn timeline_steps_with_subs_and_facts() {
             ok: false,
             dur_ms: 65_000,
             seqs: vec![1, 999, 2, 3, 4],
+            exit_code: None,
+            error: None,
         },
     ];
 
@@ -555,6 +559,8 @@ fn timeline_facts_for(blocks: Vec<Block>) -> Vec<String> {
             ok: true,
             dur_ms: 1_000,
             seqs: chunk.to_vec(),
+            exit_code: None,
+            error: None,
         })
         .collect();
 
@@ -652,6 +658,8 @@ fn timeline_caps_12_and_counts_flow_more() {
         ok: true,
         dur_ms: 60_000,
         seqs: Vec::new(),
+        exit_code: None,
+        error: None,
     };
 
     // Exactly 12 with flow_more == 0 -> no overflow line.

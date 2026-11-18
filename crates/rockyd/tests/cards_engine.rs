@@ -3582,3 +3582,125 @@ fn outside_edit_without_user_home_stays_absolute() {
     let card = outside_edit_card(&fx, "sess-no-home", None, &target);
     assert_eq!(card.blocks[0].path, target.replace('\\', "/"));
 }
+
+#[test]
+fn late_failure_revises_card() {
+    let fx = Fixture::new("sess-late-fail");
+    let s0 = fx.put_object(1, "export const e = 1;\n");
+    let s1 = fx.put_object(2, "export const e = 2;\n");
+    fx.append_version("src/e.ts", 1_550, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Edit then late failure", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let e_abs = fx.file_abs("src/e.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-late-fail",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Edit then late failure",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-late-fail",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &e_abs,
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_post_event(
+                        "sess-late-fail",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &e_abs,
+                    ),
+                    1_500,
+                ),
+                (
+                    bash_pre_event(
+                        "sess-late-fail",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b",
+                        "npm test",
+                    ),
+                    1_800,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-late-fail",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_600,
+        at_ms: 1_700,
+        coverage: "complete".to_string(),
+    }]);
+    let rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(rev1[0].rev, 1);
+
+    let mut late_fail = base_event(
+        "PostToolUseFailure",
+        "sess-late-fail",
+        &fx.repo_canon,
+        Some(&fx.transcript_path),
+    );
+    late_fail.tool_name = Some("Bash".to_string());
+    late_fail.tool_use_id = Some("tu-b".to_string());
+    late_fail.exit_code = Some(1);
+    late_fail.error_head = Some("Error: Cannot find module 'express'".to_string());
+
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(late_fail, 12_000)],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        12_000,
+    );
+
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 12_150,
+        at_ms: 12_250,
+        coverage: "complete".to_string(),
+    }]);
+    let rev2 = poll_until_cards(&mut engine, 12_300, &ctx, 1);
+    assert_eq!(rev2[0].rev, 2);
+    let bash_step = rev2[0]
+        .flow
+        .iter()
+        .find(|s| s.kind == rocky_proto::cards::FlowKind::Cmd && s.text == "npm test")
+        .expect("bash flow step in revised card");
+    assert!(!bash_step.ok);
+    assert_eq!(bash_step.exit_code, Some(1));
+    assert_eq!(
+        bash_step.error.as_deref(),
+        Some("Error: Cannot find module 'express'")
+    );
+}

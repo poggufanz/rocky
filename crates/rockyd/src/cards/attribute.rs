@@ -1077,6 +1077,8 @@ fn build_flow(
                     ok,
                     dur_ms,
                     seqs: Vec::new(),
+                    exit_code: if ok { None } else { win.exit_code },
+                    error: if ok { None } else { win.error_head.clone() },
                 },
                 ToolKind::Edit => {
                     let matching: Vec<&Block> = blocks
@@ -1112,6 +1114,8 @@ fn build_flow(
                         ok,
                         dur_ms,
                         seqs,
+                        exit_code: None,
+                        error: None,
                     }
                 }
                 ToolKind::Other => unreachable!(),
@@ -1443,6 +1447,8 @@ mod tests {
             pre_ms,
             post_ms,
             ok,
+            exit_code: None,
+            error_head: None,
         }
     }
 
@@ -1464,6 +1470,8 @@ mod tests {
             pre_ms,
             post_ms,
             ok,
+            exit_code: None,
+            error_head: None,
         }
     }
 
@@ -2153,6 +2161,8 @@ mod tests {
             pre_ms,
             post_ms: Some(pre_ms + 10),
             ok,
+            exit_code: None,
+            error_head: None,
         }
     }
 
@@ -2205,6 +2215,8 @@ mod tests {
             pre_ms: 1_500,
             post_ms: Some(1_600),
             ok: Some(true),
+            exit_code: None,
+            error_head: None,
         };
         let mut input = base_input(base_turn(vec![
             bash_win(
@@ -2967,5 +2979,108 @@ mod tests {
         assert_eq!(blk.line, Some(1));
         assert_eq!(blk.added, Some(3));
         assert_eq!(blk.removed, Some(0));
+    }
+
+    #[test]
+    fn failed_command_step_carries_exit_and_error() {
+        let mut tracker = crate::cards::windows::Tracker::new();
+        let r = RepoInfo {
+            root: Some(test_root().to_string()),
+            main_root: Some(test_root().to_string()),
+            name: "repo".to_string(),
+            branch: Some("main".to_string()),
+        };
+        let base = |name: &str| rocky_proto::hook::HookEvent {
+            hook_event_name: name.to_string(),
+            session_id: "sess-1".to_string(),
+            cwd: Some(test_root().to_string()),
+            ..Default::default()
+        };
+        tracker.on_event(&base("UserPromptSubmit"), 1_000, &r);
+
+        let mut pre_fail = base("PreToolUse");
+        pre_fail.tool_name = Some("Bash".to_string());
+        pre_fail.tool_use_id = Some("b-fail".to_string());
+        pre_fail.command = Some("npm test".to_string());
+        tracker.on_event(&pre_fail, 1_100, &r);
+
+        let mut post_fail = base("PostToolUseFailure");
+        post_fail.tool_name = Some("Bash".to_string());
+        post_fail.tool_use_id = Some("b-fail".to_string());
+        post_fail.exit_code = Some(1);
+        post_fail.error_head = Some("Error: x".to_string());
+        tracker.on_event(&post_fail, 1_400, &r);
+
+        let mut pre_ok = base("PreToolUse");
+        pre_ok.tool_name = Some("Bash".to_string());
+        pre_ok.tool_use_id = Some("b-ok".to_string());
+        pre_ok.command = Some("cargo check".to_string());
+        tracker.on_event(&pre_ok, 1_500, &r);
+
+        let mut post_ok = base("PostToolUse");
+        post_ok.tool_name = Some("Bash".to_string());
+        post_ok.tool_use_id = Some("b-ok".to_string());
+        tracker.on_event(&post_ok, 1_800, &r);
+
+        tracker.on_event(&base("Stop"), 2_000, &r);
+
+        let turn = tracker
+            .closed_turn(&main_agent("sess-1"))
+            .expect("closed turn")
+            .clone();
+        let card = build_card(&base_input(turn), &no_read, &no_stat);
+        assert_eq!(card.flow.len(), 2);
+
+        assert!(!card.flow[0].ok);
+        assert_eq!(card.flow[0].exit_code, Some(1));
+        assert_eq!(card.flow[0].error.as_deref(), Some("Error: x"));
+
+        assert!(card.flow[1].ok);
+        assert_eq!(card.flow[1].exit_code, None);
+        assert_eq!(card.flow[1].error, None);
+    }
+
+    #[test]
+    fn edit_step_never_carries_failure_fields() {
+        let mut tracker = crate::cards::windows::Tracker::new();
+        let r = RepoInfo {
+            root: Some(test_root().to_string()),
+            main_root: Some(test_root().to_string()),
+            name: "repo".to_string(),
+            branch: Some("main".to_string()),
+        };
+        let base = |name: &str| rocky_proto::hook::HookEvent {
+            hook_event_name: name.to_string(),
+            session_id: "sess-1".to_string(),
+            cwd: Some(test_root().to_string()),
+            ..Default::default()
+        };
+        tracker.on_event(&base("UserPromptSubmit"), 1_000, &r);
+
+        let mut pre_edit = base("PreToolUse");
+        pre_edit.tool_name = Some("Edit".to_string());
+        pre_edit.tool_use_id = Some("e-fail".to_string());
+        pre_edit.target_path = Some(repo_join("src/a.ts"));
+        tracker.on_event(&pre_edit, 1_100, &r);
+
+        let mut post_edit_fail = base("PostToolUseFailure");
+        post_edit_fail.tool_name = Some("Edit".to_string());
+        post_edit_fail.tool_use_id = Some("e-fail".to_string());
+        post_edit_fail.exit_code = Some(1);
+        post_edit_fail.error_head = Some("Error: should not carry".to_string());
+        tracker.on_event(&post_edit_fail, 1_400, &r);
+
+        tracker.on_event(&base("Stop"), 2_000, &r);
+
+        let turn = tracker
+            .closed_turn(&main_agent("sess-1"))
+            .expect("closed turn")
+            .clone();
+        let card = build_card(&base_input(turn), &no_read, &no_stat);
+        assert_eq!(card.flow.len(), 1);
+        assert_eq!(card.flow[0].kind, FlowKind::Edit);
+        assert!(!card.flow[0].ok);
+        assert_eq!(card.flow[0].exit_code, None);
+        assert_eq!(card.flow[0].error, None);
     }
 }
