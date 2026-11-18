@@ -847,3 +847,102 @@ test("why emits partial-read coverage line even with zero matching cards and han
   const blockLine = unknownViaSinks.outLines[1] ?? "";
   assert.equal(blockLine.includes("(via "), false, blockLine);
 });
+
+test("why prints Sequence line only when edit_seqs touches a matched block for that file and runs through terminalSafe", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const cartBlock = makeBlock({ seq: 2, path: "src/cart.ts", symbol: { kind: "function", name: "applyDiscount", container: null, exported: true } });
+  const otherBlock = makeBlock({ seq: 1, path: "src/tax.ts", symbol: null });
+
+  const matchingCard = makeCard({
+    card_id: "card-seq-match",
+    blocks: [otherBlock, cartBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+      error_names: "tax.ts",
+    },
+  });
+  const matchingResult: CardsForFile = {
+    cards: [matchingCard],
+    matched: new Map([[matchingCard.card_id, [cartBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const matchSinks = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...matchSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => matchingResult,
+    }),
+    0,
+  );
+  const seqLine = matchSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    seqLine,
+    "         Sequence: `npm test` failed (exit 1). The error names tax.ts. Edited src/tax.ts and 1 more. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(seqLine!.trim()), []);
+  assert.doesNotMatch(seqLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+
+  // Card has a sequence for seq 1 (src/tax.ts), while this file only matched seq 2 (src/cart.ts).
+  const nonMatchingCard = makeCard({
+    card_id: "card-seq-other",
+    blocks: [otherBlock, cartBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1],
+    },
+  });
+  const nonMatchingResult: CardsForFile = {
+    cards: [nonMatchingCard],
+    matched: new Map([[nonMatchingCard.card_id, [cartBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const noMatchSinks = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...noMatchSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => nonMatchingResult,
+    }),
+    0,
+  );
+  assert.equal(noMatchSinks.outLines.some((line) => line.includes("Sequence:")), false);
+
+  // Control/ANSI/question mark in command or error_names is neutralized by terminalSafe.
+  const hostileCard = makeCard({
+    card_id: "card-seq-hostile",
+    blocks: [makeBlock({ seq: 1, path: "src/cart.ts", symbol: null })],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm\u001b[31m test? --ok",
+      exit_code: 1,
+      edit_seqs: [1],
+      error_names: "cart.ts?\u202e",
+    },
+  });
+  const hostileSinks = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...hostileSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([hostileCard]),
+    }),
+    0,
+  );
+  const safeSeqLine = hostileSinks.outLines.find((line) => line.includes("Sequence:")) ?? "";
+  assert.ok(safeSeqLine.length > 0);
+  assert.equal(safeSeqLine.includes("?"), false);
+  assert.equal(safeSeqLine.includes("\u001b"), false);
+  assert.equal(safeSeqLine.includes("\u202e"), false);
+});

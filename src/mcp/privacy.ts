@@ -671,6 +671,13 @@ export type ProjectedPromptKind =
   | { kind: "cross_session" }
   | { kind: "slash_command"; name: string; args: string };
 
+export interface ProjectedWhyCardSequence {
+  pattern: "fix_after_fail";
+  command: string;
+  exit_code: number;
+  error_names: string | null;
+}
+
 export interface ProjectedWhyCard {
   card_id: string;
   ended_ms: number | null;
@@ -680,6 +687,7 @@ export interface ProjectedWhyCard {
   prompt_kind: ProjectedPromptKind;
   agent_type: string;
   blocks: ProjectedWhyCardBlock[];
+  sequence: ProjectedWhyCardSequence | null;
   more_blocks?: number;
 }
 
@@ -966,6 +974,33 @@ function projectCardBlock(
   };
 }
 
+function projectCardSequence(
+  rawSequence: unknown,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardSequence | null {
+  if (!isPlainRecord(rawSequence)) return null;
+  if (rawSequence.pattern !== "fix_after_fail") return null;
+  if (typeof rawSequence.command !== "string") return null;
+  if (typeof rawSequence.exit_code !== "number" || !Number.isSafeInteger(rawSequence.exit_code)) return null;
+  if (
+    rawSequence.error_names !== undefined
+    && rawSequence.error_names !== null
+    && typeof rawSequence.error_names !== "string"
+  ) {
+    return null;
+  }
+  return {
+    pattern: "fix_after_fail",
+    command: projectText(rawSequence.command, exposure, `${path}.command`, truncation),
+    exit_code: rawSequence.exit_code,
+    error_names: rawSequence.error_names === undefined || rawSequence.error_names === null
+      ? null
+      : projectText(rawSequence.error_names, exposure, `${path}.error_names`, truncation),
+  };
+}
+
 /**
  * Project Desk change cards returned for one file through MCP boundaries:
  * strings run through `projectText` (passing through only 32-lowercase-hex
@@ -1061,6 +1096,7 @@ export function projectWhyCards(
         prompt_kind: projectPromptKind(promptKind, exposure, `${at}.prompt_kind`, truncation),
         agent_type: projectText(rawAgentType, exposure, `${at}.agent_type`, truncation),
         blocks,
+        sequence: projectCardSequence(rawCard.sequence, exposure, `${at}.sequence`, truncation),
         ...(moreBlocks > 0 ? { more_blocks: moreBlocks } : {}),
       });
     } catch {

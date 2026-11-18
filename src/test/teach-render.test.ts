@@ -328,3 +328,39 @@ test("renderCardTeach rocky-written lines contain no causal words and pass outpu
     }
   }
 });
+
+test("renderCardTeach adds Sequence line after Changed only when hit block seq is in edit_seqs", () => {
+  const block1 = makeBlock({ seq: 1, path: "src/auth.ts" });
+  const block2 = makeBlock({ seq: 2, path: "src/other.ts", symbol: null });
+  const seq = {
+    pattern: "fix_after_fail" as const,
+    command: "npm test",
+    exit_code: 1,
+    edit_seqs: [1],
+    error_names: "auth.ts",
+  };
+
+  const hitInSeq = renderCardTeach({
+    card: makeCard({ blocks: [block1, block2], sequence: seq }),
+    block: block1,
+    match: "symbol",
+  });
+  assert.deepEqual(hitInSeq.lines, [
+    'Asked: "Add guard for empty token"',
+    "Changed: new guard, calls reject",
+    "Sequence: `npm test` failed (exit 1). The error names auth.ts. Edited src/auth.ts \u203a verifyToken(). `npm test` passed.",
+    'Agent said: "Checking empty tokens upfront."',
+    "Matched by function name; code not compared.",
+  ]);
+  for (const line of [hitInSeq.header, ...hitInSeq.lines, hitInSeq.evidence]) {
+    assert.doesNotMatch(line, CAUSAL_WORDS);
+    assert.deepEqual(validateOutputLine(line), []);
+  }
+
+  const hitNotInSeq = renderCardTeach({
+    card: makeCard({ blocks: [block1, block2], sequence: seq }),
+    block: block2,
+    match: "file",
+  });
+  assert.equal(hitNotInSeq.lines.some((line) => line.startsWith("Sequence:")), false);
+});

@@ -2000,6 +2000,12 @@ interface ProjectedCard {
   prompt_kind: { kind: string; name?: string; args?: string };
   agent_type: string;
   blocks: ProjectedCardBlock[];
+  sequence: {
+    pattern: string;
+    command: string;
+    exit_code: number;
+    error_names: string | null;
+  } | null;
   more_blocks?: number;
 }
 
@@ -2231,6 +2237,55 @@ test("why_file projects card strings according to exposure (sanitized vs raw)", 
     { id: "note", args: {} },
     { id: "config_changed", args: { key: `token_${secret}` } },
   ]);
+});
+
+test("why_file projects card sequence through projectText, returns null when absent, and keeps flow out", async () => {
+  const secret = "sk-LIVEKEY0123456789ABCDEFGHIJKLMNO";
+  const withSeq = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    flow: [{ kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [1], exit_code: 1, error: "fail" }],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: `TOKEN=${secret} npm test\u001b[31m`,
+      exit_code: 1,
+      edit_seqs: [1],
+      error_names: `file_${secret}.ts`,
+    },
+  });
+  const withoutSeq = sampleStoredCard("97394ac43381e6ac7a3b66cb264cd2b9");
+  const unknownSeq = sampleStoredCard("085fd43e5e4c84caf8d98e99af9d6ff2", {
+    sequence: { pattern: "future_pattern", command: "npm test", exit_code: 1, edit_seqs: [1] } as unknown as StoredCard["sequence"],
+  });
+
+  const provider = (): CardsForFile => ({
+    cards: [withSeq, withoutSeq, unknownSeq],
+    matched: new Map([
+      [withSeq.card_id, withSeq.blocks],
+      [withoutSeq.card_id, withoutSeq.blocks],
+      [unknownSeq.card_id, unknownSeq.blocks],
+    ]),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  const sanitized = (await cardRegistry(provider, "sanitized").call("why_file", { path: "src/a.ts", limit: 5 }, new AbortController().signal)).structuredContent;
+  const sCards = sanitized.cards as ProjectedCard[];
+  assert.equal(sCards.length, 3);
+  assert.equal("flow" in sCards[0]!, false);
+  assert.equal(JSON.stringify(sCards).includes('"flow"'), false);
+  assert.equal(sCards[0]?.sequence?.pattern, "fix_after_fail");
+  assert.equal(sCards[0]?.sequence?.exit_code, 1);
+  assert.equal(sCards[0]?.sequence?.command.includes(secret), false);
+  assert.equal(sCards[0]?.sequence?.command.includes("[redacted]"), true);
+  assert.equal(sCards[0]?.sequence?.command.includes("\u001b"), false);
+  assert.equal(sCards[0]?.sequence?.error_names?.includes(secret), false);
+  assert.equal(sCards[0]?.sequence?.error_names?.includes("[redacted]"), true);
+  assert.equal("edit_seqs" in (sCards[0]?.sequence as object), false);
+  assert.equal(sCards[1]?.sequence, null);
+  assert.equal(sCards[2]?.sequence, null);
+
+  const raw = (await cardRegistry(provider, "raw").call("why_file", { path: "src/a.ts", limit: 5 }, new AbortController().signal)).structuredContent;
+  const rCards = raw.cards as ProjectedCard[];
+  assert.equal(rCards[0]?.sequence?.command, `TOKEN=${secret} npm test`);
+  assert.equal(rCards[0]?.sequence?.error_names, `file_${secret}.ts`);
 });
 
 test("why_file preserves 32-hex card_id and redacts other opaque card_id strings under sanitized exposure", async () => {

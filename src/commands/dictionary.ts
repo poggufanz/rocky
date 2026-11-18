@@ -13,7 +13,7 @@ import { truncateUtf8 } from "../mcp/privacy.js";
 import { ago, detail, isVerbose, phrase, prompt as rockyPrompt, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 import { formatGitDiffLines, resolveGitDiff, type GitDiffOptions, type GitDiffResult } from "../core/git-diff.js";
-import { labelChip, promptTitle } from "../desk/card-text.js";
+import { labelChip, promptTitle, sequenceSentence } from "../desk/card-text.js";
 import { cardsForFile, type CardsForFile, type StoredBlock, type StoredCard } from "../desk/cards-read.js";
 import { CliUsageError, parseNoArgs, parseQueryArgs, reportCliUsage } from "./cli-args.js";
 
@@ -835,6 +835,16 @@ function sayChangeCards(
       }
       if (blocks.length > MAX_CARD_BLOCKS) {
         support(`         +${blocks.length - MAX_CARD_BLOCKS} more`);
+      }
+      const seq = card.sequence;
+      if (seq && seq.pattern === "fix_after_fail") {
+        const editSet = new Set(seq.edit_seqs);
+        if (blocks.some((block) => editSet.has(block.seq))) {
+          const sentence = sequenceSentence(card);
+          if (sentence !== undefined) {
+            support(terminalSafe(`${CARD_BLOCK_INDENT}Sequence: ${sentence}`, MAX_OUTPUT_LINE_BYTES));
+          }
+        }
       }
     }
   }

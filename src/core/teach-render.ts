@@ -1,4 +1,4 @@
-import { labelChip, promptTitle } from "../desk/card-text.js";
+import { labelChip, promptTitle, sequenceSentence } from "../desk/card-text.js";
 import { tokens } from "./fingerprint.js";
 import type { TeachHit } from "./teach.js";
 import type { CardMatch, CardTeachHit } from "./teach-cards.js";
@@ -94,6 +94,13 @@ export function renderCardTeach(hit: CardTeachHit): TeachCard {
   if (block.labels.length > 0) {
     const kind = block.symbol?.kind ?? null;
     lines.push(`Changed: ${block.labels.map((label) => labelChip(label, kind)).join(", ")}`);
+  }
+  const seq = card.sequence;
+  if (seq && seq.pattern === "fix_after_fail" && seq.edit_seqs.includes(block.seq)) {
+    const sentence = sequenceSentence(card);
+    if (sentence !== undefined) {
+      lines.push(`Sequence: ${sentence}`);
+    }
   }
   const quoteText = block.quote?.text;
   if (quoteText !== undefined && quoteText.length > 0) {

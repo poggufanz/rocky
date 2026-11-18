@@ -59,6 +59,14 @@ export interface StoredCoverage {
   reasons: string[];
 }
 
+export interface StoredSequence {
+  pattern: "fix_after_fail";
+  command: string;
+  exit_code: number;
+  edit_seqs: number[];
+  error_names?: string | null;
+}
+
 export interface StoredCard {
   v: 1;
   card_id: string;
@@ -83,6 +91,7 @@ export interface StoredCard {
   flow_more?: number;
   outside_count?: number;
   coverage?: StoredCoverage;
+  sequence?: StoredSequence | null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -170,6 +179,16 @@ function isValidCoverageField(value: unknown): value is StoredCoverage {
   return typeof value.state === "string" && isStringArray(value.reasons);
 }
 
+function isValidFixAfterFailSequence(value: Record<string, unknown>): boolean {
+  if (typeof value.command !== "string") return false;
+  if (!isSafeInt(value.exit_code)) return false;
+  if (!Array.isArray(value.edit_seqs) || !value.edit_seqs.every(isSafeNonNegInt)) return false;
+  if (value.error_names !== undefined && value.error_names !== null && typeof value.error_names !== "string") {
+    return false;
+  }
+  return true;
+}
+
 export function validateCard(value: unknown): value is StoredCard {
   if (!isPlainObject(value)) return false;
   if (value.v !== 1) return false;
@@ -202,6 +221,14 @@ export function validateCard(value: unknown): value is StoredCard {
   if (value.flow_more !== undefined && !isSafeNonNegInt(value.flow_more)) return false;
   if (value.outside_count !== undefined && !isSafeNonNegInt(value.outside_count)) return false;
   if (value.coverage !== undefined && !isValidCoverageField(value.coverage)) return false;
+  if (value.sequence !== undefined && value.sequence !== null) {
+    if (!isPlainObject(value.sequence) || typeof value.sequence.pattern !== "string") return false;
+    if (value.sequence.pattern !== "fix_after_fail") {
+      delete value.sequence;
+    } else if (!isValidFixAfterFailSequence(value.sequence)) {
+      return false;
+    }
+  }
   return true;
 }
 
