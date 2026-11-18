@@ -7,8 +7,9 @@ import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQu
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import { rationalesForFile } from "../core/dictionary.js";
 import { teachLookup } from "../core/teach.js";
+import { teachFromCards } from "../core/teach-cards.js";
 import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
-import { gapRungFor, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
+import { gapRungFor, renderCardTeach, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
 import { projectExplain } from "./privacy.js";
 import { cardsForFile, type CardsForFile } from "../desk/cards-read.js";
 import { readListeningTail } from "../listening/event-log-read.js";
@@ -121,6 +122,7 @@ const MAX_WHY_EVIDENCE_INPUTS = 256;
 const MAX_PROVIDER_NESTED_ITEMS = 256;
 const MAX_PROVIDER_NESTED_BYTES = 64 * 1024;
 const MAX_TEACH_FILE_BYTES = 2 * 1024 * 1024;
+const TEACH_CARD_LIMIT = 5;
 const MEMORY_OPERATIONAL_CODES = Object.freeze([
   "EACCES", "EPERM", "ENOENT", "EIO", "EMFILE", "ENFILE", "ENOSPC", "EROFS", "EISDIR", "ENOTDIR",
 ] as const);
@@ -305,7 +307,7 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
     },
     {
       name: "teach_lookup", title: "Teach selection",
-      description: "Read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else an assembled evidence ladder. Example: {\"path\": \"src/app.css\", \"line\": 12}. Reasons are quotes recorded from a human or agent, not verified facts.",
+      description: "Read-only teach card for a path and optional line or snippet: a remembered witness explanation when one matches, else a matching change card, else an assembled evidence ladder. Example: {\"path\": \"src/app.css\", \"line\": 12}. Reasons are quotes recorded from a human or agent, not verified facts.",
       inputSchema: schema({
         path: { type: "string", maxLength: MAX_FIELD_BYTES },
         line: { type: "integer", minimum: 1 },
@@ -1963,8 +1965,30 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               exposure: options.exposure, header: "", lines: [] as string[], evidence: "",
               match: "empty" as const, truncatedFields: [] as string[], truncated: false,
             };
+            const tryCardAnswer = (query: { snippet?: string; line?: number }) => {
+              const foundCards = safeReadMemory<CardsForFile | undefined>(
+                () => (options.cards
+                  ? options.cards(input.path, TEACH_CARD_LIMIT)
+                  : cardsForFile(input.path, { cwd: process.cwd(), limit: TEACH_CARD_LIMIT })),
+                undefined,
+              );
+              const cardHit = foundCards === undefined
+                ? undefined
+                : safeReadMemory(() => teachFromCards(foundCards, query), undefined);
+              if (cardHit === undefined) return undefined;
+              const card = renderCardTeach(cardHit);
+              const projected = projectExplain(card, "card", undefined, options.exposure);
+              return safeProjection(
+                () => cappedResult({ exposure: options.exposure, ...projected }),
+                cappedResult({ ...empty, truncated: true }),
+              );
+            };
             if (input.line !== undefined && (fileText === undefined || input.line > total)) {
-              return cappedResult(empty);
+              const cardResult = tryCardAnswer({
+                ...(input.snippet === undefined ? {} : { snippet: input.snippet }),
+                line: input.line,
+              });
+              return cardResult ?? cappedResult(empty);
             }
             let snippet = input.snippet;
             let startLine = 1;
@@ -1995,6 +2019,8 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 cappedResult({ ...empty, truncated: true }),
               );
             }
+            const cardResult = tryCardAnswer({ snippet, line: input.line });
+            if (cardResult !== undefined) return cardResult;
             if (snippet !== undefined && fileText !== undefined) {
               const ladder = buildLadder({
                 file: input.path,

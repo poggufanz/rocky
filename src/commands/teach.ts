@@ -3,17 +3,20 @@ import { readFileSync, statSync } from "node:fs";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import { loadMemoryChecked, type MemoryLoadResult } from "../core/memory-read.js";
 import { teachLookup } from "../core/teach.js";
+import { teachFromCards } from "../core/teach-cards.js";
 import { buildLadder, defaultTeachNeighbor, type LadderResult } from "../core/teach-ladder.js";
 import { gitProvenanceChain } from "../core/git-diff.js";
-import { gapRungFor, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
+import { gapRungFor, renderCardTeach, renderLadderCard, renderLadderExpanded, renderWitnessCard } from "../core/teach-render.js";
 import { redactSecretsAtBoundary } from "../core/redact.js";
+import { cardsForFile, type CardsForFile } from "../desk/cards-read.js";
 import { block, detail, heading, say } from "../ui/rocky.js";
+import { safeTerminalLine } from "../ui/sanitize.js";
 import { matchConcepts } from "../core/concepts.js";
 import { CS_CONCEPT_IDS } from "../core/cs-explain.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { analyzeExplainDecision, formatDecisionLine } from "../ai/explain-decision.js";
 
-const EMPTY_STATE = "No reason recorded yet. The authoring agent records one when it writes the code; ask the agent to explain it.";
+const EMPTY_STATE = "No reason recorded for this code. No change card or local evidence matched it.";
 const USAGE = "rocky teach <file>[:<line>] [--stdin] [--ladder] [--quiet]";
 const SELECTION_PAD = 3;
 const TEACH_STDIN_CAP_BYTES = 2 * 1024 * 1024;
@@ -24,6 +27,7 @@ export interface TeachDeps {
   heading?: (line: string) => void;
   block?: (lines: string[]) => void;
   detail?: (line: string) => void;
+  readCards?: (file: string) => CardsForFile;
 }
 
 interface TeachArgs {
@@ -103,11 +107,46 @@ function capLine(loaded: MemoryLoadResult): string | undefined {
   return describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: true });
 }
 
+interface CardPrintSinks {
+  printHeading: (line: string) => void;
+  printBlock: (lines: string[]) => void;
+  printDetail: (line: string) => void;
+}
+
+function tryPrintCardAnswer(
+  file: string,
+  query: { snippet?: string; line?: number },
+  quiet: boolean,
+  deps: TeachDeps,
+  sinks: CardPrintSinks,
+): boolean {
+  let foundCards: CardsForFile | undefined;
+  try {
+    foundCards = deps.readCards ? deps.readCards(file) : cardsForFile(file, { cwd: process.cwd() });
+  } catch {
+    foundCards = undefined;
+  }
+  const cardHit = foundCards === undefined ? undefined : teachFromCards(foundCards, query);
+  if (cardHit === undefined || foundCards === undefined) return false;
+
+  const sanitize = (s: string): string => safeTerminalLine(redactSecretsAtBoundary(s));
+  const card = renderCardTeach(cardHit);
+  sinks.printHeading(sanitize(card.header));
+  sinks.printBlock(card.lines.map(sanitize));
+  sinks.printDetail(sanitize(card.evidence));
+  if (foundCards.coverage.complete === false) {
+    sinks.printDetail(sanitize(`Change card coverage incomplete (${foundCards.coverage.reason ?? "unknown"}).`));
+  }
+  csPointerFor(file, query.snippet, quiet, sinks.printDetail);
+  return true;
+}
+
 export async function teach(argv: readonly string[], deps: TeachDeps = {}): Promise<number> {
   const speak = deps.say ?? say;
   const printHeading = deps.heading ?? heading;
   const printBlock = deps.block ?? block;
   const printDetail = deps.detail ?? detail;
+  const cardSinks: CardPrintSinks = { printHeading, printBlock, printDetail };
 
   let parsed: TeachArgs;
   try {
@@ -119,34 +158,42 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
   }
   const { file, line, stdin, ladder, quiet } = parsed;
 
-  let fileText: string;
-  try {
-    const stat = statSync(file);
-    if (!stat.isFile() || stat.size > TEACH_READ_CAP_BYTES) throw new Error("bounded teach read miss");
-    fileText = readFileSync(file, "utf8");
-  } catch {
-    if (!quiet) speak(EMPTY_STATE);
-    return 0;
-  }
-  const lines = fileText.split(/\r?\n/);
-  const total = lines.length;
-  if (line !== undefined && line > total) {
-    if (!quiet) speak(EMPTY_STATE);
-    return 0;
-  }
-
   let snippet: string | undefined;
-  let startLine = 1;
-  let endLine = total;
-  let anchorStart = 1;
-  let anchorEnd = total;
   if (stdin) {
     if (process.stdin.isTTY) {
       const code = reportCliUsage(new CliUsageError("--stdin needs piped input, not a terminal", USAGE), speak, printDetail);
       if (code !== undefined) return code;
     }
     snippet = await readTeachStdin();
-  } else if (line !== undefined) {
+  }
+
+  let fileText: string | undefined;
+  try {
+    const stat = statSync(file);
+    if (stat.isFile() && stat.size <= TEACH_READ_CAP_BYTES) {
+      fileText = readFileSync(file, "utf8");
+    }
+  } catch {
+    fileText = undefined;
+  }
+  if (fileText === undefined) {
+    if (tryPrintCardAnswer(file, { snippet, line }, quiet, deps, cardSinks)) return 0;
+    if (!quiet) speak(EMPTY_STATE);
+    return 0;
+  }
+  const lines = fileText.split(/\r?\n/);
+  const total = lines.length;
+  if (line !== undefined && line > total) {
+    if (tryPrintCardAnswer(file, { snippet, line }, quiet, deps, cardSinks)) return 0;
+    if (!quiet) speak(EMPTY_STATE);
+    return 0;
+  }
+
+  let startLine = 1;
+  let endLine = total;
+  let anchorStart = 1;
+  let anchorEnd = total;
+  if (!stdin && line !== undefined) {
     startLine = Math.max(1, line - SELECTION_PAD);
     endLine = Math.min(total, line + SELECTION_PAD);
     snippet = lines.slice(startLine - 1, endLine).join("\n");
@@ -180,6 +227,8 @@ export async function teach(argv: readonly string[], deps: TeachDeps = {}): Prom
     csPointerFor(file, snippet, quiet, printDetail);
     return 0;
   }
+
+  if (tryPrintCardAnswer(file, { snippet, line }, quiet, deps, cardSinks)) return 0;
 
   if (ladderResult !== undefined && ladderResult.rungs.length > 0) {
     const label = stdin ? "snippet from stdin" : `line ${line}`;

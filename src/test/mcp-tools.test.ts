@@ -185,7 +185,7 @@ const WITNESS_EXPLAIN: ExplainRecord = {
 test("teach_lookup renders a sanitized witness card and keeps cwd and id opaque", async () => {
   const signal = new AbortController().signal;
   const memory = teachMemory([WITNESS_EXPLAIN]);
-  const sanitized = await createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi })
+  const sanitized = await createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards })
     .call("teach_lookup", { path: "src/app.ts" }, signal);
   assert.equal(sanitized.isError, undefined);
   assert.equal(sanitized.structuredContent.header, "Witnessed: an agent stated why, and rocky recorded it.");
@@ -197,7 +197,7 @@ test("teach_lookup renders a sanitized witness card and keeps cwd and id opaque"
   assert.equal(sanitized.structuredContent.recordId, WITNESS_EXPLAIN.id);
   assert.doesNotMatch(JSON.stringify(sanitized), /TOP-LEVEL-TOPSECRET|Bearer TOP|\/private|secret-project/u);
 
-  const raw = await createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi })
+  const raw = await createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards })
     .call("teach_lookup", { path: "src/app.ts" }, signal);
   assert.equal(raw.isError, undefined);
   assert.match(JSON.stringify(raw), /TOP-LEVEL-TOPSECRET/u);
@@ -239,7 +239,7 @@ test("teach_lookup forwards git provenance through the fifth projectExplain argu
   process.chdir(dir);
   try {
     const result = await createToolRegistry({
-      exposure: "sanitized", memory: teachMemory([]), recallWithAi: disabledRecallWithAi,
+      exposure: "sanitized", memory: teachMemory([]), recallWithAi: disabledRecallWithAi, cards: emptyCards,
     }).call("teach_lookup", { path: "feed.ts", line: 2 }, new AbortController().signal);
     assert.equal(result.isError, undefined);
     assert.equal(result.structuredContent.match, "ladder");
@@ -258,7 +258,7 @@ test("teach_lookup forwards git provenance through the fifth projectExplain argu
 
 test("teach_lookup witness hit suppresses git and carries no provenance", async () => {
   const result = await createToolRegistry({
-    exposure: "sanitized", memory: teachMemory([WITNESS_EXPLAIN]), recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized", memory: teachMemory([WITNESS_EXPLAIN]), recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("teach_lookup", { path: "src/app.ts" }, new AbortController().signal);
   assert.equal(result.isError, undefined);
   assert.equal(result.structuredContent.provenance, undefined);
@@ -273,7 +273,7 @@ test("teach_lookup bounds oversized witness fields and fits the wire cap", async
     business: big,
   };
   const result = await createToolRegistry({
-    exposure: "sanitized", memory: teachMemory([oversized]), recallWithAi: disabledRecallWithAi,
+    exposure: "sanitized", memory: teachMemory([oversized]), recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("teach_lookup", { path: "src/app.ts" }, new AbortController().signal);
   assert.equal(result.isError, undefined);
   assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
@@ -2738,4 +2738,165 @@ test("why_file maps unknown string block via values to other under both exposure
     const [proj] = res.cards as ProjectedCard[];
     assert.equal(proj?.blocks[0]?.via, "other");
   }
+});
+
+test("teach_lookup answers from change cards when no witness matches, including when fileText is undefined", async () => {
+  const signal = new AbortController().signal;
+  const seenCalls: Array<{ path: string; limit: number }> = [];
+  const block = sampleStoredBlock(1, {
+    path: "src/missing-on-disk.ts",
+    symbol: { kind: "function", name: "greetUser", container: null, exported: true, nth: 1 },
+    labels: [{ id: "body_changed", args: {} }],
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
+    quote: { text: "greets a user by name", shared: false },
+  });
+  const card = sampleStoredCard("card-teach-1", {
+    agent_type: "claude-code",
+    started_ms: Date.UTC(2026, 10, 18, 12, 0, 0),
+    prompt: "Add user greeting helper",
+    blocks: [block],
+  });
+  const result = await cardRegistry((path, limit) => {
+    seenCalls.push({ path, limit });
+    return {
+      cards: [card],
+      matched: new Map([[card.card_id, [block]]]),
+      coverage: { complete: true, skipped: 0 },
+    };
+  }).call("teach_lookup", { path: "src/missing-on-disk.ts" }, signal);
+
+  assert.deepEqual(seenCalls, [{ path: "src/missing-on-disk.ts", limit: 5 }]);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.match, "card");
+  assert.equal(
+    result.structuredContent.header,
+    "greetUser, changed by claude-code on 2026-11-18 (from change card)",
+  );
+  const lines = result.structuredContent.lines as string[];
+  assert.ok(lines.includes('Asked: "Add user greeting helper"'), lines.join("\n"));
+  assert.ok(lines.includes("Changed: body changed"), lines.join("\n"));
+  assert.ok(lines.includes('Agent said: "greets a user by name"'), lines.join("\n"));
+  assert.ok(lines.includes("Matched by file; code not compared."), lines.join("\n"));
+  assert.equal(result.structuredContent.evidence, "Recorded, not verified.");
+  assert.equal(result.structuredContent.recordId, undefined);
+  assert.equal(result.structuredContent.provenance, undefined);
+});
+
+test("teach_lookup answers a line query on a missing file from change cards", async () => {
+  const signal = new AbortController().signal;
+  const block = sampleStoredBlock(1, {
+    path: "src/missing-line.ts",
+    symbol: null,
+    line: 40,
+    added: 5,
+    labels: [{ id: "body_changed", args: {} }],
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
+    quote: { text: "handles missing file line query", shared: false },
+  });
+  const card = sampleStoredCard("card-teach-line-missing", {
+    agent_type: "claude-code",
+    started_ms: Date.UTC(2026, 10, 18, 12, 0, 0),
+    prompt: "Add fallback branch",
+    blocks: [block],
+  });
+  const result = await cardRegistry(() => ({
+    cards: [card],
+    matched: new Map([[card.card_id, [block]]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("teach_lookup", { path: "src/missing-line.ts", line: 42 }, signal);
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.match, "card");
+  assert.equal(
+    result.structuredContent.header,
+    "src/missing-line.ts, changed by claude-code on 2026-11-18 (from change card)",
+  );
+  const lines = result.structuredContent.lines as string[];
+  assert.ok(lines.includes("Matched by line; code not compared."), lines.join("\n"));
+});
+
+test("teach_lookup prefers matching witness record over matching change card", async () => {
+  const signal = new AbortController().signal;
+  let cardReads = 0;
+  const block = sampleStoredBlock(1, {
+    path: "src/app.ts",
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
+  });
+  const card = sampleStoredCard("card-over-witness", { blocks: [block] });
+  const result = await cardRegistry(
+    () => {
+      cardReads += 1;
+      return {
+        cards: [card],
+        matched: new Map([[card.card_id, [block]]]),
+        coverage: { complete: true, skipped: 0 },
+      };
+    },
+    "sanitized",
+    teachMemory([WITNESS_EXPLAIN]),
+  ).call("teach_lookup", { path: "src/app.ts" }, signal);
+
+  assert.equal(cardReads, 0);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.match, "similarity");
+  assert.equal(result.structuredContent.header, "Witnessed: an agent stated why, and rocky recorded it.");
+});
+
+test("teach_lookup projects secrets out of change card prompt under sanitized exposure", async () => {
+  const signal = new AbortController().signal;
+  const secret = "sk-LIVEKEY0123456789ABCDEFGHIJKLMNO";
+  const block = sampleStoredBlock(1, {
+    path: "src/secret-card.ts",
+    symbol: { kind: "function", name: "loadSecret", container: null, exported: true, nth: 1 },
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
+    quote: { text: `use Bearer ${secret}`, shared: false },
+  });
+  const card = sampleStoredCard("card-secret-prompt", {
+    prompt: `Rotate Bearer ${secret} token`,
+    blocks: [block],
+  });
+  const provider = (): CardsForFile => ({
+    cards: [card],
+    matched: new Map([[card.card_id, [block]]]),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  const sanitized = await cardRegistry(provider, "sanitized")
+    .call("teach_lookup", { path: "src/secret-card.ts" }, signal);
+  assert.equal(sanitized.isError, undefined);
+  assert.equal(sanitized.structuredContent.match, "card");
+  assert.doesNotMatch(JSON.stringify(sanitized), /sk-LIVEKEY0123456789ABCDEFGHIJKLMNO/u);
+  const sanitizedLines = sanitized.structuredContent.lines as string[];
+  assert.ok(sanitizedLines.some((line) => line.startsWith("Asked:") && line.includes("[redacted]")), sanitizedLines.join("\n"));
+
+  const raw = await cardRegistry(provider, "raw")
+    .call("teach_lookup", { path: "src/secret-card.ts" }, signal);
+  assert.equal(raw.isError, undefined);
+  assert.equal(raw.structuredContent.match, "card");
+  assert.match(JSON.stringify(raw), /sk-LIVEKEY0123456789ABCDEFGHIJKLMNO/u);
+});
+
+test("teach_lookup falls through to ladder when change card read throws", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-mcp-teach-card-fail-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "ladder.ts");
+  writeFileSync(file, [
+    "export async function loadFeed() {",
+    "  const rows = await fetchRows();",
+    "  return rows;",
+    "}",
+  ].join("\n"), "utf8");
+  const signal = new AbortController().signal;
+  const baseline = await registry().call("teach_lookup", { path: file, line: 2 }, signal);
+  const thrown = await cardRegistry(() => {
+    throw new Error("cards store unreadable");
+  }).call("teach_lookup", { path: file, line: 2 }, signal);
+
+  assert.equal(thrown.isError, undefined);
+  assert.equal(thrown.structuredContent.match, "ladder");
+  assert.deepEqual(thrown.structuredContent, baseline.structuredContent);
 });

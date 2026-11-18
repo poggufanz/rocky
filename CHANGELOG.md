@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+`rocky teach` and MCP `teach_lookup` answer from change cards (matched by function name, line, or whole file) when no explain record matches.
+
 Failed commands on change cards now show their exit code and one redacted error line, and PowerShell commands appear in the card sequence.
 
 Desk: the Agents tab is now a project sidebar with two views of agent steps (Timeline by time, Turn steps by order), a step detail panel, and harness icons. The daemon now reports each agent's harness.
