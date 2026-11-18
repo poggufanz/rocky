@@ -123,7 +123,7 @@ export function cycleNudge(input: GateInput, env: NodeJS.ProcessEnv): string {
     const stateFile = join(paths.home, "gate-state", `${input.sessionKey}.cycles.json`);
     const state = loadCycleState(stateFile, Date.now());
     const observation = observeFailureCycle(state, input.fingerprint, input.rationale);
-    saveCycleState(stateFile, state);
+    if (!saveCycleState(stateFile, state)) return "";
     const line = cycleNudgeLine(observation.cycle);
     if (line === undefined) return "";
     const clusters = countCycleClusters(state);
