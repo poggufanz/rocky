@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 
-use rocky_proto::cards::{Block, Card, FlowKind, FlowStep, PromptKind, Sequence, classify_prompt};
+use rocky_proto::cards::{Block, Card, FlowKind, FlowStep, Sequence};
 use rocky_proto::paths::{cards_dir, rocky_home};
 use rockyd::cards::sequence::match_sequence;
 
@@ -38,15 +38,16 @@ fn main() -> io::Result<()> {
     writeln!(out, "# Sequence Audit\n")?;
 
     let mut matched = 0usize;
+    let mut matched_without_sentence = 0usize;
     let mut unmatched = 0usize;
 
     for card in &cards {
         let seq = match_sequence(&card.flow, &card.blocks);
         let sentence = seq.as_ref().and_then(|s| render_sequence_en(card, s));
-        if seq.is_some() {
-            matched += 1;
-        } else {
-            unmatched += 1;
+        match (&seq, &sentence) {
+            (Some(_), Some(_)) => matched += 1,
+            (Some(_), None) => matched_without_sentence += 1,
+            (None, _) => unmatched += 1,
         }
 
         write_card(&mut out, card, seq.as_ref(), sentence.as_deref())?;
@@ -55,6 +56,10 @@ fn main() -> io::Result<()> {
     writeln!(out, "## Summary\n")?;
     writeln!(out, "- cards: {}", cards.len())?;
     writeln!(out, "- matched: {matched}")?;
+    writeln!(
+        out,
+        "- matched without sentence: {matched_without_sentence}"
+    )?;
     writeln!(out, "- unmatched: {unmatched}")?;
     out.flush()
 }
@@ -137,12 +142,21 @@ fn write_card(
     seq: Option<&Sequence>,
     sentence: Option<&str>,
 ) -> io::Result<()> {
-    let card_id = sanitize_single_line(&card.card_id);
+    let clean_id = sanitize_single_line(&card.card_id);
+    let card_id = if clean_id.is_empty() {
+        "(empty)".to_string()
+    } else {
+        markdown_code_span(&clean_id)
+    };
     let date = format_utc_date(card_sort_key(card));
     let title = prompt_title(&card.prompt);
 
-    writeln!(out, "## `{card_id}` — {date}\n")?;
-    writeln!(out, "Prompt: {title}\n")?;
+    writeln!(out, "## {card_id} — {date}\n")?;
+    if title.is_empty() {
+        writeln!(out, "Prompt:\n")?;
+    } else {
+        writeln!(out, "Prompt: {title}\n")?;
+    }
     writeln!(out, "Steps:")?;
     for step in &card.flow {
         writeln!(out, "- {}", format_step(step))?;
@@ -151,7 +165,7 @@ fn write_card(
 
     match (seq, sentence) {
         (_, Some(text)) => writeln!(out, "Sentence: {text}\n")?,
-        (Some(_), None) => writeln!(out, "Sentence: (no pattern; no resolvable edit block)\n")?,
+        (Some(_), None) => writeln!(out, "Sentence: (matched; edit block missing)\n")?,
         (None, None) => writeln!(out, "Sentence: (no pattern)\n")?,
     }
 
@@ -179,7 +193,7 @@ fn format_step(step: &FlowStep) -> String {
     let mut line = if text.is_empty() {
         icon.to_string()
     } else {
-        format!("{icon} {text}")
+        format!("{icon} {}", escape_markdown(text))
     };
 
     if step.kind == FlowKind::Edit && !step.ok {
@@ -192,7 +206,7 @@ fn format_step(step: &FlowStep) -> String {
         let clean_err = sanitize_single_line(err);
         let clean_err = clean_err.trim();
         if !clean_err.is_empty() {
-            line.push_str(&format!(" [{clean_err}]"));
+            line.push_str(&format!(" [{}]", escape_markdown(clean_err)));
         }
     }
 
@@ -222,7 +236,7 @@ fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
                 .filter_map(|s| block_by_seq.get(&s).copied())
                 .map(|b| sanitize_single_line(&b.path).trim().to_string())
                 .filter(|path| !path.is_empty());
-            let first = resolved.next()?;
+            let first = escape_markdown(&resolved.next()?);
             let more = resolved.count();
             let edits = if more == 0 {
                 first
@@ -233,10 +247,11 @@ fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
                 .as_deref()
                 .map(|name| sanitize_single_line(name).trim().to_string())
                 .filter(|name| !name.is_empty())
-                .map(|name| format!(" The error names {name}."))
+                .map(|name| format!(" The error names {}.", escape_markdown(&name)))
                 .unwrap_or_default();
+            let cmd_span = markdown_code_span(&cmd);
             Some(format!(
-                "`{cmd}` failed (exit {exit_code}).{err} Edited {edits}. `{cmd}` passed."
+                "{cmd_span} failed (exit {exit_code}).{err} Edited {edits}. {cmd_span} passed."
             ))
         }
     }
@@ -249,30 +264,47 @@ fn normalize_and_cut_command(command: &str) -> String {
 }
 
 fn prompt_title(prompt: &str) -> String {
-    let display = match classify_prompt(prompt) {
-        PromptKind::Plain => prompt.to_string(),
-        PromptKind::CrossSession => "Message from another session".to_string(),
-        PromptKind::TaskNotification => "Background task notice".to_string(),
-        PromptKind::SlashCommand { name, args } => {
-            if args.is_empty() {
-                name
-            } else {
-                format!("{name} {args}")
-            }
-        }
-    };
-    let first_line = display
-        .split(['\r', '\n'])
-        .map(str::trim)
-        .find(|line| !line.is_empty())
+    let first_line = prompt
+        .split(['\r', '\n', '\u{2028}', '\u{2029}'])
+        .next()
         .unwrap_or("");
     let clean = sanitize_single_line(first_line);
-    let clean = clean.trim();
-    if clean.is_empty() {
-        "(empty)".to_string()
-    } else {
-        cut_to_limit(clean, TITLE_MAX_CHARS)
+    let cut = cut_to_limit(clean.trim(), TITLE_MAX_CHARS);
+    escape_markdown(&cut)
+}
+
+fn markdown_code_span(text: &str) -> String {
+    let mut max_run = 0usize;
+    let mut current_run = 0usize;
+    for ch in text.chars() {
+        if ch == '`' {
+            current_run += 1;
+            max_run = max_run.max(current_run);
+        } else {
+            current_run = 0;
+        }
     }
+    let fence = "`".repeat(max_run + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
+}
+
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(
+            ch,
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '<' | '>' | '#' | '!' | '|' | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn sanitize_single_line(text: &str) -> String {

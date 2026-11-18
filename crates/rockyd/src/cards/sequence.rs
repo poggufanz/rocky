@@ -38,6 +38,9 @@ pub fn match_sequence(flow: &[FlowStep], blocks: &[Block]) -> Option<Sequence> {
             }
         }
     }
+    if edit_seqs.is_empty() {
+        return None;
+    }
 
     let c1 = &flow[c1_idx];
     let exit_code = c1.exit_code?;
@@ -344,6 +347,35 @@ mod tests {
                 command: "npm test".to_string(),
                 exit_code: 1,
                 edit_seqs: vec![1],
+                error_names: None,
+            })
+        );
+    }
+
+    #[test]
+    fn counted_edits_with_empty_seqs_do_not_match() {
+        let flow = vec![
+            cmd_fail("npm test", Some(1), None),
+            edit_step("src/auth.ts", true, Vec::new()),
+            cmd_ok("npm test"),
+        ];
+        assert_eq!(match_sequence(&flow, &[]), None);
+    }
+
+    #[test]
+    fn mixed_empty_and_non_empty_edit_seqs_collect_non_empty() {
+        let flow = vec![
+            cmd_fail("npm test", Some(1), None),
+            edit_step("src/reverted.ts", true, Vec::new()),
+            edit_step("src/kept.ts", true, vec![3]),
+            cmd_ok("npm test"),
+        ];
+        assert_eq!(
+            match_sequence(&flow, &[block(3, "src/kept.ts")]),
+            Some(Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![3],
                 error_names: None,
             })
         );
