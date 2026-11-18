@@ -23,6 +23,7 @@ import {
   hasDeskHooksAt,
   hasOwnedDeskHooks,
   installDeskHooks,
+  isAgentHooksRetiredAt,
   mergeDeskHooks,
   removeDeskHooks,
   uninstallDeskHooks,
@@ -835,4 +836,56 @@ test("hasDeskHooksAt requires a regular desk binary file and returns false on re
 
   writeFileSync(value.settings, "{not json");
   assert.equal(hasDeskHooksAt(value.settings), false);
+});
+
+test("status helpers ignore UNC and network desk binary paths without probing the filesystem", (t) => {
+  const value = settingsFixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  const networkPaths = [
+    "//server/share/rocky-hook",
+    "//?/UNC/server/share/rocky-hook",
+    ...(process.platform === "win32"
+      ? ["\\\\server\\share\\rocky-hook.exe", "\\\\?\\UNC\\server\\share\\rocky-hook.exe"]
+      : []),
+  ];
+
+  for (const networkBin of networkPaths) {
+    const command = deskHookCommand(networkBin, () => true);
+    const settings = mergeDeskHooks({}, command, DESK_HOOK_ASYNC);
+    writeFileSync(value.settings, `${JSON.stringify(settings)}\n`);
+    const probed: string[] = [];
+    const spy = (path: string) => {
+      probed.push(path);
+      return true;
+    };
+
+    assert.equal(isAgentHooksRetiredAt(value.settings, spy), false, networkBin);
+    assert.equal(hasDeskHooksAt(value.settings, spy), false, networkBin);
+    assert.deepEqual(probed, [], networkBin);
+    assert.equal(hasOwnedDeskHooks(removeDeskHooks(settings)), false, networkBin);
+  }
+
+  if (process.platform === "win32") {
+    const localExtended = "\\\\?\\C:\\tools\\rocky-hook.exe";
+    const settings = mergeDeskHooks({}, deskHookCommand(localExtended, () => true), DESK_HOOK_ASYNC);
+    writeFileSync(value.settings, `${JSON.stringify(settings)}\n`);
+    const probed: string[] = [];
+    assert.equal(isAgentHooksRetiredAt(value.settings, (path) => {
+      probed.push(path);
+      return true;
+    }), true);
+    assert.deepEqual([...new Set(probed)], [localExtended]);
+  }
+});
+
+test("setup --status reports absent, not retired, when desk hook binary is a UNC path", async (t) => {
+  const { home, fallback } = commandFixture(t);
+  const dependencies = commandDependencies(home, {});
+  const command = deskHookCommand("//server/share/rocky-hook", () => true);
+  writeFileSync(fallback, `${JSON.stringify(mergeDeskHooks({}, command, DESK_HOOK_ASYNC))}\n`);
+
+  const status = await captureStderr(() => setup(["--status"], dependencies));
+  assert.equal(status.code, 0, status.stderr);
+  assert.ok(status.stderr.includes("claude-code agent hooks: absent"), status.stderr);
+  assert.ok(!status.stderr.includes("retired"), status.stderr);
 });

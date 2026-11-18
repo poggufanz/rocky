@@ -90,9 +90,20 @@ function isRegularFile(path: string): boolean {
   }
 }
 
-function isLiveRockyDeskHookCommand(command: string): boolean {
+function isNetworkPath(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.startsWith("//?/") || normalized.startsWith("//./")) {
+    return /^\/\/[?.]\/unc(?:\/|$)/i.test(normalized);
+  }
+  return /^\/\/[^/]/.test(normalized);
+}
+
+function isLiveRockyDeskHookCommand(
+  command: string,
+  fileExists: (path: string) => boolean = isRegularFile,
+): boolean {
   const bin = deskHookCommandBin(command);
-  return bin !== undefined && isRegularFile(bin);
+  return bin !== undefined && !isNetworkPath(bin) && fileExists(bin);
 }
 
 /**
@@ -112,23 +123,30 @@ export function hasOwnedDeskHooks(root: Record<string, unknown>): boolean {
   return hasOwnedHookCommand(root, isRockyDeskHookCommand);
 }
 
-/** True when `settingsPath` is readable and holds at least one desk hook whose binary is a regular file; false on any read error. */
-export function hasDeskHooksAt(settingsPath: string): boolean {
+/** True when `settingsPath` is readable and holds at least one desk hook whose binary is a local regular file; false on any read error. */
+export function hasDeskHooksAt(
+  settingsPath: string,
+  fileExists: (path: string) => boolean = isRegularFile,
+): boolean {
   try {
     const current = inspectCurrent(settingsPath);
-    return current.read.status === "valid" && hasOwnedHookCommand(current.read.value, isLiveRockyDeskHookCommand);
+    return current.read.status === "valid"
+      && hasOwnedHookCommand(current.read.value, (command) => isLiveRockyDeskHookCommand(command, fileExists));
   } catch {
     return false;
   }
 }
 
-/** True when `settingsPath` is readable, holds no owned agent-event hook, and holds a live desk hook; false on any read error. */
-export function isAgentHooksRetiredAt(settingsPath: string): boolean {
+/** True when `settingsPath` is readable, holds no owned agent-event hook, and holds a local live desk hook; false on any read error. */
+export function isAgentHooksRetiredAt(
+  settingsPath: string,
+  fileExists: (path: string) => boolean = isRegularFile,
+): boolean {
   try {
     const current = inspectCurrent(settingsPath);
     return current.read.status === "valid"
       && !hasOwnedAgentHooks(current.read.value)
-      && hasOwnedHookCommand(current.read.value, isLiveRockyDeskHookCommand);
+      && hasOwnedHookCommand(current.read.value, (command) => isLiveRockyDeskHookCommand(command, fileExists));
   } catch {
     return false;
   }
