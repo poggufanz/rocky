@@ -196,10 +196,7 @@ Then hang `node <home>/.rocky/agent-note.cjs <label>` on whatever event your har
 | TS-extension harnesses | Capture adapter on the tool-result event pointing at `node <home>/.rocky/agent-note.cjs <label>`. |
 | Aider | No lifecycle hooks; nearest lever is `lint-cmd` in `.aider.conf.yml`, which runs per edited file: `lint-cmd: node <home>/.rocky/agent-note.cjs aider edited` (Aider appends the file path as the last argument). Aider's descriptive auto-commits already feed Rocky's git-diff correlation with zero wiring. |
 | Gemini CLI | `AfterTool` in `settings.json` points at `node <home>/.rocky/agent-note.cjs gemini`. |
-| Cline | Post-tool hook pointing at `node <home>/.rocky/agent-note.cjs cline`. |
-| Crush | Post-tool hook in `crush.json` pointing at `node <home>/.rocky/agent-note.cjs crush`. |
-| Goose | Plugin `hooks/hooks.json` post-tool hook pointing at `node <home>/.rocky/agent-note.cjs goose`. |
-| Windsurf | Post-tool hook in `hooks.json` pointing at `node <home>/.rocky/agent-note.cjs windsurf`. |
+| Cline, Crush, Goose, Windsurf | If the harness documents an event that fires after a tool runs, point it at `node <home>/.rocky/agent-note.cjs <label>`. Without one, Steps 1 and 2 cover it. |
 | Zed, Roo Code | No scriptable pre-tool hook. Floor: Step 1 catches every shell command they run; the agent itself sends Step 2 events; Step 5 where MCP is supported. |
 | DSH (DeepSeek Harness) | Nothing to install — Rocky's adapter reads DSH session logs directly (needs Node 22.15+ at Rocky's runtime for zstd). |
 
