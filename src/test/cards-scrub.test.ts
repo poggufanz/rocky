@@ -56,6 +56,27 @@ function card(id: string, blocks: Record<string, unknown>[], flow: Record<string
   });
 }
 
+function cardWithSequence(
+  id: string,
+  blocks: Record<string, unknown>[],
+  sequence: Record<string, unknown>,
+  flow: Record<string, unknown>[] = [],
+): string {
+  return JSON.stringify({
+    v: 1,
+    card_id: id,
+    rev: 1,
+    root: "/work/other",
+    started_ms: 1,
+    ended_ms: 2,
+    prompt: "do things",
+    blocks,
+    more_count: 0,
+    flow,
+    sequence,
+  });
+}
+
 function write(name: string, content: string): string {
   const path = logPath(name);
   writeFileSync(path, content);
@@ -622,6 +643,38 @@ describe("scrubRepoCards verification and leftovers", () => {
     assert.deepEqual(result.incomplete, [path]);
   });
 
+  const seqOnly = (): string =>
+    cardWithSequence(
+      "seq-only",
+      [block(1, "/work/other/b.ts")],
+      { pattern: "fix_after_fail", command: "pytest /work/app/tests", exit_code: 1, edit_seqs: [1] },
+    );
+
+  it("re-scrubs a sequence-only card when a daemon rotation restores the old content", () => {
+    const original = `${seqOnly()}\n`;
+    const path = write("x.jsonl", original);
+    const result = scrubRepoCards(["/work/app"], {
+      rockyHome: home.dir(),
+      ...LINUX,
+      hooks: { afterPass: (pass) => { if (pass === 1) writeFileSync(path, original); } },
+    });
+    assert.deepEqual(result.incomplete, []);
+    const parsed = JSON.parse(readFileSync(path, "utf8").trim());
+    assert.equal("sequence" in parsed, false);
+  });
+
+  it("reports a log whose sequence-only removal keeps coming back", () => {
+    const original = `${seqOnly()}\n`;
+    const path = write("x.jsonl", original);
+    const result = scrubRepoCards(["/work/app"], {
+      rockyHome: home.dir(),
+      ...LINUX,
+      hooks: { afterPass: () => writeFileSync(path, original) },
+    });
+    assert.deepEqual(result.incomplete, [path]);
+    assert.equal(result.incompleteReasons[path], "Blocks about the repo kept coming back after the scrub.");
+  });
+
   it("reports a log whose kept-verbatim line names the repo, and only then", () => {
     const named = write("a.jsonl", `{not json /work/app/secret\n${gone()}\n`);
     const quiet = write("b.jsonl", "{not json /work/other\n");
@@ -653,26 +706,6 @@ describe("scrubRepoCards sequence scrubbing", () => {
     rmSync(cardsDir(), { recursive: true, force: true });
     mkdirSync(cardsDir(), { recursive: true });
   });
-
-  function cardWithSequence(
-    id: string,
-    blocks: Record<string, unknown>[],
-    sequence: Record<string, unknown>,
-  ): string {
-    return JSON.stringify({
-      v: 1,
-      card_id: id,
-      rev: 1,
-      root: "/work/other",
-      started_ms: 1,
-      ended_ms: 2,
-      prompt: "do things",
-      blocks,
-      more_count: 0,
-      flow: [],
-      sequence,
-    });
-  }
 
   it("drops sequence when any edit_seqs entry belongs to a dropped block", () => {
     const line = cardWithSequence(
@@ -736,5 +769,38 @@ describe("scrubRepoCards sequence scrubbing", () => {
     assert.equal(lines.length, 2);
     assert.deepEqual(lines[0].sequence, seq);
     assert.deepEqual(lines[1].sequence, seq);
+  });
+
+  it("keeps a blockless card when only its sequence names the purged root", () => {
+    const flow = [step("run checks", [])];
+    const line = cardWithSequence(
+      "seq-blockless",
+      [],
+      { pattern: "fix_after_fail", command: "pytest /work/app/tests", exit_code: 1, edit_seqs: [] },
+      flow,
+    );
+    const path = write("x.jsonl", `${line}\n`);
+    const result = scrubRepoCards(["/work/app"], { rockyHome: home.dir(), ...LINUX });
+    assert.equal(result.cardsRemoved, 0);
+    assert.equal(result.blocksRemoved, 0);
+    assert.equal(existsSync(path), true);
+    const parsed = JSON.parse(readFileSync(path, "utf8").trim());
+    assert.equal("sequence" in parsed, false);
+    assert.equal(parsed.prompt, "do things");
+    assert.deepEqual(parsed.flow, flow);
+    assert.deepEqual(parsed.blocks, []);
+  });
+
+  it("deletes a card with a sequence when all of its blocks are inside the purged root", () => {
+    const line = cardWithSequence(
+      "seq-all-purged",
+      [block(0, "/work/app/a.ts")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [0] },
+    );
+    const path = write("x.jsonl", `${line}\n`);
+    const result = scrubRepoCards(["/work/app"], { rockyHome: home.dir(), ...LINUX });
+    assert.equal(result.cardsRemoved, 1);
+    assert.equal(result.blocksRemoved, 1);
+    assert.equal(existsSync(path), false);
   });
 });

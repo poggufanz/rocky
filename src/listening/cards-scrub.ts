@@ -230,7 +230,7 @@ function scrubCard(card: StoredCard, original: Buffer, ctx: ScrubContext): LineO
   const removed = card.blocks.length - kept.length;
   const dropSequence = sequenceShouldDrop(card, dropped, ctx);
   if (removed === 0 && !dropSequence) return keepLine(original);
-  if (kept.length === 0) {
+  if (kept.length === 0 && removed > 0) {
     return { bytes: Buffer.alloc(0), changed: true, blocksRemoved: removed, cardDropped: true };
   }
   card.blocks = kept;
@@ -479,12 +479,21 @@ function collectKnownRoots(cardsDir: string, logNames: readonly string[], ctx: S
   }
 }
 
-/** True when a block inside the purged root is in the log, or the log cannot be checked. */
-function logStillHasBlocks(logPath: string, ctx: ScrubContext): boolean {
+/** True when a card still names the purged root via blocks inside it or a sequence referencing it. */
+function cardStillNamesRoot(card: StoredCard, ctx: ScrubContext): boolean {
+  const dropped = new Set<number>();
+  for (const block of card.blocks) {
+    if (blockIsInside(block.path, ctx)) dropped.add(block.seq);
+  }
+  return dropped.size > 0 || sequenceShouldDrop(card, dropped, ctx);
+}
+
+/** True when any card in the log still names the purged root, or the log cannot be checked. */
+function logStillNamesRoot(logPath: string, ctx: ScrubContext): boolean {
   try {
     let present = false;
     forEachCardLine(logPath, (card) => {
-      present = card.blocks.some((block) => blockIsInside(block.path, ctx));
+      present = cardStillNamesRoot(card, ctx);
       return present;
     });
     return present;
@@ -557,17 +566,17 @@ export function scrubRepoCards(rootSpellings: readonly string[], options: ScrubO
 
 /**
  * A daemon rotation (read, write a temp file, rename) can put pre-scrub content
- * back. Re-read each changed log once, scrub once more if blocks came back, and
- * report the log if they are still there.
+ * back. Re-read each changed log once, scrub once more if purged data came back,
+ * and report the log if it is still there.
  */
 function verifyChangedLogs(changed: ReadonlySet<string>, ctx: ScrubContext, result: ScrubResult): void {
   ctx.hooks?.afterPass?.(1);
-  const restored = [...changed].filter((path) => logStillHasBlocks(path, ctx));
+  const restored = [...changed].filter((path) => logStillNamesRoot(path, ctx));
   if (restored.length === 0) return;
   for (const path of restored) scrubLogWithRetry(path, ctx, result);
   ctx.hooks?.afterPass?.(2);
   for (const path of restored) {
-    if (logStillHasBlocks(path, ctx)) addIncomplete(result, path, STUCK_REASON);
+    if (logStillNamesRoot(path, ctx)) addIncomplete(result, path, STUCK_REASON);
   }
 }
 
