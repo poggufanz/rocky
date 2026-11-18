@@ -5,7 +5,11 @@
 //! before serialization. Bash `command` and the tool `description` are captured
 //! through [`bound_tool_text`]: redacted, controls mapped to spaces, at most
 //! [`TOOL_TEXT_MAX_CHARS`](crate::redact::TOOL_TEXT_MAX_CHARS) characters, and
-//! absent when the `desk/tool-text-off` marker exists. On `UserPromptSubmit`,
+//! absent when the `desk/tool-text-off` marker exists. On `PostToolUseFailure`
+//! from `Bash` or `PowerShell`, `exit_code` and one bounded, redacted
+//! `error_head` line survive (`error_head` is dropped under `desk/tool-text-off`;
+//! both are empty when `is_interrupt` is `true`), while every other line of
+//! `error` and all of `tool_response` are dropped. On `UserPromptSubmit`,
 //! `prompt` is captured through [`bound_prompt`]: redacted, controls other than
 //! `\n` and `\t` mapped to spaces, at most
 //! [`PROMPT_MAX_CHARS`](crate::redact::PROMPT_MAX_CHARS) characters, and absent

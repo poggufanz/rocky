@@ -26,7 +26,7 @@ import { cardsFilePath } from "./cards-path.js";
  * blocks and the flow steps that name them out of the other logs.
  *
  * What is edited: blocks whose path lies inside a purged root spelling, flow
- * steps that only refer to those blocks or whose text names such a path.
+ * steps that only refer to those blocks or whose text or error names such a path.
  * Everything else is left alone: lines that do not parse or validate are kept
  * byte for byte, and a log with nothing to remove is never rewritten.
  *
@@ -223,7 +223,11 @@ function scrubCard(card: StoredCard, original: Buffer, ctx: ScrubContext): LineO
   if (card.flow !== undefined) {
     card.flow = card.flow.filter((step) => {
       if (step.seqs.length > 0 && step.seqs.every((seq) => dropped.has(seq))) return false;
-      return !textNamesRoot(step.text, ctx.normalizedRoots, ctx.platform, ctx.pathHome);
+      if (textNamesRoot(step.text, ctx.normalizedRoots, ctx.platform, ctx.pathHome)) return false;
+      if (typeof step.error === "string" && textNamesRoot(step.error, ctx.normalizedRoots, ctx.platform, ctx.pathHome)) {
+        return false;
+      }
+      return true;
     });
   }
   return { bytes: Buffer.from(`${JSON.stringify(card)}\n`, "utf8"), changed: true, blocksRemoved: removed, cardDropped: false };

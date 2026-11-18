@@ -441,9 +441,18 @@ fn tool_text_off_strips_and_clears() {
     let off = st.prepare(e.clone());
     assert_eq!(off.command, None);
     assert_eq!(off.description, None);
+
+    let mut fail = tool_ev("PostToolUseFailure", "S1", None, "Bash", "t2", None);
+    fail.exit_code = Some(1);
+    fail.error_head = Some("Error: boom".into());
+    let off_fail = st.prepare(fail.clone());
+    assert_eq!(off_fail.exit_code, Some(1));
+    assert_eq!(off_fail.error_head, None);
+
     st.set_tool_text(true);
     assert!(st.tool_text());
     assert_eq!(st.prepare(e.clone()), e);
+    assert_eq!(st.prepare(fail.clone()), fail);
 }
 
 #[test]

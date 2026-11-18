@@ -140,9 +140,13 @@ mod tests {
     }
     #[test]
     fn huge_multibyte_output_is_bounded() {
-        let e = format!("Exit code 1\n{}", "é".repeat(40 * 1024));
-        let (_, head) = parse_command_failure(&e, true);
-        assert!(head.unwrap().chars().count() <= TOOL_TEXT_MAX_CHARS);
+        // 12-byte prefix + 3-byte chars ensures ERROR_SCAN_BYTES (16 KiB) lands mid-character.
+        let e = format!("Exit code 1\n{}", "€".repeat(40 * 1024));
+        let (code, head) = parse_command_failure(&e, true);
+        assert_eq!(code, Some(1));
+        let head = head.unwrap();
+        assert!(head.chars().count() <= TOOL_TEXT_MAX_CHARS);
+        assert!(!head.is_empty());
     }
     #[test]
     fn keep_text_false_drops_head_keeps_code() {

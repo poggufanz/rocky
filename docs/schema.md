@@ -190,8 +190,10 @@ the daemon syncs both markers from the settings it loaded (defaults when the
 file is missing or unreadable), and a `set` of `tool_text` or `cards` syncs
 them again, so they match the settings in use. Turning `tool_text` off also
 drops the command text and subagent descriptions from agents already in
-memory, and clears the text of timeline entries that came from a tool input
-(a command, or a subagent description). Path text stays. Every `settings`
+memory, clears the text of timeline entries that came from a tool input
+(a command, or a subagent description), and drops `command`, `description`, and
+`error_head` on ingest and replay while keeping `exit_code` (numbers only). Path
+text stays. Every `settings`
 broadcast makes the desk re-request its open timelines, so cleared text
 disappears there too. Turning `cards` off creates `desk/cards-off` so the hook
 stops recording new `prompt` values, clears every `AgentStatus.prompt` held in
@@ -253,8 +255,9 @@ Rules:
   `health.gaps` from the segments, then seeds the ingestor with every `src`
   seen so those spool files are deleted without being applied again.
 - **Tool text.** Segments written while tool text was on keep that text until
-  they age out or history is turned off. Replay drops it when `tool_text` is
-  off, so it never returns to memory, statuses, or timelines.
+  they age out or history is turned off. Replay drops `command`, `description`,
+  and `error_head` (keeping `exit_code`) when `tool_text` is off, so tool text
+  never returns to memory, statuses, or timelines.
 - **Off.** When the daemon starts with `history` off, and whenever the
   setting changes to off, every accepted segment is deleted. While off,
   nothing is appended.
