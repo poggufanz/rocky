@@ -296,6 +296,10 @@ fn markdown_code_span(text: &str) -> String {
 fn escape_markdown(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
+        if ch == '&' {
+            out.push_str("&amp;");
+            continue;
+        }
         if matches!(
             ch,
             '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '<' | '>' | '#' | '!' | '|' | '~'
