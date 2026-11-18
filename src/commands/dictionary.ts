@@ -870,21 +870,27 @@ function formatCardHeader(card: StoredCard, now: number): string {
   return terminalSafe(`  ${time}  ${label}`, MAX_OUTPUT_LINE_BYTES);
 }
 
+/** Read change cards for a file, returning undefined if the card store throws. */
+function readChangeCards(
+  filePath: string,
+  readCards?: (file: string) => CardsForFile,
+): CardsForFile | undefined {
+  try {
+    return readCards ? readCards(filePath) : cardsForFile(filePath, { cwd: process.cwd() });
+  } catch {
+    return undefined;
+  }
+}
+
 /** Print recent change cards affecting a file after rocky why's existing output. */
 function sayChangeCards(
-  filePath: string,
+  result: CardsForFile | undefined,
   safePath: string,
   now: number,
   speak: (line: string) => void,
   support: (line: string) => void,
-  readCards?: (file: string) => CardsForFile,
 ): void {
-  let result: CardsForFile;
-  try {
-    result = readCards ? readCards(filePath) : cardsForFile(filePath, { cwd: process.cwd() });
-  } catch {
-    return;
-  }
+  if (result === undefined) return;
   const cards = result.cards.slice(0, MAX_CHANGE_CARDS);
   if (cards.length > 0) {
     speak(terminalSafe(`Agent changes to ${safePath} (newest first)`, MAX_OUTPUT_LINE_BYTES));
@@ -965,13 +971,15 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
   // Reasons the human or an agent stated for exactly this file (`--files`). They
   // are spoken last, so no disclosure line below can be pushed out by one.
   const fileRationales = rationalesForFile(memory, path, process.cwd(), now, MAX_FILE_RATIONALES);
+  const cardResult = readChangeCards(path, deps.cards);
+  const hasCards = (cardResult?.cards.length ?? 0) > 0;
   if (hits.length === 0) {
     if (evidenceResult.ambiguousPath) {
       speak(terminalSafe(`"${safePath}" matches more than one path. Clarify which path you mean.`, MAX_OUTPUT_LINE_BYTES));
       support(terminalSafe(isVerbose()
         ? `coverage status: ${coverageStatus}; no silent rationale selection; confidence=incomplete reason=ambiguous path`
         : AMBIGUOUS_PATH_WORDS, MAX_OUTPUT_LINE_BYTES));
-      sayChangeCards(path, safePath, now, speak, support, deps.cards);
+      sayChangeCards(cardResult, safePath, now, speak, support);
       return 0;
     }
     const scanIncomplete = scan !== undefined && coverageIncomplete(scan);
@@ -980,7 +988,12 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     // hold more: a whole scan does not mean the reader examined everything.
     const readerBounded = memory.length > MAX_WHY_RECORDS;
     if (scanIncomplete || pathMayBeOmitted || readerBounded) {
-      speak(terminalSafe(`Coverage is incomplete, so it is not known whether an agent touched "${safePath}".`, MAX_OUTPUT_LINE_BYTES));
+      speak(terminalSafe(
+        hasCards
+          ? `Memory coverage is incomplete for "${safePath}".`
+          : `Coverage is incomplete, so it is not known whether an agent touched "${safePath}".`,
+        MAX_OUTPUT_LINE_BYTES,
+      ));
       if (scanIncomplete) support(coverageLine(scan, memory.length));
       if (pathMayBeOmitted) {
         support(terminalSafe(isVerbose()
@@ -991,13 +1004,14 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     } else {
       // The reader marks empty evidence incomplete by construction, so a whole scan, a reader that
       // examined every record, and no record that might hide this path still leave one fact: no
-      // record names the file. Say that and no more, and not even that when a stated reason does.
-      if (fileRationales.length === 0) {
+      // record names the file. Say that and no more, and not even that when a stated reason or
+      // change card does.
+      if (fileRationales.length === 0 && !hasCards) {
         speak(terminalSafe(`No record names "${safePath}". It is not known whether an agent touched it.`, MAX_OUTPUT_LINE_BYTES));
       }
     }
     sayFileRationales(speak, support, fileRationales);
-    sayChangeCards(path, safePath, now, speak, support, deps.cards);
+    sayChangeCards(cardResult, safePath, now, speak, support);
     return 0;
   }
   if (scan !== undefined && coverageIncomplete(scan)) support(coverageLine(scan, memory.length));
@@ -1047,7 +1061,7 @@ export function why(argv: string[], deps: DictionaryCommandDeps = {}): number {
     }
   }
   sayFileRationales(speak, support, fileRationales);
-  sayChangeCards(path, safePath, now, speak, support, deps.cards);
+  sayChangeCards(cardResult, safePath, now, speak, support);
   return 0;
 }
 

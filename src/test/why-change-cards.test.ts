@@ -308,10 +308,17 @@ test("why appends cards after every exit-0 path and preserves prior lines, while
 
     assert.equal(baseCode, 0, scenario.name);
     assert.equal(withCardsCode, 0, scenario.name);
+    const suppressNoRecord = scenario.name === "empty complete path";
+    const suppressUnknownTouch = scenario.name === "empty incomplete coverage path";
+    const expectedPrefixErr = suppressNoRecord
+      ? []
+      : suppressUnknownTouch
+        ? [`Memory coverage is incomplete for "${scenario.argv[scenario.argv.length - 1]}".`]
+        : baseSinks.errLines;
     assert.deepEqual(
-      withCardsSinks.errLines.slice(0, baseSinks.errLines.length),
-      baseSinks.errLines,
-      `${scenario.name}: prior say lines unchanged`,
+      withCardsSinks.errLines.slice(0, expectedPrefixErr.length),
+      expectedPrefixErr,
+      `${scenario.name}: prior say lines match expected`,
     );
     assert.deepEqual(
       withCardsSinks.outLines.slice(0, baseSinks.outLines.length),
@@ -319,7 +326,7 @@ test("why appends cards after every exit-0 path and preserves prior lines, while
       `${scenario.name}: prior out lines unchanged`,
     );
     assert.deepEqual(
-      withCardsSinks.errLines.slice(baseSinks.errLines.length),
+      withCardsSinks.errLines.slice(expectedPrefixErr.length),
       [`Agent changes to ${scenario.argv[scenario.argv.length - 1]} (newest first)`],
       `${scenario.name}: appends heading`,
     );
@@ -529,9 +536,9 @@ test("why neutralizes terminal-hostile text and bounds every output line to 512 
 
   assert.equal(code, 0);
   const allLines = [...sinks.errLines, ...sinks.outLines];
-  assert.equal(sinks.errLines.length, 2);
+  assert.equal(sinks.errLines.length, 1);
   assert.equal(sinks.outLines.length, 2);
-  assert.equal(allLines.length, 4);
+  assert.equal(allLines.length, 3);
   for (const line of allLines) {
     assert.equal(Buffer.byteLength(line, "utf8") <= 512, true, `line exceeded 512 bytes: ${line}`);
     assert.equal(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff?？]/u.test(line), false, line);
@@ -793,7 +800,6 @@ test("why reads real change cards end-to-end via cardsForFile and ROCKY_HOME", (
 
     assert.equal(code, 0);
     assert.deepEqual(sinks.errLines, [
-      'No record names "src/cart.ts". It is not known whether an agent touched it.',
       "Agent changes to src/cart.ts (newest first)",
     ]);
     assert.deepEqual(sinks.outLines, [
@@ -1294,4 +1300,69 @@ test("why folds Sequence symbol labels into a file-level label for the same path
     renderCase([bH, aF, aFile], [1, 2, 3], bH),
     "         Sequence: `npm test` failed (exit 1). Edited b.js \u203a h() and 1 more. `npm test` passed.",
   );
+});
+
+test("why omits the no-record line when cards for the file are listed", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const card = makeCard({ blocks: [makeBlock({ path: "src/cart.ts" })] });
+  const sinks = makeSinks();
+
+  const code = why(["src/cart.ts"], {
+    ...sinks,
+    load: () => [],
+    coverage: () => completeCoverage(),
+    now,
+    cards: () => makeResult([card]),
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(sinks.errLines, ["Agent changes to src/cart.ts (newest first)"]);
+});
+
+test("why keeps the no-record line when no card exists", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const sinks = makeSinks();
+
+  const code = why(["src/cart.ts"], {
+    ...sinks,
+    load: () => [],
+    coverage: () => completeCoverage(),
+    now,
+    cards: () => makeResult([]),
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(sinks.errLines, [
+    'No record names "src/cart.ts". It is not known whether an agent touched it.',
+  ]);
+});
+
+test("why with incomplete memory coverage and cards does not claim the touch is unknown", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const card = makeCard({ blocks: [makeBlock({ path: "src/cart.ts" })] });
+  const sinks = makeSinks();
+
+  const code = why(["src/cart.ts"], {
+    ...sinks,
+    load: () => [],
+    coverage: () => completeCoverage({
+      scanned: 1,
+      truncated: 1,
+      bytesScanned: 10,
+      bytesTotal: 20,
+      complete: false,
+      reason: "file-size-cap",
+    }),
+    now,
+    cards: () => makeResult([card]),
+  });
+
+  assert.equal(code, 0);
+  assert.equal(sinks.errLines[0], 'Memory coverage is incomplete for "src/cart.ts".');
+  assert.deepEqual(validateOutputLine(sinks.errLines[0]!), []);
+  assert.equal(
+    [...sinks.errLines, ...sinks.outLines].some((line) => line.includes("not known whether an agent touched")),
+    false,
+  );
+  assert.ok(sinks.outLines.some((line) => line.includes("memory coverage incomplete:")));
 });

@@ -211,12 +211,13 @@ test("auto claude settings: desk hooks land in the same write and inspect ok", (
   const reports = applyClaudeSettings(value.settings, paths);
   assert.deepEqual(states(reports), [["agent-hooks", "written"], ["desk-hooks", "written"]]);
   assert.notEqual(events(value.settings).SessionStart, undefined);
+  assert.equal(hasOwnedAgentHooks(readJson(value.settings)), false);
+  assert.equal(JSON.stringify(readJson(value.settings)).includes("hook agent-event claude-code"), false);
   assert.deepEqual(states(inspectClaudeSettings(value.settings, paths)), [["agent-hooks", "ok"], ["desk-hooks", "ok"]]);
   assert.deepEqual(claudeSettingsSnippets(paths, false), [
-    JSON.stringify(rockyHookCommand("claude-code", paths.nodePath, paths.entryPath)),
     JSON.stringify(deskHookCommand(paths.deskHookBin as string)),
   ]);
-  assert.equal(claudeSettingsSnippets(paths, true).length, 3);
+  assert.equal(claudeSettingsSnippets(paths, true).length, 2);
 });
 
 test("auto claude settings: desk hooks without a binary inspect as stale", (t) => {
@@ -224,7 +225,43 @@ test("auto claude settings: desk hooks without a binary inspect as stale", (t) =
   const bin = hookBin(value.root);
   applyClaudeSettings(value.settings, { ...value.paths, deskHookBin: bin });
   const reports = inspectClaudeSettings(value.settings, value.paths);
-  assert.deepEqual(states(reports), [["agent-hooks", "ok"], ["desk-hooks", "stale"]]);
+  assert.deepEqual(states(reports), [["agent-hooks", "missing"], ["desk-hooks", "stale"]]);
+});
+
+test("auto claude settings: desk write retires agent-event hooks and refreshes a kept gate", (t) => {
+  const value = fixture(t);
+  const oldNode = join(value.root, "old-node.exe");
+  const oldEntry = join(value.root, "old-index.js");
+  writeFileSync(
+    value.settings,
+    JSON.stringify(mergeClaudeHooks({}, rockyHookCommand("claude-code", oldNode, oldEntry), rockyGateHookCommand(oldNode, oldEntry))),
+  );
+  const paths: Paths = { ...value.paths, deskHookBin: hookBin(value.root) };
+  const reports = applyClaudeSettings(value.settings, paths);
+  assert.deepEqual(states(reports), [["agent-hooks", "written"], ["desk-hooks", "written"]]);
+  assert.equal(hasOwnedAgentHooks(readJson(value.settings)), false);
+  assert.equal(JSON.stringify(readJson(value.settings)).includes("hook agent-event claude-code"), false);
+  const gateGroup = events(value.settings).PreToolUse.find((group) => group.matcher === "Edit|Write|MultiEdit");
+  assert.equal(
+    gateGroup?.hooks[0]?.command,
+    rockyGateHookCommand(paths.nodePath, paths.entryPath),
+  );
+  assert.deepEqual(states(inspectClaudeSettings(value.settings, paths)), [["agent-hooks", "ok"], ["desk-hooks", "ok"]]);
+});
+
+test("auto claude settings: a missing desk binary brings agent-event hooks back", (t) => {
+  const value = fixture(t);
+  const bin = hookBin(value.root);
+  applyClaudeSettings(value.settings, { ...value.paths, deskHookBin: bin });
+  assert.equal(hasOwnedAgentHooks(readJson(value.settings)), false);
+  assert.deepEqual(states(inspectClaudeSettings(value.settings, value.paths)), [["agent-hooks", "missing"], ["desk-hooks", "stale"]]);
+  const restored = applyClaudeSettings(value.settings, value.paths);
+  assert.deepEqual(states(restored), [["agent-hooks", "written"], ["desk-hooks", "stale"]]);
+  const expectedCommand = rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath);
+  assert.ok(
+    events(value.settings).UserPromptSubmit.some((group) => group.hooks[0]?.command === expectedCommand),
+    JSON.stringify(events(value.settings).UserPromptSubmit),
+  );
 });
 
 test("auto claude settings: remove leaves foreign hooks and drops every owned one", (t) => {

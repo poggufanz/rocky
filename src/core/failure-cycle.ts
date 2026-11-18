@@ -15,15 +15,12 @@
  * reported only; a repeated loop is never presented as proof of cause.
  *
  * Session state is a small fingerprint -> {count, lastRationaleHash,
- * lastTokens} map in its own `<session>.cycles.json` file next to the
- * gate-state fold. It honors the same envelope as the fold
- * (FAILURE_CYCLE_MAX_KEYS mirrors GATE_MAX_ENTRIES, CYCLE_STATE_TIMEOUT_MS
- * mirrors GATE_SESSION_TIMEOUT_MS) and writes atomically (tmp file +
- * rename, the same pattern hook speech publishing uses). Any unreadable or
- * corrupt state reads as empty — the gate stays fail-open. A same-file
- * JSONL fold cannot hold this shape: the fold only stores bare key
- * strings, and encoding token arrays into keys would grow them without a
- * bound, so the separate bounded JSON file is deliberate, not drift.
+ * lastTokens} map in `<ROCKY_HOME>/gate-state/<session>.cycles.json`. It
+ * caps entries at FAILURE_CYCLE_MAX_KEYS, expires stale sessions after
+ * CYCLE_STATE_TIMEOUT_MS, caps file size at MAX_STATE_FILE_BYTES, and
+ * writes atomically (tmp file + rename, the same pattern hook speech
+ * publishing uses). Any unreadable or corrupt state reads as a fresh
+ * session — the hook stays fail-open.
  */
 
 import { createHash } from "node:crypto";
@@ -35,9 +32,9 @@ import { similarity, tokens } from "./fingerprint.js";
 export const FAILURE_CYCLE_COUNT = 3 as const;
 /** Jaccard similarity above this between the last two rationales counts as same words. */
 export const FAILURE_CYCLE_SIMILARITY = 0.8 as const;
-/** Bounds distinct fingerprints kept per session; mirrors GATE_MAX_ENTRIES. */
+/** Bounds distinct fingerprints kept per session. */
 export const FAILURE_CYCLE_MAX_KEYS = 500 as const;
-/** A state file older than this by mtime reads as a fresh session; mirrors GATE_SESSION_TIMEOUT_MS. */
+/** A state file older than this by mtime reads as a fresh session. */
 export const CYCLE_STATE_TIMEOUT_MS = 30 * 60 * 1000;
 /** Advisory nudge text for a repeated failure with unchanged wording. */
 export const CYCLE_NUDGE = "Same failure with the same wording again. Add new information before retrying." as const;
@@ -258,7 +255,7 @@ export function cycleNudgeLine(detected: unknown): string | undefined {
 }
 
 /**
- * The cluster count line shared by the CLI card and the gate's deny-reason
+ * The cluster count line shared by the CLI card and the gate's advisory note
  * suffix, so the two cannot drift. A count only: it names no cause for the
  * repeats. Callers pass `clusters >= 2`.
  */

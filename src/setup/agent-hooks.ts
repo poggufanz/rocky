@@ -381,7 +381,7 @@ export function printCodexAgentHooks(command = rockyHookCommand("codex")): void 
   detail(codexConfigSnippet(command));
   say("Codex config is TOML, and rocky does not edit it. Paste the snippet above into your Codex config yourself.");
   detail("Trust warning: review and trust changed command hooks through Codex /hooks before they run.");
-  detail("The rationale gate needs Claude Code hooks. Other agents use the notify lane, which cannot deny.");
+  detail("The advisory PreToolUse hook needs Claude Code hooks. Other agents use the notify lane.");
 }
 
 /** Build the exact Claude Code event groups owned by Rocky. */
@@ -435,6 +435,11 @@ function isRockyHook(value: JsonObject): boolean {
   const command = hookCommand(value);
   return command !== undefined
     && (isRockyClaudeHookCommand(command) || isRockyGateHookCommand(command));
+}
+
+function isRockyAgentHook(value: JsonObject): boolean {
+  const command = hookCommand(value);
+  return command !== undefined && isRockyClaudeHookCommand(command);
 }
 
 export function stripOwnedGroups(groups: readonly unknown[], isOwned: (hook: JsonObject) => boolean): unknown[] {
@@ -494,7 +499,7 @@ export function mergeClaudeHooks(
       clean.push(entry[0]);
       hooks[event] = clean;
     }
-    // PreToolUse (the rationale gate) is opt-in: rewritten from scratch like
+    // PreToolUse (the advisory PreToolUse hook) is opt-in: rewritten from scratch like
     // the three events above, but only re-added when a gate command is
     // supplied. A rerun with no gate command strips a previously installed
     // gate entry instead of leaving it stale.
@@ -533,6 +538,11 @@ export function removeOwnedHooks(
 /** Remove Rocky-owned groups while preserving all foreign configuration. */
 export function removeClaudeHooks(existing: Record<string, unknown>): Record<string, unknown> {
   return removeOwnedHooks(existing, isRockyHook);
+}
+
+/** Remove Rocky agent-event groups while preserving the gate and all foreign configuration. */
+export function removeAgentEventHooks(existing: Record<string, unknown>): Record<string, unknown> {
+  return removeOwnedHooks(existing, isRockyAgentHook);
 }
 
 function ownedHookGroupsByEvent(
@@ -876,7 +886,7 @@ function hasCurrentHooks(value: Record<string, unknown>, command: string, gateCo
   const hooks = validateHooks(value);
   if (hooks === undefined) return false;
   // Events a Rocky-owned group is allowed to appear under. PreToolUse (the
-  // opt-in rationale gate) belongs here so an owned PreToolUse group never
+  // opt-in advisory PreToolUse hook) belongs here so an owned PreToolUse group never
   // makes an otherwise-current config report "not current" - whether or not
   // this install chose the gate. This is a separate job from the
   // must-be-present loop below; do not fold the two back into one list.

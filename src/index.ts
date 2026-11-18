@@ -140,9 +140,9 @@ usage:
                             choose the projected-memory exposure during configure.
   rocky setup --agent-hooks
                             install Claude Code hooks after explicit consent and
-                            print the Codex TOML. This installs the PreToolUse
-                            rationale gate too, unless you pass --no-rationale-gate.
-                            Codex has no deny hook; it uses the notify lane only.
+                            print the Codex TOML. This installs the advisory
+                            PreToolUse hook too, unless you pass --no-rationale-gate.
+                            The hook never blocks an edit. Codex uses the notify lane.
   rocky setup --uninstall-agent-hooks
                             remove rocky's Claude Code hooks; Codex config stays untouched.
                             Refuses while desk consent is approved.
@@ -177,8 +177,9 @@ usage:
                             one-shot native event ingress; static argv, stdin
                             JSON only, fail-open, stdout stays empty.
   rocky hook gate-event claude-code
-                            PreToolUse enforcement endpoint; reads one hook payload from
-                            stdin, prints an allow/deny decision, always exits 0.
+                            PreToolUse advisory endpoint; reads one hook payload from
+                            stdin, prints {} or one advisory note, never blocks,
+                            always exits 0.
 
 Memory lives in ~/.rocky/memory.jsonl. There is no telemetry. Outside calls:
 rocky check asks registry.npmjs.org whether a package exists (package name only,

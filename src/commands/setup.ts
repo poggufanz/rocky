@@ -49,7 +49,7 @@ import {
   type AgentHooksTarget,
 } from "../setup/agent-hooks.js";
 import type { AgentHooksAction, HarnessId, RepoCaptureAction } from "../setup/clients.js";
-import { installDeskHooks, uninstallDeskHooks } from "../setup/desk-hooks.js";
+import { isAgentHooksRetiredAt, installDeskHooks, uninstallDeskHooks } from "../setup/desk-hooks.js";
 import {
   checkLegacyVoiceSkill,
   removeLegacyVoiceSkill,
@@ -658,7 +658,10 @@ async function runAgentHooksAction(
     }
     const result = agentHooksStatus(target, options);
     detail("Setup status scope: host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.");
-    detail(`claude-code agent hooks: ${result.claudeCode}`);
+    const retired = result.claudeCode === "absent" && isAgentHooksRetiredAt(target.settingsPath);
+    detail(retired
+      ? "claude-code agent hooks: retired (desk hooks installed)"
+      : `claude-code agent hooks: ${result.claudeCode}`);
     detail("codex agent hooks: manual");
     await reportLegacyVoiceSkill(harnesses, dependencies);
     return result.claudeCode === "unreadable" ? 1 : 0;
@@ -719,6 +722,9 @@ async function runDeskHooksAction(
     });
     detail(`claude-code desk hooks: ${result.status}`);
     if (result.detail !== undefined) detail(safeTerminalBlock(result.detail));
+    if (result.status === "written") {
+      detail("Rocky's Claude Code agent hooks are not put back. Run rocky setup --agent-hooks to hear Claude Code without the desk.");
+    }
     return result.status === "written" || result.status === "unchanged" ? 0 : 1;
   } catch {
     say("Setup stopped: the Claude Code desk hook paths are not usable.");

@@ -682,9 +682,9 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
         const hasArgvPayload = adapter === "codex"
           && typeof argvPayload === "string"
           && argvPayload.length > 0;
-        // A real terminal never pipes a vendor payload, but an interactive
-        // stdin also never reaches EOF — reading it would hang the exact
-        // command the gate's deny message tells the agent to run. TTY in,
+        // A real terminal never pipes a vendor payload, and an interactive
+        // stdin never reaches EOF — reading it would hang a direct CLI call
+        // such as `rocky hook agent-event <adapter> --rationale ...`. TTY in,
         // vendor-payload lane out; the argv --rationale lane is independent
         // and already handled above/below.
         const raw = hasArgvPayload

@@ -26,8 +26,10 @@ import {
   defaultAgentHooksTarget,
   installClaudeAgentHooks,
   mergeClaudeHooks,
+  removeAgentEventHooks,
   removeClaudeHooks,
   retainedCopyMatches,
+  rockyGateHookCommand,
   rockyHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
@@ -173,6 +175,46 @@ test("removeClaudeHooks still strips the exact pre-canonical POSIX bang spelling
   const command = '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook agent-event claude-code';
   const existing = { hooks: { Stop: [{ hooks: [{ type: "command", command }] }] } };
   assert.deepEqual(removeClaudeHooks(existing), {});
+});
+
+test("removeAgentEventHooks strips canonical, legacy bang, and bare spellings while keeping gate and foreign", () => {
+  const canonical = rockyHookCommand("claude-code", "/usr/bin/node", "/opt/rocky/dist/index.js");
+  const legacyBang = '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook agent-event claude-code';
+  const gateCommand = rockyGateHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const unsafeWindows = '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook agent-event claude-code';
+  const existing = {
+    keep: 1,
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: canonical }] }],
+      PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: legacyBang }] }],
+      Stop: [
+        { hooks: [{ type: "command", command: LEGACY_CLAUDE_HOOK_COMMAND }] },
+        {
+          hooks: [
+            { type: "command", command: "foreign-tool --label 'hook agent-event claude-code'" },
+            { type: "command", command: LEGACY_CLAUDE_HOOK_COMMAND },
+            { type: "command", command: unsafeWindows },
+          ],
+        },
+      ],
+      PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: gateCommand }] }],
+    },
+  };
+
+  assert.deepEqual(removeAgentEventHooks(existing), {
+    keep: 1,
+    hooks: {
+      Stop: [
+        {
+          hooks: [
+            { type: "command", command: "foreign-tool --label 'hook agent-event claude-code'" },
+            { type: "command", command: unsafeWindows },
+          ],
+        },
+      ],
+      PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: gateCommand }] }],
+    },
+  });
 });
 
 function fixture(t: test.TestContext): { root: string; settings: string; command: string } {
