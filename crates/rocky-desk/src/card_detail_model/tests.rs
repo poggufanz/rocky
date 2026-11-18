@@ -1293,3 +1293,129 @@ fn sequence_sentence_is_none_when_no_edit_seq_resolves_to_block() {
     };
     assert_eq!(view.sequence_line, None);
 }
+
+#[test]
+fn sequence_sentence_deduplicates_by_rendered_label_en_and_id() {
+    let render = |id: &str, card: Card, lang: UiLang| -> Option<String> {
+        let (mut model, _) = DetailModel::open(id.to_string(), 1);
+        model.on_detail(1, card, Vec::new(), lang);
+        let DetailState::Ready(view) = model.state() else {
+            panic!("expected Ready state");
+        };
+        view.sequence_line.clone()
+    };
+
+    // Two blocks with the same path and no symbol -> no "and N more" / "dan N lainnya".
+    let mut same_file = sample_card("c-dup-file", 1_000, Some(5_000));
+    same_file.blocks = vec![
+        sample_block(1, "src/cli.js", Vec::new()),
+        sample_block(2, "src/cli.js", Vec::new()),
+    ];
+    same_file.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-dup-file", same_file.clone(), UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-dup-file", same_file, UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/cli.js diedit. `npm test` lulus.")
+    );
+
+    // Two blocks with the same path and same symbol -> no "and N more" / "dan N lainnya".
+    let mut b1 = sample_block(1, "src/cli.js", Vec::new());
+    b1.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "run".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut b2 = sample_block(2, "src/cli.js", Vec::new());
+    b2.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "run".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut same_sym = sample_card("c-dup-sym", 1_000, Some(5_000));
+    same_sym.blocks = vec![b1, b2];
+    same_sym.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-dup-sym", same_sym.clone(), UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/cli.js \u{203a} run(). `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-dup-sym", same_sym, UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/cli.js \u{203a} run() diedit. `npm test` lulus.")
+    );
+
+    // Two different symbols in the same file -> "and 1 more" / "dan 1 lainnya".
+    let mut f1 = sample_block(1, "src/cli.js", Vec::new());
+    f1.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "f".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut f2 = sample_block(2, "src/cli.js", Vec::new());
+    f2.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "g".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut diff_sym = sample_card("c-diff-sym", 1_000, Some(5_000));
+    diff_sym.blocks = vec![f1, f2];
+    diff_sym.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-diff-sym", diff_sym.clone(), UiLang::En).as_deref(),
+        Some(
+            "`npm test` failed (exit 1). Edited src/cli.js \u{203a} f() and 1 more. `npm test` passed."
+        )
+    );
+    assert_eq!(
+        render("c-diff-sym", diff_sym, UiLang::Id).as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). src/cli.js \u{203a} f() dan 1 lainnya diedit. `npm test` lulus."
+        )
+    );
+
+    // Two different files -> "and 1 more" / "dan 1 lainnya".
+    let mut diff_files = sample_card("c-diff-files", 1_000, Some(5_000));
+    diff_files.blocks = vec![
+        sample_block(1, "src/a.js", Vec::new()),
+        sample_block(2, "src/b.js", Vec::new()),
+    ];
+    diff_files.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-diff-files", diff_files.clone(), UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/a.js and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-diff-files", diff_files, UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/a.js dan 1 lainnya diedit. `npm test` lulus.")
+    );
+}

@@ -1145,3 +1145,86 @@ test("why omits Sequence line when command or first edit head sanitizes to empty
   );
   assert.equal(unresolvableSinks.outLines.some((line) => line.includes("Sequence:")), false);
 });
+
+test("why deduplicates Sequence edit labels so repeated edits to one file or symbol omit and N more", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const block1 = makeBlock({ seq: 1, path: "src/cli.js", symbol: null });
+  const block2 = makeBlock({ seq: 2, path: "src/cli.js", symbol: null });
+  const sameLabelCard = makeCard({
+    card_id: "card-seq-dup-label",
+    blocks: [block1, block2],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+    },
+  });
+  const sameLabelResult: CardsForFile = {
+    cards: [sameLabelCard],
+    matched: new Map([[sameLabelCard.card_id, [block1, block2]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const sameSinks = makeSinks();
+  assert.equal(
+    why(["src/cli.js"], {
+      ...sameSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => sameLabelResult,
+    }),
+    0,
+  );
+  const sameSeqLine = sameSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    sameSeqLine,
+    "         Sequence: `npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(sameSeqLine!.trim()), []);
+  assert.doesNotMatch(sameSeqLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+
+  const fn1 = makeBlock({
+    seq: 1,
+    path: "src/cli.js",
+    symbol: { kind: "function", name: "f", container: null, exported: false },
+  });
+  const fn2 = makeBlock({
+    seq: 2,
+    path: "src/cli.js",
+    symbol: { kind: "function", name: "g", container: null, exported: false },
+  });
+  const diffLabelCard = makeCard({
+    card_id: "card-seq-diff-label",
+    blocks: [fn1, fn2],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+    },
+  });
+  const diffLabelResult: CardsForFile = {
+    cards: [diffLabelCard],
+    matched: new Map([[diffLabelCard.card_id, [fn1, fn2]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const diffSinks = makeSinks();
+  assert.equal(
+    why(["src/cli.js"], {
+      ...diffSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => diffLabelResult,
+    }),
+    0,
+  );
+  const diffSeqLine = diffSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    diffSeqLine,
+    "         Sequence: `npm test` failed (exit 1). Edited src/cli.js \u203a f() and 1 more. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(diffSeqLine!.trim()), []);
+  assert.doesNotMatch(diffSeqLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+});

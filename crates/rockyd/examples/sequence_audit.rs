@@ -230,19 +230,27 @@ fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
             if cmd.is_empty() {
                 return None;
             }
-            let mut seen = HashSet::new();
-            let mut resolved = edit_seqs
-                .iter()
-                .copied()
-                .filter(|s| seen.insert(*s))
-                .filter_map(|s| block_by_seq.get(&s).copied());
-            let first_block = resolved.next()?;
-            let first_head = block_head(first_block);
-            if first_head.is_empty() {
-                return None;
+            let mut seen_seqs = HashSet::new();
+            let mut seen_heads = HashSet::new();
+            let mut first_head: Option<String> = None;
+            for &edit_seq in edit_seqs {
+                if !seen_seqs.insert(edit_seq) {
+                    continue;
+                }
+                let Some(block) = block_by_seq.get(&edit_seq).copied() else {
+                    continue;
+                };
+                let head = block_head(block);
+                if first_head.is_none() {
+                    if head.is_empty() {
+                        return None;
+                    }
+                    first_head = Some(head.clone());
+                }
+                seen_heads.insert(head);
             }
-            let first = escape_markdown(&first_head);
-            let more = resolved.count();
+            let first = escape_markdown(&first_head?);
+            let more = seen_heads.len().saturating_sub(1);
             let edits = if more == 0 {
                 first
             } else {
@@ -527,6 +535,90 @@ mod tests {
                 empty_first_card.sequence.as_ref().unwrap()
             ),
             None
+        );
+    }
+
+    #[test]
+    fn deduplicates_by_rendered_edit_label() {
+        let same_file = sample_card(
+            vec![
+                sample_block(1, "src/cli.js", None),
+                sample_block(2, "src/cli.js", None),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&same_file, same_file.sequence.as_ref().unwrap()).as_deref(),
+            Some("`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.")
+        );
+
+        let sym = |name: &str| {
+            Some(BlockSymbol {
+                kind: SymbolKind::Function,
+                name: name.to_string(),
+                container: None,
+                exported: false,
+                nth: 0,
+            })
+        };
+        let same_sym = sample_card(
+            vec![
+                sample_block(1, "src/cli.js", sym("run")),
+                sample_block(2, "src/cli.js", sym("run")),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&same_sym, same_sym.sequence.as_ref().unwrap()).as_deref(),
+            Some(
+                "`npm test` failed (exit 1). Edited src/cli.js \u{203a} run(). `npm test` passed."
+            )
+        );
+
+        let diff_sym = sample_card(
+            vec![
+                sample_block(1, "src/cli.js", sym("f")),
+                sample_block(2, "src/cli.js", sym("g")),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&diff_sym, diff_sym.sequence.as_ref().unwrap()).as_deref(),
+            Some(
+                "`npm test` failed (exit 1). Edited src/cli.js \u{203a} f() and 1 more. `npm test` passed."
+            )
+        );
+
+        let diff_files = sample_card(
+            vec![
+                sample_block(1, "src/a.js", None),
+                sample_block(2, "src/b.js", None),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&diff_files, diff_files.sequence.as_ref().unwrap()).as_deref(),
+            Some("`npm test` failed (exit 1). Edited src/a.js and 1 more. `npm test` passed.")
         );
     }
 }

@@ -175,19 +175,22 @@ export function sequenceSentenceParts(card: StoredCard): SequenceSentenceParts |
     blockBySeq.set(block.seq, block);
   }
 
-  const seen = new Set<number>();
-  const resolved: StoredBlock[] = [];
+  const seenSeqs = new Set<number>();
+  const seenHeads = new Set<string>();
+  let firstHead: string | undefined;
   for (const editSeq of seq.edit_seqs) {
-    if (seen.has(editSeq)) continue;
-    seen.add(editSeq);
+    if (seenSeqs.has(editSeq)) continue;
+    seenSeqs.add(editSeq);
     const block = blockBySeq.get(editSeq);
-    if (block !== undefined) resolved.push(block);
+    if (block === undefined) continue;
+    const head = blockHead(block);
+    if (firstHead === undefined) {
+      if (head.length === 0) return undefined;
+      firstHead = head;
+    }
+    seenHeads.add(head);
   }
-
-  const firstBlock = resolved[0];
-  if (firstBlock === undefined) return undefined;
-  const firstHead = blockHead(firstBlock);
-  if (firstHead.length === 0) return undefined;
+  if (firstHead === undefined) return undefined;
 
   const errName = typeof seq.error_names === "string"
     ? sanitizeSingleLine(seq.error_names).replace(UNICODE_EDGE_WHITESPACE_RE, "")
@@ -198,7 +201,7 @@ export function sequenceSentenceParts(card: StoredCard): SequenceSentenceParts |
     exitCode: seq.exit_code,
     ...(errName.length > 0 ? { errorName: errName } : {}),
     editHead: firstHead,
-    moreEdits: resolved.length - 1,
+    moreEdits: seenHeads.size - 1,
   };
 }
 

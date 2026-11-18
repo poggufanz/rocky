@@ -297,3 +297,59 @@ test("sequenceSentence preserves U+FEFF like Rust whitespace rules and renders e
   );
   assert.equal(emptyStruct, "`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.");
 });
+
+test("sequenceSentence deduplicates by rendered edit label and counts remaining unique labels", () => {
+  const sameFileNoSymbol = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/cli.js"), seqBlock(2, "src/cli.js")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    sameFileNoSymbol,
+    "`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.",
+  );
+  assert.doesNotMatch(sameFileNoSymbol!, BANNED_WORDS);
+
+  const sameFileSameSymbol = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "src/cli.js", { kind: "function", name: "run" }),
+        seqBlock(2, "src/cli.js", { kind: "function", name: "run" }),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    sameFileSameSymbol,
+    "`npm test` failed (exit 1). Edited src/cli.js \u203a run(). `npm test` passed.",
+  );
+  assert.doesNotMatch(sameFileSameSymbol!, BANNED_WORDS);
+
+  const sameFileDiffSymbols = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "src/cli.js", { kind: "function", name: "f" }),
+        seqBlock(2, "src/cli.js", { kind: "function", name: "g" }),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    sameFileDiffSymbols,
+    "`npm test` failed (exit 1). Edited src/cli.js \u203a f() and 1 more. `npm test` passed.",
+  );
+  assert.doesNotMatch(sameFileDiffSymbols!, BANNED_WORDS);
+
+  const diffFilesWithRepeat = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/a.js"), seqBlock(2, "src/b.js"), seqBlock(3, "src/a.js")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(
+    diffFilesWithRepeat,
+    "`npm test` failed (exit 1). Edited src/a.js and 1 more. `npm test` passed.",
+  );
+  assert.doesNotMatch(diffFilesWithRepeat!, BANNED_WORDS);
+});

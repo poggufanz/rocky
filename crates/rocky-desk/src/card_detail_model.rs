@@ -375,18 +375,27 @@ fn build_sequence_line(
             if cmd.is_empty() {
                 return None;
             }
-            let mut seen = HashSet::new();
-            let mut resolved = edit_seqs
-                .iter()
-                .copied()
-                .filter(|seq| seen.insert(*seq))
-                .filter_map(|seq| block_by_seq.get(&seq).copied());
-            let first_block = resolved.next()?;
-            let first_head = block_head(first_block);
-            if first_head.is_empty() {
-                return None;
+            let mut seen_seqs = HashSet::new();
+            let mut seen_heads = HashSet::new();
+            let mut first_head: Option<String> = None;
+            for &edit_seq in edit_seqs {
+                if !seen_seqs.insert(edit_seq) {
+                    continue;
+                }
+                let Some(block) = block_by_seq.get(&edit_seq).copied() else {
+                    continue;
+                };
+                let head = block_head(block);
+                if first_head.is_none() {
+                    if head.is_empty() {
+                        return None;
+                    }
+                    first_head = Some(head.clone());
+                }
+                seen_heads.insert(head);
             }
-            let more = resolved.count();
+            let first_head = first_head?;
+            let more = seen_heads.len().saturating_sub(1);
             let edits = if more > 0 {
                 card_text(
                     lang,
