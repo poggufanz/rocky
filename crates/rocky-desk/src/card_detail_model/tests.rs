@@ -1,6 +1,6 @@
 use rocky_proto::cards::{
     Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageReason,
-    CoverageState, FlowKind, FlowStep, Importance, Label, Quote, SymbolKind,
+    CoverageState, FlowKind, FlowStep, Importance, Label, Quote, Sequence, SymbolKind,
 };
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, DiffLineKind, SnippetLine};
 
@@ -1063,4 +1063,167 @@ fn old_flow_step_renders_unchanged() {
     assert_eq!(step.error, None);
     assert_eq!(step.title, "cargo test");
     assert_eq!(step.dur, "3s");
+}
+
+#[test]
+fn sequence_sentence_en_and_id_match_task1_example() {
+    let mut card = sample_card("c-seq", 1_000, Some(5_000));
+    card.blocks = vec![sample_block(1, "src/auth.ts", Vec::new())];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: None,
+    });
+
+    let (mut en_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    en_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(en_view) = en_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        en_view.sequence_line.as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.")
+    );
+
+    let (mut id_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    id_model.on_detail(1, card.clone(), Vec::new(), UiLang::Id);
+    let DetailState::Ready(id_view) = id_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        id_view.sequence_line.as_deref(),
+        Some("`npm test` gagal (exit 1). src/auth.ts diedit. `npm test` lulus.")
+    );
+
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: Some("auth.ts".to_string()),
+    });
+
+    let (mut en_err_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    en_err_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(en_err_view) = en_err_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        en_err_view.sequence_line.as_deref(),
+        Some(
+            "`npm test` failed (exit 1). The error names auth.ts. Edited src/auth.ts. `npm test` passed."
+        )
+    );
+
+    let (mut id_err_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    id_err_model.on_detail(1, card, Vec::new(), UiLang::Id);
+    let DetailState::Ready(id_err_view) = id_err_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        id_err_view.sequence_line.as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). Error menyebut auth.ts. src/auth.ts diedit. `npm test` lulus."
+        )
+    );
+}
+
+#[test]
+fn sequence_sentence_summarizes_three_edits() {
+    let mut card = sample_card("c-seq-3", 1_000, Some(5_000));
+    card.blocks = vec![
+        sample_block(1, "src/a.ts", Vec::new()),
+        sample_block(2, "src/b.ts", Vec::new()),
+        sample_block(3, "src/c.ts", Vec::new()),
+    ];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 2,
+        edit_seqs: vec![1, 2, 3],
+        error_names: None,
+    });
+
+    let (mut en_model, _) = DetailModel::open("c-seq-3".to_string(), 1);
+    en_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(en_view) = en_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        en_view.sequence_line.as_deref(),
+        Some("`npm test` failed (exit 2). Edited src/a.ts and 2 more. `npm test` passed.")
+    );
+
+    let (mut id_model, _) = DetailModel::open("c-seq-3".to_string(), 1);
+    id_model.on_detail(1, card, Vec::new(), UiLang::Id);
+    let DetailState::Ready(id_view) = id_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        id_view.sequence_line.as_deref(),
+        Some("`npm test` gagal (exit 2). src/a.ts dan 2 lainnya diedit. `npm test` lulus.")
+    );
+}
+
+#[test]
+fn sequence_sentence_cuts_long_command_and_sanitizes_control_chars() {
+    let mut long_card = sample_card("c-seq-long", 1_000, Some(5_000));
+    long_card.blocks = vec![sample_block(1, "src/auth.ts", Vec::new())];
+    long_card.sequence = Some(Sequence::FixAfterFail {
+        command: "x".repeat(120),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: None,
+    });
+
+    let (mut long_model, _) = DetailModel::open("c-seq-long".to_string(), 1);
+    long_model.on_detail(1, long_card, Vec::new(), UiLang::En);
+    let DetailState::Ready(long_view) = long_model.state() else {
+        panic!("expected Ready state");
+    };
+    let expected_cmd = format!("{}\u{2026}", "x".repeat(79));
+    assert_eq!(expected_cmd.chars().count(), 80);
+    assert_eq!(
+        long_view.sequence_line.as_deref(),
+        Some(
+            format!(
+                "`{expected_cmd}` failed (exit 1). Edited src/auth.ts. `{expected_cmd}` passed."
+            )
+            .as_str()
+        )
+    );
+
+    let mut ctrl_card = sample_card("c-seq-ctrl", 1_000, Some(5_000));
+    ctrl_card.blocks = vec![sample_block(1, "src/auth.ts", Vec::new())];
+    ctrl_card.sequence = Some(Sequence::FixAfterFail {
+        command: "  npm\u{7}test   --watch\n".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: None,
+    });
+
+    let (mut ctrl_model, _) = DetailModel::open("c-seq-ctrl".to_string(), 1);
+    ctrl_model.on_detail(1, ctrl_card, Vec::new(), UiLang::En);
+    let DetailState::Ready(ctrl_view) = ctrl_model.state() else {
+        panic!("expected Ready state");
+    };
+    let line = ctrl_view
+        .sequence_line
+        .as_deref()
+        .expect("sequence_line should be Some");
+    assert!(!line.chars().any(|c| c.is_control()), "got {line:?}");
+    assert_eq!(
+        line,
+        "`npm test --watch` failed (exit 1). Edited src/auth.ts. `npm test --watch` passed."
+    );
+}
+
+#[test]
+fn card_without_sequence_has_no_sequence_line() {
+    let card = sample_card("c-no-seq", 1_000, Some(5_000));
+    let (mut model, _) = DetailModel::open("c-no-seq".to_string(), 1);
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(view.sequence_line, None);
 }

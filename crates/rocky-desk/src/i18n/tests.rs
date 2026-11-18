@@ -282,8 +282,23 @@ fn card_catalog_renders_every_sample_in_both_languages() {
 
 #[test]
 fn card_templates_have_no_causal_words() {
-    let id_banned = ["untuk", "agar", "supaya", "karena", "sehingga"];
-    let en_banned = ["because", "so that", "in order to", "to ensure"];
+    let id_banned = [
+        "untuk",
+        "agar",
+        "supaya",
+        "karena",
+        "sehingga",
+        "diperbaiki",
+        "memperbaiki",
+    ];
+    let en_banned = [
+        "because",
+        "so that",
+        "in order to",
+        "to ensure",
+        "fixed",
+        "resolved",
+    ];
 
     let mut rendered = Vec::new();
     for lang in [UiLang::En, UiLang::Id] {
@@ -614,6 +629,8 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::BashUncertain
         | CardMsg::ExportedTooltip
         | CardMsg::TimelineHeading
+        | CardMsg::SequenceEditsMore { .. }
+        | CardMsg::SequenceFixAfterFail { .. }
         | CardMsg::TimelineMoreSteps { .. }
         | CardMsg::BackDone
         | CardMsg::SettingCards
@@ -637,7 +654,7 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::CloseCard => {}
     };
     let _ = check;
-    55
+    57
 }
 
 #[test]

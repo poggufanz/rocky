@@ -89,10 +89,11 @@ fn ready_card<T: 'static>(
         card = card.child(quote_group_view(lang, group, cx, on_action));
     }
 
-    if !view.timeline.is_empty() || view.timeline_more.is_some() {
+    if view.sequence_line.is_some() || !view.timeline.is_empty() || view.timeline_more.is_some() {
         card = card.child(timeline_section(
             lang,
             card_id,
+            view.sequence_line.as_deref(),
             &view.timeline,
             view.timeline_more.as_deref(),
         ));
@@ -250,7 +251,13 @@ fn snippet_line_view(line: &CodeLine) -> Div {
     diff_code_line(tone, text).min_w_0().truncate()
 }
 
-fn timeline_section(lang: UiLang, card_id: &str, steps: &[Step], more: Option<&str>) -> Div {
+fn timeline_section(
+    lang: UiLang,
+    card_id: &str,
+    sequence_line: Option<&str>,
+    steps: &[Step],
+    more: Option<&str>,
+) -> Div {
     let mut section = div()
         .flex()
         .flex_col()
@@ -268,6 +275,18 @@ fn timeline_section(lang: UiLang, card_id: &str, steps: &[Step], more: Option<&s
             .text_color(rgb(TEXT_DIM))
             .child(card_text(lang, &CardMsg::TimelineHeading).to_uppercase()),
     );
+
+    if let Some(line) = sequence_line {
+        section = section.child(
+            div()
+                .mb(px(6.0))
+                .min_w_0()
+                .text_size(px(12.0))
+                .font_family(mono_font())
+                .text_color(rgb(TEXT_DARK))
+                .child(line.to_string()),
+        );
+    }
 
     let last_idx = steps.len().saturating_sub(1);
     for (idx, step) in steps.iter().enumerate() {
