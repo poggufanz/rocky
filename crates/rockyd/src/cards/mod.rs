@@ -3,6 +3,7 @@
 pub mod attribute;
 pub mod detail;
 pub mod query;
+pub mod sequence;
 pub mod storage;
 pub mod store;
 pub mod transcript;

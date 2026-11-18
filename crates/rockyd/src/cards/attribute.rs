@@ -429,6 +429,7 @@ pub fn build_card(
         coverage,
         reads,
         reads_more,
+        sequence: None,
     }
 }
 

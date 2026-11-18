@@ -222,6 +222,19 @@ pub struct FlowStep {
     pub error: Option<String>,
 }
 
+/// Detected behavioral pattern across a card's execution flow.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "pattern", rename_all = "snake_case")]
+pub enum Sequence {
+    FixAfterFail {
+        command: String,
+        exit_code: i32,
+        edit_seqs: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_names: Option<String>,
+    },
+}
+
 /// Overall capture completeness of a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,6 +297,9 @@ pub struct Card {
     /// Distinct read paths beyond [`MAX_READS`].
     #[serde(default, skip_serializing_if = "is_zero")]
     pub reads_more: u32,
+    /// Matched pattern summary detected from the turn's flow, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<Sequence>,
 }
 
 /// How a card prompt should be shown when a harness envelope, not a person, started the turn.
@@ -563,5 +579,87 @@ mod tests {
             !serialized.contains("error"),
             "unexpected error key: {serialized}"
         );
+    }
+
+    #[test]
+    fn card_sequence_serde_round_trip() {
+        let base_json = serde_json::json!({
+            "v": 1,
+            "card_id": "c-1",
+            "rev": 1,
+            "repo_id": "r-1",
+            "root": "/repo",
+            "main_root": null,
+            "branch": null,
+            "session_id": "s-1",
+            "agent_id": "a-1",
+            "agent_type": "",
+            "parent_card_id": null,
+            "started_ms": 1,
+            "ended_ms": 2,
+            "status": "done",
+            "prompt": "fix tests",
+            "prompt_truncated": false,
+            "importance": "low",
+            "blocks": [],
+            "flow": [],
+            "outside_count": 0,
+            "coverage": { "state": "full", "reasons": [] }
+        });
+
+        let mut card: Card =
+            serde_json::from_value(base_json).expect("deserialize card without sequence");
+        assert_eq!(card.sequence, None);
+
+        let serialized_none = serde_json::to_value(&card).expect("serialize card with None");
+        assert!(
+            !serialized_none
+                .as_object()
+                .unwrap()
+                .contains_key("sequence"),
+            "sequence key should be omitted when None"
+        );
+
+        let seq = Sequence::FixAfterFail {
+            command: "npm test".to_string(),
+            exit_code: 1,
+            edit_seqs: vec![1, 2],
+            error_names: Some("auth.ts".to_string()),
+        };
+        let seq_val = serde_json::to_value(&seq).expect("serialize Sequence");
+        assert_eq!(
+            seq_val,
+            serde_json::json!({
+                "pattern": "fix_after_fail",
+                "command": "npm test",
+                "exit_code": 1,
+                "edit_seqs": [1, 2],
+                "error_names": "auth.ts"
+            })
+        );
+        let seq_back: Sequence = serde_json::from_value(seq_val).expect("deserialize Sequence");
+        assert_eq!(seq_back, seq);
+
+        let seq_no_err = Sequence::FixAfterFail {
+            command: "npm test".to_string(),
+            exit_code: 1,
+            edit_seqs: vec![1],
+            error_names: None,
+        };
+        let seq_no_err_val =
+            serde_json::to_value(&seq_no_err).expect("serialize Sequence without error_names");
+        assert!(
+            !seq_no_err_val
+                .as_object()
+                .unwrap()
+                .contains_key("error_names"),
+            "error_names key should be omitted when None"
+        );
+
+        card.sequence = Some(seq);
+        let card_with_seq = serde_json::to_value(&card).expect("serialize card with sequence");
+        let card_back: Card =
+            serde_json::from_value(card_with_seq).expect("deserialize card with sequence");
+        assert_eq!(card_back.sequence, card.sequence);
     }
 }

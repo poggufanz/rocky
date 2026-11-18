@@ -498,6 +498,7 @@ mod tests {
             },
             reads: read.iter().map(|p| p.to_string()).collect(),
             reads_more: 0,
+            sequence: None,
         }
     }
 
