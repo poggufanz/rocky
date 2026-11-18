@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+`rocky why <file>` no longer says that no record names a file when change cards for it are listed below.
+
 When desk hooks are installed in the same Claude Code settings file, `rocky setup --desk-hooks` and automatic setup remove rocky's `hook agent-event claude-code` entries, because the desk hook already hears Claude Code. Removing desk hooks does not put them back; run `rocky setup --agent-hooks` for that. `rocky setup --status` reports them as retired.
 
 The PreToolUse hook (`rocky hook gate-event`) no longer blocks edits or asks an agent to record a reason first. Prompt-clarity and failure-cycle notes now reach the agent as `additionalContext`. `ROCKY_GATE_MODE`, `ROCKY_RATIONALE_GATE`, and `ROCKY_GATE_OVERRIDE` are gone. `rocky hook agent-event generic --rationale` and `rocky why --add` still record a stated reason.
