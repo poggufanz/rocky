@@ -499,7 +499,7 @@ export function mergeClaudeHooks(
       clean.push(entry[0]);
       hooks[event] = clean;
     }
-    // PreToolUse (the rationale gate) is opt-in: rewritten from scratch like
+    // PreToolUse (the advisory PreToolUse hook) is opt-in: rewritten from scratch like
     // the three events above, but only re-added when a gate command is
     // supplied. A rerun with no gate command strips a previously installed
     // gate entry instead of leaving it stale.
@@ -886,7 +886,7 @@ function hasCurrentHooks(value: Record<string, unknown>, command: string, gateCo
   const hooks = validateHooks(value);
   if (hooks === undefined) return false;
   // Events a Rocky-owned group is allowed to appear under. PreToolUse (the
-  // opt-in rationale gate) belongs here so an owned PreToolUse group never
+  // opt-in advisory PreToolUse hook) belongs here so an owned PreToolUse group never
   // makes an otherwise-current config report "not current" - whether or not
   // this install chose the gate. This is a separate job from the
   // must-be-present loop below; do not fold the two back into one list.

@@ -20,7 +20,6 @@ import {
   DESK_HOOK_ASYNC,
   buildDeskHookEntries,
   deskHookCommand,
-  hasDeskHooksAt,
   hasOwnedDeskHooks,
   installDeskHooks,
   isAgentHooksRetiredAt,
@@ -818,27 +817,27 @@ test("setup --status reports absent, not retired, when desk hooks coexist with s
   assert.ok(!status.stderr.includes("retired"), status.stderr);
 });
 
-test("hasDeskHooksAt requires a regular desk binary file and returns false on read errors", (t) => {
+test("isAgentHooksRetiredAt requires a regular desk binary file and returns false on read errors", (t) => {
   const value = settingsFixture(t);
   const hookBin = hookBinFixture(t);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
-  assert.equal(hasDeskHooksAt(value.settings), false);
+  assert.equal(isAgentHooksRetiredAt(value.settings), false);
 
   const command = deskHookCommand(hookBin, () => true);
   writeFileSync(value.settings, `${JSON.stringify(mergeDeskHooks({}, command, DESK_HOOK_ASYNC))}\n`);
-  assert.equal(hasDeskHooksAt(value.settings), true);
+  assert.equal(isAgentHooksRetiredAt(value.settings), true);
 
   rmSync(hookBin, { force: true });
-  assert.equal(hasDeskHooksAt(value.settings), false);
+  assert.equal(isAgentHooksRetiredAt(value.settings), false);
 
   mkdirSync(hookBin);
-  assert.equal(hasDeskHooksAt(value.settings), false);
+  assert.equal(isAgentHooksRetiredAt(value.settings), false);
 
   writeFileSync(value.settings, "{not json");
-  assert.equal(hasDeskHooksAt(value.settings), false);
+  assert.equal(isAgentHooksRetiredAt(value.settings), false);
 });
 
-test("status helpers ignore UNC and network desk binary paths without probing the filesystem", (t) => {
+test("isAgentHooksRetiredAt ignores UNC and network desk binary paths without probing the filesystem", (t) => {
   const value = settingsFixture(t);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
   const networkPaths = [
@@ -860,7 +859,6 @@ test("status helpers ignore UNC and network desk binary paths without probing th
     };
 
     assert.equal(isAgentHooksRetiredAt(value.settings, spy), false, networkBin);
-    assert.equal(hasDeskHooksAt(value.settings, spy), false, networkBin);
     assert.deepEqual(probed, [], networkBin);
     assert.equal(hasOwnedDeskHooks(removeDeskHooks(settings)), false, networkBin);
   }

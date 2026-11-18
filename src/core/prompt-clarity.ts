@@ -2,7 +2,7 @@
  * Prompt-clarity scorer — deterministic, zero-dependency, no model.
  *
  * Scores a rationale or prompt draft locally so `rocky check --prompt` and
- * the rationale gate can nudge toward clearer instructions without any
+ * the advisory PreToolUse hook can nudge toward clearer instructions without any
  * outside call. Every metric here is a pure function of the input text.
  *
  * Diversity metrics follow the lexical-diversity literature:

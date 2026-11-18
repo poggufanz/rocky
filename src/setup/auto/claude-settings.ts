@@ -138,7 +138,7 @@ export function inspectClaudeSettings(settingsPath: string, paths: Paths): AutoT
 
 /**
  * Write Rocky's agent hooks (or retire them when desk hooks validate), a kept
- * rationale gate, and desk hooks in one transaction. A pending transaction is
+ * advisory PreToolUse hook, and desk hooks in one transaction. A pending transaction is
  * recovered first, and the existing PreToolUse gate is refreshed only when it
  * is already Rocky's.
  */

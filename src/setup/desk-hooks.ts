@@ -123,20 +123,6 @@ export function hasOwnedDeskHooks(root: Record<string, unknown>): boolean {
   return hasOwnedHookCommand(root, isRockyDeskHookCommand);
 }
 
-/** True when `settingsPath` is readable and holds at least one desk hook whose binary is a local regular file; false on any read error. */
-export function hasDeskHooksAt(
-  settingsPath: string,
-  fileExists: (path: string) => boolean = isRegularFile,
-): boolean {
-  try {
-    const current = inspectCurrent(settingsPath);
-    return current.read.status === "valid"
-      && hasOwnedHookCommand(current.read.value, (command) => isLiveRockyDeskHookCommand(command, fileExists));
-  } catch {
-    return false;
-  }
-}
-
 /** True when `settingsPath` is readable, holds no owned agent-event hook, and holds a local live desk hook; false on any read error. */
 export function isAgentHooksRetiredAt(
   settingsPath: string,

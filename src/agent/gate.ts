@@ -8,9 +8,11 @@
  * agent.
  *
  * Hard rule: `gateEvent` NEVER throws, NEVER denies an edit, and NEVER
- * returns a non-zero exit code. Every failure path — unparseable stdin,
- * corrupt state, an unwritable state directory, an unrecognized vendor or
- * tool — prints `{}` and exits 0.
+ * returns a non-zero exit code. Unparseable stdin, an unrecognized vendor
+ * or tool, or a missing file path or session id print `{}` and exit 0.
+ * Corrupt or stale cycle state reads as a fresh session, and a failed
+ * cycle-state save keeps only the cycle note silent, so a prompt-clarity
+ * note can still print.
  */
 
 import { createHash } from "node:crypto";
