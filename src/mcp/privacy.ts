@@ -671,6 +671,14 @@ export type ProjectedPromptKind =
   | { kind: "cross_session" }
   | { kind: "slash_command"; name: string; args: string };
 
+export interface ProjectedWhyCardSequence {
+  pattern: "fix_after_fail";
+  command: string;
+  exit_code: number;
+  edit_seqs: number[];
+  error_names: string | null;
+}
+
 export interface ProjectedWhyCard {
   card_id: string;
   ended_ms: number | null;
@@ -680,6 +688,7 @@ export interface ProjectedWhyCard {
   prompt_kind: ProjectedPromptKind;
   agent_type: string;
   blocks: ProjectedWhyCardBlock[];
+  sequence: ProjectedWhyCardSequence | null;
   more_blocks?: number;
 }
 
@@ -966,6 +975,49 @@ function projectCardBlock(
   };
 }
 
+function projectCardSequence(
+  rawSequence: unknown,
+  matchedSeqs: ReadonlySet<number>,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): ProjectedWhyCardSequence | null {
+  if (!isPlainRecord(rawSequence)) return null;
+  if (rawSequence.pattern !== "fix_after_fail") return null;
+  if (typeof rawSequence.command !== "string") return null;
+  if (typeof rawSequence.exit_code !== "number" || !Number.isSafeInteger(rawSequence.exit_code)) return null;
+  if (!Array.isArray(rawSequence.edit_seqs)) return null;
+  if (
+    rawSequence.error_names !== undefined
+    && rawSequence.error_names !== null
+    && typeof rawSequence.error_names !== "string"
+  ) {
+    return null;
+  }
+
+  const editSeqBound = Math.min(rawSequence.edit_seqs.length, MAX_NESTED_ITEMS);
+  const editSeqs: number[] = [];
+  for (let index = 0; index < editSeqBound; index += 1) {
+    const seq = rawSequence.edit_seqs[index];
+    if (!isSafeNonNegativeInteger(seq)) return null;
+    editSeqs.push(seq);
+  }
+  if (!editSeqs.some((seq) => matchedSeqs.has(seq))) return null;
+  if (rawSequence.edit_seqs.length > editSeqBound) {
+    truncation.fields.push(`${path}.edit_seqs`);
+  }
+
+  return {
+    pattern: "fix_after_fail",
+    command: projectText(rawSequence.command, exposure, `${path}.command`, truncation),
+    exit_code: rawSequence.exit_code,
+    edit_seqs: editSeqs,
+    error_names: rawSequence.error_names === undefined || rawSequence.error_names === null
+      ? null
+      : projectText(rawSequence.error_names, exposure, `${path}.error_names`, truncation),
+  };
+}
+
 /**
  * Project Desk change cards returned for one file through MCP boundaries:
  * strings run through `projectText` (passing through only 32-lowercase-hex
@@ -1023,6 +1075,7 @@ export function projectWhyCards(
       const title = promptTitle(promptInput);
 
       const blocks: ProjectedWhyCardBlock[] = [];
+      const matchedSeqs = new Set<number>();
       let moreBlocks = 0;
       const matchingBlocks = matchedMap?.get(rawCardId);
       if (Array.isArray(matchingBlocks)) {
@@ -1036,7 +1089,10 @@ export function projectWhyCards(
               `${at}.blocks[${blocks.length}]`,
               truncation,
             );
-            if (projectedBlock !== undefined) blocks.push(projectedBlock);
+            if (projectedBlock !== undefined) {
+              blocks.push(projectedBlock);
+              matchedSeqs.add(projectedBlock.seq);
+            }
           } else {
             const extraBlock = projectCardBlock(
               matchingBlocks[blockIndex],
@@ -1044,7 +1100,10 @@ export function projectWhyCards(
               `${at}.blocks[${MAX_BLOCKS_PER_CARD + moreBlocks}]`,
               discardTruncation,
             );
-            if (extraBlock !== undefined) moreBlocks += 1;
+            if (extraBlock !== undefined) {
+              moreBlocks += 1;
+              matchedSeqs.add(extraBlock.seq);
+            }
           }
         }
         if (moreBlocks > 0 || matchingBlocks.length > blockScanBound) {
@@ -1061,6 +1120,7 @@ export function projectWhyCards(
         prompt_kind: projectPromptKind(promptKind, exposure, `${at}.prompt_kind`, truncation),
         agent_type: projectText(rawAgentType, exposure, `${at}.agent_type`, truncation),
         blocks,
+        sequence: projectCardSequence(rawCard.sequence, matchedSeqs, exposure, `${at}.sequence`, truncation),
         ...(moreBlocks > 0 ? { more_blocks: moreBlocks } : {}),
       });
     } catch {

@@ -321,6 +321,7 @@ fn card(id: &str, session: &str, started_ms: u64, prompt: &str) -> Card {
         outside_count: 0,
         reads: Vec::new(),
         reads_more: 0,
+        sequence: None,
         coverage: Coverage {
             state: CoverageState::Full,
             reasons: Vec::new(),

@@ -847,3 +847,451 @@ test("why emits partial-read coverage line even with zero matching cards and han
   const blockLine = unknownViaSinks.outLines[1] ?? "";
   assert.equal(blockLine.includes("(via "), false, blockLine);
 });
+
+test("why prints Sequence line only when edit_seqs touches a matched block for that file and runs through terminalSafe", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const cartBlock = makeBlock({ seq: 2, path: "src/cart.ts", symbol: { kind: "function", name: "applyDiscount", container: null, exported: true } });
+  const otherBlock = makeBlock({ seq: 1, path: "src/tax.ts", symbol: null });
+
+  const matchingCard = makeCard({
+    card_id: "card-seq-match",
+    blocks: [otherBlock, cartBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+      error_names: "tax.ts",
+    },
+  });
+  const matchingResult: CardsForFile = {
+    cards: [matchingCard],
+    matched: new Map([[matchingCard.card_id, [cartBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const matchSinks = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...matchSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => matchingResult,
+    }),
+    0,
+  );
+  const seqLine = matchSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    seqLine,
+    "         Sequence: `npm test` failed (exit 1). The error names tax.ts. Edited src/tax.ts and 1 more. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(seqLine!.trim()), []);
+  assert.doesNotMatch(seqLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+
+  // Card has a sequence for seq 1 (src/tax.ts), while this file only matched seq 2 (src/cart.ts).
+  const nonMatchingCard = makeCard({
+    card_id: "card-seq-other",
+    blocks: [otherBlock, cartBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1],
+    },
+  });
+  const nonMatchingResult: CardsForFile = {
+    cards: [nonMatchingCard],
+    matched: new Map([[nonMatchingCard.card_id, [cartBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const noMatchSinks = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...noMatchSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => nonMatchingResult,
+    }),
+    0,
+  );
+  assert.equal(noMatchSinks.outLines.some((line) => line.includes("Sequence:")), false);
+
+  // Control/ANSI/question mark in command or error_names is neutralized by terminalSafe.
+  const hostileCard = makeCard({
+    card_id: "card-seq-hostile",
+    blocks: [makeBlock({ seq: 1, path: "src/cart.ts", symbol: null })],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm\u001b[31m test? --ok",
+      exit_code: 1,
+      edit_seqs: [1],
+      error_names: "cart.ts?\u202e",
+    },
+  });
+  const hostileSinks = makeSinks();
+  assert.equal(
+    why(["src/cart.ts"], {
+      ...hostileSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([hostileCard]),
+    }),
+    0,
+  );
+  const safeSeqLine = hostileSinks.outLines.find((line) => line.includes("Sequence:")) ?? "";
+  assert.ok(safeSeqLine.length > 0);
+  assert.equal(safeSeqLine.includes("?"), false);
+  assert.equal(safeSeqLine.includes("\u001b"), false);
+  assert.equal(safeSeqLine.includes("\u202e"), false);
+});
+
+test("why keeps Sequence fixed clauses and passing outcome under the 512-byte limit for multibyte and long fields", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+
+  // 80-character command with 75 4-byte U+20000 characters (305 bytes per command occurrence).
+  const multibyteCmd = `echo ${"\u{20000}".repeat(75)}`;
+  const multibyteCard = makeCard({
+    card_id: "card-seq-multibyte",
+    blocks: [makeBlock({ seq: 1, path: "src/auth.ts", symbol: null })],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: multibyteCmd,
+      exit_code: 1,
+      edit_seqs: [1],
+    },
+  });
+  const multibyteSinks = makeSinks();
+  assert.equal(
+    why(["src/auth.ts"], {
+      ...multibyteSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([multibyteCard]),
+    }),
+    0,
+  );
+  const mbLine = multibyteSinks.outLines.find((line) => line.includes("Sequence:")) ?? "";
+  assert.ok(mbLine.length > 0);
+  assert.ok(Buffer.byteLength(mbLine, "utf8") <= 512, `byte length was ${Buffer.byteLength(mbLine, "utf8")}`);
+  assert.ok(mbLine.endsWith("\u2026` passed."), mbLine);
+  assert.ok(mbLine.includes("`echo "), mbLine);
+  assert.ok(mbLine.includes("failed (exit 1). Edited src/auth.ts."), mbLine);
+  assert.deepEqual(validateOutputLine(mbLine.trim()), []);
+
+  // Long ASCII path and error_names with an 80-character ASCII command.
+  const longAsciiCmd = "c".repeat(80);
+  const longPath = `src/${"nested/".repeat(40)}auth.ts`;
+  const longErr = `${"longerror_".repeat(30)}auth.ts`;
+  const longFieldsCard = makeCard({
+    card_id: "card-seq-long-fields",
+    blocks: [makeBlock({ seq: 1, path: longPath, symbol: null })],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: longAsciiCmd,
+      exit_code: 2,
+      edit_seqs: [1],
+      error_names: longErr,
+    },
+  });
+  const longSinks = makeSinks();
+  assert.equal(
+    why([longPath], {
+      ...longSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => makeResult([longFieldsCard]),
+    }),
+    0,
+  );
+  const longLine = longSinks.outLines.find((line) => line.includes("Sequence:")) ?? "";
+  assert.ok(longLine.length > 0);
+  assert.ok(Buffer.byteLength(longLine, "utf8") <= 512, `byte length was ${Buffer.byteLength(longLine, "utf8")}`);
+  assert.ok(longLine.endsWith(`\`${longAsciiCmd}\` passed.`), longLine);
+  assert.ok(longLine.includes(`\`${longAsciiCmd}\` failed (exit 2). The error names `), longLine);
+  assert.ok(longLine.includes(" Edited "), longLine);
+  assert.deepEqual(validateOutputLine(longLine.trim()), []);
+});
+
+test("why omits Sequence line when command or first edit head sanitizes to empty and drops empty error_names clause", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+
+  // First edit block path is only U+202E, second edit at src/auth.ts, edit_seqs: [1, 2]: omit Sequence line.
+  const firstBidiBlock = makeBlock({ seq: 1, path: "\u202e", symbol: null });
+  const secondAuthBlock = makeBlock({ seq: 2, path: "src/auth.ts", symbol: null });
+  const bidiEditCard = makeCard({
+    card_id: "card-seq-bidi-edit",
+    blocks: [firstBidiBlock, secondAuthBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+    },
+  });
+  const bidiEditResult: CardsForFile = {
+    cards: [bidiEditCard],
+    matched: new Map([[bidiEditCard.card_id, [secondAuthBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const bidiEditSinks = makeSinks();
+  assert.equal(
+    why(["src/auth.ts"], {
+      ...bidiEditSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => bidiEditResult,
+    }),
+    0,
+  );
+  assert.equal(bidiEditSinks.outLines.some((line) => line.includes("Sequence:")), false);
+
+  // When command sanitizes to empty, omit the Sequence line.
+  const bidiCmdCard = makeCard({
+    card_id: "card-seq-bidi-cmd",
+    blocks: [secondAuthBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "\u202e",
+      exit_code: 2,
+      edit_seqs: [2],
+      error_names: "auth.ts",
+    },
+  });
+  const bidiCmdResult: CardsForFile = {
+    cards: [bidiCmdCard],
+    matched: new Map([[bidiCmdCard.card_id, [secondAuthBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const bidiCmdSinks = makeSinks();
+  assert.equal(
+    why(["src/auth.ts"], {
+      ...bidiCmdSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => bidiCmdResult,
+    }),
+    0,
+  );
+  assert.equal(bidiCmdSinks.outLines.some((line) => line.includes("Sequence:")), false);
+
+  // When only error_names sanitizes to empty, keep the Sequence line and drop the "The error names ..." clause.
+  const bidiErrCard = makeCard({
+    card_id: "card-seq-bidi-err",
+    blocks: [secondAuthBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 2,
+      edit_seqs: [2],
+      error_names: "\u202e",
+    },
+  });
+  const bidiErrResult: CardsForFile = {
+    cards: [bidiErrCard],
+    matched: new Map([[bidiErrCard.card_id, [secondAuthBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const bidiErrSinks = makeSinks();
+  assert.equal(
+    why(["src/auth.ts"], {
+      ...bidiErrSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => bidiErrResult,
+    }),
+    0,
+  );
+  const errLine = bidiErrSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    errLine,
+    "         Sequence: `npm test` failed (exit 2). Edited src/auth.ts. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(errLine!.trim()), []);
+  assert.doesNotMatch(errLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+
+  // Data rule preserved: when no seq in edit_seqs resolves to a block on card.blocks, no Sequence line is emitted.
+  const unresolvableCard = makeCard({
+    card_id: "card-seq-unresolvable",
+    blocks: [],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [2],
+    },
+  });
+  const unresolvableResult: CardsForFile = {
+    cards: [unresolvableCard],
+    matched: new Map([[unresolvableCard.card_id, [secondAuthBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const unresolvableSinks = makeSinks();
+  assert.equal(
+    why(["src/auth.ts"], {
+      ...unresolvableSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => unresolvableResult,
+    }),
+    0,
+  );
+  assert.equal(unresolvableSinks.outLines.some((line) => line.includes("Sequence:")), false);
+});
+
+test("why deduplicates Sequence edit labels so repeated edits to one file or symbol omit and N more", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const block1 = makeBlock({ seq: 1, path: "src/cli.js", symbol: null });
+  const block2 = makeBlock({ seq: 2, path: "src/cli.js", symbol: null });
+  const sameLabelCard = makeCard({
+    card_id: "card-seq-dup-label",
+    blocks: [block1, block2],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+    },
+  });
+  const sameLabelResult: CardsForFile = {
+    cards: [sameLabelCard],
+    matched: new Map([[sameLabelCard.card_id, [block1, block2]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const sameSinks = makeSinks();
+  assert.equal(
+    why(["src/cli.js"], {
+      ...sameSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => sameLabelResult,
+    }),
+    0,
+  );
+  const sameSeqLine = sameSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    sameSeqLine,
+    "         Sequence: `npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(sameSeqLine!.trim()), []);
+  assert.doesNotMatch(sameSeqLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+
+  const fn1 = makeBlock({
+    seq: 1,
+    path: "src/cli.js",
+    symbol: { kind: "function", name: "f", container: null, exported: false },
+  });
+  const fn2 = makeBlock({
+    seq: 2,
+    path: "src/cli.js",
+    symbol: { kind: "function", name: "g", container: null, exported: false },
+  });
+  const diffLabelCard = makeCard({
+    card_id: "card-seq-diff-label",
+    blocks: [fn1, fn2],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+    },
+  });
+  const diffLabelResult: CardsForFile = {
+    cards: [diffLabelCard],
+    matched: new Map([[diffLabelCard.card_id, [fn1, fn2]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const diffSinks = makeSinks();
+  assert.equal(
+    why(["src/cli.js"], {
+      ...diffSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => diffLabelResult,
+    }),
+    0,
+  );
+  const diffSeqLine = diffSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    diffSeqLine,
+    "         Sequence: `npm test` failed (exit 1). Edited src/cli.js \u203a f() and 1 more. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(diffSeqLine!.trim()), []);
+  assert.doesNotMatch(diffSeqLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+});
+
+test("why folds Sequence symbol labels into a file-level label for the same path", () => {
+  const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
+  const renderCase = (blocks: ReturnType<typeof makeBlock>[], edit_seqs: number[], matchedBlock: ReturnType<typeof makeBlock>) => {
+    const card = makeCard({
+      card_id: "card-seq-fold",
+      blocks,
+      sequence: {
+        pattern: "fix_after_fail",
+        command: "npm test",
+        exit_code: 1,
+        edit_seqs,
+      },
+    });
+    const result: CardsForFile = {
+      cards: [card],
+      matched: new Map([[card.card_id, [matchedBlock]]]),
+      coverage: { complete: true, skipped: 0 },
+    };
+    const sinks = makeSinks();
+    assert.equal(
+      why([matchedBlock.path], {
+        ...sinks,
+        load: () => [],
+        coverage: () => completeCoverage(),
+        now,
+        cards: () => result,
+      }),
+      0,
+    );
+    const seqLine = sinks.outLines.find((line) => line.includes("Sequence:"));
+    assert.ok(seqLine);
+    assert.deepEqual(validateOutputLine(seqLine.trim()), []);
+    assert.doesNotMatch(seqLine, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+    return seqLine;
+  };
+
+  // dbe20e88 shape: file-level, symbol, file-level for src/cli.js -> single file-level label.
+  const cli1 = makeBlock({ seq: 1, path: "src/cli.js", symbol: null });
+  const cli2 = makeBlock({
+    seq: 2,
+    path: "src/cli.js",
+    symbol: { kind: "const", name: "USAGE", container: null, exported: false },
+  });
+  const cli3 = makeBlock({ seq: 3, path: "src/cli.js", symbol: null });
+  assert.equal(
+    renderCase([cli1, cli2, cli3], [1, 2, 3], cli1),
+    "         Sequence: `npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.",
+  );
+
+  // Ordering and cross-file check: b.js > h() + a.js > f() + a.js -> b.js > h() and 1 more.
+  const bH = makeBlock({
+    seq: 1,
+    path: "b.js",
+    symbol: { kind: "function", name: "h", container: null, exported: false },
+  });
+  const aF = makeBlock({
+    seq: 2,
+    path: "a.js",
+    symbol: { kind: "function", name: "f", container: null, exported: false },
+  });
+  const aFile = makeBlock({ seq: 3, path: "a.js", symbol: null });
+  assert.equal(
+    renderCase([bH, aF, aFile], [1, 2, 3], bH),
+    "         Sequence: `npm test` failed (exit 1). Edited b.js \u203a h() and 1 more. `npm test` passed.",
+  );
+});

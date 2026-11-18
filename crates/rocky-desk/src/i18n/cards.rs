@@ -71,6 +71,16 @@ pub enum CardMsg {
     BashUncertain,
     ExportedTooltip,
     TimelineHeading,
+    SequenceEditsMore {
+        first: String,
+        more: usize,
+    },
+    SequenceFixAfterFail {
+        command: String,
+        exit_code: i32,
+        edits: String,
+        error_names: Option<String>,
+    },
     TimelineMoreSteps {
         n: usize,
     },
@@ -152,6 +162,22 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::BashUncertain,
         CardMsg::ExportedTooltip,
         CardMsg::TimelineHeading,
+        CardMsg::SequenceEditsMore {
+            first: "src/a.ts".into(),
+            more: 2,
+        },
+        CardMsg::SequenceFixAfterFail {
+            command: "npm test".into(),
+            exit_code: 1,
+            edits: "src/auth.ts".into(),
+            error_names: None,
+        },
+        CardMsg::SequenceFixAfterFail {
+            command: "npm test".into(),
+            exit_code: 1,
+            edits: "src/a.ts and 2 more".into(),
+            error_names: Some("auth.ts".into()),
+        },
         CardMsg::TimelineMoreSteps { n: 5 },
         CardMsg::BackDone,
         CardMsg::SettingCards,
@@ -236,6 +262,25 @@ fn card_en(msg: &CardMsg) -> String {
         CardMsg::BashUncertain => "\u{00b7} agent uncertain".to_string(),
         CardMsg::ExportedTooltip => "public (per code)".to_string(),
         CardMsg::TimelineHeading => "Sequence".to_string(),
+        CardMsg::SequenceEditsMore { first, more } => {
+            if *more == 0 {
+                first.clone()
+            } else {
+                format!("{first} and {more} more")
+            }
+        }
+        CardMsg::SequenceFixAfterFail {
+            command,
+            exit_code,
+            edits,
+            error_names,
+        } => {
+            let err = error_names
+                .as_deref()
+                .map(|name| format!(" The error names {name}."))
+                .unwrap_or_default();
+            format!("`{command}` failed (exit {exit_code}).{err} Edited {edits}. `{command}` passed.")
+        }
         CardMsg::TimelineMoreSteps { n } => format!("+{n} more steps"),
         CardMsg::BackDone => "\u{2039} Done".to_string(),
         CardMsg::SettingCards => "Change cards".to_string(),
@@ -325,6 +370,25 @@ fn card_id(msg: &CardMsg) -> String {
         CardMsg::BashUncertain => "\u{00b7} agent tidak pasti".to_string(),
         CardMsg::ExportedTooltip => "publik (menurut kode)".to_string(),
         CardMsg::TimelineHeading => "Urutan".to_string(),
+        CardMsg::SequenceEditsMore { first, more } => {
+            if *more == 0 {
+                first.clone()
+            } else {
+                format!("{first} dan {more} lainnya")
+            }
+        }
+        CardMsg::SequenceFixAfterFail {
+            command,
+            exit_code,
+            edits,
+            error_names,
+        } => {
+            let err = error_names
+                .as_deref()
+                .map(|name| format!(" Error menyebut {name}."))
+                .unwrap_or_default();
+            format!("`{command}` gagal (exit {exit_code}).{err} {edits} diedit. `{command}` lulus.")
+        }
         CardMsg::TimelineMoreSteps { n } => format!("+{n} langkah"),
         CardMsg::BackDone => "\u{2039} Selesai".to_string(),
         CardMsg::SettingCards => "Kartu perubahan".to_string(),

@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rocky_proto::cards::{BlockVia, Card, CardStatus, CoverageReason, CoverageState, Label};
+use rocky_proto::cards::{
+    BlockVia, Card, CardStatus, CoverageReason, CoverageState, Label, Sequence,
+};
 use rocky_proto::hook::HookEvent;
 use rocky_proto::paths::{canonical_path, listening_store_dir, repo_id};
 use rocky_proto::pipe::{CaptureHealth, CaptureState, RepoInfo};
@@ -203,6 +205,22 @@ fn bash_post_event(session_id: &str, cwd: &str, transcript: &Path, tool_use_id: 
     let mut ev = base_event("PostToolUse", session_id, cwd, Some(transcript));
     ev.tool_name = Some("Bash".to_string());
     ev.tool_use_id = Some(tool_use_id.to_string());
+    ev
+}
+
+fn bash_fail_event(
+    session_id: &str,
+    cwd: &str,
+    transcript: &Path,
+    tool_use_id: &str,
+    exit_code: i32,
+    error_head: Option<&str>,
+) -> HookEvent {
+    let mut ev = base_event("PostToolUseFailure", session_id, cwd, Some(transcript));
+    ev.tool_name = Some("Bash".to_string());
+    ev.tool_use_id = Some(tool_use_id.to_string());
+    ev.exit_code = Some(exit_code);
+    ev.error_head = error_head.map(str::to_string);
     ev
 }
 
@@ -3703,4 +3721,348 @@ fn late_failure_revises_card() {
         bash_step.error.as_deref(),
         Some("Error: Cannot find module 'express'")
     );
+}
+
+#[test]
+fn card_stores_fix_after_fail_sequence() {
+    let fx = Fixture::new("sess-seq-fix");
+    let s0 = fx.put_object(1, "export const a = 1;\n");
+    let s1 = fx.put_object(2, "export const a = 2;\n");
+    fx.append_version("src/a.ts", 1_450, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Fix failing test", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let a_abs = fx.file_abs("src/a.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-seq-fix",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Fix failing test",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    bash_pre_event(
+                        "sess-seq-fix",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                        "npm test",
+                    ),
+                    1_100,
+                ),
+                (
+                    bash_fail_event(
+                        "sess-seq-fix",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                        1,
+                        Some("FAIL src/a.ts"),
+                    ),
+                    1_200,
+                ),
+                (
+                    edit_pre_event(
+                        "sess-seq-fix",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &a_abs,
+                    ),
+                    1_300,
+                ),
+                (
+                    edit_post_event(
+                        "sess-seq-fix",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &a_abs,
+                    ),
+                    1_400,
+                ),
+                (
+                    bash_pre_event(
+                        "sess-seq-fix",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b2",
+                        "npm test",
+                    ),
+                    1_500,
+                ),
+                (
+                    bash_post_event("sess-seq-fix", &fx.repo_canon, &fx.transcript_path, "tu-b2"),
+                    1_600,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-seq-fix",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_650,
+        at_ms: 1_750,
+        coverage: "complete".to_string(),
+    }]);
+    let cards = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(cards[0].rev, 1);
+    assert_eq!(
+        cards[0].sequence,
+        Some(Sequence::FixAfterFail {
+            command: "npm test".to_string(),
+            exit_code: 1,
+            edit_seqs: vec![1],
+            error_names: Some("a.ts".to_string()),
+        })
+    );
+}
+
+#[test]
+fn late_failure_revises_card_with_sequence() {
+    let fx = Fixture::new("sess-seq-late");
+    let s0 = fx.put_object(1, "export const e = 1;\n");
+    let s1 = fx.put_object(2, "export const e = 2;\n");
+    fx.append_version("src/e.ts", 1_450, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Fix failing test late", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let e_abs = fx.file_abs("src/e.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-seq-late",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Fix failing test late",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    bash_pre_event(
+                        "sess-seq-late",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                        "npm test",
+                    ),
+                    1_100,
+                ),
+                (
+                    edit_pre_event(
+                        "sess-seq-late",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &e_abs,
+                    ),
+                    1_300,
+                ),
+                (
+                    edit_post_event(
+                        "sess-seq-late",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &e_abs,
+                    ),
+                    1_400,
+                ),
+                (
+                    bash_pre_event(
+                        "sess-seq-late",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b2",
+                        "npm test",
+                    ),
+                    1_500,
+                ),
+                (
+                    bash_post_event(
+                        "sess-seq-late",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b2",
+                    ),
+                    1_600,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-seq-late",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_650,
+        at_ms: 1_750,
+        coverage: "complete".to_string(),
+    }]);
+    let rev1 = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(rev1[0].rev, 1);
+    assert_eq!(rev1[0].sequence, None);
+
+    let late_fail = bash_fail_event(
+        "sess-seq-late",
+        &fx.repo_canon,
+        &fx.transcript_path,
+        "tu-b1",
+        1,
+        Some("FAIL src/e.ts"),
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![(late_fail, 12_000)],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        12_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 12_150,
+        at_ms: 12_250,
+        coverage: "complete".to_string(),
+    }]);
+    let rev2 = poll_until_cards(&mut engine, 12_300, &ctx, 1);
+    assert_eq!(rev2[0].rev, 2);
+    assert_eq!(
+        rev2[0].sequence,
+        Some(Sequence::FixAfterFail {
+            command: "npm test".to_string(),
+            exit_code: 1,
+            edit_seqs: vec![1],
+            error_names: Some("e.ts".to_string()),
+        })
+    );
+}
+
+#[test]
+fn card_without_failure_has_no_sequence() {
+    let fx = Fixture::new("sess-seq-none");
+    let s0 = fx.put_object(1, "export const n = 1;\n");
+    let s1 = fx.put_object(2, "export const n = 2;\n");
+    fx.append_version("src/n.ts", 1_450, &s1, Some(&s0), false);
+    fx.write_transcript("1970-01-01T00:00:01.000Z", "Edit and test", &[]);
+
+    let mut engine = Engine::new(fx.home.clone(), 1).with_user_home(None);
+    let mut repo_of = |_: &str| fx.repo_info();
+    let ctx = fx.ctx(true);
+    let n_abs = fx.file_abs("src/n.ts");
+
+    let _ = engine.on_ingest(
+        &user_prompt_out(
+            "sess-seq-none",
+            &fx.repo_canon,
+            &fx.transcript_path,
+            "Edit and test",
+            1_000,
+        ),
+        &mut repo_of,
+        1_000,
+    );
+    let _ = engine.on_ingest(
+        &IngestOutput {
+            events: vec![
+                (
+                    edit_pre_event(
+                        "sess-seq-none",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &n_abs,
+                    ),
+                    1_300,
+                ),
+                (
+                    edit_post_event(
+                        "sess-seq-none",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-e1",
+                        &n_abs,
+                    ),
+                    1_400,
+                ),
+                (
+                    bash_pre_event(
+                        "sess-seq-none",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                        "npm test",
+                    ),
+                    1_500,
+                ),
+                (
+                    bash_post_event(
+                        "sess-seq-none",
+                        &fx.repo_canon,
+                        &fx.transcript_path,
+                        "tu-b1",
+                    ),
+                    1_600,
+                ),
+                (
+                    base_event(
+                        "Stop",
+                        "sess-seq-none",
+                        &fx.repo_canon,
+                        Some(&fx.transcript_path),
+                    ),
+                    2_000,
+                ),
+            ],
+            ..IngestOutput::default()
+        },
+        &mut repo_of,
+        2_000,
+    );
+    engine.on_capture(&[CaptureResult {
+        root: fx.repo_canon.clone(),
+        started_ms: 1_650,
+        at_ms: 1_750,
+        coverage: "complete".to_string(),
+    }]);
+    let cards = poll_until_cards(&mut engine, 2_100, &ctx, 1);
+    assert_eq!(cards[0].rev, 1);
+    assert_eq!(cards[0].sequence, None);
 }

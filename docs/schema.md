@@ -658,6 +658,7 @@ One JSON object per line:
 | `flow_more` | integer | Number of overflow steps omitted beyond `100` (`#[serde(default)]`). |
 | `outside_count` | integer | Observed repo edits during the turn not attributed to agent tools. |
 | `coverage` | `Coverage` | Capture and attribution completeness summary. |
+| `sequence` | `Sequence` \| omitted | Optional matched pattern summary detected from `flow` (`#[serde(default, skip_serializing_if = "Option::is_none")]`). |
 
 #### `Block`
 
@@ -711,6 +712,19 @@ lines per side (files over `1 MiB` receive `too_large` instead).
 line) are optional and omitted when absent. Only failed command (`kind: "cmd"`)
 steps carry them, with `error` absent when `desk/tool-text-off` suppressed
 `error_head` or no non-empty error line remained.
+
+#### `Sequence`
+
+`{ "pattern": "fix_after_fail", "command": string, "exit_code": i32, "edit_seqs": u32[], "error_names"?: string }`
+
+Optional summary detected from `flow` when a passing command step follows an
+earlier failing command step with the same whitespace-normalized text and at
+least one successful edit step (`edit_seqs`, in chronological order) sits between
+them. `error_names` is optional and omitted when absent; it names the first
+counted edit's basename that appears in the failing command's `error`. The
+Sequence line states command and edit order, not cause. Node CLI readers treat an
+unknown `pattern` value as absent without rejecting the card; `rockyd` skips a
+card line it cannot parse.
 
 #### `Coverage`
 
@@ -803,6 +817,13 @@ at `10`) with a separate `cardsCoverage` read-completeness object
   `0`) and `truncated` is `true`. Stored hashes (`before`, `after`),
   `tool_use_ids`, `flow`, `symbol.exported`, and `symbol.nth` are never
   returned.
+- **Sequence projection**: when a card carries a valid `fix_after_fail`
+  `sequence` and at least one matched block for the queried path has its `seq`
+  in `sequence.edit_seqs`, `sequence` projects as `{ pattern, command,
+  exit_code, edit_seqs, error_names }` (`edit_seqs` bounded to `256` entries
+  with truncation recorded on `cards[i].sequence.edit_seqs`; `command` and
+  optional `error_names` passed through `projectText`); otherwise `sequence` is
+  `null`.
 - **Label `args` allowlist**: `labels[].args` is projected through a strict
   per-label allowlist aligned with the catalog above. Literal `before`, `after`,
   and `version` label values (and any unknown label keys or un-allowlisted

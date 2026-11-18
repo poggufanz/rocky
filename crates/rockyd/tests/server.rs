@@ -751,6 +751,7 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         outside_count: 0,
         reads: Vec::new(),
         reads_more: 0,
+        sequence: None,
         coverage: Coverage {
             state: CoverageState::Full,
             reasons: Vec::new(),

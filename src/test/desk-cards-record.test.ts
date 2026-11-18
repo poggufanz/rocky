@@ -197,3 +197,81 @@ test("isPathInside understands win32 unc paths", () => {
   assert.equal(isPathInside("\\\\server\\share\\repo2\\a.ts", "\\\\server\\share\\repo", o), false);
   assert.equal(isPathInside("\\\\server\\share\\..\\x", "\\\\server\\share", o), false);
 });
+
+test("parseCardLine accepts a valid fix_after_fail sequence", () => {
+  const withErr = card({
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+      error_names: "auth.ts",
+    },
+  });
+  const parsedWithErr = parseCardLine(Buffer.from(JSON.stringify(withErr)));
+  assert.equal(parsedWithErr.kind, "card");
+  if (parsedWithErr.kind === "card") {
+    assert.deepEqual(parsedWithErr.card.sequence, {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1, 2],
+      error_names: "auth.ts",
+    });
+  }
+
+  const withoutErr = card({
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "pwsh -Command test",
+      exit_code: -1,
+      edit_seqs: [3],
+    },
+  });
+  const parsedWithoutErr = parseCardLine(Buffer.from(JSON.stringify(withoutErr)));
+  assert.equal(parsedWithoutErr.kind, "card");
+  if (parsedWithoutErr.kind === "card") {
+    assert.deepEqual(parsedWithoutErr.card.sequence, {
+      pattern: "fix_after_fail",
+      command: "pwsh -Command test",
+      exit_code: -1,
+      edit_seqs: [3],
+    });
+  }
+});
+
+test("validateCard drops an unknown sequence pattern without rejecting the card", () => {
+  const unknownObj = card({
+    sequence: {
+      pattern: "future_pattern",
+      count: 3,
+    },
+  });
+  assert.equal(validateCard(unknownObj), true);
+  assert.equal(unknownObj.sequence, undefined);
+
+  const parsed = parseCardLine(
+    Buffer.from(JSON.stringify(card({ sequence: { pattern: "retry_loop", steps: [1, 2] } }))),
+  );
+  assert.equal(parsed.kind, "card");
+  if (parsed.kind === "card") {
+    assert.equal(parsed.card.sequence, undefined);
+  }
+});
+
+test("validateCard rejects wrong-typed sequence fields", () => {
+  const validSeq = {
+    pattern: "fix_after_fail",
+    command: "npm test",
+    exit_code: 1,
+    edit_seqs: [1],
+  };
+  assert.equal(validateCard(card({ sequence: { ...validSeq, exit_code: "1" } })), false);
+  assert.equal(validateCard(card({ sequence: { ...validSeq, exit_code: 1.5 } })), false);
+  assert.equal(validateCard(card({ sequence: { ...validSeq, command: 42 } })), false);
+  assert.equal(validateCard(card({ sequence: { ...validSeq, edit_seqs: ["1"] } })), false);
+  assert.equal(validateCard(card({ sequence: { ...validSeq, edit_seqs: [-1] } })), false);
+  assert.equal(validateCard(card({ sequence: { ...validSeq, error_names: 123 } })), false);
+  assert.equal(validateCard(card({ sequence: "not-an-object" })), false);
+  assert.equal(validateCard(card({ sequence: { ...validSeq, pattern: 99 } })), false);
+});

@@ -1,6 +1,6 @@
 use rocky_proto::cards::{
     Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageReason,
-    CoverageState, FlowKind, FlowStep, Importance, Label, Quote, SymbolKind,
+    CoverageState, FlowKind, FlowStep, Importance, Label, Quote, Sequence, SymbolKind,
 };
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, DiffLineKind, SnippetLine};
 
@@ -33,6 +33,7 @@ pub(super) fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> C
         outside_count: 0,
         reads: Vec::new(),
         reads_more: 0,
+        sequence: None,
         coverage: Coverage {
             state: CoverageState::Full,
             reasons: Vec::new(),
@@ -1062,4 +1063,503 @@ fn old_flow_step_renders_unchanged() {
     assert_eq!(step.error, None);
     assert_eq!(step.title, "cargo test");
     assert_eq!(step.dur, "3s");
+}
+
+#[test]
+fn sequence_sentence_en_and_id_for_fail_edit_pass() {
+    let mut card = sample_card("c-seq", 1_000, Some(5_000));
+    card.blocks = vec![sample_block(1, "src/auth.ts", Vec::new())];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: None,
+    });
+
+    let (mut en_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    en_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(en_view) = en_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        en_view.sequence_line.as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.")
+    );
+
+    let (mut id_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    id_model.on_detail(1, card.clone(), Vec::new(), UiLang::Id);
+    let DetailState::Ready(id_view) = id_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        id_view.sequence_line.as_deref(),
+        Some("`npm test` gagal (exit 1). src/auth.ts diedit. `npm test` lulus.")
+    );
+
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: Some("auth.ts".to_string()),
+    });
+
+    let (mut en_err_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    en_err_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(en_err_view) = en_err_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        en_err_view.sequence_line.as_deref(),
+        Some(
+            "`npm test` failed (exit 1). The error names auth.ts. Edited src/auth.ts. `npm test` passed."
+        )
+    );
+
+    let (mut id_err_model, _) = DetailModel::open("c-seq".to_string(), 1);
+    id_err_model.on_detail(1, card, Vec::new(), UiLang::Id);
+    let DetailState::Ready(id_err_view) = id_err_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        id_err_view.sequence_line.as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). Error menyebut auth.ts. src/auth.ts diedit. `npm test` lulus."
+        )
+    );
+}
+
+#[test]
+fn sequence_sentence_summarizes_three_edits() {
+    let mut card = sample_card("c-seq-3", 1_000, Some(5_000));
+    card.blocks = vec![
+        sample_block(1, "src/a.ts", Vec::new()),
+        sample_block(2, "src/b.ts", Vec::new()),
+        sample_block(3, "src/c.ts", Vec::new()),
+    ];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 2,
+        edit_seqs: vec![1, 2, 3],
+        error_names: None,
+    });
+
+    let (mut en_model, _) = DetailModel::open("c-seq-3".to_string(), 1);
+    en_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(en_view) = en_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        en_view.sequence_line.as_deref(),
+        Some("`npm test` failed (exit 2). Edited src/a.ts and 2 more. `npm test` passed.")
+    );
+
+    let (mut id_model, _) = DetailModel::open("c-seq-3".to_string(), 1);
+    id_model.on_detail(1, card, Vec::new(), UiLang::Id);
+    let DetailState::Ready(id_view) = id_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        id_view.sequence_line.as_deref(),
+        Some("`npm test` gagal (exit 2). src/a.ts dan 2 lainnya diedit. `npm test` lulus.")
+    );
+}
+
+#[test]
+fn sequence_sentence_cuts_long_command_and_sanitizes_control_chars() {
+    let mut long_card = sample_card("c-seq-long", 1_000, Some(5_000));
+    long_card.blocks = vec![sample_block(1, "src/auth.ts", Vec::new())];
+    long_card.sequence = Some(Sequence::FixAfterFail {
+        command: "x".repeat(120),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: None,
+    });
+
+    let (mut long_model, _) = DetailModel::open("c-seq-long".to_string(), 1);
+    long_model.on_detail(1, long_card, Vec::new(), UiLang::En);
+    let DetailState::Ready(long_view) = long_model.state() else {
+        panic!("expected Ready state");
+    };
+    let expected_cmd = format!("{}\u{2026}", "x".repeat(79));
+    assert_eq!(expected_cmd.chars().count(), 80);
+    assert_eq!(
+        long_view.sequence_line.as_deref(),
+        Some(
+            format!(
+                "`{expected_cmd}` failed (exit 1). Edited src/auth.ts. `{expected_cmd}` passed."
+            )
+            .as_str()
+        )
+    );
+
+    let mut ctrl_card = sample_card("c-seq-ctrl", 1_000, Some(5_000));
+    ctrl_card.blocks = vec![sample_block(1, "src/auth.ts", Vec::new())];
+    ctrl_card.sequence = Some(Sequence::FixAfterFail {
+        command: "  npm\u{7}test   --watch\n".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1],
+        error_names: None,
+    });
+
+    let (mut ctrl_model, _) = DetailModel::open("c-seq-ctrl".to_string(), 1);
+    ctrl_model.on_detail(1, ctrl_card, Vec::new(), UiLang::En);
+    let DetailState::Ready(ctrl_view) = ctrl_model.state() else {
+        panic!("expected Ready state");
+    };
+    let line = ctrl_view
+        .sequence_line
+        .as_deref()
+        .expect("sequence_line should be Some");
+    assert!(!line.chars().any(|c| c.is_control()), "got {line:?}");
+    assert_eq!(
+        line,
+        "`npm test --watch` failed (exit 1). Edited src/auth.ts. `npm test --watch` passed."
+    );
+}
+
+#[test]
+fn card_without_sequence_has_no_sequence_line() {
+    let card = sample_card("c-no-seq", 1_000, Some(5_000));
+    let (mut model, _) = DetailModel::open("c-no-seq".to_string(), 1);
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(view.sequence_line, None);
+}
+
+#[test]
+fn sequence_sentence_names_first_edit_in_chronological_order_and_deduplicates() {
+    let mut card = sample_card("c-seq-order", 1_000, Some(5_000));
+    // Stored in capture order [1, 2], while edit_seqs carries chronological order [2, 1].
+    card.blocks = vec![
+        sample_block(1, "src/later_started.ts", Vec::new()),
+        sample_block(2, "src/earlier_started.ts", Vec::new()),
+    ];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![2, 1],
+        error_names: None,
+    });
+
+    let (mut model, _) = DetailModel::open("c-seq-order".to_string(), 1);
+    model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        view.sequence_line.as_deref(),
+        Some(
+            "`npm test` failed (exit 1). Edited src/earlier_started.ts and 1 more. `npm test` passed."
+        )
+    );
+
+    // Duplicate seqs and a missing seq before/between resolvable ones are ignored/deduplicated.
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![99, 2, 2, 1, 1],
+        error_names: None,
+    });
+    let (mut dedup_model, _) = DetailModel::open("c-seq-order".to_string(), 2);
+    dedup_model.on_detail(2, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(dedup_view) = dedup_model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        dedup_view.sequence_line.as_deref(),
+        Some(
+            "`npm test` failed (exit 1). Edited src/earlier_started.ts and 1 more. `npm test` passed."
+        )
+    );
+}
+
+#[test]
+fn sequence_sentence_is_none_when_no_edit_seq_resolves_to_block() {
+    let mut card = sample_card("c-seq-missing-blocks", 1_000, Some(5_000));
+    card.blocks = vec![sample_block(1, "src/other.ts", Vec::new())];
+    card.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![2, 3],
+        error_names: None,
+    });
+
+    let (mut model, _) = DetailModel::open("c-seq-missing-blocks".to_string(), 1);
+    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(view.sequence_line, None);
+}
+
+#[test]
+fn sequence_sentence_deduplicates_by_rendered_label_en_and_id() {
+    let render = |id: &str, card: Card, lang: UiLang| -> Option<String> {
+        let (mut model, _) = DetailModel::open(id.to_string(), 1);
+        model.on_detail(1, card, Vec::new(), lang);
+        let DetailState::Ready(view) = model.state() else {
+            panic!("expected Ready state");
+        };
+        view.sequence_line.clone()
+    };
+
+    // Two blocks with the same path and no symbol -> no "and N more" / "dan N lainnya".
+    let mut same_file = sample_card("c-dup-file", 1_000, Some(5_000));
+    same_file.blocks = vec![
+        sample_block(1, "src/cli.js", Vec::new()),
+        sample_block(2, "src/cli.js", Vec::new()),
+    ];
+    same_file.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-dup-file", same_file.clone(), UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-dup-file", same_file, UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/cli.js diedit. `npm test` lulus.")
+    );
+
+    // Two blocks with the same path and same symbol -> no "and N more" / "dan N lainnya".
+    let mut b1 = sample_block(1, "src/cli.js", Vec::new());
+    b1.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "run".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut b2 = sample_block(2, "src/cli.js", Vec::new());
+    b2.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "run".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut same_sym = sample_card("c-dup-sym", 1_000, Some(5_000));
+    same_sym.blocks = vec![b1, b2];
+    same_sym.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-dup-sym", same_sym.clone(), UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/cli.js \u{203a} run(). `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-dup-sym", same_sym, UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/cli.js \u{203a} run() diedit. `npm test` lulus.")
+    );
+
+    // Two different symbols in the same file -> "and 1 more" / "dan 1 lainnya".
+    let mut f1 = sample_block(1, "src/cli.js", Vec::new());
+    f1.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "f".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut f2 = sample_block(2, "src/cli.js", Vec::new());
+    f2.symbol = Some(BlockSymbol {
+        kind: SymbolKind::Function,
+        name: "g".to_string(),
+        container: None,
+        exported: false,
+        nth: 0,
+    });
+    let mut diff_sym = sample_card("c-diff-sym", 1_000, Some(5_000));
+    diff_sym.blocks = vec![f1, f2];
+    diff_sym.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-diff-sym", diff_sym.clone(), UiLang::En).as_deref(),
+        Some(
+            "`npm test` failed (exit 1). Edited src/cli.js \u{203a} f() and 1 more. `npm test` passed."
+        )
+    );
+    assert_eq!(
+        render("c-diff-sym", diff_sym, UiLang::Id).as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). src/cli.js \u{203a} f() dan 1 lainnya diedit. `npm test` lulus."
+        )
+    );
+
+    // Two different files -> "and 1 more" / "dan 1 lainnya".
+    let mut diff_files = sample_card("c-diff-files", 1_000, Some(5_000));
+    diff_files.blocks = vec![
+        sample_block(1, "src/a.js", Vec::new()),
+        sample_block(2, "src/b.js", Vec::new()),
+    ];
+    diff_files.sequence = Some(Sequence::FixAfterFail {
+        command: "npm test".to_string(),
+        exit_code: 1,
+        edit_seqs: vec![1, 2],
+        error_names: None,
+    });
+    assert_eq!(
+        render("c-diff-files", diff_files.clone(), UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/a.js and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-diff-files", diff_files, UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/a.js dan 1 lainnya diedit. `npm test` lulus.")
+    );
+}
+
+#[test]
+fn sequence_sentence_folds_symbol_labels_into_file_level_en_and_id() {
+    let render =
+        |id: &str, blocks: Vec<Block>, edit_seqs: Vec<u32>, lang: UiLang| -> Option<String> {
+            let mut card = sample_card(id, 1_000, Some(5_000));
+            card.blocks = blocks;
+            card.sequence = Some(Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs,
+                error_names: None,
+            });
+            let (mut model, _) = DetailModel::open(id.to_string(), 1);
+            model.on_detail(1, card, Vec::new(), lang);
+            let DetailState::Ready(view) = model.state() else {
+                panic!("expected Ready state");
+            };
+            view.sequence_line.clone()
+        };
+
+    let sym_block = |seq: u32, path: &str, kind: SymbolKind, name: &str| {
+        let mut b = sample_block(seq, path, Vec::new());
+        b.symbol = Some(BlockSymbol {
+            kind,
+            name: name.to_string(),
+            container: None,
+            exported: false,
+            nth: 0,
+        });
+        b
+    };
+
+    // dbe20e88 shape: [src/cli.js, src/cli.js > USAGE (const), src/cli.js]
+    let dbe_blocks = vec![
+        sample_block(1, "src/cli.js", Vec::new()),
+        sym_block(2, "src/cli.js", SymbolKind::Const, "USAGE"),
+        sample_block(3, "src/cli.js", Vec::new()),
+    ];
+    assert_eq!(
+        render("c-dbe", dbe_blocks.clone(), vec![1, 2, 3], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-dbe", dbe_blocks, vec![1, 2, 3], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). src/cli.js diedit. `npm test` lulus.")
+    );
+
+    // a.js + a.js > f() -> no "and N more" / "dan N lainnya".
+    let file_then_sym = vec![
+        sample_block(1, "a.js", Vec::new()),
+        sym_block(2, "a.js", SymbolKind::Function, "f"),
+    ];
+    assert_eq!(
+        render("c-fts", file_then_sym.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-fts", file_then_sym, vec![1, 2], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js diedit. `npm test` lulus.")
+    );
+
+    // a.js > f() + a.js -> no "and N more" / "dan N lainnya".
+    let sym_then_file = vec![
+        sym_block(1, "a.js", SymbolKind::Function, "f"),
+        sample_block(2, "a.js", Vec::new()),
+    ];
+    assert_eq!(
+        render("c-stf", sym_then_file.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-stf", sym_then_file, vec![1, 2], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js diedit. `npm test` lulus.")
+    );
+
+    // a.js > f() + a.js > g() -> "and 1 more" / "dan 1 lainnya".
+    let two_syms = vec![
+        sym_block(1, "a.js", SymbolKind::Function, "f"),
+        sym_block(2, "a.js", SymbolKind::Function, "g"),
+    ];
+    assert_eq!(
+        render("c-2sym", two_syms.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js \u{203a} f() and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-2sym", two_syms, vec![1, 2], UiLang::Id).as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). a.js \u{203a} f() dan 1 lainnya diedit. `npm test` lulus."
+        )
+    );
+
+    // a.js + b.js > h() -> "and 1 more" / "dan 1 lainnya".
+    let file_and_other = vec![
+        sample_block(1, "a.js", Vec::new()),
+        sym_block(2, "b.js", SymbolKind::Function, "h"),
+    ];
+    assert_eq!(
+        render("c-fao", file_and_other.clone(), vec![1, 2], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-fao", file_and_other, vec![1, 2], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js dan 1 lainnya diedit. `npm test` lulus.")
+    );
+
+    // Ordering: b.js > h() + a.js > f() + a.js -> "b.js > h() and 1 more" / "dan 1 lainnya".
+    let ordered_other_first = vec![
+        sym_block(1, "b.js", SymbolKind::Function, "h"),
+        sym_block(2, "a.js", SymbolKind::Function, "f"),
+        sample_block(3, "a.js", Vec::new()),
+    ];
+    assert_eq!(
+        render(
+            "c-ord",
+            ordered_other_first.clone(),
+            vec![1, 2, 3],
+            UiLang::En
+        )
+        .as_deref(),
+        Some("`npm test` failed (exit 1). Edited b.js \u{203a} h() and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-ord", ordered_other_first, vec![1, 2, 3], UiLang::Id).as_deref(),
+        Some(
+            "`npm test` gagal (exit 1). b.js \u{203a} h() dan 1 lainnya diedit. `npm test` lulus."
+        )
+    );
+
+    // Ordering: a.js > f() + b.js > h() + a.js -> folded a.js keeps first position of a.js.
+    let folded_first_pos = vec![
+        sym_block(1, "a.js", SymbolKind::Function, "f"),
+        sym_block(2, "b.js", SymbolKind::Function, "h"),
+        sample_block(3, "a.js", Vec::new()),
+    ];
+    assert_eq!(
+        render("c-pos", folded_first_pos.clone(), vec![1, 2, 3], UiLang::En).as_deref(),
+        Some("`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.")
+    );
+    assert_eq!(
+        render("c-pos", folded_first_pos, vec![1, 2, 3], UiLang::Id).as_deref(),
+        Some("`npm test` gagal (exit 1). a.js dan 1 lainnya diedit. `npm test` lulus.")
+    );
 }

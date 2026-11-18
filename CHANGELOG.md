@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+`rocky why`, `rocky teach` (and MCP `teach_lookup`), and MCP `why_file` now surface a change card's `sequence` (stating command and edit order, not cause) when present.
+
 `rocky teach` and MCP `teach_lookup` answer from change cards (matched by function name, line, or whole file) when no explain record matches.
 
 Failed commands on change cards now show their exit code and one redacted error line, and PowerShell commands appear in the card sequence.

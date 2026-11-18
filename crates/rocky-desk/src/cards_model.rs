@@ -8,7 +8,7 @@ use rocky_proto::pipe::ClientMsg;
 use crate::atlas_model::ProjectId;
 use crate::i18n::{CardMsg, UiLang};
 pub(crate) use rows::{
-    block_kind, block_status, first_non_empty_line, format_symbol, last_path_segment,
+    block_kind, block_status, cut_to_limit, first_non_empty_line, format_symbol, last_path_segment,
     prompt_display, repo_name, sanitize_single_line, status_chip,
 };
 use rows::{build_card_row, card_matches_query, card_sort_key};

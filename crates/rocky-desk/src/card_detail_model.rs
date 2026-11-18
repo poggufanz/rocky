@@ -1,18 +1,19 @@
 //! Pure view-model for change card detail, execution timeline, and paged block diffs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use rocky_proto::cards::{Block, Card, CoverageState, FlowKind, FlowStep, Importance};
+use rocky_proto::cards::{Block, Card, CoverageState, FlowKind, FlowStep, Importance, Sequence};
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, SnippetLine};
 
 use crate::cards_model::{
-    block_kind, block_status, format_symbol, last_path_segment, prompt_display, repo_name,
-    sanitize_single_line, status_chip,
+    block_kind, block_status, cut_to_limit, format_symbol, last_path_segment, prompt_display,
+    repo_name, sanitize_single_line, status_chip,
 };
 use crate::i18n::{CardMsg, UiLang, card_text, label_chip};
 
 const MAX_TIMELINE_STEPS: usize = 12;
 const MAX_STEP_SUBS: usize = 3;
+const SEQUENCE_CMD_MAX_CHARS: usize = 80;
 
 /// Load state of an opened change card detail view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,7 @@ pub struct DetailView {
     pub prompt_is_notice: bool,
     pub meta: String,
     pub groups: Vec<QuoteGroup>,
+    pub sequence_line: Option<String>,
     pub timeline: Vec<Step>,
     pub timeline_more: Option<String>,
     pub coverage: String,
@@ -341,17 +343,110 @@ fn build_detail_view(card: &Card, snippets: &[BlockSnippet], lang: UiLang) -> De
     });
 
     let (prompt, prompt_is_notice) = prompt_display(&card.prompt, lang);
+    let sequence_line = build_sequence_line(card, &block_by_seq, lang);
 
     DetailView {
         prompt,
         prompt_is_notice,
         meta: build_meta(card, lang),
         groups,
+        sequence_line,
         timeline,
         timeline_more,
         coverage,
         outside,
     }
+}
+
+fn build_sequence_line(
+    card: &Card,
+    block_by_seq: &HashMap<u32, &Block>,
+    lang: UiLang,
+) -> Option<String> {
+    let seq = card.sequence.as_ref()?;
+    match seq {
+        Sequence::FixAfterFail {
+            command,
+            exit_code,
+            edit_seqs,
+            error_names,
+        } => {
+            let cmd = normalize_and_cut_command(command);
+            if cmd.is_empty() {
+                return None;
+            }
+            let mut seen_seqs = HashSet::new();
+            let mut entries: Vec<(String, String)> = Vec::new();
+            let mut file_level_paths = HashSet::new();
+            for &edit_seq in edit_seqs {
+                if !seen_seqs.insert(edit_seq) {
+                    continue;
+                }
+                let Some(block) = block_by_seq.get(&edit_seq).copied() else {
+                    continue;
+                };
+                let (path, symbol, head) = block_head_parts(block);
+                if entries.is_empty() && head.is_empty() {
+                    return None;
+                }
+                if symbol.is_none() {
+                    file_level_paths.insert(path.clone());
+                }
+                entries.push((path, head));
+            }
+            if entries.is_empty() {
+                return None;
+            }
+            let mut seen_labels = HashSet::new();
+            let mut first_label: Option<String> = None;
+            for (path, head) in entries {
+                let label = if file_level_paths.contains(&path) {
+                    path
+                } else {
+                    head
+                };
+                if first_label.is_none() {
+                    if label.is_empty() {
+                        return None;
+                    }
+                    first_label = Some(label.clone());
+                }
+                seen_labels.insert(label);
+            }
+            let first_label = first_label?;
+            let more = seen_labels.len().saturating_sub(1);
+            let edits = if more > 0 {
+                card_text(
+                    lang,
+                    &CardMsg::SequenceEditsMore {
+                        first: first_label,
+                        more,
+                    },
+                )
+            } else {
+                first_label
+            };
+            let error_names = error_names
+                .as_deref()
+                .map(|s| sanitize_single_line(s).trim().to_string())
+                .filter(|s| !s.is_empty());
+            Some(card_text(
+                lang,
+                &CardMsg::SequenceFixAfterFail {
+                    command: cmd,
+                    exit_code: *exit_code,
+                    edits,
+                    error_names,
+                },
+            ))
+        }
+    }
+}
+
+fn normalize_and_cut_command(command: &str) -> String {
+    let clean = sanitize_single_line(command);
+    let normalized = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    cut_to_limit(&normalized, SEQUENCE_CMD_MAX_CHARS)
 }
 
 fn build_meta(card: &Card, lang: UiLang) -> String {

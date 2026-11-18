@@ -489,7 +489,7 @@ fn cut_with_ellipsis(text: &str, max_chars: usize) -> String {
 }
 
 /// Keeps the total output length at most `max_total` characters, using `…` when truncated.
-fn cut_to_limit(text: &str, max_total: usize) -> String {
+pub(crate) fn cut_to_limit(text: &str, max_total: usize) -> String {
     if text.chars().count() <= max_total {
         return text.to_string();
     }

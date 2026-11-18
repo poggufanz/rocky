@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { classifyPrompt, labelChip, promptTitle } from "../desk/card-text.js";
+import { classifyPrompt, labelChip, promptTitle, sequenceSentence } from "../desk/card-text.js";
+import type { StoredBlock, StoredCard } from "../desk/cards-record.js";
 
 interface LabelChipVector {
   readonly label: {
@@ -93,4 +94,345 @@ test("promptTitle formats plain, notification, cross-session, and slash commands
     promptTitle("\n <command-message>review</command-message>\n<command-name>review</command-name>\n<command-args>64\n--fast</command-args>"),
     "/review 64 --fast",
   );
+});
+
+const BANNED_WORDS = /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i;
+
+function cardWithSequence(
+  blocks: StoredBlock[],
+  sequence: StoredCard["sequence"],
+): StoredCard {
+  return {
+    v: 1,
+    card_id: "c-seq",
+    rev: 1,
+    root: "/work/app",
+    started_ms: 1000,
+    ended_ms: 5000,
+    prompt: "p",
+    blocks,
+    sequence,
+  };
+}
+
+function seqBlock(seq: number, path: string, symbol: StoredBlock["symbol"] = null): StoredBlock {
+  return {
+    seq,
+    path,
+    symbol,
+    labels: [],
+    importance: "low",
+  };
+}
+
+test("sequenceSentence produces exact EN sentence for single edit without and with error_names", () => {
+  const noErr = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(noErr, "`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.");
+  assert.doesNotMatch(noErr!, BANNED_WORDS);
+
+  const withErr = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1], error_names: "auth.ts" },
+    ),
+  );
+  assert.equal(
+    withErr,
+    "`npm test` failed (exit 1). The error names auth.ts. Edited src/auth.ts. `npm test` passed.",
+  );
+  assert.doesNotMatch(withErr!, BANNED_WORDS);
+});
+
+test("sequenceSentence formats symbols with U+203A and parens for functions and methods", () => {
+  const fnSentence = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "function", name: "verifyToken" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(
+    fnSentence,
+    "`npm test` failed (exit 1). Edited src/auth.ts \u203a verifyToken(). `npm test` passed.",
+  );
+
+  const structSentence = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "struct", name: "Token" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(
+    structSentence,
+    "`npm test` failed (exit 1). Edited src/auth.ts \u203a Token. `npm test` passed.",
+  );
+});
+
+test("sequenceSentence walks edit_seqs in chronological order, deduplicates, and summarizes N more", () => {
+  const ordered = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/later.ts"), seqBlock(2, "src/earlier.ts"), seqBlock(3, "src/third.ts")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 2, edit_seqs: [99, 2, 2, 1, 3, 1] },
+    ),
+  );
+  assert.equal(
+    ordered,
+    "`npm test` failed (exit 2). Edited src/earlier.ts and 2 more. `npm test` passed.",
+  );
+  assert.doesNotMatch(ordered!, BANNED_WORDS);
+});
+
+test("sequenceSentence normalizes whitespace, sanitizes control chars, and cuts command at 80 chars", () => {
+  const longCmd = "x".repeat(120);
+  const longLine = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      { pattern: "fix_after_fail", command: longCmd, exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  const expectedCmd = `${"x".repeat(79)}\u2026`;
+  assert.equal(
+    longLine,
+    `\`${expectedCmd}\` failed (exit 1). Edited src/auth.ts. \`${expectedCmd}\` passed.`,
+  );
+
+  const ctrlLine = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      { pattern: "fix_after_fail", command: "  npm\u0007test   --watch\n", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(
+    ctrlLine,
+    "`npm test --watch` failed (exit 1). Edited src/auth.ts. `npm test --watch` passed.",
+  );
+});
+
+test("sequenceSentence returns undefined when sequence is absent, empty cmd, or no edit_seq resolves", () => {
+  assert.equal(sequenceSentence(cardWithSequence([seqBlock(1, "src/auth.ts")], undefined)), undefined);
+  assert.equal(sequenceSentence(cardWithSequence([seqBlock(1, "src/auth.ts")], null)), undefined);
+  assert.equal(
+    sequenceSentence(
+      cardWithSequence([seqBlock(1, "src/auth.ts")], {
+        pattern: "fix_after_fail",
+        command: "   \n ",
+        exit_code: 1,
+        edit_seqs: [1],
+      }),
+    ),
+    undefined,
+  );
+  assert.equal(
+    sequenceSentence(
+      cardWithSequence([seqBlock(1, "src/auth.ts")], {
+        pattern: "fix_after_fail",
+        command: "npm test",
+        exit_code: 1,
+        edit_seqs: [2, 3],
+      }),
+    ),
+    undefined,
+  );
+});
+
+test("sequenceSentence preserves U+FEFF like Rust whitespace rules and renders empty function/method names as ()", () => {
+  const feffLine = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      {
+        pattern: "fix_after_fail",
+        command: "\uFEFFnpm\uFEFF \u00A0test\uFEFF\u3000",
+        exit_code: 1,
+        edit_seqs: [1],
+        error_names: "\u00A0\uFEFFauth.ts\uFEFF\u3000",
+      },
+    ),
+  );
+  assert.equal(
+    feffLine,
+    "`\uFEFFnpm\uFEFF test\uFEFF` failed (exit 1). The error names \uFEFFauth.ts\uFEFF. Edited src/auth.ts. `\uFEFFnpm\uFEFF test\uFEFF` passed.",
+  );
+
+  const feffTokenLine = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts")],
+      {
+        pattern: "fix_after_fail",
+        command: "\uFEFFnpm\u3000\uFEFF",
+        exit_code: 1,
+        edit_seqs: [1],
+      },
+    ),
+  );
+  assert.equal(
+    feffTokenLine,
+    "`\uFEFFnpm \uFEFF` failed (exit 1). Edited src/auth.ts. `\uFEFFnpm \uFEFF` passed.",
+  );
+
+  const emptyFn = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "function", name: "" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(emptyFn, "`npm test` failed (exit 1). Edited src/auth.ts \u203a (). `npm test` passed.");
+
+  const emptyMethod = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "method", name: "" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(emptyMethod, "`npm test` failed (exit 1). Edited src/auth.ts \u203a (). `npm test` passed.");
+
+  const emptyStruct = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/auth.ts", { kind: "struct", name: "" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1] },
+    ),
+  );
+  assert.equal(emptyStruct, "`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.");
+});
+
+test("sequenceSentence deduplicates by rendered edit label and counts remaining unique labels", () => {
+  const sameFileNoSymbol = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/cli.js"), seqBlock(2, "src/cli.js")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    sameFileNoSymbol,
+    "`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.",
+  );
+  assert.doesNotMatch(sameFileNoSymbol!, BANNED_WORDS);
+
+  const sameFileSameSymbol = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "src/cli.js", { kind: "function", name: "run" }),
+        seqBlock(2, "src/cli.js", { kind: "function", name: "run" }),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    sameFileSameSymbol,
+    "`npm test` failed (exit 1). Edited src/cli.js \u203a run(). `npm test` passed.",
+  );
+  assert.doesNotMatch(sameFileSameSymbol!, BANNED_WORDS);
+
+  const sameFileDiffSymbols = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "src/cli.js", { kind: "function", name: "f" }),
+        seqBlock(2, "src/cli.js", { kind: "function", name: "g" }),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    sameFileDiffSymbols,
+    "`npm test` failed (exit 1). Edited src/cli.js \u203a f() and 1 more. `npm test` passed.",
+  );
+  assert.doesNotMatch(sameFileDiffSymbols!, BANNED_WORDS);
+
+  const diffFilesWithRepeat = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "src/a.js"), seqBlock(2, "src/b.js"), seqBlock(3, "src/a.js")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(
+    diffFilesWithRepeat,
+    "`npm test` failed (exit 1). Edited src/a.js and 1 more. `npm test` passed.",
+  );
+  assert.doesNotMatch(diffFilesWithRepeat!, BANNED_WORDS);
+});
+
+test("sequenceSentence folds symbol labels into a file-level label for the same path", () => {
+  const dbe20e88 = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "src/cli.js"),
+        seqBlock(2, "src/cli.js", { kind: "const", name: "USAGE" }),
+        seqBlock(3, "src/cli.js"),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(dbe20e88, "`npm test` failed (exit 1). Edited src/cli.js. `npm test` passed.");
+  assert.doesNotMatch(dbe20e88!, BANNED_WORDS);
+
+  const fileThenSym = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "a.js"), seqBlock(2, "a.js", { kind: "function", name: "f" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(fileThenSym, "`npm test` failed (exit 1). Edited a.js. `npm test` passed.");
+  assert.doesNotMatch(fileThenSym!, BANNED_WORDS);
+
+  const symThenFile = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "a.js", { kind: "function", name: "f" }), seqBlock(2, "a.js")],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(symThenFile, "`npm test` failed (exit 1). Edited a.js. `npm test` passed.");
+  assert.doesNotMatch(symThenFile!, BANNED_WORDS);
+
+  const twoSymsSameFile = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "a.js", { kind: "function", name: "f" }),
+        seqBlock(2, "a.js", { kind: "function", name: "g" }),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(
+    twoSymsSameFile,
+    "`npm test` failed (exit 1). Edited a.js \u203a f() and 1 more. `npm test` passed.",
+  );
+
+  const fileAndOtherSym = sequenceSentence(
+    cardWithSequence(
+      [seqBlock(1, "a.js"), seqBlock(2, "b.js", { kind: "function", name: "h" })],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    ),
+  );
+  assert.equal(fileAndOtherSym, "`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.");
+
+  const orderedOtherFirst = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "b.js", { kind: "function", name: "h" }),
+        seqBlock(2, "a.js", { kind: "function", name: "f" }),
+        seqBlock(3, "a.js"),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(
+    orderedOtherFirst,
+    "`npm test` failed (exit 1). Edited b.js \u203a h() and 1 more. `npm test` passed.",
+  );
+  assert.doesNotMatch(orderedOtherFirst!, BANNED_WORDS);
+
+  const foldedPositionFirst = sequenceSentence(
+    cardWithSequence(
+      [
+        seqBlock(1, "a.js", { kind: "function", name: "f" }),
+        seqBlock(2, "b.js", { kind: "function", name: "h" }),
+        seqBlock(3, "a.js"),
+      ],
+      { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2, 3] },
+    ),
+  );
+  assert.equal(foldedPositionFirst, "`npm test` failed (exit 1). Edited a.js and 1 more. `npm test` passed.");
 });
