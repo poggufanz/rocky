@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import {
   defaultConfirmation,
@@ -70,20 +70,37 @@ export function deskHookCommand(hookBin: string, fileExists: (path: string) => b
   return `${quotePath(bin)} ${DESK_MARKER}`;
 }
 
+function deskHookCommandBin(command: string): string | undefined {
+  if (typeof command !== "string" || command.length === 0) return undefined;
+  if (!command.endsWith(` ${DESK_MARKER}`)) return undefined;
+  try {
+    const parsed = parseQuotedCommandPath(command, 0);
+    if (command.slice(parsed.next) !== ` ${DESK_MARKER}`) return undefined;
+    return deskHookCommand(parsed.value, () => true) === command ? parsed.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isLiveRockyDeskHookCommand(command: string): boolean {
+  const bin = deskHookCommandBin(command);
+  return bin !== undefined && isRegularFile(bin);
+}
+
 /**
  * Recognize the exact desk command shape Rocky writes: one quoted path plus
  * the marker. A marker in an argument or an unrelated command is foreign.
  */
 export function isRockyDeskHookCommand(command: string): boolean {
-  if (typeof command !== "string" || command.length === 0) return false;
-  if (!command.endsWith(` ${DESK_MARKER}`)) return false;
-  try {
-    const parsed = parseQuotedCommandPath(command, 0);
-    if (command.slice(parsed.next) !== ` ${DESK_MARKER}`) return false;
-    return deskHookCommand(parsed.value, () => true) === command;
-  } catch {
-    return false;
-  }
+  return deskHookCommandBin(command) !== undefined;
 }
 
 function isRockyDeskHook(value: JsonObject): boolean {
@@ -95,11 +112,23 @@ export function hasOwnedDeskHooks(root: Record<string, unknown>): boolean {
   return hasOwnedHookCommand(root, isRockyDeskHookCommand);
 }
 
-/** True when `settingsPath` is readable and holds at least one desk hook; false on any read error. */
+/** True when `settingsPath` is readable and holds at least one desk hook whose binary is a regular file; false on any read error. */
 export function hasDeskHooksAt(settingsPath: string): boolean {
   try {
     const current = inspectCurrent(settingsPath);
-    return current.read.status === "valid" && hasOwnedDeskHooks(current.read.value);
+    return current.read.status === "valid" && hasOwnedHookCommand(current.read.value, isLiveRockyDeskHookCommand);
+  } catch {
+    return false;
+  }
+}
+
+/** True when `settingsPath` is readable, holds no owned agent-event hook, and holds a live desk hook; false on any read error. */
+export function isAgentHooksRetiredAt(settingsPath: string): boolean {
+  try {
+    const current = inspectCurrent(settingsPath);
+    return current.read.status === "valid"
+      && !hasOwnedAgentHooks(current.read.value)
+      && hasOwnedHookCommand(current.read.value, isLiveRockyDeskHookCommand);
   } catch {
     return false;
   }
@@ -176,13 +205,15 @@ export async function installDeskHooks(
 ): Promise<AgentHooksOperationResult> {
   let resolved: AgentHooksTarget;
   let command: string;
+  let retireNoticed = false;
   try {
     resolved = resolveTarget(target, options);
     command = commandFor(options);
     const current = inspectCurrent(resolved.settingsPath, true);
     const emit = options.detail ?? ((message: string) => process.stderr.write(`${message}\n`));
     emit(JSON.stringify(buildDeskHookEntries(command, DESK_HOOK_ASYNC), null, 2));
-    if (current.read.status === "valid" && hasOwnedAgentHooks(current.read.value)) {
+    retireNoticed = current.read.status === "valid" && hasOwnedAgentHooks(current.read.value);
+    if (retireNoticed) {
       emit(DESK_RETIRE_NOTICE);
     }
   } catch (error) {
@@ -199,7 +230,14 @@ export async function installDeskHooks(
   if (!allowed) return { status: "declined" };
 
   try {
+    commandFor({ hookBin: options.hookBin, fileExists: isRegularFile });
     const current = prepareMutation(resolved.settingsPath);
+    if (!retireNoticed && current.read.status === "valid" && hasOwnedAgentHooks(current.read.value)) {
+      return {
+        status: "error",
+        detail: "Claude Code settings changed while waiting for consent; run rocky setup --desk-hooks again.",
+      };
+    }
     const merged = mergeDeskHooks(removeAgentEventHooks(current.read.value), command, DESK_HOOK_ASYNC);
     return writeMutation(resolved.settingsPath, current, merged, options, "desk hooks");
   } catch (error) {

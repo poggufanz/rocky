@@ -20,6 +20,7 @@ import {
   DESK_HOOK_ASYNC,
   buildDeskHookEntries,
   deskHookCommand,
+  hasDeskHooksAt,
   hasOwnedDeskHooks,
   installDeskHooks,
   mergeDeskHooks,
@@ -651,4 +652,187 @@ test("setup --status reports agent hooks retired when desk hooks are installed",
   assert.equal(status.code, 0, status.stderr);
   assert.ok(status.stderr.includes("claude-code agent hooks: retired (desk hooks installed)"), status.stderr);
   assert.ok(!status.stderr.includes("claude-code agent hooks: absent"), status.stderr);
+});
+
+test("desk install fails without writing when the desk binary is deleted during consent", async (t) => {
+  const value = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, command, gateCommand))}\n`);
+  const beforeBytes = readFileSync(value.settings);
+
+  const result = await installDeskHooks({ settingsPath: value.settings }, {
+    hookBin,
+    fileExists: (path) => path === hookBin,
+    confirmation: {
+      async confirm() {
+        rmSync(hookBin, { force: true });
+        return true;
+      },
+    },
+    detail: () => undefined,
+  });
+
+  assert.equal(result.status, "error");
+  assert.deepEqual(readFileSync(value.settings), beforeBytes);
+});
+
+test("desk install fails without removing agent-event hooks when the desk path is a directory", async (t) => {
+  const value = settingsFixture(t);
+  const binRoot = realpathSync(mkdtempSync(join(tmpdir(), "rocky-desk-hook-dir-")));
+  t.after(() => rmSync(binRoot, { recursive: true, force: true }));
+  const dirBin = join(binRoot, "rocky-hook");
+  mkdirSync(dirBin);
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, command, gateCommand))}\n`);
+  const beforeBytes = readFileSync(value.settings);
+
+  const result = await installDeskHooks({ settingsPath: value.settings }, {
+    hookBin: dirBin,
+    fileExists: (path) => path === dirBin,
+    confirmation: { async confirm() { return true; } },
+    detail: () => undefined,
+  });
+
+  assert.equal(result.status, "error");
+  assert.deepEqual(readFileSync(value.settings), beforeBytes);
+  const after = JSON.parse(readFileSync(value.settings, "utf8")) as Record<string, unknown>;
+  assert.equal(hasOwnedAgentHooks(after), true);
+});
+
+test("desk install refuses undisclosed retirement when agent-event hooks appear during consent", async (t) => {
+  const value = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  writeFileSync(value.settings, `${JSON.stringify({ custom: { keep: true } })}\n`);
+  const details: string[] = [];
+
+  const result = await installDeskHooks({ settingsPath: value.settings }, {
+    hookBin,
+    fileExists: (path) => path === hookBin,
+    confirmation: {
+      async confirm() {
+        writeFileSync(
+          value.settings,
+          `${JSON.stringify(mergeClaudeHooks({ custom: { keep: true } }, command, gateCommand))}\n`,
+        );
+        return true;
+      },
+    },
+    detail: (message) => details.push(message),
+  });
+
+  assert.equal(result.status, "error");
+  assert.match(result.detail ?? "", /changed while waiting for consent/i);
+  assert.match(result.detail ?? "", /again/i);
+  assert.equal(details.some((line) => line.includes("replace rocky's Claude Code agent hooks")), false);
+  const after = JSON.parse(readFileSync(value.settings, "utf8")) as Record<string, unknown>;
+  assert.equal(hasOwnedAgentHooks(after), true);
+  assert.equal(hasOwnedDeskHooks(after), false);
+});
+
+test("desk install preserves unrelated concurrent edits when no agent-event hooks appear", async (t) => {
+  const value = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  writeFileSync(value.settings, `${JSON.stringify({ custom: 1 })}\n`);
+
+  const result = await installDeskHooks({ settingsPath: value.settings }, {
+    hookBin,
+    fileExists: (path) => path === hookBin,
+    confirmation: {
+      async confirm() {
+        writeFileSync(value.settings, `${JSON.stringify({ custom: 2 })}\n`);
+        return true;
+      },
+    },
+    detail: () => undefined,
+  });
+
+  assert.equal(result.status, "written");
+  const after = JSON.parse(readFileSync(value.settings, "utf8")) as Record<string, unknown>;
+  assert.equal(after.custom, 2);
+  assert.equal(hasOwnedDeskHooks(after), true);
+});
+
+test("setup --status reports absent, not retired, when desk hook binary does not exist", async (t) => {
+  const { home } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+  const dependencies = commandDependencies(home, {}, hookBin);
+
+  const installed = await captureStderr(() => setup(["--desk-hooks", hookBin], dependencies));
+  assert.equal(installed.code, 0, installed.stderr);
+  rmSync(hookBin, { force: true });
+
+  const status = await captureStderr(() => setup(["--status"], dependencies));
+  assert.equal(status.code, 0, status.stderr);
+  assert.ok(status.stderr.includes("claude-code agent hooks: absent"), status.stderr);
+  assert.ok(!status.stderr.includes("retired"), status.stderr);
+});
+
+test("setup --status reports absent, not retired, when desk hooks coexist with a partial agent-event entry", async (t) => {
+  const { home, fallback } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+  const dependencies = commandDependencies(home, {}, hookBin);
+
+  const installed = await captureStderr(() => setup(["--desk-hooks", hookBin], dependencies));
+  assert.equal(installed.code, 0, installed.stderr);
+
+  const current = JSON.parse(readFileSync(fallback, "utf8")) as { hooks: Record<string, unknown[]> };
+  current.hooks.Stop.push({ hooks: [{ type: "command", command: "rocky hook agent-event claude-code" }] });
+  writeFileSync(fallback, `${JSON.stringify(current)}\n`);
+
+  const status = await captureStderr(() => setup(["--status"], dependencies));
+  assert.equal(status.code, 0, status.stderr);
+  assert.ok(status.stderr.includes("claude-code agent hooks: absent"), status.stderr);
+  assert.ok(!status.stderr.includes("retired"), status.stderr);
+});
+
+test("setup --status reports absent, not retired, when desk hooks coexist with stale agent-event entries", async (t) => {
+  const { home, fallback } = commandFixture(t);
+  const hookBin = hookBinFixture(t);
+  const dependencies = commandDependencies(home, {}, hookBin);
+
+  const installed = await captureStderr(() => setup(["--desk-hooks", hookBin], dependencies));
+  assert.equal(installed.code, 0, installed.stderr);
+
+  const staleCommand = rockyHookCommand(
+    "claude-code",
+    process.platform === "win32" ? "C:\\old\\node.exe" : "/old/node",
+    process.platform === "win32" ? "C:\\old\\index.js" : "/old/index.js",
+  );
+  const desk = JSON.parse(readFileSync(fallback, "utf8")) as Record<string, unknown>;
+  const withStale = mergeClaudeHooks(desk, staleCommand);
+  writeFileSync(fallback, `${JSON.stringify(withStale)}\n`);
+
+  const status = await captureStderr(() => setup(["--status"], dependencies));
+  assert.equal(status.code, 0, status.stderr);
+  assert.ok(status.stderr.includes("claude-code agent hooks: absent"), status.stderr);
+  assert.ok(!status.stderr.includes("retired"), status.stderr);
+});
+
+test("hasDeskHooksAt requires a regular desk binary file and returns false on read errors", (t) => {
+  const value = settingsFixture(t);
+  const hookBin = hookBinFixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  assert.equal(hasDeskHooksAt(value.settings), false);
+
+  const command = deskHookCommand(hookBin, () => true);
+  writeFileSync(value.settings, `${JSON.stringify(mergeDeskHooks({}, command, DESK_HOOK_ASYNC))}\n`);
+  assert.equal(hasDeskHooksAt(value.settings), true);
+
+  rmSync(hookBin, { force: true });
+  assert.equal(hasDeskHooksAt(value.settings), false);
+
+  mkdirSync(hookBin);
+  assert.equal(hasDeskHooksAt(value.settings), false);
+
+  writeFileSync(value.settings, "{not json");
+  assert.equal(hasDeskHooksAt(value.settings), false);
 });

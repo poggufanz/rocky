@@ -49,7 +49,7 @@ import {
   type AgentHooksTarget,
 } from "../setup/agent-hooks.js";
 import type { AgentHooksAction, HarnessId, RepoCaptureAction } from "../setup/clients.js";
-import { hasDeskHooksAt, installDeskHooks, uninstallDeskHooks } from "../setup/desk-hooks.js";
+import { isAgentHooksRetiredAt, installDeskHooks, uninstallDeskHooks } from "../setup/desk-hooks.js";
 import {
   checkLegacyVoiceSkill,
   removeLegacyVoiceSkill,
@@ -658,7 +658,7 @@ async function runAgentHooksAction(
     }
     const result = agentHooksStatus(target, options);
     detail("Setup status scope: host/MCP registration via rocky setup --check and agent-hook state/capability; spool and Ollama/model health are not checked.");
-    const retired = result.claudeCode === "absent" && hasDeskHooksAt(target.settingsPath);
+    const retired = result.claudeCode === "absent" && isAgentHooksRetiredAt(target.settingsPath);
     detail(retired
       ? "claude-code agent hooks: retired (desk hooks installed)"
       : `claude-code agent hooks: ${result.claudeCode}`);
