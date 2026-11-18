@@ -15,7 +15,7 @@ const WITNESS_HEADER = "Witnessed: an agent stated why, and rocky recorded it.";
 const LADDER_HEADER = "Assembled from evidence, not witnessed.";
 const CARD_EVIDENCE = "Recorded, not verified.";
 
-const CARD_MATCH_LABEL: Readonly<Record<Exclude<CardMatch, "content">, string>> = {
+const CARD_MATCH_LABEL: Readonly<Record<CardMatch, string>> = {
   symbol: "function name",
   line: "line",
   file: "file",
@@ -67,12 +67,24 @@ export function renderWitnessCard(hit: TeachHit, gapRung?: Rung): TeachCard {
   };
 }
 
+function formatCardDate(startedMs: number): string | undefined {
+  if (!Number.isFinite(startedMs)) return undefined;
+  const parsed = new Date(startedMs);
+  if (!Number.isFinite(parsed.getTime())) return undefined;
+  const year = parsed.getUTCFullYear();
+  if (year < 0 || year > 9999) return undefined;
+  return parsed.toISOString().slice(0, 10);
+}
+
 /** Format a teach answer card from a matched change card block. */
 export function renderCardTeach(hit: CardTeachHit): TeachCard {
   const { card, block, match } = hit;
   const subject = block.symbol?.name && block.symbol.name.length > 0 ? block.symbol.name : block.path;
   const agent = card.agent_type && card.agent_type.length > 0 ? card.agent_type : "an agent";
-  const date = new Date(card.started_ms).toISOString().slice(0, 10);
+  const date = formatCardDate(card.started_ms);
+  const header = date === undefined
+    ? `${subject}, changed by ${agent} (from change card)`
+    : `${subject}, changed by ${agent} on ${date} (from change card)`;
 
   const lines: string[] = [];
   const title = promptTitle(card.prompt);
@@ -89,12 +101,10 @@ export function renderCardTeach(hit: CardTeachHit): TeachCard {
   } else {
     lines.push("No agent words recorded for this edit.");
   }
-  if (match !== "content") {
-    lines.push(`The code has changed since this card; matched by ${CARD_MATCH_LABEL[match]}.`);
-  }
+  lines.push(`Matched by ${CARD_MATCH_LABEL[match]}; code not compared.`);
 
   return {
-    header: `${subject}, changed by ${agent} on ${date} (from change card)`,
+    header,
     lines,
     evidence: CARD_EVIDENCE,
     expandable: false,

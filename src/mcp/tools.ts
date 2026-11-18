@@ -1965,8 +1965,30 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               exposure: options.exposure, header: "", lines: [] as string[], evidence: "",
               match: "empty" as const, truncatedFields: [] as string[], truncated: false,
             };
+            const tryCardAnswer = (query: { snippet?: string; line?: number }) => {
+              const foundCards = safeReadMemory<CardsForFile | undefined>(
+                () => (options.cards
+                  ? options.cards(input.path, TEACH_CARD_LIMIT)
+                  : cardsForFile(input.path, { cwd: process.cwd(), limit: TEACH_CARD_LIMIT })),
+                undefined,
+              );
+              const cardHit = foundCards === undefined
+                ? undefined
+                : safeReadMemory(() => teachFromCards(foundCards, query), undefined);
+              if (cardHit === undefined) return undefined;
+              const card = renderCardTeach(cardHit);
+              const projected = projectExplain(card, "card", undefined, options.exposure);
+              return safeProjection(
+                () => cappedResult({ exposure: options.exposure, ...projected }),
+                cappedResult({ ...empty, truncated: true }),
+              );
+            };
             if (input.line !== undefined && (fileText === undefined || input.line > total)) {
-              return cappedResult(empty);
+              const cardResult = tryCardAnswer({
+                ...(input.snippet === undefined ? {} : { snippet: input.snippet }),
+                line: input.line,
+              });
+              return cardResult ?? cappedResult(empty);
             }
             let snippet = input.snippet;
             let startLine = 1;
@@ -1997,23 +2019,8 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 cappedResult({ ...empty, truncated: true }),
               );
             }
-            const foundCards = safeReadMemory<CardsForFile | undefined>(
-              () => (options.cards
-                ? options.cards(input.path, TEACH_CARD_LIMIT)
-                : cardsForFile(input.path, { cwd: process.cwd(), limit: TEACH_CARD_LIMIT })),
-              undefined,
-            );
-            const cardHit = foundCards === undefined
-              ? undefined
-              : safeReadMemory(() => teachFromCards(foundCards, { snippet, line: input.line }), undefined);
-            if (cardHit !== undefined) {
-              const card = renderCardTeach(cardHit);
-              const projected = projectExplain(card, "card", undefined, options.exposure);
-              return safeProjection(
-                () => cappedResult({ exposure: options.exposure, ...projected }),
-                cappedResult({ ...empty, truncated: true }),
-              );
-            }
+            const cardResult = tryCardAnswer({ snippet, line: input.line });
+            if (cardResult !== undefined) return cardResult;
             if (snippet !== undefined && fileText !== undefined) {
               const ladder = buildLadder({
                 file: input.path,

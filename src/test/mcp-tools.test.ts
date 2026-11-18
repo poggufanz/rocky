@@ -2747,7 +2747,8 @@ test("teach_lookup answers from change cards when no witness matches, including 
     path: "src/missing-on-disk.ts",
     symbol: { kind: "function", name: "greetUser", container: null, exported: true, nth: 1 },
     labels: [{ id: "body_changed", args: {} }],
-    after: "export function greetUser(name: string) {\n  return \"hello \" + name;\n}",
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
     quote: { text: "greets a user by name", shared: false },
   });
   const card = sampleStoredCard("card-teach-1", {
@@ -2776,9 +2777,44 @@ test("teach_lookup answers from change cards when no witness matches, including 
   assert.ok(lines.includes('Asked: "Add user greeting helper"'), lines.join("\n"));
   assert.ok(lines.includes("Changed: body changed"), lines.join("\n"));
   assert.ok(lines.includes('Agent said: "greets a user by name"'), lines.join("\n"));
+  assert.ok(lines.includes("Matched by file; code not compared."), lines.join("\n"));
   assert.equal(result.structuredContent.evidence, "Recorded, not verified.");
   assert.equal(result.structuredContent.recordId, undefined);
   assert.equal(result.structuredContent.provenance, undefined);
+});
+
+test("teach_lookup answers a line query on a missing file from change cards", async () => {
+  const signal = new AbortController().signal;
+  const block = sampleStoredBlock(1, {
+    path: "src/missing-line.ts",
+    symbol: null,
+    line: 40,
+    added: 5,
+    labels: [{ id: "body_changed", args: {} }],
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
+    quote: { text: "handles missing file line query", shared: false },
+  });
+  const card = sampleStoredCard("card-teach-line-missing", {
+    agent_type: "claude-code",
+    started_ms: Date.UTC(2026, 10, 18, 12, 0, 0),
+    prompt: "Add fallback branch",
+    blocks: [block],
+  });
+  const result = await cardRegistry(() => ({
+    cards: [card],
+    matched: new Map([[card.card_id, [block]]]),
+    coverage: { complete: true, skipped: 0 },
+  })).call("teach_lookup", { path: "src/missing-line.ts", line: 42 }, signal);
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.match, "card");
+  assert.equal(
+    result.structuredContent.header,
+    "src/missing-line.ts, changed by claude-code on 2026-11-18 (from change card)",
+  );
+  const lines = result.structuredContent.lines as string[];
+  assert.ok(lines.includes("Matched by line; code not compared."), lines.join("\n"));
 });
 
 test("teach_lookup prefers matching witness record over matching change card", async () => {
@@ -2786,7 +2822,8 @@ test("teach_lookup prefers matching witness record over matching change card", a
   let cardReads = 0;
   const block = sampleStoredBlock(1, {
     path: "src/app.ts",
-    after: WITNESS_EXPLAIN.snippet ?? "",
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
   });
   const card = sampleStoredCard("card-over-witness", { blocks: [block] });
   const result = await cardRegistry(
@@ -2814,6 +2851,8 @@ test("teach_lookup projects secrets out of change card prompt under sanitized ex
   const block = sampleStoredBlock(1, {
     path: "src/secret-card.ts",
     symbol: { kind: "function", name: "loadSecret", container: null, exported: true, nth: 1 },
+    before: "0123456789abcdef".repeat(4),
+    after: "fedcba9876543210".repeat(4),
     quote: { text: `use Bearer ${secret}`, shared: false },
   });
   const card = sampleStoredCard("card-secret-prompt", {

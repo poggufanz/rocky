@@ -3,6 +3,9 @@ import { test } from "node:test";
 import { teachFromCards } from "../core/teach-cards.js";
 import type { CardsForFile, StoredBlock, StoredCard } from "../desk/cards-read.js";
 
+const HASH_A = "0123456789abcdef".repeat(4);
+const HASH_B = "fedcba9876543210".repeat(4);
+
 function makeBlock(seq: number, overrides: Partial<StoredBlock> = {}): StoredBlock {
   return {
     seq,
@@ -12,7 +15,7 @@ function makeBlock(seq: number, overrides: Partial<StoredBlock> = {}): StoredBlo
     importance: "medium",
     via: "edit",
     before: null,
-    after: null,
+    after: HASH_A,
     recorded: true,
     line: null,
     added: null,
@@ -53,44 +56,18 @@ function makeFound(cards: StoredCard[]): CardsForFile {
   };
 }
 
-test("content match picks the most similar block", () => {
-  const targetAfter = "export function verifySession(token: string) { return decodeJwt(token, publicKey); }";
-  const otherAfter = "export function formatAuditRow(entry: AuditEntry) { return entry.id.trim(); }";
+test("snippet identical to block after hash does not produce a content match", () => {
   const card = makeCard("c1", 10, [
-    makeBlock(1, { after: otherAfter }),
-    makeBlock(2, { after: targetAfter }),
+    makeBlock(1, { before: HASH_B, after: HASH_A, symbol: null, line: null }),
   ]);
-  const hit = teachFromCards(makeFound([card]), { snippet: targetAfter });
-  assert.ok(hit);
-  assert.equal(hit.match, "content");
-  assert.equal(hit.block.seq, 2);
-  assert.ok(hit.score >= 0.34);
+  const hit = teachFromCards(makeFound([card]), { snippet: HASH_A });
+  assert.equal(hit, undefined);
 });
 
-test("content beats a newer symbol-only match", () => {
-  const snippet = "export function validateToken(raw: string) { return verifySignature(raw, secretKey); }";
-  const olderCard = makeCard("old", 100, [
-    makeBlock(1, {
-      after: snippet,
-      symbol: { kind: "function", name: "otherHelper" },
-    }),
-  ]);
-  const newerCard = makeCard("new", 200, [
-    makeBlock(1, {
-      after: null,
-      symbol: { kind: "function", name: "validateToken" },
-    }),
-  ]);
-  const hit = teachFromCards(makeFound([olderCard, newerCard]), { snippet });
-  assert.ok(hit);
-  assert.equal(hit.match, "content");
-  assert.equal(hit.card.card_id, "old");
-});
-
-test("block without after is matched by symbol", () => {
+test("block with hash after is matched by symbol", () => {
   const card = makeCard("c1", 10, [
     makeBlock(1, {
-      after: null,
+      after: HASH_A,
       symbol: { kind: "function", name: "validateToken" },
     }),
   ]);
@@ -99,8 +76,8 @@ test("block without after is matched by symbol", () => {
   });
   assert.ok(hit);
   assert.equal(hit.match, "symbol");
-  assert.equal(hit.score, 0);
   assert.equal(hit.block.seq, 1);
+  assert.equal("score" in hit, false);
 });
 
 test("symbol name must be a whole identifier", () => {
@@ -129,17 +106,41 @@ test("symbol name is regex-escaped before boundary matching", () => {
   assert.equal(hit, undefined);
 });
 
-test("line inside block range matches", () => {
+test("line inside symbol-less hunk block range matches", () => {
   const card = makeCard("c1", 10, [
-    makeBlock(1, { line: 40, added: 5 }),
+    makeBlock(1, { symbol: null, line: 40, added: 5 }),
   ]);
   const found = makeFound([card]);
   const hit = teachFromCards(found, { line: 44 });
   assert.ok(hit);
   assert.equal(hit.match, "line");
-  assert.equal(hit.score, 0);
   assert.equal(hit.block.seq, 1);
   assert.equal(teachFromCards(found, { line: 45 }), undefined);
+});
+
+test("line tier ignores symbol blocks and matches symbol-less blocks with the same numbers", () => {
+  const symbolCard = makeCard("sym", 20, [
+    makeBlock(1, {
+      symbol: { kind: "function", name: "verifySession" },
+      line: 40,
+      added: 5,
+      after: HASH_A,
+    }),
+  ]);
+  assert.equal(teachFromCards(makeFound([symbolCard]), { line: 42 }), undefined);
+
+  const hunkCard = makeCard("hunk", 10, [
+    makeBlock(1, {
+      symbol: null,
+      line: 40,
+      added: 5,
+      after: HASH_B,
+    }),
+  ]);
+  const hit = teachFromCards(makeFound([symbolCard, hunkCard]), { line: 42 });
+  assert.ok(hit);
+  assert.equal(hit.match, "line");
+  assert.equal(hit.card.card_id, "hunk");
 });
 
 test("whole-file query returns newest block", () => {
@@ -149,18 +150,17 @@ test("whole-file query returns newest block", () => {
   const hit = teachFromCards(makeFound([c1, c2, c3]), {});
   assert.ok(hit);
   assert.equal(hit.match, "file");
-  assert.equal(hit.score, 0);
   assert.equal(hit.card.card_id, "c2");
   assert.equal(hit.block.seq, 7);
 });
 
-test("newest card wins a tie", () => {
-  const sharedAfter = "const parsed = parseSessionCookie(headerValue, signingSecret);";
-  const c1 = makeCard("c1", 1, [makeBlock(1, { after: sharedAfter })]);
-  const c2 = makeCard("c2", 2, [makeBlock(1, { after: sharedAfter })]);
-  const hit = teachFromCards(makeFound([c1, c2]), { snippet: sharedAfter });
+test("newest card wins a symbol tie", () => {
+  const symbol = { kind: "function", name: "parseSessionCookie" };
+  const c1 = makeCard("c1", 1, [makeBlock(1, { symbol, after: HASH_A })]);
+  const c2 = makeCard("c2", 2, [makeBlock(1, { symbol, after: HASH_B })]);
+  const hit = teachFromCards(makeFound([c1, c2]), { snippet: "const parsed = parseSessionCookie(headerValue);" });
   assert.ok(hit);
-  assert.equal(hit.match, "content");
+  assert.equal(hit.match, "symbol");
   assert.equal(hit.card.card_id, "c2");
 });
 

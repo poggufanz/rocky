@@ -200,6 +200,9 @@ function makeCard(overrides: Partial<StoredCard> = {}): StoredCard {
   };
 }
 
+const HASH_A = "0123456789abcdef".repeat(4);
+const HASH_B = "fedcba9876543210".repeat(4);
+
 function makeBlock(overrides: Partial<StoredBlock> = {}): StoredBlock {
   return {
     seq: 1,
@@ -207,6 +210,8 @@ function makeBlock(overrides: Partial<StoredBlock> = {}): StoredBlock {
     symbol: { kind: "function", name: "verifyToken" },
     labels: [{ id: "guard_added" }, { id: "call_added", args: { name: "reject" } }],
     importance: "high",
+    before: HASH_A,
+    after: HASH_B,
     quote: { text: "Checking empty tokens upfront.", shared: true },
     ...overrides,
   };
@@ -217,7 +222,6 @@ function cardHit(
     card?: Partial<StoredCard>;
     block?: Partial<StoredBlock>;
     match?: CardTeachHit["match"];
-    score?: number;
   } = {},
 ): CardTeachHit {
   const block = makeBlock(overrides.block);
@@ -225,18 +229,18 @@ function cardHit(
   return {
     card,
     block,
-    match: overrides.match ?? "content",
-    score: overrides.score ?? 0.9,
+    match: overrides.match ?? "symbol",
   };
 }
 
-test("renderCardTeach renders full content hit with prompt, labels, and quote", () => {
-  const rendered = renderCardTeach(cardHit());
+test("renderCardTeach renders full hit with prompt, labels, quote, and match line", () => {
+  const rendered = renderCardTeach(cardHit({ match: "symbol" }));
   assert.equal(rendered.header, "verifyToken, changed by claude-code on 2026-11-18 (from change card)");
   assert.deepEqual(rendered.lines, [
     'Asked: "Add guard for empty token"',
     "Changed: new guard, calls reject",
     'Agent said: "Checking empty tokens upfront."',
+    "Matched by function name; code not compared.",
   ]);
   assert.equal(rendered.evidence, "Recorded, not verified.");
   assert.equal(rendered.expandable, false);
@@ -247,24 +251,35 @@ test("renderCardTeach uses fallback line when quote is missing", () => {
   assert.equal(rendered.lines[2], "No agent words recorded for this edit.");
 });
 
-test("renderCardTeach appends mismatch notice for symbol, line, and file matches", () => {
+test("renderCardTeach appends code-not-compared notice for symbol, line, and file matches", () => {
   const symbolRendered = renderCardTeach(cardHit({ match: "symbol" }));
   assert.equal(
     symbolRendered.lines[symbolRendered.lines.length - 1],
-    "The code has changed since this card; matched by function name.",
+    "Matched by function name; code not compared.",
   );
 
   const lineRendered = renderCardTeach(cardHit({ match: "line" }));
   assert.equal(
     lineRendered.lines[lineRendered.lines.length - 1],
-    "The code has changed since this card; matched by line.",
+    "Matched by line; code not compared.",
   );
 
   const fileRendered = renderCardTeach(cardHit({ match: "file" }));
   assert.equal(
     fileRendered.lines[fileRendered.lines.length - 1],
-    "The code has changed since this card; matched by file.",
+    "Matched by file; code not compared.",
   );
+});
+
+test("renderCardTeach omits the date when started_ms is out of range (MAX_SAFE_INTEGER) and never throws", () => {
+  const maxSafeRendered = renderCardTeach(cardHit({ card: { started_ms: Number.MAX_SAFE_INTEGER } }));
+  assert.equal(maxSafeRendered.header, "verifyToken, changed by claude-code (from change card)");
+
+  const edgeDateRendered = renderCardTeach(cardHit({ card: { started_ms: 8.64e15 } }));
+  assert.equal(edgeDateRendered.header, "verifyToken, changed by claude-code (from change card)");
+
+  const nanRendered = renderCardTeach(cardHit({ card: { started_ms: Number.NaN } }));
+  assert.equal(nanRendered.header, "verifyToken, changed by claude-code (from change card)");
 });
 
 test("renderCardTeach falls back to path and generic agent when symbol and agent_type are absent", () => {
@@ -289,21 +304,27 @@ test("renderCardTeach omits Asked and Changed lines when prompt and labels are e
   );
   assert.deepEqual(rendered.lines, [
     "No agent words recorded for this edit.",
-    "The code has changed since this card; matched by line.",
+    "Matched by line; code not compared.",
   ]);
 });
 
 test("renderCardTeach rocky-written lines contain no causal words and pass output validation", () => {
-  const rendered = renderCardTeach(
+  const cases: CardTeachHit[] = [
+    cardHit({ match: "symbol" }),
+    cardHit({ match: "line" }),
+    cardHit({ match: "file" }),
     cardHit({
-      card: { agent_type: undefined, prompt: "" },
+      card: { agent_type: undefined, prompt: "", started_ms: Number.MAX_SAFE_INTEGER },
       block: { symbol: undefined, labels: [], quote: undefined },
       match: "symbol",
     }),
-  );
-  const rockyLines = [rendered.header, ...rendered.lines, rendered.evidence];
-  for (const line of rockyLines) {
-    assert.doesNotMatch(line, CAUSAL_WORDS);
-    assert.deepEqual(validateOutputLine(line), []);
+  ];
+  for (const hit of cases) {
+    const rendered = renderCardTeach(hit);
+    const rockyLines = [rendered.header, ...rendered.lines, rendered.evidence];
+    for (const line of rockyLines) {
+      assert.doesNotMatch(line, CAUSAL_WORDS);
+      assert.deepEqual(validateOutputLine(line), []);
+    }
   }
 });

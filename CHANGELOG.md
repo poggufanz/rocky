@@ -4,7 +4,7 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
-`rocky teach` and MCP `teach_lookup` answer from change cards when no explain record matches.
+`rocky teach` and MCP `teach_lookup` answer from change cards (matched by function name, line, or whole file) when no explain record matches.
 
 Failed commands on change cards now show their exit code and one redacted error line, and PowerShell commands appear in the card sequence.
 
