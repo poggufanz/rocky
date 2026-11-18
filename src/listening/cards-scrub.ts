@@ -26,7 +26,9 @@ import { cardsFilePath } from "./cards-path.js";
  * blocks and the flow steps that name them out of the other logs.
  *
  * What is edited: blocks whose path lies inside a purged root spelling, flow
- * steps that only refer to those blocks or whose text or error names such a path.
+ * steps that only refer to those blocks or whose text or error names such a path,
+ * and card `sequence` when any `edit_seqs` entry belongs to a dropped block or
+ * `sequence.command` / `sequence.error_names` names such a path.
  * Everything else is left alone: lines that do not parse or validate are kept
  * byte for byte, and a log with nothing to remove is never rewritten.
  *
@@ -207,6 +209,17 @@ function keepLine(bytes: Buffer): LineOutcome {
   return { bytes, changed: false, blocksRemoved: 0, cardDropped: false };
 }
 
+function sequenceShouldDrop(card: StoredCard, dropped: ReadonlySet<number>, ctx: ScrubContext): boolean {
+  const seq = card.sequence;
+  if (seq === undefined || seq === null) return false;
+  if (seq.edit_seqs.some((editSeq) => dropped.has(editSeq))) return true;
+  if (textNamesRoot(seq.command, ctx.normalizedRoots, ctx.platform, ctx.pathHome)) return true;
+  if (typeof seq.error_names === "string" && textNamesRoot(seq.error_names, ctx.normalizedRoots, ctx.platform, ctx.pathHome)) {
+    return true;
+  }
+  return false;
+}
+
 function scrubCard(card: StoredCard, original: Buffer, ctx: ScrubContext): LineOutcome {
   const dropped = new Set<number>();
   const kept = card.blocks.filter((block) => {
@@ -215,12 +228,13 @@ function scrubCard(card: StoredCard, original: Buffer, ctx: ScrubContext): LineO
     return false;
   });
   const removed = card.blocks.length - kept.length;
-  if (removed === 0) return keepLine(original);
+  const dropSequence = sequenceShouldDrop(card, dropped, ctx);
+  if (removed === 0 && !dropSequence) return keepLine(original);
   if (kept.length === 0) {
     return { bytes: Buffer.alloc(0), changed: true, blocksRemoved: removed, cardDropped: true };
   }
   card.blocks = kept;
-  if (card.flow !== undefined) {
+  if (removed > 0 && card.flow !== undefined) {
     card.flow = card.flow.filter((step) => {
       if (step.seqs.length > 0 && step.seqs.every((seq) => dropped.has(seq))) return false;
       if (textNamesRoot(step.text, ctx.normalizedRoots, ctx.platform, ctx.pathHome)) return false;
@@ -229,6 +243,9 @@ function scrubCard(card: StoredCard, original: Buffer, ctx: ScrubContext): LineO
       }
       return true;
     });
+  }
+  if (dropSequence) {
+    delete card.sequence;
   }
   return { bytes: Buffer.from(`${JSON.stringify(card)}\n`, "utf8"), changed: true, blocksRemoved: removed, cardDropped: false };
 }

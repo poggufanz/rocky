@@ -1016,10 +1016,10 @@ test("why keeps Sequence fixed clauses and passing outcome under the 512-byte li
   assert.deepEqual(validateOutputLine(longLine.trim()), []);
 });
 
-test("why keeps Sequence line with (unnamed) placeholder when terminal sanitization empties a field", () => {
+test("why omits Sequence line when command or first edit head sanitizes to empty and drops empty error_names clause", () => {
   const now = new Date(2026, 10, 15, 16, 0, 0).getTime();
 
-  // Repro: symbol-less first edit block whose path is only U+202E, second edit at src/auth.ts, edit_seqs: [1, 2].
+  // First edit block path is only U+202E, second edit at src/auth.ts, edit_seqs: [1, 2]: omit Sequence line.
   const firstBidiBlock = makeBlock({ seq: 1, path: "\u202e", symbol: null });
   const secondAuthBlock = makeBlock({ seq: 2, path: "src/auth.ts", symbol: null });
   const bidiEditCard = makeCard({
@@ -1048,49 +1048,73 @@ test("why keeps Sequence line with (unnamed) placeholder when terminal sanitizat
     }),
     0,
   );
-  const editLine = bidiEditSinks.outLines.find((line) => line.includes("Sequence:"));
-  assert.equal(
-    editLine,
-    "         Sequence: `npm test` failed (exit 1). Edited (unnamed) and 1 more. `npm test` passed.",
-  );
-  assert.deepEqual(validateOutputLine(editLine!.trim()), []);
-  assert.doesNotMatch(editLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+  assert.equal(bidiEditSinks.outLines.some((line) => line.includes("Sequence:")), false);
 
-  // When error_names or command sanitizes to empty, render (unnamed) rather than dropping the clause or line.
-  const bidiFieldsCard = makeCard({
-    card_id: "card-seq-bidi-fields",
+  // When command sanitizes to empty, omit the Sequence line.
+  const bidiCmdCard = makeCard({
+    card_id: "card-seq-bidi-cmd",
     blocks: [secondAuthBlock],
     sequence: {
       pattern: "fix_after_fail",
       command: "\u202e",
       exit_code: 2,
       edit_seqs: [2],
-      error_names: "\u202e",
+      error_names: "auth.ts",
     },
   });
-  const bidiFieldsResult: CardsForFile = {
-    cards: [bidiFieldsCard],
-    matched: new Map([[bidiFieldsCard.card_id, [secondAuthBlock]]]),
+  const bidiCmdResult: CardsForFile = {
+    cards: [bidiCmdCard],
+    matched: new Map([[bidiCmdCard.card_id, [secondAuthBlock]]]),
     coverage: { complete: true, skipped: 0 },
   };
-  const bidiFieldsSinks = makeSinks();
+  const bidiCmdSinks = makeSinks();
   assert.equal(
     why(["src/auth.ts"], {
-      ...bidiFieldsSinks,
+      ...bidiCmdSinks,
       load: () => [],
       coverage: () => completeCoverage(),
       now,
-      cards: () => bidiFieldsResult,
+      cards: () => bidiCmdResult,
     }),
     0,
   );
-  const fieldsLine = bidiFieldsSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(bidiCmdSinks.outLines.some((line) => line.includes("Sequence:")), false);
+
+  // When only error_names sanitizes to empty, keep the Sequence line and drop the "The error names ..." clause.
+  const bidiErrCard = makeCard({
+    card_id: "card-seq-bidi-err",
+    blocks: [secondAuthBlock],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 2,
+      edit_seqs: [2],
+      error_names: "\u202e",
+    },
+  });
+  const bidiErrResult: CardsForFile = {
+    cards: [bidiErrCard],
+    matched: new Map([[bidiErrCard.card_id, [secondAuthBlock]]]),
+    coverage: { complete: true, skipped: 0 },
+  };
+  const bidiErrSinks = makeSinks();
   assert.equal(
-    fieldsLine,
-    "         Sequence: `(unnamed)` failed (exit 2). The error names (unnamed). Edited src/auth.ts. `(unnamed)` passed.",
+    why(["src/auth.ts"], {
+      ...bidiErrSinks,
+      load: () => [],
+      coverage: () => completeCoverage(),
+      now,
+      cards: () => bidiErrResult,
+    }),
+    0,
   );
-  assert.deepEqual(validateOutputLine(fieldsLine!.trim()), []);
-  assert.doesNotMatch(fieldsLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
+  const errLine = bidiErrSinks.outLines.find((line) => line.includes("Sequence:"));
+  assert.equal(
+    errLine,
+    "         Sequence: `npm test` failed (exit 2). Edited src/auth.ts. `npm test` passed.",
+  );
+  assert.deepEqual(validateOutputLine(errLine!.trim()), []);
+  assert.doesNotMatch(errLine!, /\b(?:because|so that|in order to|to ensure|fixed|resolved)\b/i);
 
   // Data rule preserved: when no seq in edit_seqs resolves to a block on card.blocks, no Sequence line is emitted.
   const unresolvableCard = makeCard({

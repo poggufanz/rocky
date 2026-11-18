@@ -722,8 +722,9 @@ earlier failing command step with the same whitespace-normalized text and at
 least one successful edit step (`edit_seqs`, in chronological order) sits between
 them. `error_names` is optional and omitted when absent; it names the first
 counted edit's basename that appears in the failing command's `error`. The
-Sequence line states command and edit order, not cause. Readers treat an
-unknown `pattern` value as absent without rejecting the card.
+Sequence line states command and edit order, not cause. Node CLI readers treat an
+unknown `pattern` value as absent without rejecting the card; `rockyd` skips a
+card line it cannot parse.
 
 #### `Coverage`
 
@@ -816,6 +817,13 @@ at `10`) with a separate `cardsCoverage` read-completeness object
   `0`) and `truncated` is `true`. Stored hashes (`before`, `after`),
   `tool_use_ids`, `flow`, `symbol.exported`, and `symbol.nth` are never
   returned.
+- **Sequence projection**: when a card carries a valid `fix_after_fail`
+  `sequence` and at least one matched block for the queried path has its `seq`
+  in `sequence.edit_seqs`, `sequence` projects as `{ pattern, command,
+  exit_code, edit_seqs, error_names }` (`edit_seqs` bounded to `256` entries
+  with truncation recorded on `cards[i].sequence.edit_seqs`; `command` and
+  optional `error_names` passed through `projectText`); otherwise `sequence` is
+  `null`.
 - **Label `args` allowlist**: `labels[].args` is projected through a strict
   per-label allowlist aligned with the catalog above. Literal `before`, `after`,
   and `version` label values (and any unknown label keys or un-allowlisted

@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 
-use rocky_proto::cards::{Block, Card, FlowKind, FlowStep, Sequence};
+use rocky_proto::cards::{Block, BlockSymbol, Card, FlowKind, FlowStep, Sequence, SymbolKind};
 use rocky_proto::paths::{cards_dir, rocky_home};
 use rockyd::cards::sequence::match_sequence;
 
@@ -214,7 +214,9 @@ fn format_step(step: &FlowStep) -> String {
 }
 
 // ponytail: copy of the desk EN template (crates/rocky-desk/src/i18n/cards.rs,
-// SequenceFixAfterFail / SequenceEditsMore) for an owner-run tool; must follow desk wording changes.
+// SequenceFixAfterFail / SequenceEditsMore) and edit-head / sanitize helpers
+// (crates/rocky-desk/src/card_detail_model.rs, crates/rocky-desk/src/cards_model/rows.rs)
+// for an owner-run tool; must follow desk wording and rendering changes.
 fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
     let block_by_seq: HashMap<u32, &Block> = card.blocks.iter().map(|b| (b.seq, b)).collect();
     match seq {
@@ -233,10 +235,13 @@ fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
                 .iter()
                 .copied()
                 .filter(|s| seen.insert(*s))
-                .filter_map(|s| block_by_seq.get(&s).copied())
-                .map(|b| sanitize_single_line(&b.path).trim().to_string())
-                .filter(|path| !path.is_empty());
-            let first = escape_markdown(&resolved.next()?);
+                .filter_map(|s| block_by_seq.get(&s).copied());
+            let first_block = resolved.next()?;
+            let first_head = block_head(first_block);
+            if first_head.is_empty() {
+                return None;
+            }
+            let first = escape_markdown(&first_head);
             let more = resolved.count();
             let edits = if more == 0 {
                 first
@@ -254,6 +259,25 @@ fn render_sequence_en(card: &Card, seq: &Sequence) -> Option<String> {
                 "{cmd_span} failed (exit {exit_code}).{err} Edited {edits}. {cmd_span} passed."
             ))
         }
+    }
+}
+
+fn format_symbol(symbol: Option<&BlockSymbol>) -> Option<String> {
+    let sym = symbol?;
+    let name = sanitize_single_line(&sym.name);
+    if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) && !name.ends_with("()") {
+        Some(format!("{name}()"))
+    } else {
+        Some(name)
+    }
+}
+
+fn block_head(block: &Block) -> String {
+    let path = sanitize_single_line(&block.path);
+    let symbol = format_symbol(block.symbol.as_ref()).filter(|s| !s.is_empty());
+    match symbol {
+        Some(sym) => format!("{path} \u{203a} {sym}"),
+        None => path,
     }
 }
 
@@ -318,10 +342,8 @@ fn sanitize_single_line(text: &str) -> String {
         if c == '\r' && chars.peek() == Some(&'\n') {
             chars.next();
             out.push(' ');
-        } else if matches!(c, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
+        } else if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
             out.push(' ');
-        } else if c.is_control() {
-            // Strip all other control characters (e.g. NUL, ESC, DEL, C1).
         } else {
             out.push(c);
         }
@@ -356,4 +378,155 @@ fn format_utc_date(ms: u64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02} {hour:02}:{min:02} UTC")
+}
+
+#[cfg(test)]
+mod tests {
+    use rocky_proto::cards::{CardStatus, Coverage, CoverageState, Importance};
+
+    use super::*;
+
+    fn sample_card(blocks: Vec<Block>, sequence: Sequence) -> Card {
+        Card {
+            v: 1,
+            card_id: "c-audit".to_string(),
+            rev: 1,
+            repo_id: "repo-1".to_string(),
+            root: "/work/repo".to_string(),
+            main_root: None,
+            branch: None,
+            session_id: "s-1".to_string(),
+            agent_id: "a-1".to_string(),
+            agent_type: String::new(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "test".to_string(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks,
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+            reads: Vec::new(),
+            reads_more: 0,
+            sequence: Some(sequence),
+        }
+    }
+
+    fn sample_block(seq: u32, path: &str, symbol: Option<BlockSymbol>) -> Block {
+        Block {
+            seq,
+            path: path.to_string(),
+            symbol,
+            labels: Vec::new(),
+            importance: Importance::Medium,
+            via: rocky_proto::cards::BlockVia::Edit,
+            tool_use_ids: Vec::new(),
+            bash: None,
+            before: None,
+            after: None,
+            recorded: true,
+            line: Some(1),
+            added: Some(1),
+            removed: Some(0),
+            quote: None,
+        }
+    }
+
+    #[test]
+    fn renders_edit_head_like_desk_with_symbol_and_parens() {
+        let card = sample_card(
+            vec![sample_block(
+                1,
+                "src/auth.ts",
+                Some(BlockSymbol {
+                    kind: SymbolKind::Function,
+                    name: "verifyToken".to_string(),
+                    container: None,
+                    exported: false,
+                    nth: 0,
+                }),
+            )],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&card, card.sequence.as_ref().unwrap()).as_deref(),
+            Some(
+                "`npm test` failed (exit 1). Edited src/auth.ts \u{203a} verifyToken(). `npm test` passed."
+            )
+        );
+
+        let empty_fn_card = sample_card(
+            vec![sample_block(
+                1,
+                "src/auth.ts",
+                Some(BlockSymbol {
+                    kind: SymbolKind::Method,
+                    name: String::new(),
+                    container: None,
+                    exported: false,
+                    nth: 0,
+                }),
+            )],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&empty_fn_card, empty_fn_card.sequence.as_ref().unwrap()).as_deref(),
+            Some("`npm test` failed (exit 1). Edited src/auth.ts \u{203a} (). `npm test` passed.")
+        );
+    }
+
+    #[test]
+    fn turns_control_chars_into_spaces_and_returns_none_when_first_head_empty() {
+        let ctrl_card = sample_card(
+            vec![sample_block(1, "src/auth.ts", None)],
+            Sequence::FixAfterFail {
+                command: "npm\u{7}test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(&ctrl_card, ctrl_card.sequence.as_ref().unwrap()).as_deref(),
+            Some("`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.")
+        );
+
+        let empty_first_card = sample_card(
+            vec![
+                sample_block(1, "", None),
+                sample_block(2, "src/auth.ts", None),
+            ],
+            Sequence::FixAfterFail {
+                command: "npm test".to_string(),
+                exit_code: 1,
+                edit_seqs: vec![1, 2],
+                error_names: None,
+            },
+        );
+        assert_eq!(
+            render_sequence_en(
+                &empty_first_card,
+                empty_first_card.sequence.as_ref().unwrap()
+            ),
+            None
+        );
+    }
 }

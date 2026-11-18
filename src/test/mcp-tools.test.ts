@@ -2004,6 +2004,7 @@ interface ProjectedCard {
     pattern: string;
     command: string;
     exit_code: number;
+    edit_seqs: number[];
     error_names: string | null;
   } | null;
   more_blocks?: number;
@@ -2278,14 +2279,72 @@ test("why_file projects card sequence through projectText, returns null when abs
   assert.equal(sCards[0]?.sequence?.command.includes("\u001b"), false);
   assert.equal(sCards[0]?.sequence?.error_names?.includes(secret), false);
   assert.equal(sCards[0]?.sequence?.error_names?.includes("[redacted]"), true);
-  assert.equal("edit_seqs" in (sCards[0]?.sequence as object), false);
+  assert.deepEqual(sCards[0]?.sequence?.edit_seqs, [1]);
   assert.equal(sCards[1]?.sequence, null);
   assert.equal(sCards[2]?.sequence, null);
 
   const raw = (await cardRegistry(provider, "raw").call("why_file", { path: "src/a.ts", limit: 5 }, new AbortController().signal)).structuredContent;
   const rCards = raw.cards as ProjectedCard[];
   assert.equal(rCards[0]?.sequence?.command, `TOKEN=${secret} npm test`);
+  assert.deepEqual(rCards[0]?.sequence?.edit_seqs, [1]);
   assert.equal(rCards[0]?.sequence?.error_names, `file_${secret}.ts`);
+});
+
+test("why_file gates sequence on matched block seq in edit_seqs, bounds edit_seqs, and keeps flow out", async () => {
+  const blockA = sampleStoredBlock(1, { path: "src/a.ts" });
+  const blockB = sampleStoredBlock(2, { path: "src/b.ts" });
+  const card = sampleStoredCard("4e5e1a6d22cea72d7a8b3985c9c27fcf", {
+    blocks: [blockA, blockB],
+    flow: [{ kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [1], exit_code: 1, error: "fail" }],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: [1],
+      error_names: "a.ts",
+    },
+  });
+
+  const providerFor = (blocks: StoredBlock[]): (() => CardsForFile) => () => ({
+    cards: [card],
+    matched: new Map([[card.card_id, blocks]]),
+    coverage: { complete: true, skipped: 0 },
+  });
+
+  const matchedRes = (await cardRegistry(providerFor([blockA]), "sanitized").call("why_file", { path: "src/a.ts", limit: 5 }, new AbortController().signal)).structuredContent;
+  const matchedCards = matchedRes.cards as ProjectedCard[];
+  assert.equal(JSON.stringify(matchedCards).includes('"flow"'), false);
+  assert.deepEqual(matchedCards[0]?.sequence, {
+    pattern: "fix_after_fail",
+    command: "npm test",
+    exit_code: 1,
+    edit_seqs: [1],
+    error_names: "a.ts",
+  });
+
+  const otherRes = (await cardRegistry(providerFor([blockB]), "sanitized").call("why_file", { path: "src/b.ts", limit: 5 }, new AbortController().signal)).structuredContent;
+  const otherCards = otherRes.cards as ProjectedCard[];
+  assert.equal(JSON.stringify(otherCards).includes('"flow"'), false);
+  assert.equal(otherCards[0]?.sequence, null);
+  assert.equal(otherRes.truncated, false);
+
+  const oversizedCard = sampleStoredCard("97394ac43381e6ac7a3b66cb264cd2b9", {
+    blocks: [blockA],
+    sequence: {
+      pattern: "fix_after_fail",
+      command: "npm test",
+      exit_code: 1,
+      edit_seqs: Array.from({ length: 300 }, (_, i) => i + 1),
+    },
+  });
+  const boundedRes = (await cardRegistry(() => ({
+    cards: [oversizedCard],
+    matched: new Map([[oversizedCard.card_id, [blockA]]]),
+    coverage: { complete: true, skipped: 0 },
+  }), "sanitized").call("why_file", { path: "src/a.ts", limit: 5 }, new AbortController().signal)).structuredContent;
+  const boundedCards = boundedRes.cards as ProjectedCard[];
+  assert.equal(boundedCards[0]?.sequence?.edit_seqs.length, 256);
+  assert.equal(boundedRes.truncated, true);
 });
 
 test("why_file preserves 32-hex card_id and redacts other opaque card_id strings under sanitized exposure", async () => {

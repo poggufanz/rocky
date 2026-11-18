@@ -1066,7 +1066,7 @@ fn old_flow_step_renders_unchanged() {
 }
 
 #[test]
-fn sequence_sentence_en_and_id_match_task1_example() {
+fn sequence_sentence_en_and_id_for_fail_edit_pass() {
     let mut card = sample_card("c-seq", 1_000, Some(5_000));
     card.blocks = vec![sample_block(1, "src/auth.ts", Vec::new())];
     card.sequence = Some(Sequence::FixAfterFail {

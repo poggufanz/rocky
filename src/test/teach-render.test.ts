@@ -364,3 +364,39 @@ test("renderCardTeach adds Sequence line after Changed only when hit block seq i
   });
   assert.equal(hitNotInSeq.lines.some((line) => line.startsWith("Sequence:")), false);
 });
+
+test("renderCardTeach omits Sequence when command or first edit head sanitizes to empty and drops empty error_names clause", () => {
+  const bidiBlock = makeBlock({ seq: 1, path: "\u202e", symbol: null });
+  const okBlock = makeBlock({ seq: 2, path: "src/auth.ts", symbol: null });
+
+  const emptyHead = renderCardTeach({
+    card: makeCard({
+      blocks: [bidiBlock, okBlock],
+      sequence: { pattern: "fix_after_fail", command: "npm test", exit_code: 1, edit_seqs: [1, 2] },
+    }),
+    block: okBlock,
+    match: "file",
+  });
+  assert.equal(emptyHead.lines.some((line) => line.startsWith("Sequence:")), false);
+
+  const emptyCmd = renderCardTeach({
+    card: makeCard({
+      blocks: [okBlock],
+      sequence: { pattern: "fix_after_fail", command: "\u202e", exit_code: 1, edit_seqs: [2], error_names: "auth.ts" },
+    }),
+    block: okBlock,
+    match: "file",
+  });
+  assert.equal(emptyCmd.lines.some((line) => line.startsWith("Sequence:")), false);
+
+  const emptyErr = renderCardTeach({
+    card: makeCard({
+      blocks: [okBlock],
+      sequence: { pattern: "fix_after_fail", command: "npm test", exit_code: 2, edit_seqs: [2], error_names: "\u202e" },
+    }),
+    block: okBlock,
+    match: "file",
+  });
+  const seqLine = emptyErr.lines.find((line) => line.startsWith("Sequence:"));
+  assert.equal(seqLine, "Sequence: `npm test` failed (exit 2). Edited src/auth.ts. `npm test` passed.");
+});

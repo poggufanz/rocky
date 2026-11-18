@@ -1,5 +1,8 @@
-import { labelChip, promptTitle, sequenceSentence } from "../desk/card-text.js";
+import { labelChip, promptTitle, sequenceSentenceParts } from "../desk/card-text.js";
+import type { StoredCard } from "../desk/cards-record.js";
 import { tokens } from "./fingerprint.js";
+import { stripInvisibleControls } from "./redact.js";
+import { safeTerminalLine } from "./terminal-sanitize.js";
 import type { TeachHit } from "./teach.js";
 import type { CardMatch, CardTeachHit } from "./teach-cards.js";
 import type { LadderResult, Rung } from "./teach-ladder.js";
@@ -76,6 +79,23 @@ function formatCardDate(startedMs: number): string | undefined {
   return parsed.toISOString().slice(0, 10);
 }
 
+function sanitizeTeachSequenceField(value: string): string {
+  const safe = safeTerminalLine(stripInvisibleControls(value));
+  return safe.trim().length > 0 ? safe : "";
+}
+
+function renderTeachSequence(card: StoredCard): string | undefined {
+  const parts = sequenceSentenceParts(card);
+  if (!parts) return undefined;
+  const cmd = sanitizeTeachSequenceField(parts.command);
+  const editHead = sanitizeTeachSequenceField(parts.editHead);
+  if (cmd.length === 0 || editHead.length === 0) return undefined;
+  const errName = parts.errorName !== undefined ? sanitizeTeachSequenceField(parts.errorName) : "";
+  const errClause = errName.length > 0 ? ` The error names ${errName}.` : "";
+  const edits = parts.moreEdits > 0 ? `${editHead} and ${parts.moreEdits} more` : editHead;
+  return `\`${cmd}\` failed (exit ${parts.exitCode}).${errClause} Edited ${edits}. \`${cmd}\` passed.`;
+}
+
 /** Format a teach answer card from a matched change card block. */
 export function renderCardTeach(hit: CardTeachHit): TeachCard {
   const { card, block, match } = hit;
@@ -97,7 +117,7 @@ export function renderCardTeach(hit: CardTeachHit): TeachCard {
   }
   const seq = card.sequence;
   if (seq && seq.pattern === "fix_after_fail" && seq.edit_seqs.includes(block.seq)) {
-    const sentence = sequenceSentence(card);
+    const sentence = renderTeachSequence(card);
     if (sentence !== undefined) {
       lines.push(`Sequence: ${sentence}`);
     }
