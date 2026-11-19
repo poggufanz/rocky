@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
@@ -201,13 +201,14 @@ async function fetchWithinCap(
   let response: Response;
   try {
     response = await fetchFn(url, {
+      redirect: "error",
       signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
     });
   } catch {
     return { ok: false, reason: "download" };
   }
 
-  if (!response.ok) {
+  if (!response.ok || response.status < 200 || response.status >= 300) {
     try {
       await response.body?.cancel();
     } catch {
@@ -245,8 +246,11 @@ async function fetchWithinCap(
   return { ok: true, data: Buffer.concat(chunks, total) };
 }
 
+// Stage with a per-process unique name so concurrent installers cannot truncate
+// each other's .part files before atomic renameSync publishes verified bytes.
 function writeFileAtomic(dir: string, name: string, data: Buffer | string): boolean {
-  const partPath = join(dir, `${name}.part`);
+  const suffix = `${process.pid}-${randomBytes(6).toString("hex")}`;
+  const partPath = join(dir, `${name}.${suffix}.part`);
   const finalPath = join(dir, name);
   try {
     writeFileSync(partPath, data);

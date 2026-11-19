@@ -3,11 +3,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +23,7 @@ import {
   type InstallProgress,
 } from "../translate/install.js";
 import {
+  INSTALLED_FILE,
   MANIFEST,
   engineDir,
   modelDir,
@@ -74,12 +78,13 @@ function sha512Integrity(buf: Buffer): string {
 }
 
 function makeFakeFetch(
-  routes: Map<string, Buffer | number | (() => Promise<Response>)>,
+  routes: Map<string, Buffer | number | ((init?: RequestInit) => Promise<Response>)>,
   calls: string[] = [],
 ): typeof fetch {
-  return (async (input: string | URL | Request): Promise<Response> => {
+  return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     calls.push(url);
+    assert.equal(init?.redirect, "error");
     const entry = routes.get(url);
     if (entry === undefined) {
       return new Response(null, { status: 404 });
@@ -88,7 +93,7 @@ function makeFakeFetch(
       return new Response(null, { status: entry });
     }
     if (typeof entry === "function") {
-      return entry();
+      return entry(init);
     }
     return new Response(new Uint8Array(entry), { status: 200 });
   }) as typeof fetch;
@@ -115,7 +120,7 @@ function findPartFiles(dir: string): string[] {
 
 function buildFixture(): {
   manifest: TranslateManifest;
-  routes: Map<string, Buffer | number | (() => Promise<Response>)>;
+  routes: Map<string, Buffer | number | ((init?: RequestInit) => Promise<Response>)>;
   glueBytes: Buffer;
   wasmBytes: Buffer;
   modelBytes: Buffer;
@@ -215,7 +220,7 @@ function buildFixture(): {
     },
   };
 
-  const routes = new Map<string, Buffer | number | (() => Promise<Response>)>([
+  const routes = new Map<string, Buffer | number | ((init?: RequestInit) => Promise<Response>)>([
     [tarballUrl, tgz],
     [modelUrl, gzipSync(modelBytes)],
     [lexUrl, gzipSync(lexBytes)],
@@ -327,6 +332,29 @@ test("wrong file bytes are a checksum failure and leave nothing ready", async ()
   });
 });
 
+test("same-length 1-byte mutation is a checksum failure and leaves nothing ready", async () => {
+  await withTempHome(async (home) => {
+    const { manifest, routes, lexBytes } = buildFixture();
+    const lexUrl = manifest.models["id-en"][1].url;
+    const mutatedLex = Buffer.from(lexBytes);
+    mutatedLex[0] ^= 0xff;
+    assert.equal(mutatedLex.length, lexBytes.length);
+    routes.set(lexUrl, gzipSync(mutatedLex));
+
+    const res = await installTranslation(home, "id-en", {
+      fetch: makeFakeFetch(routes),
+      manifest,
+      onProgress: () => {},
+    });
+
+    const mDir = modelDir(home, "id-en");
+    assert.deepEqual(res, { ok: false, reason: "checksum" });
+    assert.equal(readInstalled(mDir), undefined);
+    assert.equal(existsSync(join(mDir, INSTALLED_FILE)), false);
+    assert.deepEqual(findPartFiles(join(home, "translate")), []);
+  });
+});
+
 test("wrong tarball integrity is a checksum failure", async () => {
   await withTempHome(async (home) => {
     const { manifest, routes } = buildFixture();
@@ -410,6 +438,7 @@ test("an interrupted install is not ready, and a rerun completes", async () => {
     });
     assert.deepEqual(first, { ok: false, reason: "download" });
     assert.equal(readInstalled(modelDir(home, "id-en")), undefined);
+    assert.equal(existsSync(join(modelDir(home, "id-en"), INSTALLED_FILE)), false);
     assert.deepEqual(findPartFiles(join(home, "translate")), []);
 
     const rerunCalls: string[] = [];
@@ -456,5 +485,89 @@ test("readInstalled rejects a file whose size drifted", async () => {
     assert.equal(statSync(target).size, originalSize + 1);
 
     assert.equal(readInstalled(mDir), undefined);
+  });
+});
+
+test("refuses redirects via redirect: 'error' and treats 3xx as download", async () => {
+  await withTempHome(async (home) => {
+    const { manifest, routes } = buildFixture();
+    const seenRedirects: (RequestRedirect | undefined)[] = [];
+    routes.set(manifest.engine.tarball, async (init) => {
+      seenRedirects.push(init?.redirect);
+      throw new TypeError("redirect mode is set to error");
+    });
+
+    const res = await installTranslation(home, "id-en", {
+      fetch: makeFakeFetch(routes),
+      manifest,
+      onProgress: () => {},
+    });
+
+    assert.deepEqual(seenRedirects, ["error"]);
+    assert.deepEqual(res, { ok: false, reason: "download" });
+    assert.equal(readInstalled(engineDir(home)), undefined);
+  });
+
+  await withTempHome(async (home) => {
+    const { manifest, routes } = buildFixture();
+    routes.set(manifest.engine.tarball, 302);
+
+    const res = await installTranslation(home, "id-en", {
+      fetch: makeFakeFetch(routes),
+      manifest,
+      onProgress: () => {},
+    });
+
+    assert.deepEqual(res, { ok: false, reason: "download" });
+    assert.equal(readInstalled(engineDir(home)), undefined);
+  });
+});
+
+test("stages files with unique .part names without touching other .part files", async () => {
+  await withTempHome(async (home) => {
+    const { manifest, routes } = buildFixture();
+    const mDir = modelDir(home, "id-en");
+    const blockingTargetDir = join(mDir, "lex.50.50.iden.s2t.bin");
+    mkdirSync(blockingTargetDir, { recursive: true });
+    const foreignPart = join(mDir, "lex.50.50.iden.s2t.bin.999999-foreign.part");
+    writeFileSync(foreignPart, "in-flight-by-other-process");
+
+    const res = await installTranslation(home, "id-en", {
+      fetch: makeFakeFetch(routes),
+      manifest,
+      onProgress: () => {},
+    });
+
+    assert.deepEqual(res, { ok: false, reason: "write" });
+    assert.equal(readInstalled(mDir), undefined);
+    assert.equal(existsSync(join(mDir, INSTALLED_FILE)), false);
+    assert.deepEqual(findPartFiles(join(home, "translate")), [foreignPart]);
+  });
+
+  await withTempHome(async (home) => {
+    const { manifest, routes, glueBytes, wasmBytes, modelBytes, lexBytes, vocabBytes } = buildFixture();
+    const [r1, r2] = await Promise.all([
+      installTranslation(home, "id-en", {
+        fetch: makeFakeFetch(routes),
+        manifest,
+        onProgress: () => {},
+      }),
+      installTranslation(home, "id-en", {
+        fetch: makeFakeFetch(routes),
+        manifest,
+        onProgress: () => {},
+      }),
+    ]);
+
+    assert.deepEqual(r1, { ok: true });
+    assert.deepEqual(r2, { ok: true });
+    assert.deepEqual(readFileSync(join(engineDir(home), "bergamot-translator-worker.js")), glueBytes);
+    assert.deepEqual(readFileSync(join(engineDir(home), "bergamot-translator-worker.wasm")), wasmBytes);
+    assert.deepEqual(readFileSync(join(modelDir(home, "id-en"), "model.iden.intgemm.alphas.bin")), modelBytes);
+    assert.deepEqual(readFileSync(join(modelDir(home, "id-en"), "lex.50.50.iden.s2t.bin")), lexBytes);
+    assert.deepEqual(readFileSync(join(modelDir(home, "id-en"), "vocab.iden.spm")), vocabBytes);
+    assert.ok(readInstalled(engineDir(home)));
+    assert.ok(readInstalled(modelDir(home, "id-en")));
+    assert.deepEqual(findPartFiles(join(home, "translate")), []);
   });
 });
