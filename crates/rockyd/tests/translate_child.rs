@@ -4,14 +4,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rocky_proto::translate::{QuoteLang, TranslateFailure, TranslatePair};
 use rockyd::guard::records::CliRecord;
 use rockyd::translate::child::{
-    INSTALL_TIMEOUT, InstallEvent, MAX_RUN_QUOTES, RUN_TIMEOUT, RunEvent, RunReply, RunRequest,
-    start_install, start_run,
+    INSTALL_TIMEOUT, InstallEvent, InstallJob, MAX_RUN_QUOTES, RUN_TIMEOUT, RunEvent, RunJob,
+    RunReply, RunRequest, start_install, start_run,
 };
 use rockyd::translate::marker;
 use serde_json::{Value, json};
@@ -70,54 +72,134 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
-fn collect_run(job: &mut rockyd::translate::child::RunJob, limit: Duration) -> Vec<RunReply> {
-    let start = Instant::now();
-    let mut replies = Vec::new();
-    loop {
-        assert!(
-            start.elapsed() < limit,
-            "timed out waiting for RunEvent::Done"
-        );
-        if let Some(event) = job.try_next() {
-            match event {
-                RunEvent::Reply(reply) => replies.push(reply),
-                RunEvent::Done => return replies,
-            }
-            continue;
+struct GuardedJob<T: Send + 'static> {
+    inner: Option<T>,
+    name: &'static str,
+}
+
+impl<T: Send + 'static> GuardedJob<T> {
+    fn new(job: T, name: &'static str) -> Self {
+        Self {
+            inner: Some(job),
+            name,
         }
-        thread::sleep(Duration::from_millis(10));
+    }
+
+    fn into_inner(mut self) -> T {
+        self.inner.take().expect("job already taken")
+    }
+}
+
+impl<T: Send + 'static> Drop for GuardedJob<T> {
+    fn drop(&mut self) {
+        if let Some(job) = self.inner.take() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            thread::spawn(move || {
+                drop(job);
+                let _ = tx.send(());
+            });
+            if rx.recv_timeout(GUARD).is_err() {
+                if thread::panicking() {
+                    eprintln!(
+                        "timed out waiting for {} drop within {GUARD:?} during unwind",
+                        self.name
+                    );
+                } else {
+                    panic!("timed out waiting for {} drop within {GUARD:?}", self.name);
+                }
+            }
+        }
+    }
+}
+
+fn collect_run(job: GuardedJob<RunJob>, limit: Duration) -> Vec<RunReply> {
+    let mut job = job.into_inner();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_worker = Arc::clone(&stop);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut replies = Vec::new();
+        while !stop_worker.load(Ordering::Acquire) {
+            if let Some(event) = job.try_next() {
+                match event {
+                    RunEvent::Reply(reply) => replies.push(reply),
+                    RunEvent::Done => {
+                        let trailing = job.try_next();
+                        drop(job);
+                        let _ = tx.send((replies, trailing));
+                        return;
+                    }
+                }
+                continue;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(job);
+    });
+    match rx.recv_timeout(limit) {
+        Ok((replies, trailing)) => {
+            let _ = handle.join();
+            assert_eq!(trailing, None, "unexpected event after RunEvent::Done");
+            replies
+        }
+        Err(_) => {
+            stop.store(true, Ordering::Release);
+            panic!("timed out after {limit:?} waiting for RunEvent::Done");
+        }
     }
 }
 
 fn collect_install(
-    job: &mut rockyd::translate::child::InstallJob,
+    job: GuardedJob<InstallJob>,
     limit: Duration,
 ) -> (Vec<(u64, u64)>, Result<(), TranslateFailure>) {
-    let start = Instant::now();
-    let mut progress = Vec::new();
-    loop {
-        assert!(
-            start.elapsed() < limit,
-            "timed out waiting for InstallEvent::Finished"
-        );
-        if let Some(event) = job.try_next() {
-            match event {
-                InstallEvent::Progress {
-                    done_bytes,
-                    total_bytes,
-                } => progress.push((done_bytes, total_bytes)),
-                InstallEvent::Finished(result) => return (progress, result),
+    let mut job = job.into_inner();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_worker = Arc::clone(&stop);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut progress = Vec::new();
+        while !stop_worker.load(Ordering::Acquire) {
+            if let Some(event) = job.try_next() {
+                match event {
+                    InstallEvent::Progress {
+                        done_bytes,
+                        total_bytes,
+                    } => progress.push((done_bytes, total_bytes)),
+                    InstallEvent::Finished(result) => {
+                        let trailing = job.try_next();
+                        drop(job);
+                        let _ = tx.send((progress, result, trailing));
+                        return;
+                    }
+                }
+                continue;
             }
-            continue;
+            thread::sleep(Duration::from_millis(10));
         }
-        thread::sleep(Duration::from_millis(10));
+        drop(job);
+    });
+    match rx.recv_timeout(limit) {
+        Ok((progress, result, trailing)) => {
+            let _ = handle.join();
+            assert_eq!(
+                trailing, None,
+                "unexpected event after InstallEvent::Finished"
+            );
+            (progress, result)
+        }
+        Err(_) => {
+            stop.store(true, Ordering::Release);
+            panic!("timed out after {limit:?} waiting for InstallEvent::Finished");
+        }
     }
 }
 
-fn drop_within<T: Send + 'static>(value: T, limit: Duration, what: &str) {
+fn drop_within<T: Send + 'static>(value: GuardedJob<T>, limit: Duration, what: &str) {
+    let inner = value.into_inner();
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        drop(value);
+        drop(inner);
         let _ = tx.send(());
     });
     rx.recv_timeout(limit)
@@ -181,6 +263,22 @@ fn is_pid_alive(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+fn begin_run(
+    home: &Path,
+    requests: &[RunRequest],
+    timeout: Duration,
+) -> std::io::Result<GuardedJob<RunJob>> {
+    start_run(&fake_cli(), home, requests, timeout).map(|job| GuardedJob::new(job, "RunJob"))
+}
+
+fn begin_install(
+    home: &Path,
+    pair: TranslatePair,
+    timeout: Duration,
+) -> std::io::Result<GuardedJob<InstallJob>> {
+    start_install(&fake_cli(), home, pair, timeout).map(|job| GuardedJob::new(job, "InstallJob"))
+}
+
 #[test]
 fn run_replies_in_order_then_done() {
     let home = TempDir::new().expect("temp home");
@@ -190,8 +288,8 @@ fn run_replies_in_order_then_done() {
         req("k3", QuoteLang::En, "tiga"),
     ];
 
-    let mut job = start_run(&fake_cli(), home.path(), &requests, RUN_TIMEOUT).expect("start run");
-    let replies = collect_run(&mut job, GUARD);
+    let job = begin_run(home.path(), &requests, RUN_TIMEOUT).expect("start run");
+    let replies = collect_run(job, GUARD);
 
     assert_eq!(
         replies,
@@ -213,7 +311,6 @@ fn run_replies_in_order_then_done() {
             },
         ]
     );
-    assert_eq!(job.try_next(), None);
 
     let runs = read_logged_argv(home.path());
     assert_eq!(runs.len(), 1);
@@ -227,8 +324,8 @@ fn same_language_is_original() {
     configure(home.path(), &json!({ "same": true }));
     let requests = vec![req("k1", QuoteLang::En, "already english")];
 
-    let mut job = start_run(&fake_cli(), home.path(), &requests, RUN_TIMEOUT).expect("start run");
-    let replies = collect_run(&mut job, GUARD);
+    let job = begin_run(home.path(), &requests, RUN_TIMEOUT).expect("start run");
+    let replies = collect_run(job, GUARD);
 
     assert_eq!(
         replies,
@@ -247,8 +344,8 @@ fn run_maps_no_prose_other_failures_and_ignores_unknown_lines() {
     );
     let requests = vec![req("k1", QuoteLang::En, "12345")];
 
-    let mut job = start_run(&fake_cli(), home.path(), &requests, RUN_TIMEOUT).expect("start run");
-    let replies = collect_run(&mut job, GUARD);
+    let job = begin_run(home.path(), &requests, RUN_TIMEOUT).expect("start run");
+    let replies = collect_run(job, GUARD);
     assert_eq!(
         replies,
         vec![RunReply::Original {
@@ -258,9 +355,8 @@ fn run_maps_no_prose_other_failures_and_ignores_unknown_lines() {
 
     let home2 = TempDir::new().expect("temp home 2");
     configure(home2.path(), &json!({ "fail": true }));
-    let mut job2 =
-        start_run(&fake_cli(), home2.path(), &requests, RUN_TIMEOUT).expect("start run 2");
-    let replies2 = collect_run(&mut job2, GUARD);
+    let job2 = begin_run(home2.path(), &requests, RUN_TIMEOUT).expect("start run 2");
+    let replies2 = collect_run(job2, GUARD);
     assert_eq!(
         replies2,
         vec![RunReply::Failed {
@@ -279,8 +375,8 @@ fn crash_mid_batch_keeps_earlier_replies() {
         req("k3", QuoteLang::En, "tiga"),
     ];
 
-    let mut job = start_run(&fake_cli(), home.path(), &requests, RUN_TIMEOUT).expect("start run");
-    let replies = collect_run(&mut job, GUARD);
+    let job = begin_run(home.path(), &requests, RUN_TIMEOUT).expect("start run");
+    let replies = collect_run(job, GUARD);
 
     assert_eq!(
         replies,
@@ -299,15 +395,9 @@ fn hang_ends_at_deadline() {
     let requests = vec![req("k1", QuoteLang::En, "halo")];
 
     let started = Instant::now();
-    let mut job = start_run(
-        &fake_cli(),
-        home.path(),
-        &requests,
-        Duration::from_millis(500),
-    )
-    .expect("start run");
+    let job = begin_run(home.path(), &requests, Duration::from_millis(500)).expect("start run");
     let pid = wait_for_pid(home.path());
-    let replies = collect_run(&mut job, Duration::from_secs(5));
+    let replies = collect_run(job, Duration::from_secs(5));
 
     assert!(replies.is_empty());
     assert!(started.elapsed() < Duration::from_secs(5));
@@ -325,15 +415,9 @@ fn hang_after_keeps_pre_deadline_replies_then_ends_with_done() {
     ];
 
     let started = Instant::now();
-    let mut job = start_run(
-        &fake_cli(),
-        home.path(),
-        &requests,
-        Duration::from_millis(500),
-    )
-    .expect("start run");
+    let job = begin_run(home.path(), &requests, Duration::from_millis(500)).expect("start run");
     let pid = wait_for_pid(home.path());
-    let replies = collect_run(&mut job, Duration::from_secs(5));
+    let replies = collect_run(job, Duration::from_secs(5));
 
     assert_eq!(
         replies,
@@ -351,19 +435,13 @@ fn hang_after_keeps_pre_deadline_replies_then_ends_with_done() {
 fn install_reports_progress_and_writes_markers() {
     let home = TempDir::new().expect("temp home");
 
-    let mut job = start_install(
-        &fake_cli(),
-        home.path(),
-        TranslatePair::IdEn,
-        INSTALL_TIMEOUT,
-    )
-    .expect("start install");
-    let (progress, result) = collect_install(&mut job, GUARD);
+    let job =
+        begin_install(home.path(), TranslatePair::IdEn, INSTALL_TIMEOUT).expect("start install");
+    let (progress, result) = collect_install(job, GUARD);
 
     assert_eq!(progress, vec![(50, 100), (100, 100)]);
     assert_eq!(result, Ok(()));
     assert_eq!(marker::ready_pairs(home.path()), vec![TranslatePair::IdEn]);
-    assert_eq!(job.try_next(), None);
 
     let runs = read_logged_argv(home.path());
     assert_eq!(runs.len(), 1);
@@ -376,42 +454,31 @@ fn install_checksum_and_crash_and_hang() {
     // checksum
     let home_checksum = TempDir::new().expect("temp home checksum");
     configure(home_checksum.path(), &json!({ "install": "checksum" }));
-    let mut job = start_install(
-        &fake_cli(),
-        home_checksum.path(),
-        TranslatePair::IdEn,
-        INSTALL_TIMEOUT,
-    )
-    .expect("start install checksum");
-    let (_, result) = collect_install(&mut job, GUARD);
+    let job = begin_install(home_checksum.path(), TranslatePair::IdEn, INSTALL_TIMEOUT)
+        .expect("start install checksum");
+    let (_, result) = collect_install(job, GUARD);
     assert_eq!(result, Err(TranslateFailure::Checksum));
 
     // crash
     let home_crash = TempDir::new().expect("temp home crash");
     configure(home_crash.path(), &json!({ "install": "crash" }));
-    let mut job = start_install(
-        &fake_cli(),
-        home_crash.path(),
-        TranslatePair::EnId,
-        INSTALL_TIMEOUT,
-    )
-    .expect("start install crash");
-    let (_, result) = collect_install(&mut job, GUARD);
+    let job = begin_install(home_crash.path(), TranslatePair::EnId, INSTALL_TIMEOUT)
+        .expect("start install crash");
+    let (_, result) = collect_install(job, GUARD);
     assert_eq!(result, Err(TranslateFailure::Engine));
 
     // hang
     let home_hang = TempDir::new().expect("temp home hang");
     configure(home_hang.path(), &json!({ "install": "hang" }));
     let started = Instant::now();
-    let mut job = start_install(
-        &fake_cli(),
+    let job = begin_install(
         home_hang.path(),
         TranslatePair::IdEn,
         Duration::from_millis(500),
     )
     .expect("start install hang");
     let pid = wait_for_pid(home_hang.path());
-    let (_, result) = collect_install(&mut job, Duration::from_secs(5));
+    let (_, result) = collect_install(job, Duration::from_secs(5));
     assert_eq!(result, Err(TranslateFailure::Download));
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(
@@ -426,8 +493,7 @@ fn dropping_a_job_kills_the_child() {
     let home_run = TempDir::new().expect("temp home run");
     configure(home_run.path(), &json!({ "hang": true }));
     let requests = vec![req("k1", QuoteLang::En, "halo")];
-    let job =
-        start_run(&fake_cli(), home_run.path(), &requests, RUN_TIMEOUT).expect("start hanging run");
+    let job = begin_run(home_run.path(), &requests, RUN_TIMEOUT).expect("start hanging run");
     let run_pid = wait_for_pid(home_run.path());
     assert!(is_pid_alive(run_pid), "run child should be running");
 
@@ -440,13 +506,8 @@ fn dropping_a_job_kills_the_child() {
     // InstallJob
     let home_install = TempDir::new().expect("temp home install");
     configure(home_install.path(), &json!({ "install": "hang" }));
-    let install_job = start_install(
-        &fake_cli(),
-        home_install.path(),
-        TranslatePair::IdEn,
-        INSTALL_TIMEOUT,
-    )
-    .expect("start hanging install");
+    let install_job = begin_install(home_install.path(), TranslatePair::IdEn, INSTALL_TIMEOUT)
+        .expect("start hanging install");
     let install_pid = wait_for_pid(home_install.path());
     assert!(is_pid_alive(install_pid), "install child should be running");
 
@@ -463,6 +524,6 @@ fn start_run_rejects_requests_past_max() {
     let requests: Vec<RunRequest> = (0..=MAX_RUN_QUOTES)
         .map(|i| req(&format!("k{i}"), QuoteLang::En, "text"))
         .collect();
-    let result = start_run(&fake_cli(), home.path(), &requests, RUN_TIMEOUT);
+    let result = begin_run(home.path(), &requests, RUN_TIMEOUT);
     assert!(result.is_err());
 }

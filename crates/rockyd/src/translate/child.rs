@@ -414,6 +414,11 @@ enum ChildExit {
     Error,
 }
 
+trait ManagedChild {
+    fn try_reap(&mut self) -> ChildExit;
+    fn kill_and_reap(&mut self);
+}
+
 struct ChildGuard {
     child: Child,
     reaped: bool,
@@ -434,7 +439,9 @@ impl ChildGuard {
     fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
         self.child.stdout.take()
     }
+}
 
+impl ManagedChild for ChildGuard {
     fn try_reap(&mut self) -> ChildExit {
         if self.reaped {
             return ChildExit::Exited;
@@ -470,8 +477,8 @@ fn kill_and_reap(child: &mut Child) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn supervise<L, S, E>(
-    mut child: ChildGuard,
+fn supervise<C: ManagedChild, L, S, E>(
+    mut child: C,
     rx: Receiver<SupervisorMsg<L>>,
     events_tx: Sender<E>,
     cancelled: &AtomicBool,
@@ -489,31 +496,33 @@ fn supervise<L, S, E>(
         }
 
         // Check the deadline before reaping so expiry wins over a late child exit.
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            child.kill_and_reap();
-            while let Ok(msg) = rx.try_recv() {
-                if let SupervisorMsg::Line { line, received_at } = msg
-                    && received_at <= deadline
-                {
-                    on_line(&mut state, line, &events_tx);
-                }
-            }
-            let _ = events_tx.send(on_finish(state, true));
+        let now = Instant::now();
+        if now >= deadline {
+            finish_expired(
+                &mut child, &rx, &events_tx, cancelled, deadline, state, on_line, on_finish,
+            );
             return;
-        };
+        }
+        let remaining = deadline.saturating_duration_since(now);
 
         if stdout_closed {
-            match child.try_reap() {
-                ChildExit::Exited => {
-                    let _ = events_tx.send(on_finish(state, false));
-                    return;
-                }
+            let exited = match child.try_reap() {
+                ChildExit::Exited => true,
                 ChildExit::Error => {
                     child.kill_and_reap();
-                    let _ = events_tx.send(on_finish(state, false));
-                    return;
+                    true
                 }
-                ChildExit::Running => {}
+                ChildExit::Running => false,
+            };
+            if exited {
+                if Instant::now() >= deadline {
+                    finish_expired(
+                        &mut child, &rx, &events_tx, cancelled, deadline, state, on_line, on_finish,
+                    );
+                } else {
+                    let _ = events_tx.send(on_finish(state, false));
+                }
+                return;
             }
         }
 
@@ -525,7 +534,7 @@ fn supervise<L, S, E>(
 
         match rx.recv_timeout(wait_for) {
             Ok(SupervisorMsg::Line { line, received_at }) => {
-                if received_at <= deadline {
+                if received_at < deadline {
                     on_line(&mut state, line, &events_tx);
                 }
             }
@@ -539,6 +548,39 @@ fn supervise<L, S, E>(
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_expired<C: ManagedChild, L, S, E>(
+    child: &mut C,
+    rx: &Receiver<SupervisorMsg<L>>,
+    events_tx: &Sender<E>,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    mut state: S,
+    mut on_line: impl FnMut(&mut S, L, &Sender<E>),
+    on_finish: impl FnOnce(S, bool) -> E,
+) {
+    child.kill_and_reap();
+    while !cancelled.load(Ordering::Acquire) {
+        let Ok(msg) = rx.try_recv() else {
+            break;
+        };
+        match msg {
+            SupervisorMsg::Line { line, received_at } => {
+                if received_at >= deadline {
+                    break;
+                }
+                on_line(&mut state, line, events_tx);
+            }
+            SupervisorMsg::Cancel => return,
+            SupervisorMsg::StdoutClosed => {}
+        }
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return;
+    }
+    let _ = events_tx.send(on_finish(state, true));
 }
 
 fn write_requests(mut stdin: ChildStdin, lines: Vec<String>) {
@@ -880,6 +922,220 @@ mod tests {
         assert_eq!(
             events,
             vec![InstallEvent::Finished(Err(TranslateFailure::Download))]
+        );
+    }
+
+    struct FakeLateChild {
+        deadline: Instant,
+        killed: Arc<AtomicBool>,
+    }
+
+    impl ManagedChild for FakeLateChild {
+        fn try_reap(&mut self) -> ChildExit {
+            // Simulate supervisor descheduling across the deadline between the top-of-loop check
+            // and observing the child's exit.
+            let now = Instant::now();
+            if now <= self.deadline {
+                thread::sleep(self.deadline - now + Duration::from_millis(10));
+            }
+            ChildExit::Exited
+        }
+
+        fn kill_and_reap(&mut self) {
+            self.killed.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn late_exit_after_deadline_during_exit_poll_returns_download_timeout() {
+        let deadline = Instant::now() + Duration::from_millis(30);
+        let killed = Arc::new(AtomicBool::new(false));
+        let child = FakeLateChild {
+            deadline,
+            killed: Arc::clone(&killed),
+        };
+
+        let (msg_tx, msg_rx) = mpsc::channel();
+        msg_tx
+            .send(SupervisorMsg::Line {
+                line: InstallLine::Result(Ok(())),
+                received_at: deadline - Duration::from_millis(20),
+            })
+            .expect("send result");
+        msg_tx
+            .send(SupervisorMsg::StdoutClosed)
+            .expect("send close");
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let cancelled = AtomicBool::new(false);
+        supervise(
+            child,
+            msg_rx,
+            events_tx,
+            &cancelled,
+            deadline,
+            None,
+            |outcome, line, _out| {
+                if let InstallLine::Result(result) = line {
+                    *outcome = Some(result);
+                }
+            },
+            |outcome, timed_out| {
+                let result = if timed_out {
+                    Err(TranslateFailure::Download)
+                } else {
+                    outcome.unwrap_or(Err(TranslateFailure::Engine))
+                };
+                InstallEvent::Finished(result)
+            },
+        );
+
+        let events: Vec<_> = events_rx.try_iter().collect();
+        assert_eq!(
+            events,
+            vec![InstallEvent::Finished(Err(TranslateFailure::Download))]
+        );
+    }
+
+    #[test]
+    fn expired_deadline_emits_done_even_while_queue_keeps_receiving_post_cutoff_lines() {
+        let mut child = spawn_fast_dummy_child();
+        let _ = child.wait();
+        let guard = ChildGuard::new(child);
+
+        let deadline = Instant::now() - Duration::from_millis(5);
+        let (msg_tx, msg_rx) = mpsc::channel();
+        msg_tx
+            .send(SupervisorMsg::Line {
+                line: RunReply::Translated {
+                    key: "early".to_string(),
+                    from: QuoteLang::Id,
+                    text: "before".to_string(),
+                },
+                received_at: deadline - Duration::from_millis(10),
+            })
+            .expect("send early reply");
+        msg_tx
+            .send(SupervisorMsg::Line {
+                line: RunReply::Translated {
+                    key: "cutoff".to_string(),
+                    from: QuoteLang::Id,
+                    text: "at-deadline".to_string(),
+                },
+                received_at: deadline,
+            })
+            .expect("send cutoff reply");
+
+        let stop_writer = Arc::new(AtomicBool::new(false));
+        let stop_writer_flag = Arc::clone(&stop_writer);
+        let writer_tx = msg_tx.clone();
+        let writer = thread::spawn(move || {
+            while !stop_writer_flag.load(Ordering::Acquire) {
+                if writer_tx
+                    .send(SupervisorMsg::Line {
+                        line: RunReply::Translated {
+                            key: "flood".to_string(),
+                            from: QuoteLang::Id,
+                            text: "after".to_string(),
+                        },
+                        received_at: Instant::now(),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let supervisor = thread::spawn(move || {
+            let cancelled = AtomicBool::new(false);
+            supervise(
+                guard,
+                msg_rx,
+                events_tx,
+                &cancelled,
+                deadline,
+                (),
+                |(), reply, out| {
+                    let _ = out.send(RunEvent::Reply(reply));
+                },
+                |(), _timed_out| RunEvent::Done,
+            );
+            let _ = done_tx.send(());
+        });
+
+        let finished = done_rx.recv_timeout(Duration::from_secs(2));
+        stop_writer.store(true, Ordering::Release);
+        assert!(
+            finished.is_ok(),
+            "supervisor should emit Done promptly despite continuous post-cutoff lines"
+        );
+        let _ = supervisor.join();
+        let _ = writer.join();
+
+        let events: Vec<_> = events_rx.try_iter().collect();
+        assert_eq!(
+            events,
+            vec![
+                RunEvent::Reply(RunReply::Translated {
+                    key: "early".to_string(),
+                    from: QuoteLang::Id,
+                    text: "before".to_string(),
+                }),
+                RunEvent::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn cancelled_drop_stops_drain_even_with_pre_cutoff_backlog() {
+        let mut child = spawn_fast_dummy_child();
+        let _ = child.wait();
+        let guard = ChildGuard::new(child);
+
+        let deadline = Instant::now() - Duration::from_millis(5);
+        let (msg_tx, msg_rx) = mpsc::channel();
+        for i in 0..10 {
+            msg_tx
+                .send(SupervisorMsg::Line {
+                    line: RunReply::Translated {
+                        key: format!("k{i}"),
+                        from: QuoteLang::Id,
+                        text: format!("t{i}"),
+                    },
+                    received_at: deadline - Duration::from_millis(10),
+                })
+                .expect("send pre-cutoff reply");
+        }
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_on_first = Arc::clone(&cancelled);
+        supervise(
+            guard,
+            msg_rx,
+            events_tx,
+            &cancelled,
+            deadline,
+            (),
+            |(), reply, out| {
+                let _ = out.send(RunEvent::Reply(reply));
+                cancel_on_first.store(true, Ordering::Release);
+            },
+            |(), _timed_out| RunEvent::Done,
+        );
+
+        let events: Vec<_> = events_rx.try_iter().collect();
+        assert_eq!(
+            events,
+            vec![RunEvent::Reply(RunReply::Translated {
+                key: "k0".to_string(),
+                from: QuoteLang::Id,
+                text: "t0".to_string(),
+            })]
         );
     }
 }
