@@ -243,29 +243,32 @@ impl CardsModel {
         }
         for card in items {
             let card_id = card.card_id.clone();
-            let card_keys: HashSet<String> = card
-                .blocks
-                .iter()
-                .filter_map(|b| b.quote.as_ref().map(|q| quote_key(&q.text)))
-                .collect();
-            let stored_is_same_or_older = self
+            let reply_card = card.clone();
+            upsert_by_rev(&mut self.items, card);
+            let stored_matches_reply = self
                 .items
                 .iter()
                 .find(|c| c.card_id == card_id)
-                .is_none_or(|existing| existing.rev <= card.rev);
-            let card_changed = upsert_by_rev(&mut self.items, card);
-            if stored_is_same_or_older {
+                .is_some_and(|stored| *stored == reply_card);
+            if stored_matches_reply {
+                let card_keys: HashSet<String> = reply_card
+                    .blocks
+                    .iter()
+                    .filter_map(|b| b.quote.as_ref().map(|q| quote_key(&q.text)))
+                    .collect();
                 let mut per_card = HashMap::new();
                 for key in card_keys {
                     if let Some(tr) = reply_translations.get(&key) {
                         per_card.insert(key, tr.clone());
                     }
                 }
-                if !per_card.is_empty() {
-                    self.translations.insert(card_id, per_card);
-                } else if card_changed {
+                if per_card.is_empty() {
                     self.translations.remove(&card_id);
+                } else {
+                    self.translations.insert(card_id, per_card);
                 }
+            } else {
+                self.translations.remove(&card_id);
             }
         }
         for pushed in pending_pushes {

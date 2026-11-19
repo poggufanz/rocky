@@ -1516,3 +1516,74 @@ fn page_reply_stores_translations_for_pushed_card_at_same_rev_not_newer() {
             .any(|l| l.text.starts_with("translated from"))
     );
 }
+
+#[test]
+fn page_reply_skips_translations_for_pushed_card_with_trimmed_blocks() {
+    use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+    let shown = format!("{}...", "x".repeat(197));
+
+    let mut blk_1 = sample_block(1, "src/b1.rs", Vec::new());
+    blk_1.quote = Some(Quote {
+        text: shown.clone(),
+        shared: false,
+    });
+    let mut blk_2 = sample_block(2, "src/b2.rs", Vec::new());
+    blk_2.quote = Some(Quote {
+        text: shown.clone(),
+        shared: false,
+    });
+
+    let mut card_b_pushed = sample_card("card-b", 2_000, Some(3_000));
+    card_b_pushed.rev = 4;
+    card_b_pushed.blocks = vec![blk_1.clone(), blk_2];
+
+    let mut card_b_trimmed = sample_card("card-b", 2_000, Some(3_000));
+    card_b_trimmed.rev = 4;
+    card_b_trimmed.blocks = vec![blk_1];
+    card_b_trimmed.more_count = 1;
+
+    let mut card_a = sample_card("card-a", 3_000, Some(4_000));
+    card_a.rev = 1;
+
+    let mut model = CardsModel::new();
+    let _ = model.set_target(Some(QuoteLang::En), 1);
+    model.on_cards(1, vec![card_a], Some("4000:card-a".to_string()), Vec::new());
+
+    // Push full card B at rev 4 before page 2 delivers a trimmed copy at the same rev.
+    model.on_push(card_b_pushed);
+
+    let _ = model.request_more(2).expect("load page 2");
+    model.on_cards(
+        2,
+        vec![card_b_trimmed],
+        None,
+        vec![QuoteTranslation {
+            quote_key: quote_key(&shown),
+            from: QuoteLang::Id,
+            text: "Translated.".to_string(),
+        }],
+    );
+
+    let rows = model.rows(UiLang::En);
+    let row_b = rows.iter().find(|r| r.card_id == "card-b").expect("card-b");
+    assert_eq!(row_b.edits.len(), 2);
+    assert_eq!(row_b.edits[0].tooltip, vec![TooltipLine::text(&shown)]);
+    assert_eq!(row_b.edits[1].tooltip, vec![TooltipLine::text(&shown)]);
+    assert_eq!(
+        row_b.files[0].tooltip,
+        vec![TooltipLine::text("src/b1.rs"), TooltipLine::text(&shown)]
+    );
+    assert_eq!(
+        row_b.files[1].tooltip,
+        vec![TooltipLine::text("src/b2.rs"), TooltipLine::text(&shown)]
+    );
+    assert!(
+        !row_b
+            .edits
+            .iter()
+            .flat_map(|e| e.tooltip.iter())
+            .chain(row_b.files.iter().flat_map(|f| f.tooltip.iter()))
+            .any(|l| l.text.starts_with("translated from"))
+    );
+}
