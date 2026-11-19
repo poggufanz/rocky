@@ -320,10 +320,8 @@ fn quote_groups_share_consecutive_quotes() {
     assert_eq!(view.groups.len(), 3);
 
     assert_eq!(view.groups[0].quote.as_deref(), Some(long_quote.as_str()));
-    assert_eq!(
-        view.groups[0].quote_line(UiLang::Id),
-        (long_quote.clone(), false)
-    );
+    let disp0 = model.quote_display(&view.groups[0], UiLang::Id);
+    assert_eq!((disp0.text, disp0.is_dim), (long_quote.clone(), false));
     assert_eq!(view.groups[0].blocks.len(), 2);
     assert_eq!(view.groups[0].blocks[0].seq, 1);
     assert_eq!(view.groups[0].blocks[0].path, "src/auth.rs");
@@ -403,20 +401,20 @@ fn missing_quote_shows_dim_line() {
     assert_eq!(id_view.groups.len(), 2);
     assert_eq!(id_view.groups[0].quote, None);
     assert_eq!(id_view.groups[0].blocks.len(), 2);
+    let d0_id = model.quote_display(&id_view.groups[0], UiLang::Id);
     assert_eq!(
-        id_view.groups[0].quote_line(UiLang::Id),
+        (d0_id.text, d0_id.is_dim),
         ("Kata agent tidak tercatat di edit ini".to_string(), true)
     );
+    let d0_en = model.quote_display(&id_view.groups[0], UiLang::En);
     assert_eq!(
-        id_view.groups[0].quote_line(UiLang::En),
+        (d0_en.text, d0_en.is_dim),
         ("No agent words recorded for this edit".to_string(), true)
     );
 
     assert_eq!(id_view.groups[1].quote.as_deref(), Some("Explained"));
-    assert_eq!(
-        id_view.groups[1].quote_line(UiLang::En),
-        ("Explained".to_string(), false)
-    );
+    let d1_en = model.quote_display(&id_view.groups[1], UiLang::En);
+    assert_eq!((d1_en.text, d1_en.is_dim), ("Explained".to_string(), false));
 }
 
 #[test]

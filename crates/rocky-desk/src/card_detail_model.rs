@@ -196,15 +196,7 @@ impl DetailModel {
         };
         let original = || match &group.quote {
             Some(text) if !text.is_empty() => (text.clone(), false),
-            _ => match group
-                .raw_quote
-                .as_deref()
-                .map(crate::plain_text::plain_quote)
-                .filter(|t| !t.is_empty())
-            {
-                Some(text) => (text, false),
-                None => (card_text(lang, &CardMsg::NoAgentWords), true),
-            },
+            _ => (card_text(lang, &CardMsg::NoAgentWords), true),
         };
         if let Some(tr) = self.translations.get(&key) {
             let cleaned = crate::plain_text::plain_quote(&tr.text);
@@ -289,14 +281,6 @@ pub struct QuoteGroup {
 }
 
 impl QuoteGroup {
-    /// Returns `(text, is_dim)` for rendering this group's quote line in `lang`.
-    pub fn quote_line(&self, lang: UiLang) -> (String, bool) {
-        match &self.quote {
-            Some(text) => (text.clone(), false),
-            None => (card_text(lang, &CardMsg::NoAgentWords), true),
-        }
-    }
-
     /// Returns the SHA-256 key of the group's raw quote text, if present.
     pub fn quote_key(&self) -> Option<String> {
         self.raw_quote.as_deref().map(quote_key)

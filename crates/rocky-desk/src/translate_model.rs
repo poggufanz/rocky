@@ -149,6 +149,15 @@ impl TranslateFlow {
         }
     }
 
+    /// Drops an open download confirmation once its asked pair is ready.
+    pub fn on_status(&mut self, status: &TranslateStatus) {
+        if let Some((asked, _)) = self.asking
+            && status.ready.contains(&asked)
+        {
+            self.asking = None;
+        }
+    }
+
     /// Returns the pair awaiting user confirmation to download, if any.
     pub fn asking(&self) -> Option<TranslatePair> {
         self.asking.map(|(pair, _)| pair)
@@ -550,5 +559,22 @@ mod tests {
             UiLang::En,
         );
         assert_eq!(flow.error(), None);
+    }
+
+    #[test]
+    fn status_ready_drops_open_ask() {
+        let mut flow = TranslateFlow::default();
+        let empty = TranslateStatus::default();
+        let ready = status_with(vec![TranslatePair::IdEn], None, None);
+
+        let out = flow.act(TranslateAction::Toggle, false, &empty, UiLang::En);
+        assert!(out.is_empty());
+        assert_eq!(flow.asking(), Some(TranslatePair::IdEn));
+
+        flow.on_status(&ready);
+        assert_eq!(flow.asking(), None);
+
+        let out = flow.act(TranslateAction::Confirm, false, &ready, UiLang::En);
+        assert!(out.is_empty());
     }
 }

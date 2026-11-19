@@ -48,6 +48,11 @@ impl DeskView {
                         }
                         let for_notify = msg.clone();
                         self.setup.on_server_msg(&for_notify);
+                        if let ServerMsg::Snapshot { translate, .. }
+                        | ServerMsg::Translate { status: translate } = &for_notify
+                        {
+                            self.translate.on_status(translate);
+                        }
                         if matches!(&for_notify, ServerMsg::Snapshot { .. }) {
                             snapshot_seen = true;
                         }

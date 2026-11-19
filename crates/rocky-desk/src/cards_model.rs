@@ -379,16 +379,14 @@ impl CardsModel {
     }
 }
 
-fn upsert_by_rev(cards: &mut Vec<Card>, card: Card) -> bool {
+fn upsert_by_rev(cards: &mut Vec<Card>, card: Card) {
     if let Some(existing) = cards.iter_mut().find(|c| c.card_id == card.card_id) {
         if card.rev > existing.rev {
             *existing = card;
-            return true;
         }
-        return false;
+        return;
     }
     cards.push(card);
-    true
 }
 
 /// True when the card's main checkout (else its root) is `project`. The daemon

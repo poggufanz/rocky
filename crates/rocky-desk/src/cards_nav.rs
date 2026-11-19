@@ -1002,6 +1002,79 @@ mod tests {
     }
 
     #[test]
+    fn route_card_msg_applies_card_detail_translations_and_pending() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::{QuoteTranslation, quote_key};
+
+        let mut view = View::Agents;
+        let mut cards = CardsModel::new();
+        let mut detail = None;
+        let mut diff = None;
+
+        let raw0 = "Pertama";
+        let raw1 = "Kedua";
+        let k0 = quote_key(raw0);
+        let k1 = quote_key(raw1);
+
+        let _ = open_detail(
+            &mut view,
+            &mut detail,
+            &mut diff,
+            "c1".to_string(),
+            1,
+            Some(QuoteLang::En),
+        );
+
+        let mut card = sample_card("c1");
+        let mut b0 = card.blocks[0].clone();
+        b0.seq = 1;
+        b0.quote = Some(Quote {
+            text: raw0.to_string(),
+            shared: false,
+        });
+        let mut b1 = card.blocks[0].clone();
+        b1.seq = 2;
+        b1.quote = Some(Quote {
+            text: raw1.to_string(),
+            shared: false,
+        });
+        card.blocks = vec![b0, b1];
+
+        assert!(route_card_msg(
+            &ServerMsg::CardDetail {
+                id: 1,
+                card,
+                snippets: Vec::new(),
+                translations: vec![QuoteTranslation {
+                    quote_key: k0,
+                    from: QuoteLang::Id,
+                    text: "First".to_string(),
+                }],
+                pending: vec![k1],
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+
+        let d = detail.as_ref().unwrap();
+        let DetailState::Ready(ready) = d.state() else {
+            panic!("expected Ready state");
+        };
+        let disp0 = d.quote_display(&ready.groups[0], UiLang::En);
+        assert_eq!(disp0.text, "First");
+        assert_eq!(disp0.translated_from, Some(QuoteLang::Id));
+        assert!(!disp0.translating);
+
+        let disp1 = d.quote_display(&ready.groups[1], UiLang::En);
+        assert_eq!(disp1.text, raw1);
+        assert_eq!(disp1.translated_from, None);
+        assert!(disp1.translating);
+    }
+
+    #[test]
     fn open_detail_sends_target() {
         use rocky_proto::translate::QuoteTranslation;
 
