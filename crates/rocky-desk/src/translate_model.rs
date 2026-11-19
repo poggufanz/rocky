@@ -132,11 +132,14 @@ impl TranslateFlow {
                 Vec::new()
             }
             TranslateAction::Confirm => match self.asking.take() {
-                Some((asking_pair, true)) => {
-                    vec![Outgoing::SetEnabled(true), Outgoing::Install(asking_pair)]
+                Some((asking_pair, turn_on)) if asking_pair == pair => {
+                    if turn_on {
+                        vec![Outgoing::SetEnabled(true), Outgoing::Install(asking_pair)]
+                    } else {
+                        vec![Outgoing::Install(asking_pair)]
+                    }
                 }
-                Some((asking_pair, false)) => vec![Outgoing::Install(asking_pair)],
-                None => Vec::new(),
+                Some(_) | None => Vec::new(),
             },
             TranslateAction::Cancel => {
                 self.asking = None;
@@ -164,6 +167,11 @@ impl TranslateFlow {
             Outcome::Expired => Some(TranslateError::Other(expired.to_string())),
             Outcome::Plan { .. } | Outcome::Repos(_) => None,
         };
+    }
+
+    /// Records that an outgoing install or remove request could not be sent.
+    pub fn on_not_sent(&mut self, reason: &str) {
+        self.error = Some(TranslateError::Other(reason.to_string()));
     }
 
     /// Returns the last request error, cleared on the next action.
@@ -503,6 +511,38 @@ mod tests {
         // Any action clears error.
         flow.on_result(&Outcome::Expired, "timed out");
         assert!(flow.error().is_some());
+        flow.act(
+            TranslateAction::Cancel,
+            false,
+            &TranslateStatus::default(),
+            UiLang::En,
+        );
+        assert_eq!(flow.error(), None);
+    }
+
+    #[test]
+    fn confirm_after_language_change_installs_nothing() {
+        let mut flow = TranslateFlow::default();
+        let status = TranslateStatus::default();
+
+        let out = flow.act(TranslateAction::Toggle, false, &status, UiLang::En);
+        assert!(out.is_empty());
+        assert_eq!(flow.asking(), Some(TranslatePair::IdEn));
+
+        let out = flow.act(TranslateAction::Confirm, false, &status, UiLang::Id);
+        assert!(out.is_empty());
+        assert_eq!(flow.asking(), None);
+    }
+
+    #[test]
+    fn not_sent_sets_error_and_next_action_clears_it() {
+        let mut flow = TranslateFlow::default();
+        flow.on_not_sent("Rocky is not connected yet.");
+        assert_eq!(
+            flow.error(),
+            Some(&TranslateError::Other("Rocky is not connected yet.".into()))
+        );
+
         flow.act(
             TranslateAction::Cancel,
             false,

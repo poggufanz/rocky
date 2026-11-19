@@ -240,7 +240,8 @@ impl DeskView {
         let pair = TranslatePair::to(quote_lang(lang));
         let install_busy = self.requests.pending(&RequestKind::TranslateInstall(pair));
         let remove_busy = self.requests.pending(&RequestKind::TranslateRemove);
-        let asking = self.translate.asking().is_some();
+        let asked_pair = self.translate.asking();
+        let asking = asked_pair.is_some();
         let can_remove = !status.ready.is_empty() || status.failed.is_some();
 
         let mut buttons = div().flex().flex_wrap().items_center().gap(px(6.0));
@@ -312,9 +313,10 @@ impl DeskView {
             has_extras = true;
             extras = extras.child(buttons);
         }
-        if asking {
+        if let Some(asked) = asked_pair {
             has_extras = true;
-            let confirm_label = if install_busy {
+            let confirm_busy = self.requests.pending(&RequestKind::TranslateInstall(asked));
+            let confirm_label = if confirm_busy {
                 SetupMsg::SwitchWorking
             } else {
                 SetupMsg::TranslateDownload
@@ -329,7 +331,7 @@ impl DeskView {
                     SharedString::from("translate:confirm"),
                     setup(confirm_label),
                     kit::Weight::Normal,
-                    editable && !install_busy,
+                    editable && !confirm_busy,
                     cx.listener(|this, _, _, cx| {
                         this.translate_act(TranslateAction::Confirm);
                         cx.notify();

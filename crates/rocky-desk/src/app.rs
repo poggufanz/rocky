@@ -296,6 +296,13 @@ impl DeskView {
         self.send_set(id, set_lang(id, lang));
     }
 
+    fn start_translate_request(&mut self, kind: RequestKind) {
+        if !self.start_request(kind.clone()) && !self.requests.pending(&kind) {
+            let reason = self.not_connected_text();
+            self.translate.on_not_sent(&reason);
+        }
+    }
+
     /// Apply a quote translation settings action and emit any outgoing commands.
     fn translate_act(&mut self, action: TranslateAction) {
         if !self.ctl.model.editable() {
@@ -315,10 +322,10 @@ impl DeskView {
                     self.send_set(id, set_translate_quotes(id, on));
                 }
                 Outgoing::Install(pair) => {
-                    self.start_request(RequestKind::TranslateInstall(pair));
+                    self.start_translate_request(RequestKind::TranslateInstall(pair));
                 }
                 Outgoing::Remove => {
-                    self.start_request(RequestKind::TranslateRemove);
+                    self.start_translate_request(RequestKind::TranslateRemove);
                 }
             }
         }
@@ -411,6 +418,16 @@ impl DeskView {
             return;
         }
         self.ctl.ui_lang = lang;
+        if self.translate.asking().is_some() {
+            let enabled = self
+                .ctl
+                .model
+                .settings()
+                .is_some_and(|s| s.translate_quotes);
+            let status = self.ctl.model.translate_status().clone();
+            self.translate
+                .act(TranslateAction::Cancel, enabled, &status, lang);
+        }
         // A value `tooltip` never returns forces the next refresh to re-send it.
         self.ctl.last_tooltip = Msg::NoAgents;
         self.menu_stale = true;
