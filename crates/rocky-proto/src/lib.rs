@@ -11,3 +11,4 @@ pub mod redact;
 pub mod respawn;
 pub mod settings;
 pub mod spool;
+pub mod translate;

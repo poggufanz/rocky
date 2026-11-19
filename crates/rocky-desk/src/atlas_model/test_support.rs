@@ -21,6 +21,7 @@ pub fn model_with(
             ..Settings::default()
         },
         repo_pending: Vec::new(),
+        translate: rocky_proto::translate::TranslateStatus::default(),
     });
     model.set_wanted(keys);
     for (key, entries) in timelines {

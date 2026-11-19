@@ -477,6 +477,7 @@ mod tests {
             health: Health::default(),
             settings: Settings::default(),
             repo_pending: Vec::new(),
+            translate: rocky_proto::translate::TranslateStatus::default(),
         };
         let line = encode(&msg);
         assert!(line.len() > LINE_CAP, "fixture must exceed 64 KiB");

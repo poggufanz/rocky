@@ -219,6 +219,7 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
         ClientMsg::CardDetail {
             id: 2,
             card_id: "c1".to_string(),
+            translate_to: None,
         }
     );
     assert_eq!(detail.state(), &DetailState::Loading);

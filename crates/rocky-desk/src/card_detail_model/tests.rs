@@ -69,6 +69,7 @@ fn detail_request_and_ready() {
         ClientMsg::CardDetail {
             id: 7,
             card_id: "card-42".to_string(),
+            translate_to: None,
         }
     );
     assert_eq!(model.card_id(), "card-42");
@@ -98,6 +99,7 @@ fn detail_request_and_ready() {
         ClientMsg::CardDetail {
             id: 8,
             card_id: "card-43".to_string(),
+            translate_to: None,
         }
     );
     let mut sub = sample_card("card-43", 5_000, Some(50_000));

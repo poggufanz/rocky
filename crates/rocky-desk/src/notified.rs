@@ -497,6 +497,7 @@ mod tests {
             health: rocky_proto::pipe::Health::default(),
             settings: rocky_proto::settings::Settings::default(),
             repo_pending: Vec::new(),
+            translate: rocky_proto::translate::TranslateStatus::default(),
         };
         let out = s.on_message(&snap_on);
         assert_eq!(out.len(), 1);
@@ -575,6 +576,7 @@ mod tests {
             health: rocky_proto::pipe::Health::default(),
             settings: rocky_proto::settings::Settings::default(),
             repo_pending: Vec::new(),
+            translate: rocky_proto::translate::TranslateStatus::default(),
         };
         let settings_on = ServerMsg::Settings {
             settings: rocky_proto::settings::Settings::default(),

@@ -301,6 +301,7 @@ mod tests {
             health: Health::default(),
             settings: Settings::default(),
             repo_pending: Vec::new(),
+            translate: rocky_proto::translate::TranslateStatus::default(),
         }
     }
 

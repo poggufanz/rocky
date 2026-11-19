@@ -4,6 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
+use crate::translate::{QuoteLang, QuoteTranslation, TranslatePair, TranslateStatus};
 
 pub const PROTOCOL_VERSION: u32 = 4;
 pub const LINE_CAP: usize = 64 * 1024;
@@ -351,12 +352,21 @@ pub enum ClientMsg {
     CardDetail {
         id: u64,
         card_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        translate_to: Option<QuoteLang>,
     },
     BlockDiff {
         id: u64,
         card_id: String,
         seq: u32,
         page: u32,
+    },
+    TranslateInstall {
+        id: u64,
+        pair: TranslatePair,
+    },
+    TranslateRemove {
+        id: u64,
     },
 }
 
@@ -377,6 +387,8 @@ pub enum ServerMsg {
         settings: Settings,
         #[serde(default)]
         repo_pending: Vec<PendingRepo>,
+        #[serde(default)]
+        translate: TranslateStatus,
     },
     Status {
         op: StatusOp,
@@ -431,6 +443,21 @@ pub enum ServerMsg {
         id: u64,
         card: crate::cards::Card,
         snippets: Vec<BlockSnippet>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        translations: Vec<QuoteTranslation>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending: Vec<String>,
+    },
+    QuoteTranslated {
+        card_id: String,
+        item: QuoteTranslation,
+    },
+    QuoteSettled {
+        card_id: String,
+        quote_key: String,
+    },
+    Translate {
+        status: TranslateStatus,
     },
     BlockDiff {
         id: u64,
@@ -729,6 +756,7 @@ mod tests {
                 health: health.clone(),
                 settings: Settings::default(),
                 repo_pending: Vec::new(),
+                translate: crate::translate::TranslateStatus::default(),
             },
             ServerMsg::Snapshot {
                 agents: Vec::new(),
@@ -736,6 +764,7 @@ mod tests {
                 health: Health::default(),
                 settings: Settings::default(),
                 repo_pending: vec![pending_repo()],
+                translate: crate::translate::TranslateStatus::default(),
             },
             ServerMsg::ConsentPlan {
                 id: 14,
@@ -876,6 +905,7 @@ mod tests {
                 health: Health::default(),
                 settings: Settings::default(),
                 repo_pending: vec![pending_repo()],
+                translate: crate::translate::TranslateStatus::default(),
             },
         ];
         for m in server {
@@ -1087,6 +1117,7 @@ mod tests {
             ClientMsg::CardDetail {
                 id: 12,
                 card_id: "c1".into(),
+                translate_to: None,
             },
             ClientMsg::BlockDiff {
                 id: 13,
@@ -1135,6 +1166,8 @@ mod tests {
                         SnippetLine::More { lines: 5 },
                     ],
                 }],
+                translations: Vec::new(),
+                pending: Vec::new(),
             },
             ServerMsg::BlockDiff {
                 id: 13,
@@ -1237,6 +1270,169 @@ mod tests {
             let wire = encode(&msg);
             assert!(wire.contains("\"dur_ms\""), "missing dur_ms: {wire}");
             assert_eq!(decode::<ServerMsg>(wire.trim_end()).unwrap(), msg);
+        }
+    }
+
+    #[test]
+    fn translate_protocol_messages_round_trip_and_compat() {
+        use crate::cards::{CARD_VERSION, Card, CardStatus, Coverage, CoverageState, Importance};
+        use crate::translate::{
+            InstallProgress, QuoteLang, QuoteTranslation, TranslateFailure, TranslatePair,
+            TranslateStatus,
+        };
+
+        let sample_card = Card {
+            v: CARD_VERSION,
+            card_id: "c1".into(),
+            rev: 1,
+            repo_id: "r1".into(),
+            root: String::new(),
+            main_root: None,
+            branch: Some("main".into()),
+            session_id: "s1".into(),
+            agent_id: "a1".into(),
+            agent_type: "claude".into(),
+            parent_card_id: None,
+            started_ms: 1_000,
+            ended_ms: Some(2_000),
+            status: CardStatus::Done,
+            prompt: "fix bug".into(),
+            prompt_truncated: false,
+            importance: Importance::Medium,
+            blocks: Vec::new(),
+            more_count: 0,
+            flow: Vec::new(),
+            flow_more: 0,
+            outside_count: 0,
+            reads: Vec::new(),
+            reads_more: 0,
+            sequence: None,
+            coverage: Coverage {
+                state: CoverageState::Full,
+                reasons: Vec::new(),
+            },
+        };
+
+        // Old ClientMsg::CardDetail without translate_to parses with None.
+        let old_req = r#"{"v":4,"type":"card_detail","id":1,"card_id":"c1"}"#;
+        assert_eq!(
+            decode::<ClientMsg>(old_req).unwrap(),
+            ClientMsg::CardDetail {
+                id: 1,
+                card_id: "c1".into(),
+                translate_to: None,
+            }
+        );
+
+        // CardDetail request with translate_to: None omits the key.
+        let encoded_none = encode(&ClientMsg::CardDetail {
+            id: 1,
+            card_id: "c1".into(),
+            translate_to: None,
+        });
+        assert!(
+            !encoded_none.contains("translate_to"),
+            "unexpected translate_to key: {encoded_none}"
+        );
+
+        // Round-trip new and updated ClientMsg variants.
+        let client_msgs = [
+            ClientMsg::CardDetail {
+                id: 2,
+                card_id: "c1".into(),
+                translate_to: Some(QuoteLang::En),
+            },
+            ClientMsg::TranslateInstall {
+                id: 3,
+                pair: TranslatePair::IdEn,
+            },
+            ClientMsg::TranslateRemove { id: 4 },
+        ];
+        for msg in &client_msgs {
+            let wire = encode(msg);
+            assert_eq!(&decode::<ClientMsg>(wire.trim_end()).unwrap(), msg);
+        }
+
+        // Old ServerMsg::CardDetail without translations or pending parses with empty Vecs.
+        let card_json = serde_json::to_string(&sample_card).unwrap();
+        let old_detail =
+            format!(r#"{{"v":4,"type":"card_detail","id":12,"card":{card_json},"snippets":[]}}"#);
+        assert_eq!(
+            decode::<ServerMsg>(&old_detail).unwrap(),
+            ServerMsg::CardDetail {
+                id: 12,
+                card: sample_card.clone(),
+                snippets: Vec::new(),
+                translations: Vec::new(),
+                pending: Vec::new(),
+            }
+        );
+
+        let encoded_empty_detail = encode(&ServerMsg::CardDetail {
+            id: 12,
+            card: sample_card.clone(),
+            snippets: Vec::new(),
+            translations: Vec::new(),
+            pending: Vec::new(),
+        });
+        assert!(
+            !encoded_empty_detail.contains("\"pending\""),
+            "unexpected pending key: {encoded_empty_detail}"
+        );
+
+        // Old ServerMsg::Snapshot without translate parses with TranslateStatus::default().
+        let old_snap = r#"{"v":4,"type":"snapshot","agents":[],"aggregate":"idle","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false},"settings":{"v":1}}"#;
+        let ServerMsg::Snapshot { translate, .. } = decode::<ServerMsg>(old_snap).unwrap() else {
+            panic!("expected Snapshot");
+        };
+        assert_eq!(translate, TranslateStatus::default());
+
+        // Round-trip new and updated ServerMsg variants.
+        let qt = QuoteTranslation {
+            quote_key: "deadbeef".into(),
+            from: QuoteLang::Id,
+            text: "hello".into(),
+        };
+        let status = TranslateStatus {
+            ready: vec![TranslatePair::IdEn],
+            installing: Some(InstallProgress {
+                pair: TranslatePair::EnId,
+                done_bytes: 100,
+                total_bytes: 200,
+            }),
+            failed: Some(TranslateFailure::Checksum),
+        };
+        let server_msgs = [
+            ServerMsg::CardDetail {
+                id: 12,
+                card: sample_card,
+                snippets: Vec::new(),
+                translations: vec![qt.clone()],
+                pending: vec!["cafebabe".into()],
+            },
+            ServerMsg::QuoteTranslated {
+                card_id: "c1".into(),
+                item: qt,
+            },
+            ServerMsg::QuoteSettled {
+                card_id: "c1".into(),
+                quote_key: "cafebabe".into(),
+            },
+            ServerMsg::Translate {
+                status: status.clone(),
+            },
+            ServerMsg::Snapshot {
+                agents: Vec::new(),
+                aggregate: Status::Idle,
+                health: Health::default(),
+                settings: Settings::default(),
+                repo_pending: Vec::new(),
+                translate: status,
+            },
+        ];
+        for msg in &server_msgs {
+            let wire = encode(msg);
+            assert_eq!(&decode::<ServerMsg>(wire.trim_end()).unwrap(), msg);
         }
     }
 }

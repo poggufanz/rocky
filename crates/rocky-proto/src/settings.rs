@@ -26,6 +26,7 @@ pub struct Settings {
     pub notify_done: bool,
     pub lang: Lang,
     pub autostart_asked: bool,
+    pub translate_quotes: bool,
 }
 
 impl Default for Settings {
@@ -41,6 +42,7 @@ impl Default for Settings {
             notify_done: true,
             lang: Lang::Auto,
             autostart_asked: false,
+            translate_quotes: false,
         }
     }
 }
@@ -53,7 +55,7 @@ mod tests {
     fn default_settings_wire_matches_spec() {
         assert_eq!(
             serde_json::to_string(&Settings::default()).unwrap(),
-            r#"{"v":1,"subagent_tree":true,"history":true,"tool_text":true,"cards":true,"notify_needs_you":true,"notify_failed":true,"notify_done":true,"lang":"auto","autostart_asked":false}"#
+            r#"{"v":1,"subagent_tree":true,"history":true,"tool_text":true,"cards":true,"notify_needs_you":true,"notify_failed":true,"notify_done":true,"lang":"auto","autostart_asked":false,"translate_quotes":false}"#
         );
     }
 

@@ -68,6 +68,7 @@ pub fn apply_set(s: &Settings, name: &str, value: &Value) -> Result<Settings, &'
         "notify_failed" => next.notify_failed = b(value)?,
         "notify_done" => next.notify_done = b(value)?,
         "autostart_asked" => next.autostart_asked = b(value)?,
+        "translate_quotes" => next.translate_quotes = b(value)?,
         "lang" => {
             next.lang =
                 serde_json::from_value::<Lang>(value.clone()).map_err(|_| "invalid value")?

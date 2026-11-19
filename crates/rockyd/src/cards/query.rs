@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 
 use rocky_proto::pipe::ServerMsg;
+use rocky_proto::translate::QuoteLang;
 
 use crate::cards::detail::{
     build_block_diff, build_block_diff_with, build_card_detail, build_card_detail_unowned,
@@ -62,6 +63,11 @@ struct QueryDone {
     reply: ServerMsg,
 }
 
+struct PendingReply {
+    translate_to: Option<QuoteLang>,
+    reply: SyncSender<ServerMsg>,
+}
+
 /// Asynchronous query supervisor that runs card reads, detail snippet assembly,
 /// block diffs, and frame sizing on one dedicated worker thread.
 pub struct CardQueryLoop {
@@ -69,7 +75,7 @@ pub struct CardQueryLoop {
     worker_index: usize,
     object_reader: Option<QueryObjectReader>,
     next_token: u64,
-    replies: HashMap<u64, SyncSender<ServerMsg>>,
+    replies: HashMap<u64, PendingReply>,
     job_tx: Option<mpsc::Sender<QueryJob>>,
     job_rx: Option<mpsc::Receiver<QueryJob>>,
     res_tx: Option<mpsc::Sender<QueryDone>>,
@@ -143,6 +149,7 @@ impl CardQueryLoop {
                 before,
                 limit,
             },
+            None,
             reply,
         );
     }
@@ -153,6 +160,7 @@ impl CardQueryLoop {
         id: u64,
         card_id: String,
         owned_roots: BTreeSet<String>,
+        translate_to: Option<QuoteLang>,
         reply: SyncSender<ServerMsg>,
     ) {
         self.submit(
@@ -161,6 +169,7 @@ impl CardQueryLoop {
                 card_id,
                 owned_roots,
             },
+            translate_to,
             reply,
         );
     }
@@ -183,17 +192,30 @@ impl CardQueryLoop {
                 page,
                 owned_roots,
             },
+            None,
             reply,
         );
     }
 
-    /// Forwards every completed query reply back through its waiting client channel.
-    pub fn service(&mut self) {
+    /// Forwards every completed query reply back through its waiting client channel,
+    /// running `attach` on `CardDetail` replies whose request asked for translation.
+    pub fn service_with(&mut self, attach: &mut dyn FnMut(&mut ServerMsg, QuoteLang)) {
         while let Ok(done) = self.res_rx.try_recv() {
-            if let Some(reply) = self.replies.remove(&done.token) {
-                let _ = reply.send(done.reply);
+            if let Some(pending) = self.replies.remove(&done.token) {
+                let mut msg = done.reply;
+                if let Some(to) = pending.translate_to
+                    && matches!(msg, ServerMsg::CardDetail { .. })
+                {
+                    attach(&mut msg, to);
+                }
+                let _ = pending.reply.send(msg);
             }
         }
+    }
+
+    /// Forwards every completed query reply back through its waiting client channel.
+    pub fn service(&mut self) {
+        self.service_with(&mut |_, _| {});
     }
 
     fn ensure_started(&mut self) {
@@ -216,18 +238,29 @@ impl CardQueryLoop {
         self.workers.push(handle, finished);
     }
 
-    fn submit(&mut self, kind: QueryKind, reply: SyncSender<ServerMsg>) {
+    fn submit(
+        &mut self,
+        kind: QueryKind,
+        translate_to: Option<QuoteLang>,
+        reply: SyncSender<ServerMsg>,
+    ) {
         self.ensure_started();
         self.next_token = self.next_token.wrapping_add(1);
         let token = self.next_token;
         let id = kind.id();
-        self.replies.insert(token, reply);
+        self.replies.insert(
+            token,
+            PendingReply {
+                translate_to,
+                reply,
+            },
+        );
         let send_failed = self
             .job_tx
             .as_ref()
             .is_none_or(|tx| tx.send(QueryJob { token, kind }).is_err());
-        if send_failed && let Some(reply) = self.replies.remove(&token) {
-            let _ = reply.send(ServerMsg::Ack {
+        if send_failed && let Some(pending) = self.replies.remove(&token) {
+            let _ = pending.reply.send(ServerMsg::Ack {
                 id,
                 ok: false,
                 error: Some("query worker unavailable".to_string()),
@@ -459,7 +492,7 @@ mod tests {
         assert_eq!(items[0].card_id, "card-q-1");
 
         let (tx, rx) = mpsc::sync_channel(1);
-        queries.card_detail(2, "card-q-1".to_string(), owned.clone(), tx);
+        queries.card_detail(2, "card-q-1".to_string(), owned.clone(), None, tx);
         let ServerMsg::CardDetail {
             id: 2, snippets, ..
         } = wait_reply(&rx, &mut queries)
@@ -482,7 +515,7 @@ mod tests {
         assert!(!lines.is_empty());
 
         let (tx, rx) = mpsc::sync_channel(1);
-        queries.card_detail(4, "missing-card".to_string(), owned.clone(), tx);
+        queries.card_detail(4, "missing-card".to_string(), owned.clone(), None, tx);
         assert_eq!(
             wait_reply(&rx, &mut queries),
             ServerMsg::Ack {
@@ -600,8 +633,8 @@ mod tests {
 
         let (tx1, rx1) = mpsc::sync_channel(1);
         let (tx2, rx2) = mpsc::sync_channel(1);
-        queries.card_detail(1, "card-panic".to_string(), owned.clone(), tx1);
-        queries.card_detail(2, "card-ok".to_string(), owned.clone(), tx2);
+        queries.card_detail(1, "card-panic".to_string(), owned.clone(), None, tx1);
+        queries.card_detail(2, "card-ok".to_string(), owned.clone(), None, tx2);
 
         assert_eq!(
             wait_reply(&rx1, &mut queries),
@@ -726,11 +759,18 @@ mod tests {
 
         let empty_owned = BTreeSet::new();
         let (tx1, rx1) = mpsc::sync_channel(1);
-        queries.card_detail(10, "card-revoked".to_string(), empty_owned.clone(), tx1);
+        queries.card_detail(
+            10,
+            "card-revoked".to_string(),
+            empty_owned.clone(),
+            None,
+            tx1,
+        );
         let ServerMsg::CardDetail {
             id: 10,
             card: detail_card,
             snippets,
+            ..
         } = wait_reply(&rx1, &mut queries)
         else {
             panic!("expected CardDetail without snippets for unowned root");
@@ -841,7 +881,13 @@ mod tests {
             }),
         );
         let (tx, _rx) = mpsc::sync_channel(1);
-        queries.card_detail(1, "card-q-drop".to_string(), BTreeSet::from([canon]), tx);
+        queries.card_detail(
+            1,
+            "card-q-drop".to_string(),
+            BTreeSet::from([canon]),
+            None,
+            tx,
+        );
         entered_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("query worker entered object reader");

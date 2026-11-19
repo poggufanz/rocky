@@ -1,8 +1,9 @@
-// Fake Rocky CLI for the node_runner and capture_child tests. Node built-ins only.
-// Logs its argv under ROCKY_HOME, then behaves as fake-cli.json says, or as
-// fake-capture.json says when run as `listen`.
+// Fake Rocky CLI for the node_runner, capture_child, and translate_child tests.
+// Node built-ins only. Logs its argv under ROCKY_HOME, then behaves as fake-cli.json says,
+// as fake-capture.json says for `listen`, or as fake-translate.json says for `translate`.
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
@@ -17,6 +18,10 @@ fs.appendFileSync(
 
 if (process.argv[2] === "listen") {
   listen();
+  return;
+}
+if (process.argv[2] === "translate") {
+  translate();
   return;
 }
 
@@ -104,4 +109,154 @@ function listen() {
     default:
       process.exitCode = 3;
   }
+}
+
+// The translate command: `translate run` or `translate install --pair <pair>`.
+// Behaves as fake-translate.json says; absent file uses defaults.
+function translate() {
+  fs.writeFileSync(path.join(home, "fake-translate.pid"), String(process.pid));
+  const translatePath = path.join(home, "fake-translate.json");
+  const cfg = fs.existsSync(translatePath)
+    ? JSON.parse(fs.readFileSync(translatePath, "utf8"))
+    : {};
+  const out = (value) => process.stdout.write(JSON.stringify(value) + "\n");
+  const sub = process.argv[3];
+
+  if (sub === "run") {
+    if (cfg.hang || cfg.hang_after === 0) {
+      const lines = readline.createInterface({ input: process.stdin });
+      lines.on("line", () => {});
+      setInterval(() => {}, 60_000);
+      return;
+    }
+    if (cfg.crash_after === 0) {
+      process.exitCode = 1;
+      return;
+    }
+    let replies = 0;
+    let stopped = false;
+    const lines = readline.createInterface({ input: process.stdin });
+    const handleLine = (line) => {
+      if (stopped || !line.trim()) {
+        return;
+      }
+      const req = JSON.parse(line);
+      if (cfg.extra_noise) {
+        process.stdout.write("not-json\n");
+        out({ v: 1, key: "unrequested-key", ok: true, from: "id", text: "ignored" });
+      }
+      if (cfg.same) {
+        out({ v: 1, key: req.key, ok: false, reason: "same-language" });
+      } else if (cfg.no_prose) {
+        out({ v: 1, key: req.key, ok: false, reason: "no-prose" });
+      } else if (cfg.fail) {
+        out({ v: 1, key: req.key, ok: false, reason: "engine" });
+      } else if (cfg.wrong_from) {
+        out({ v: 1, key: req.key, ok: true, from: req.to, text: "T:" + req.text });
+      } else {
+        const from = req.to === "en" ? "id" : "en";
+        out({ v: 1, key: req.key, ok: true, from, text: "T:" + req.text });
+      }
+      replies += 1;
+      if (typeof cfg.hang_after === "number" && replies >= cfg.hang_after) {
+        stopped = true;
+        setInterval(() => {}, 60_000);
+      } else if (typeof cfg.crash_after === "number" && replies >= cfg.crash_after) {
+        stopped = true;
+        lines.close();
+        process.stdin.destroy();
+        process.exitCode = 1;
+      }
+    };
+    if (cfg.wait_file) {
+      const pending = [];
+      let released = false;
+      lines.on("line", (line) => {
+        if (released) {
+          handleLine(line);
+        } else {
+          pending.push(line);
+        }
+      });
+      const timer = setInterval(() => {
+        if (fs.existsSync(cfg.wait_file)) {
+          clearInterval(timer);
+          released = true;
+          while (pending.length > 0) {
+            handleLine(pending.shift());
+          }
+        }
+      }, 15);
+    } else {
+      lines.on("line", handleLine);
+    }
+    return;
+  }
+
+  if (sub === "install") {
+    const pairIdx = process.argv.indexOf("--pair", 4);
+    const pair = pairIdx !== -1 ? process.argv[pairIdx + 1] : "";
+    if (cfg.install === "hang") {
+      setInterval(() => {}, 60_000);
+      return;
+    }
+    if (cfg.install === "crash") {
+      process.exitCode = 1;
+      return;
+    }
+    if (cfg.install === "checksum") {
+      out({ v: 1, kind: "progress", done_bytes: 50, total_bytes: 100 });
+      out({ v: 1, kind: "result", ok: false, reason: "checksum" });
+      return;
+    }
+    out({ v: 1, kind: "progress", done_bytes: 50, total_bytes: 100 });
+    out({ v: 1, kind: "progress", done_bytes: 100, total_bytes: 100 });
+    writeFakeInstallMarkers(pair);
+    out({ v: 1, kind: "result", ok: true });
+    return;
+  }
+
+  process.exitCode = 3;
+}
+
+function writeFakeInstallMarkers(pair) {
+  const engineDir = path.join(home, "translate", "engine");
+  fs.mkdirSync(engineDir, { recursive: true });
+  const glue = Buffer.from("console.log(1);");
+  const wasm = Buffer.from("wasm-bytes");
+  fs.writeFileSync(path.join(engineDir, "bergamot.js"), glue);
+  fs.writeFileSync(path.join(engineDir, "bergamot.wasm"), wasm);
+  fs.writeFileSync(
+    path.join(engineDir, "installed.json"),
+    JSON.stringify({
+      v: 1,
+      files: [
+        { role: "glue", name: "bergamot.js", size: glue.length },
+        { role: "wasm", name: "bergamot.wasm", size: wasm.length },
+      ],
+    }),
+  );
+
+  const modelDir = path.join(home, "translate", "models", pair);
+  fs.mkdirSync(modelDir, { recursive: true });
+  const model = Buffer.from("model-payload");
+  const lex = Buffer.from("lex");
+  const vocab = Buffer.from("vocab");
+  fs.writeFileSync(path.join(modelDir, "model.bin"), model);
+  fs.writeFileSync(path.join(modelDir, "lex.bin"), lex);
+  fs.writeFileSync(path.join(modelDir, "vocab.spm"), vocab);
+  const sha = crypto.createHash("sha256").update(model).digest("hex");
+  fs.writeFileSync(
+    path.join(modelDir, "installed.json"),
+    JSON.stringify({
+      v: 1,
+      pair,
+      model_sha256: sha,
+      files: [
+        { role: "model", name: "model.bin", size: model.length },
+        { role: "lex", name: "lex.bin", size: lex.length },
+        { role: "vocab", name: "vocab.spm", size: vocab.length },
+      ],
+    }),
+  );
 }

@@ -18,10 +18,11 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rocky_proto::history::{HISTORY_VERSION, HistoryBody, HistoryLine};
 use rocky_proto::paths::{desk_dir, history_dir, log_path, rocky_home, settings_path, spool_dir};
 use rocky_proto::pipe::{
-    AgentKey, AgentStatus, CaptureHealth, Health, PendingRepo, PromptText, RepoInfo, ServerMsg,
-    SetupAction, SetupHealth, StatusOp,
+    AgentKey, AgentStatus, CaptureHealth, Health, LINE_CAP, PendingRepo, PromptText, RepoInfo,
+    ServerMsg, SetupAction, SetupHealth, StatusOp, encode,
 };
 use rocky_proto::settings::Settings;
+use rocky_proto::translate::{QuoteLang, TranslateStatus};
 use rockyd::cards::query::CardQueryLoop;
 use rockyd::cards::storage::CardStore;
 use rockyd::cards::transcript::claude_config_dirs;
@@ -35,6 +36,7 @@ use rockyd::server::{BindError, Control, Hub, serve};
 use rockyd::settings;
 use rockyd::spool::{Ingestor, MAX_BYTES, MAX_FILES, prune};
 use rockyd::state::StatusState;
+use rockyd::translate::Translator;
 use serde_json::Value;
 
 const RESCAN_EVERY: Duration = Duration::from_secs(5);
@@ -70,6 +72,8 @@ struct Shared {
     cards: CardStore,
     /// Latched when a full Remove Rocky request starts; stays set for this process.
     cards_removed: bool,
+    /// Last-known quote translation readiness and install progress.
+    translate: TranslateStatus,
 }
 
 impl Shared {
@@ -112,6 +116,7 @@ fn snapshot_of(s: &Shared) -> ServerMsg {
         health: s.health.clone(),
         settings: s.settings.clone(),
         repo_pending: s.repo_pending.clone(),
+        translate: s.translate.clone(),
     }
 }
 
@@ -152,6 +157,7 @@ fn main() {
         capture: Vec::new(),
         cards: CardStore::new(home.clone()),
         cards_removed: false,
+        translate: TranslateStatus::default(),
     }));
 
     let hub = Arc::new(Hub::new());
@@ -187,12 +193,14 @@ fn main() {
         log.line(&format!("marker sync failed: {e}"));
     }
     let settings = loaded.settings;
+    let mut translator = Translator::new(home.clone());
     {
         let mut s = shared.lock().unwrap();
         s.settings = settings.clone();
         s.settings_unreadable = loaded.unreadable;
         s.state.set_tool_text(settings.tool_text);
         s.state.set_prompts_enabled(settings.cards);
+        s.translate = translator.status().clone();
     }
 
     // 2. Prune the spool; keep its gap for the startup gap record.
@@ -328,6 +336,7 @@ fn main() {
                 &mut cards,
                 &mut queries,
                 &mut guards,
+                &mut translator,
             ) {
                 // Wait for the client thread to flush the ack before
                 // exiting: without this, `process::exit` can race the
@@ -351,7 +360,8 @@ fn main() {
                 } else {
                     "stop requested, exiting"
                 });
-                // `process::exit` runs no destructors, so the capture child is stopped here.
+                // `process::exit` runs no destructors, so child processes are stopped here.
+                let _ = translator.service(false);
                 captures.shutdown(&log);
                 std::process::exit(0);
             }
@@ -363,7 +373,8 @@ fn main() {
             triggered = true;
         }
         let now = Instant::now();
-        if now.duration_since(last_rescan) >= RESCAN_EVERY {
+        let rescan_due = now.duration_since(last_rescan) >= RESCAN_EVERY;
+        if rescan_due {
             triggered = true;
             last_rescan = now;
         }
@@ -379,6 +390,10 @@ fn main() {
                 Some(&mut captures),
             );
             config_dirs = claude_config_dirs(&home);
+        }
+        if rescan_due && let Some(status) = translator.check() {
+            shared.lock().unwrap().translate = status.clone();
+            hub.broadcast(&ServerMsg::Translate { status });
         }
 
         let now = Instant::now();
@@ -402,7 +417,8 @@ fn main() {
             &hub,
             &log,
         );
-        service_queries(&mut queries, &log);
+        service_queries(&mut queries, &shared, &mut translator, &log);
+        service_translate(&mut translator, &shared, &hub, &log);
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -653,11 +669,114 @@ fn broadcast_appended_cards(appended: Vec<rocky_proto::cards::Card>, hub: &Hub, 
     }
 }
 
-fn service_queries(queries: &mut CardQueryLoop, log: &RotatingLog) {
-    queries.service();
+fn service_queries(
+    queries: &mut CardQueryLoop,
+    shared: &Arc<Mutex<Shared>>,
+    translator: &mut Translator,
+    log: &RotatingLog,
+) {
+    let translate_quotes = shared.lock().unwrap().settings.translate_quotes;
+    queries.service_with(&mut |msg, to| {
+        attach_translations(msg, to, translate_quotes, translator);
+    });
     let panics = queries.take_worker_panics();
     if panics > 0 {
         log.line(&format!("cards: {panics} query worker panics"));
+    }
+}
+
+fn attach_translations(
+    msg: &mut ServerMsg,
+    to: QuoteLang,
+    enabled: bool,
+    translator: &mut Translator,
+) {
+    if !enabled {
+        return;
+    }
+    let ServerMsg::CardDetail { card, .. } = msg else {
+        return;
+    };
+    let quotes = distinct_block_quotes(&card.blocks);
+    if quotes.is_empty() {
+        return;
+    }
+    let card_id = card.card_id.clone();
+    let detail = translator.on_detail(enabled, &card_id, to, &quotes);
+    if detail.hits.is_empty() && detail.pending.is_empty() {
+        return;
+    }
+    let mut overflow = Vec::new();
+    let mut iter = detail.hits.into_iter();
+    while let Some(item) = iter.next() {
+        let ServerMsg::CardDetail { translations, .. } = msg else {
+            unreachable!();
+        };
+        translations.push(item);
+        if encode(msg).len() > LINE_CAP {
+            let ServerMsg::CardDetail { translations, .. } = msg else {
+                unreachable!();
+            };
+            overflow.push(translations.pop().expect("just pushed"));
+            overflow.extend(iter);
+            break;
+        }
+    }
+    for key in detail.pending {
+        let ServerMsg::CardDetail { pending, .. } = msg else {
+            unreachable!();
+        };
+        pending.push(key);
+        if encode(msg).len() > LINE_CAP {
+            let ServerMsg::CardDetail { pending, .. } = msg else {
+                unreachable!();
+            };
+            pending.pop();
+            break;
+        }
+    }
+    if !overflow.is_empty() {
+        translator.push_later(&card_id, overflow);
+    }
+}
+
+fn distinct_block_quotes(blocks: &[rocky_proto::cards::Block]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut quotes = Vec::new();
+    for block in blocks {
+        if let Some(quote) = &block.quote
+            && seen.insert(quote.text.as_str())
+        {
+            quotes.push(quote.text.clone());
+        }
+    }
+    quotes
+}
+
+fn service_translate(
+    translator: &mut Translator,
+    shared: &Arc<Mutex<Shared>>,
+    hub: &Hub,
+    log: &RotatingLog,
+) {
+    let enabled = shared.lock().unwrap().settings.translate_quotes;
+    let msgs = translator.service(enabled);
+    for line in translator.drain_log() {
+        log.line(&line);
+    }
+    if msgs.is_empty() {
+        return;
+    }
+    {
+        let mut s = shared.lock().unwrap();
+        for msg in &msgs {
+            if let ServerMsg::Translate { status } = msg {
+                s.translate = status.clone();
+            }
+        }
+    }
+    for msg in &msgs {
+        hub.broadcast(msg);
     }
 }
 
@@ -798,6 +917,7 @@ fn handle_control(
     cards: &mut Engine,
     queries: &mut CardQueryLoop,
     guards: &mut GuardLoop,
+    translator: &mut Translator,
 ) -> LoopAction {
     match ctrl {
         Control::Stop {
@@ -868,8 +988,13 @@ fn handle_control(
             queries.cards(id, query, before, limit, reply);
             LoopAction::Continue
         }
-        Control::CardDetail { id, card_id, reply } => {
-            queries.card_detail(id, card_id, owned_roots.clone(), reply);
+        Control::CardDetail {
+            id,
+            card_id,
+            translate_to,
+            reply,
+        } => {
+            queries.card_detail(id, card_id, owned_roots.clone(), translate_to, reply);
             LoopAction::Continue
         }
         Control::BlockDiff {
@@ -880,6 +1005,54 @@ fn handle_control(
             reply,
         } => {
             queries.block_diff(id, card_id, seq, page, owned_roots.clone(), reply);
+            LoopAction::Continue
+        }
+        Control::TranslateInstall { id, pair, reply } => {
+            let enabled = shared.lock().unwrap().settings.translate_quotes;
+            let ack = match translator.install(enabled, pair) {
+                Ok(()) => ServerMsg::Ack {
+                    id,
+                    ok: true,
+                    error: None,
+                    cleanup_errors: 0,
+                },
+                Err(err) => ServerMsg::Ack {
+                    id,
+                    ok: false,
+                    error: Some(err.to_string()),
+                    cleanup_errors: 0,
+                },
+            };
+            let _ = reply.send(ack);
+            let status = translator.status().clone();
+            shared.lock().unwrap().translate = status.clone();
+            hub.broadcast(&ServerMsg::Translate { status });
+            LoopAction::Continue
+        }
+        Control::TranslateRemove { id, reply } => {
+            match translator.remove() {
+                Ok(()) => {
+                    shared.lock().unwrap().translate = translator.status().clone();
+                    let ack = handle_set(
+                        id,
+                        "translate_quotes",
+                        &serde_json::json!(false),
+                        shared,
+                        hub,
+                        log,
+                        home,
+                    );
+                    let _ = reply.send(ack);
+                }
+                Err(err) => {
+                    let _ = reply.send(ServerMsg::Ack {
+                        id,
+                        ok: false,
+                        error: Some(err.to_string()),
+                        cleanup_errors: 0,
+                    });
+                }
+            }
             LoopAction::Continue
         }
     }
@@ -909,6 +1082,7 @@ mod tests {
             capture: Vec::new(),
             cards: CardStore::new(home.to_path_buf()),
             cards_removed: false,
+            translate: TranslateStatus::default(),
         }))
     }
 
@@ -1010,6 +1184,7 @@ mod tests {
             let mut ingest = Ingestor::new();
             let mut guards = GuardLoop::new(home_bg.clone(), &log_bg, now_ms());
             let mut cards = Engine::new(home_bg.clone(), 1).with_user_home(None);
+            let mut translator = Translator::new(home_bg.clone());
             let mut queries = CardQueryLoop::new_with_object_reader(
                 home_bg.clone(),
                 cards.worker_count(),
@@ -1033,6 +1208,7 @@ mod tests {
                 Control::CardDetail {
                     id: 99,
                     card_id: "card-stalled".to_string(),
+                    translate_to: None,
                     reply: detail_tx,
                 },
                 &shared_bg,
@@ -1043,6 +1219,7 @@ mod tests {
                 &mut cards,
                 &mut queries,
                 &mut guards,
+                &mut translator,
             );
             entered_rx
                 .recv_timeout(Duration::from_secs(2))
@@ -1153,6 +1330,7 @@ mod tests {
             let mut ingest = Ingestor::new();
             let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
             let mut cards = Engine::new(home.clone(), 2).with_user_home(None);
+            let mut translator = Translator::new(home.clone());
             assert_eq!(cards.worker_count(), 2);
             let observed_thread = Arc::new(Mutex::new(None::<String>));
             let observed_thread_ref = Arc::clone(&observed_thread);
@@ -1181,6 +1359,7 @@ mod tests {
                 Control::CardDetail {
                     id: 10,
                     card_id: "card-panic".to_string(),
+                    translate_to: None,
                     reply: tx1,
                 },
                 &shared,
@@ -1191,11 +1370,13 @@ mod tests {
                 &mut cards,
                 &mut queries,
                 &mut guards,
+                &mut translator,
             );
             let _ = handle_control(
                 Control::CardDetail {
                     id: 11,
                     card_id: "card-ok".to_string(),
+                    translate_to: None,
                     reply: tx2,
                 },
                 &shared,
@@ -1206,13 +1387,14 @@ mod tests {
                 &mut cards,
                 &mut queries,
                 &mut guards,
+                &mut translator,
             );
 
             let mut reply1 = None;
             let mut reply2 = None;
             let deadline = Instant::now() + Duration::from_secs(3);
             while Instant::now() < deadline && (reply1.is_none() || reply2.is_none()) {
-                service_queries(&mut queries, &log);
+                service_queries(&mut queries, &shared, &mut translator, &log);
                 if reply1.is_none()
                     && let Ok(msg) = rx1.try_recv()
                 {
@@ -1254,10 +1436,11 @@ mod tests {
                 &mut cards,
                 &mut queries,
                 &mut guards,
+                &mut translator,
             );
             let deadline = Instant::now() + Duration::from_secs(3);
             let reply3 = loop {
-                service_queries(&mut queries, &log);
+                service_queries(&mut queries, &shared, &mut translator, &log);
                 if let Ok(msg) = rx3.try_recv() {
                     break msg;
                 }
@@ -1440,6 +1623,7 @@ mod tests {
             .expect("first turn card build should start in worker");
 
         let (reply_tx, _reply_rx) = mpsc::sync_channel(1);
+        let mut translator = Translator::new(home.clone());
         let _ = handle_control(
             Control::Setup {
                 id: 77,
@@ -1454,6 +1638,7 @@ mod tests {
             &mut cards,
             &mut queries,
             &mut guards,
+            &mut translator,
         );
         assert!(
             !cards_dir(&home).exists(),
@@ -1500,6 +1685,7 @@ mod tests {
             &mut cards,
             &mut queries,
             &mut guards,
+            &mut translator,
         );
         assert!(matches!(
             set_rx.recv_timeout(Duration::from_secs(1)),
@@ -1660,6 +1846,7 @@ mod tests {
             "running and queued builds hold their prompts only in clearable slots"
         );
 
+        let mut translator = Translator::new(home.clone());
         for (id, on) in [(1_u64, false), (2_u64, true)] {
             let (tx, _reply_rx) = mpsc::sync_channel(1);
             let _ = handle_control(
@@ -1677,6 +1864,7 @@ mod tests {
                 &mut cards,
                 &mut queries,
                 &mut guards,
+                &mut translator,
             );
             if !on {
                 assert_eq!(
@@ -2254,6 +2442,7 @@ mod tests {
         let mut resolver = stub_repo_resolver;
 
         let (tx, reply_rx) = mpsc::sync_channel(1);
+        let mut translator = Translator::new(home.clone());
         let _ = handle_control(
             Control::Set {
                 id: 1,
@@ -2269,6 +2458,7 @@ mod tests {
             &mut cards,
             &mut queries,
             &mut guards,
+            &mut translator,
         );
         assert!(matches!(
             reply_rx.recv_timeout(Duration::from_secs(1)),
@@ -2465,6 +2655,7 @@ mod tests {
 
         // Flip on -> off: clears held prompts in state & last_known and broadcasts Status upserts before Settings.
         let (tx, reply_rx) = mpsc::sync_channel(1);
+        let mut translator = Translator::new(home.clone());
         let _ = handle_control(
             Control::Set {
                 id: 1,
@@ -2480,6 +2671,7 @@ mod tests {
             &mut cards,
             &mut queries,
             &mut guards,
+            &mut translator,
         );
         assert!(matches!(
             reply_rx.recv_timeout(Duration::from_secs(1)),
@@ -2570,6 +2762,7 @@ mod tests {
             &mut cards,
             &mut queries,
             &mut guards,
+            &mut translator,
         );
         assert!(matches!(
             reply_rx.recv_timeout(Duration::from_secs(1)),
@@ -2725,6 +2918,7 @@ mod tests {
         let _ = drain_server_msgs(&rx);
 
         let (reply_tx, _reply_rx) = mpsc::sync_channel(1);
+        let mut translator = Translator::new(home.clone());
         let _ = handle_control(
             Control::Setup {
                 id: 99,
@@ -2739,6 +2933,7 @@ mod tests {
             &mut cards,
             &mut queries,
             &mut guards,
+            &mut translator,
         );
 
         {
@@ -2827,5 +3022,485 @@ mod tests {
             stdout,
             stderr,
         }
+    }
+
+    fn seed_ready_id_en_with_sha(home: &Path, sha: &str) {
+        use rockyd::translate::marker;
+
+        let engine = marker::engine_dir(home);
+        std::fs::create_dir_all(&engine).unwrap();
+        std::fs::write(engine.join("bergamot.js"), b"x").unwrap();
+        std::fs::write(
+            engine.join("installed.json"),
+            r#"{"v":1,"files":[{"name":"bergamot.js","size":1}]}"#,
+        )
+        .unwrap();
+
+        let model = marker::model_dir(home, rocky_proto::translate::TranslatePair::IdEn);
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("model.bin"), b"m").unwrap();
+        std::fs::write(
+            model.join("installed.json"),
+            format!(
+                r#"{{"v":1,"model_sha256":"{sha}","files":[{{"name":"model.bin","size":1}}]}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn seed_cached_translation(
+        home: &Path,
+        sha: &str,
+        to: rocky_proto::translate::QuoteLang,
+        from: rocky_proto::translate::QuoteLang,
+        original: &str,
+        translated: &str,
+    ) {
+        use rockyd::translate::cache::{Cached, QuoteCache, cache_key};
+
+        let mut cache = QuoteCache::new(home.to_path_buf());
+        let key = cache_key(sha, to, original);
+        cache
+            .put(
+                to,
+                &key,
+                &Cached::Translated {
+                    from,
+                    text: translated.to_string(),
+                },
+            )
+            .unwrap();
+    }
+
+    fn request_card_detail(
+        home: &Path,
+        shared: &Arc<Mutex<Shared>>,
+        id: u64,
+        card_id: &str,
+        translate_to: Option<rocky_proto::translate::QuoteLang>,
+    ) -> (ServerMsg, rockyd::translate::Translator) {
+        use rockyd::translate::Translator;
+        use std::collections::BTreeSet;
+
+        let hub = Hub::new();
+        let log = RotatingLog::new(&log_path(home));
+        let mut cards = Engine::new(home.to_path_buf(), 1).with_user_home(None);
+        let mut queries = CardQueryLoop::new(home.to_path_buf(), cards.worker_count());
+        let mut guards = GuardLoop::new(home.to_path_buf(), &log, now_ms());
+        let mut translator = Translator::new(home.to_path_buf());
+        let owned = BTreeSet::new();
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::CardDetail {
+                id,
+                card_id: card_id.to_string(),
+                translate_to,
+                reply: tx,
+            },
+            shared,
+            &hub,
+            &log,
+            home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+            &mut translator,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let reply = loop {
+            service_queries(&mut queries, shared, &mut translator, &log);
+            if let Ok(msg) = rx.try_recv() {
+                break msg;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for detail");
+            thread::sleep(Duration::from_millis(5));
+        };
+        (reply, translator)
+    }
+
+    #[test]
+    fn card_detail_reply_carries_cached_translations() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+        let sha = "a".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+        seed_cached_translation(&home, &sha, QuoteLang::En, QuoteLang::Id, "Merah.", "Red.");
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+        let mut card = make_test_card(&home, "card-tr-hit");
+        card.root.clear();
+        card.blocks[0].recorded = false;
+        card.blocks[0].before = None;
+        card.blocks[0].after = None;
+        card.blocks[0].quote = Some(Quote {
+            text: "Merah.".to_string(),
+            shared: false,
+        });
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, _) = request_card_detail(&home, &shared, 1, "card-tr-hit", Some(QuoteLang::En));
+        let ServerMsg::CardDetail {
+            translations,
+            pending,
+            ..
+        } = reply
+        else {
+            panic!("expected CardDetail, got {reply:?}");
+        };
+        assert_eq!(
+            translations,
+            vec![QuoteTranslation {
+                quote_key: quote_key("Merah."),
+                from: QuoteLang::Id,
+                text: "Red.".to_string(),
+            }]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn card_detail_with_setting_off_has_no_translations() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::QuoteLang;
+
+        let sha = "b".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+        seed_cached_translation(&home, &sha, QuoteLang::En, QuoteLang::Id, "Merah.", "Red.");
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = false;
+        let mut card = make_test_card(&home, "card-tr-off");
+        card.root.clear();
+        card.blocks[0].recorded = false;
+        card.blocks[0].before = None;
+        card.blocks[0].after = None;
+        card.blocks[0].quote = Some(Quote {
+            text: "Merah.".to_string(),
+            shared: false,
+        });
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, _) = request_card_detail(&home, &shared, 2, "card-tr-off", Some(QuoteLang::En));
+        let ServerMsg::CardDetail {
+            translations,
+            pending,
+            ..
+        } = reply
+        else {
+            panic!("expected CardDetail, got {reply:?}");
+        };
+        assert!(translations.is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn oversized_translations_stay_under_line_cap_and_overflow_is_pushed() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::pipe::{LINE_CAP, encode};
+        use rocky_proto::translate::QuoteLang;
+
+        let sha = "c".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+
+        let mut card = make_test_card(&home, "card-tr-big");
+        card.root.clear();
+        card.blocks.clear();
+        for i in 0..10u32 {
+            let quote_text = format!("quote-{i}");
+            let translated_text = format!("{i}-{}", "x".repeat(498));
+            seed_cached_translation(
+                &home,
+                &sha,
+                QuoteLang::En,
+                QuoteLang::Id,
+                &quote_text,
+                &translated_text,
+            );
+            card.blocks.push(Block {
+                seq: i + 1,
+                path: format!("src/f{i}.rs"),
+                symbol: None,
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec![format!("tu-{i}")],
+                bash: None,
+                before: None,
+                after: None,
+                recorded: false,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+                quote: Some(Quote {
+                    text: quote_text,
+                    shared: false,
+                }),
+            });
+        }
+        // Size the prompt so the reply without translations sits close to LINE_CAP.
+        let base_msg =
+            rockyd::cards::detail::build_card_detail_with(1, &card, |_| ObjectRead::Missing);
+        let base_len = encode(&base_msg).len();
+        let pad = LINE_CAP.saturating_sub(base_len + 1200);
+        card.prompt = "p".repeat(pad);
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, mut translator) =
+            request_card_detail(&home, &shared, 3, "card-tr-big", Some(QuoteLang::En));
+        assert!(encode(&reply).len() <= LINE_CAP);
+        let ServerMsg::CardDetail { translations, .. } = reply else {
+            panic!("expected CardDetail, got {reply:?}");
+        };
+        assert!(
+            !translations.is_empty() && translations.len() < 10,
+            "expected partial inline translations, got {}",
+            translations.len()
+        );
+
+        // Overflow emits no earlier than the next loop pass.
+        assert!(translator.service(true).is_empty());
+        let pushed = translator.service(true);
+        let quote_pushes: Vec<_> = pushed
+            .into_iter()
+            .filter(|m| matches!(m, ServerMsg::QuoteTranslated { card_id, .. } if card_id == "card-tr-big"))
+            .collect();
+        assert_eq!(translations.len() + quote_pushes.len(), 10);
+    }
+
+    #[test]
+    fn card_detail_reply_carries_pending_keys_and_respects_line_cap() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::pipe::{LINE_CAP, encode};
+        use rocky_proto::translate::{QuoteLang, quote_key};
+
+        let sha = "e".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+        let mut card = make_test_card(&home, "card-tr-miss");
+        card.root.clear();
+        card.blocks[0].recorded = false;
+        card.blocks[0].before = None;
+        card.blocks[0].after = None;
+        card.blocks[0].quote = Some(Quote {
+            text: "Belum ada di cache.".to_string(),
+            shared: false,
+        });
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, _) =
+            request_card_detail(&home, &shared, 4, "card-tr-miss", Some(QuoteLang::En));
+        let ServerMsg::CardDetail {
+            translations,
+            pending,
+            ..
+        } = reply
+        else {
+            panic!("expected CardDetail, got {reply:?}");
+        };
+        assert!(translations.is_empty());
+        assert_eq!(pending, vec![quote_key("Belum ada di cache.")]);
+
+        // Pending keys that would push the reply past LINE_CAP are dropped cleanly.
+        let mut tight = make_test_card(&home, "card-tr-tight");
+        tight.root.clear();
+        tight.blocks.clear();
+        for i in 0..10u32 {
+            tight.blocks.push(Block {
+                seq: i + 1,
+                path: format!("src/p{i}.rs"),
+                symbol: None,
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec![format!("tu-p-{i}")],
+                bash: None,
+                before: None,
+                after: None,
+                recorded: false,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+                quote: Some(Quote {
+                    text: format!("pending-quote-{i}"),
+                    shared: false,
+                }),
+            });
+        }
+        let base_msg =
+            rockyd::cards::detail::build_card_detail_with(1, &tight, |_| ObjectRead::Missing);
+        let base_len = encode(&base_msg).len();
+        let pad = LINE_CAP.saturating_sub(base_len + 200);
+        tight.prompt = "p".repeat(pad);
+        shared.lock().unwrap().cards.append(&tight).unwrap();
+
+        let (tight_reply, _) =
+            request_card_detail(&home, &shared, 5, "card-tr-tight", Some(QuoteLang::En));
+        assert!(encode(&tight_reply).len() <= LINE_CAP);
+        let ServerMsg::CardDetail { pending, .. } = tight_reply else {
+            panic!("expected CardDetail, got {tight_reply:?}");
+        };
+        assert!(
+            !pending.is_empty() && pending.len() < 10,
+            "expected partial pending keys under LINE_CAP, got {}",
+            pending.len()
+        );
+    }
+
+    #[test]
+    fn translate_remove_turns_the_setting_off_and_acks() {
+        use rockyd::translate::{Translator, marker};
+        use std::collections::BTreeSet;
+
+        let sha = "d".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+
+        let shared = make_test_shared(&home);
+        {
+            let mut s = shared.lock().unwrap();
+            s.settings.translate_quotes = true;
+            settings::save(&settings_path(&home), &s.settings).unwrap();
+        }
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let log = RotatingLog::new(&log_path(&home));
+        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
+        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut translator = Translator::new(home.clone());
+        let owned = BTreeSet::new();
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::TranslateRemove {
+                id: 42,
+                reply: reply_tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+            &mut translator,
+        );
+
+        let ack = reply_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            ack,
+            ServerMsg::Ack {
+                id: 42,
+                ok: true,
+                error: None,
+                cleanup_errors: 0,
+            }
+        );
+        assert!(!shared.lock().unwrap().settings.translate_quotes);
+        assert!(
+            !settings::load(&settings_path(&home))
+                .settings
+                .translate_quotes
+        );
+        assert!(!marker::translate_dir(&home).exists());
+        let msgs = drain_server_msgs(&rx);
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            ServerMsg::Settings { settings } if !settings.translate_quotes
+        )));
+    }
+
+    #[test]
+    fn translate_install_while_off_acks_disabled() {
+        use rocky_proto::translate::TranslatePair;
+        use rockyd::translate::Translator;
+        use std::collections::BTreeSet;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = false;
+        let hub = Hub::new();
+        let rx = hub.subscribe_for_test();
+        let log = RotatingLog::new(&log_path(&home));
+        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
+        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
+        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
+        let mut translator = Translator::new(home.clone());
+        let owned = BTreeSet::new();
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::TranslateInstall {
+                id: 43,
+                pair: TranslatePair::IdEn,
+                reply: reply_tx,
+            },
+            &shared,
+            &hub,
+            &log,
+            &home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+            &mut translator,
+        );
+
+        let ack = reply_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            ack,
+            ServerMsg::Ack {
+                id: 43,
+                ok: false,
+                error: Some("disabled".to_string()),
+                cleanup_errors: 0,
+            }
+        );
+        let msgs = drain_server_msgs(&rx);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMsg::Translate { .. }))
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_translate_status() {
+        use rocky_proto::translate::{TranslateFailure, TranslatePair, TranslateStatus};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = make_test_shared(tmp.path());
+        let expected = TranslateStatus {
+            ready: vec![TranslatePair::IdEn],
+            installing: None,
+            failed: Some(TranslateFailure::Checksum),
+        };
+        shared.lock().unwrap().translate = expected.clone();
+
+        let snap = snapshot_of(&shared.lock().unwrap());
+        let ServerMsg::Snapshot { translate, .. } = snap else {
+            panic!("expected Snapshot, got {snap:?}");
+        };
+        assert_eq!(translate, expected);
     }
 }

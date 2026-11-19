@@ -275,6 +275,8 @@ pub fn build_card_detail_unowned(id: u64, card: &Card) -> ServerMsg {
         id,
         card: reply_card,
         snippets: Vec::new(),
+        translations: Vec::new(),
+        pending: Vec::new(),
     };
     if shrink_card_msg(&mut msg) {
         msg
@@ -428,6 +430,8 @@ where
         id,
         card: reply_card,
         snippets,
+        translations: Vec::new(),
+        pending: Vec::new(),
     };
     if shrink_card_msg(&mut msg) {
         msg
@@ -1444,6 +1448,7 @@ mod tests {
             id,
             card: out_card,
             snippets,
+            ..
         } = msg
         else {
             panic!("expected ServerMsg::CardDetail");
