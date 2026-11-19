@@ -525,12 +525,15 @@ test("refuses redirects via redirect: 'error' and treats 3xx as download", async
 
 test("stages files with unique .part names without touching other .part files", async () => {
   await withTempHome(async (home) => {
-    const { manifest, routes } = buildFixture();
+    const { manifest, routes, modelBytes } = buildFixture();
     const mDir = modelDir(home, "id-en");
     const blockingTargetDir = join(mDir, "lex.50.50.iden.s2t.bin");
     mkdirSync(blockingTargetDir, { recursive: true });
     const foreignPart = join(mDir, "lex.50.50.iden.s2t.bin.999999-foreign.part");
-    writeFileSync(foreignPart, "in-flight-by-other-process");
+    routes.set(manifest.models["id-en"][0].url, async () => {
+      writeFileSync(foreignPart, "in-flight-by-other-process");
+      return new Response(new Uint8Array(gzipSync(modelBytes)), { status: 200 });
+    });
 
     const res = await installTranslation(home, "id-en", {
       fetch: makeFakeFetch(routes),
@@ -569,5 +572,26 @@ test("stages files with unique .part names without touching other .part files", 
     assert.ok(readInstalled(engineDir(home)));
     assert.ok(readInstalled(modelDir(home, "id-en")));
     assert.deepEqual(findPartFiles(join(home, "translate")), []);
+  });
+});
+
+test("sweeps stale .part files in the model directory before install", async () => {
+  await withTempHome(async (home) => {
+    const { manifest, routes } = buildFixture();
+    const mDir = modelDir(home, "id-en");
+    mkdirSync(mDir, { recursive: true });
+    const stalePart = join(mDir, "vocab.iden.spm.123-abc.part");
+    writeFileSync(stalePart, "stale-leftover-from-killed-install");
+
+    const res = await installTranslation(home, "id-en", {
+      fetch: makeFakeFetch(routes),
+      manifest,
+      onProgress: () => {},
+    });
+
+    assert.deepEqual(res, { ok: true });
+    assert.equal(existsSync(stalePart), false);
+    assert.deepEqual(findPartFiles(join(home, "translate")), []);
+    assert.ok(readInstalled(mDir));
   });
 });

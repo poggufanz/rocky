@@ -226,7 +226,15 @@ test("bad arguments exit 2 without touching the network", async (t) => {
       const res = await proc.done;
       assert.equal(res.code, 2, `args: ${args.join(" ")}\nstderr: ${res.stderr}`);
       assert.equal(res.stdout, "", `stdout must be empty for: ${args.join(" ")}`);
-      assert.ok(res.stderr.includes(TRANSLATE_USAGE), `usage missing for: ${args.join(" ")}`);
+      assert.ok(
+        res.stderr.includes(`usage: ${TRANSLATE_USAGE.replace(/^Usage:\s*/, "")}`),
+        `usage missing for: ${args.join(" ")}`,
+      );
+      assert.doesNotMatch(
+        res.stderr,
+        /usage:\s*usage/i,
+        `doubled usage prefix for: ${args.join(" ")}`,
+      );
     }),
   );
 });

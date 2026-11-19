@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -208,7 +209,7 @@ async function fetchWithinCap(
     return { ok: false, reason: "download" };
   }
 
-  if (!response.ok || response.status < 200 || response.status >= 300) {
+  if (!response.ok) {
     try {
       await response.body?.cancel();
     } catch {
@@ -269,6 +270,19 @@ function writeFileAtomic(dir: string, name: string, data: Buffer | string): bool
 function prepareDirAndClearMarker(dir: string): boolean {
   try {
     mkdirSync(dir, { recursive: true });
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith(".part")) {
+          try {
+            rmSync(join(dir, entry.name), { force: true });
+          } catch {
+            // ignore stale part cleanup errors
+          }
+        }
+      }
+    } catch {
+      // ignore stale part scan errors
+    }
     rmSync(join(dir, INSTALLED_FILE), { force: true });
     return true;
   } catch {

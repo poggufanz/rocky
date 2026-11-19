@@ -17,6 +17,7 @@ import { createLineReader, MAX_LINE_BYTES } from "./listen.js";
 
 export const TRANSLATE_USAGE =
   "Usage: rocky translate install --pair <id-en|en-id> | rocky translate run";
+const TRANSLATE_CLI_USAGE = TRANSLATE_USAGE.replace(/^Usage:\s*/, "");
 export const MAX_KEY_CHARS = 128;
 export const MAX_TEXT_CHARS = 4000;
 
@@ -205,12 +206,12 @@ async function flushStdout(): Promise<void> {
 
 export async function translateCommand(args: string[]): Promise<number> {
   if (args.length === 0) {
-    throw new CliUsageError("missing translate subcommand", TRANSLATE_USAGE);
+    throw new CliUsageError("missing translate subcommand", TRANSLATE_CLI_USAGE);
   }
 
   if (args[0] === "run") {
     if (args.length !== 1) {
-      throw new CliUsageError(`unexpected argument: ${args[1]}`, TRANSLATE_USAGE);
+      throw new CliUsageError(`unexpected argument: ${args[1]}`, TRANSLATE_CLI_USAGE);
     }
 
     let stdoutClosed = false;
@@ -243,12 +244,12 @@ export async function translateCommand(args: string[]): Promise<number> {
     if (args.length !== 3 || args[1] !== "--pair") {
       throw new CliUsageError(
         "install requires --pair <id-en|en-id>",
-        TRANSLATE_USAGE,
+        TRANSLATE_CLI_USAGE,
       );
     }
     const pair = args[2];
     if (!isPair(pair)) {
-      throw new CliUsageError(`invalid translation pair: ${pair}`, TRANSLATE_USAGE);
+      throw new CliUsageError(`invalid translation pair: ${pair}`, TRANSLATE_CLI_USAGE);
     }
 
     let stdoutClosed = false;
@@ -291,6 +292,6 @@ export async function translateCommand(args: string[]): Promise<number> {
 
   throw new CliUsageError(
     `unknown translate subcommand: ${args[0]}`,
-    TRANSLATE_USAGE,
+    TRANSLATE_CLI_USAGE,
   );
 }

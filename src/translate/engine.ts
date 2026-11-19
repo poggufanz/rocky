@@ -294,14 +294,12 @@ async function initRuntime(gluePath: string, wasmPath: string): Promise<RuntimeS
 
   try {
     const glueSource = glueBytes.toString("utf8");
-    const wasmCopy = new Uint8Array(wasmBytes.byteLength);
-    wasmCopy.set(wasmBytes);
 
     const modInit: BergamotModuleInit = {
       instantiateWasm(info, accept) {
         try {
           const wasm_gemm = buildWasmGemmImports(modInit);
-          WebAssembly.instantiate(wasmCopy, {
+          WebAssembly.instantiate(wasmBytes as BufferSource, {
             ...(info as WebAssembly.Imports),
             wasm_gemm,
           })
