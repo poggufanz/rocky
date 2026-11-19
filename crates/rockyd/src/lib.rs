@@ -9,3 +9,4 @@ pub mod server;
 pub mod settings;
 pub mod spool;
 pub mod state;
+pub mod translate;
