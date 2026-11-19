@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use rocky_proto::cards::Card;
+use rocky_proto::paths::canonical_path;
 use rocky_proto::pipe::ClientMsg;
 
 use crate::atlas_model::ProjectId;
@@ -274,7 +275,7 @@ impl CardsModel {
         let mine: HashSet<&str> = self
             .items
             .iter()
-            .filter(|c| card_project(c) == *project)
+            .filter(|c| in_project(c, &project.0, cfg!(windows)))
             .map(|c| c.card_id.as_str())
             .collect();
         self.rows(lang)
@@ -324,9 +325,12 @@ fn upsert_by_rev(cards: &mut Vec<Card>, card: Card) {
     }
 }
 
-/// The project a card belongs to: its main checkout, else its root.
-fn card_project(card: &Card) -> ProjectId {
-    ProjectId(card.main_root.clone().unwrap_or_else(|| card.root.clone()))
+/// True when the card's main checkout (else its root) is `project`. The daemon
+/// stores card roots canonicalized (lowercase on Windows) while project ids keep
+/// git's spelling, so both sides are canonicalized before comparing.
+fn in_project(card: &Card, project: &str, win32: bool) -> bool {
+    let root = card.main_root.as_deref().unwrap_or(&card.root);
+    canonical_path(root, win32) == canonical_path(project, win32)
 }
 
 fn emit_subtree(
