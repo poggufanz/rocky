@@ -215,3 +215,86 @@ test("filename stays protected before an attached sentence", () => {
   const nonCode = prepareQuote("Selesai.Lanjut 1.5").lines[0]!;
   assert.deepEqual(nonCode.codes, []);
 });
+
+test("emphasis tracking across prose and code tokens", () => {
+  const cases: Array<{
+    input: string;
+    codes: string[];
+    forbiddenInHtml?: string[];
+    proseIncludes?: string[];
+    restored: string;
+  }> = [
+    {
+      input: "lihat **https://x.dev/a** dulu",
+      codes: ["https://x.dev/a"],
+      forbiddenInHtml: ["**"],
+      restored: "lihat https://x.dev/a dulu",
+    },
+    {
+      input: "lihat **https://x.dev/a**—situs resmi",
+      codes: ["https://x.dev/a"],
+      forbiddenInHtml: ["**"],
+      proseIncludes: ["—situs resmi"],
+      restored: "lihat https://x.dev/a—situs resmi",
+    },
+    {
+      input: "Tolong **buka https://x.dev/a** lalu lanjut.",
+      codes: ["https://x.dev/a"],
+      forbiddenInHtml: ["**"],
+      restored: "Tolong buka https://x.dev/a lalu lanjut.",
+    },
+    {
+      input: "Tolong **buka src/a.ts** lalu lanjut.",
+      codes: ["src/a.ts"],
+      forbiddenInHtml: ["**"],
+      restored: "Tolong buka src/a.ts lalu lanjut.",
+    },
+    {
+      input: "lihat src/**/*.ts dan https://x.dev/objects/** sekarang",
+      codes: ["src/**/*.ts", "https://x.dev/objects/**"],
+      restored: "lihat src/**/*.ts dan https://x.dev/objects/** sekarang",
+    },
+    {
+      input: "Buka https://x.dev/?q=*foo* sekarang.",
+      codes: ["https://x.dev/?q=*foo*"],
+      restored: "Buka https://x.dev/?q=*foo* sekarang.",
+    },
+    {
+      input: "Buka config.json.Berikutnya ulangi.",
+      codes: ["config.json"],
+      proseIncludes: ["Berikutnya"],
+      restored: "Buka config.json.Berikutnya ulangi.",
+    },
+    {
+      input: "ubah *src/a.ts* dan ~~b.ts~~",
+      codes: ["src/a.ts", "b.ts"],
+      forbiddenInHtml: ["*", "~~"],
+      restored: "ubah src/a.ts dan b.ts",
+    },
+  ];
+
+  for (const row of cases) {
+    const q = prepareQuote(row.input);
+    assert.equal(q.lines.length, 1, row.input);
+    const line = q.lines[0]!;
+    assert.deepEqual(
+      line.codes.map((c) => c.text),
+      row.codes,
+      row.input,
+    );
+    for (const marker of row.forbiddenInHtml ?? []) {
+      assert.equal(line.html.includes(marker), false, `${row.input}: unexpected ${marker} in html`);
+    }
+    for (const expectedProse of row.proseIncludes ?? []) {
+      assert.equal(q.prose.includes(expectedProse), true, `${row.input}: expected ${expectedProse} in prose`);
+    }
+    for (const code of row.codes) {
+      assert.equal(q.prose.includes(code), false, `${row.input}: code leaked into prose: ${code}`);
+    }
+    const restored = restoreLine(line.html, line);
+    assert.equal(restored, row.restored, row.input);
+    for (const code of row.codes) {
+      assert.equal(restored!.includes(code), true, `${row.input}: restored missing ${code}`);
+    }
+  }
+});

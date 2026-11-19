@@ -22,17 +22,21 @@ type Segment =
   | { kind: "prose"; text: string }
   | { kind: "code"; text: string };
 
-interface MatchRange {
-  start: number;
-  end: number;
+interface EmphasisState {
+  bold: boolean;
+  strike: boolean;
+  italic: boolean;
 }
 
-const URL_RE = /https?:\/\/[^\s"'<>]+/g;
-const PATH_TOKEN_RE = /[^\s"'<>()[\]{}]+/g;
-const EXT_NAME_RE = /(?<![\w-]|[\w-]\.)[\w-]+(?:\.[\w-]+)*\.[a-z0-9]{1,6}(?![\w-])/g;
-const FLAG_RE = /(?<![\w-])--?[a-z][\w-]*/g;
-const HASH_RE = /(?<![\w])[0-9a-fA-F]{7,}(?![\w])/g;
-const EXIT_CODE_RE = /\bexit \d+\b/g;
+const URL_STICKY_RE = /https?:\/\/[^\s"'<>]+/y;
+const PATH_STICKY_RE = /[^\s"'<>()[\]{}]+/y;
+const EXT_NAME_STICKY_RE = /(?<![\w-]|[\w-]\.)[\w-]+(?:\.[\w-]+)*\.[a-z0-9]{1,6}(?![\w-])/y;
+const FLAG_STICKY_RE = /(?<![\w-])--?[a-z][\w-]*/y;
+const HASH_STICKY_RE = /(?<![\w])[0-9a-fA-F]{7,}(?![\w])/y;
+const EXIT_CODE_STICKY_RE = /\bexit \d+\b/y;
+
+const PATH_DELIM_RE = /[\s"'<>()[\]{}]/;
+const OPEN_PREDECESSOR_RE = /[\s\p{P}\p{S}]/u;
 
 const PLACEHOLDER_SPLIT_RE = /<x id="(\d+)"><\/x>/;
 const STRAY_TAG_RE = /<[\p{L}/]/u;
@@ -226,36 +230,6 @@ function unlinkSegments(segments: Segment[]): Segment[] {
   return out;
 }
 
-function splitProseSegments(
-  segments: Segment[],
-  findMatches: (prose: string) => MatchRange[],
-): Segment[] {
-  const out: Segment[] = [];
-  for (const seg of segments) {
-    if (seg.kind !== "prose") {
-      out.push(seg);
-      continue;
-    }
-    const matches = findMatches(seg.text);
-    if (matches.length === 0) {
-      out.push(seg);
-      continue;
-    }
-    let cursor = 0;
-    for (const { start, end } of matches) {
-      if (start > cursor) {
-        out.push({ kind: "prose", text: seg.text.slice(cursor, start) });
-      }
-      out.push({ kind: "code", text: seg.text.slice(start, end) });
-      cursor = end;
-    }
-    if (cursor < seg.text.length) {
-      out.push({ kind: "prose", text: seg.text.slice(cursor) });
-    }
-  }
-  return out;
-}
-
 function hasUnmatchedClosing(text: string, openCh: string, closeCh: string): boolean {
   let balance = 0;
   for (const ch of text) {
@@ -283,13 +257,6 @@ function charAt(text: string, index: number): string {
   return cp === undefined ? "" : String.fromCodePoint(cp);
 }
 
-function isWrapperBoundary(ch: string, allowDot: boolean): boolean {
-  if (ch === "" || /\s/.test(ch)) return true;
-  if (UNICODE_ALNUM_RE.test(ch)) return false;
-  if (!allowDot && ch === ".") return false;
-  return !/[\/\\_*~-]/.test(ch);
-}
-
 function markerRunLength(text: string, index: number): number {
   const ch = text[index];
   if (ch !== "*" && ch !== "~") return 0;
@@ -300,199 +267,317 @@ function markerRunLength(text: string, index: number): number {
   return end - index;
 }
 
-function isEmphasisMarker(ch: string, runLen: number): boolean {
-  if (ch === "*") return runLen >= 1 && runLen <= 3;
-  if (ch === "~") return runLen === 2;
-  return false;
-}
-
-function peelTightEmphasis(text: string): string {
-  let current = text;
-  while (current.length >= 3) {
-    const ch = current[0];
-    const runLen = markerRunLength(current, 0);
-    if (!isEmphasisMarker(ch, runLen) || current.length <= runLen * 2) {
-      break;
-    }
-    const closeStart = current.length - runLen;
-    if (
-      current.slice(closeStart) === current.slice(0, runLen) &&
-      current[closeStart - 1] !== ch &&
-      !/\s/.test(current[runLen]) &&
-      !/\s/.test(current[closeStart - 1])
-    ) {
-      current = current.slice(runLen, closeStart);
-      continue;
-    }
-    break;
+function findClosingMarkerInToken(raw: string, emphasis: EmphasisState): number {
+  if (!emphasis.bold && !emphasis.strike && !emphasis.italic) {
+    return -1;
   }
-  return current;
-}
 
-function unwrapTightEmphasisText(text: string, out: Segment[]): void {
-  let chunkStart = 0;
-  let i = 0;
-  const noCloserUntil = new Map<string, number>();
-
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch !== "*" && ch !== "~") {
-      i++;
-      continue;
-    }
-
-    const runLen = markerRunLength(text, i);
-    if (!isEmphasisMarker(ch, runLen)) {
+  let i = 1;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === "*") {
+      const runLen = markerRunLength(raw, i);
+      if (runLen === 1) {
+        if (emphasis.italic) return i;
+      } else if (runLen === 2) {
+        if (emphasis.bold) return i;
+      } else {
+        const needed = (emphasis.bold ? 2 : 0) + (emphasis.italic ? 1 : 0);
+        if (needed > 0) return i + runLen - needed;
+      }
       i += runLen;
       continue;
     }
 
-    const before = charBefore(text, i);
-    const openEnd = i + runLen;
-    if (
-      !isWrapperBoundary(before, false) ||
-      openEnd >= text.length ||
-      /\s/.test(text[openEnd])
+    if (ch === "~") {
+      const runLen = markerRunLength(raw, i);
+      if (runLen >= 2 && emphasis.strike) {
+        return i + runLen - 2;
+      }
+      i += runLen;
+      continue;
+    }
+
+    i++;
+  }
+
+  return -1;
+}
+
+function matchStickyAt(re: RegExp, text: string, pos: number): RegExpExecArray | null {
+  re.lastIndex = pos;
+  return re.exec(text);
+}
+
+function matchUrlAt(text: string, pos: number, emphasis: EmphasisState): number | null {
+  if (text[pos] !== "h") return null;
+  const m = matchStickyAt(URL_STICKY_RE, text, pos);
+  if (!m) return null;
+
+  const raw = m[0];
+  const cut = findClosingMarkerInToken(raw, emphasis);
+  let candidate = cut === -1 ? raw : raw.slice(0, cut);
+
+  while (candidate.length > 0) {
+    const last = candidate[candidate.length - 1];
+    if (/[.,;:!?]/.test(last)) {
+      candidate = candidate.slice(0, -1);
+    } else if (
+      (last === ")" && hasUnmatchedClosing(candidate, "(", ")")) ||
+      (last === "]" && hasUnmatchedClosing(candidate, "[", "]")) ||
+      (last === "}" && hasUnmatchedClosing(candidate, "{", "}"))
     ) {
-      i = openEnd;
+      candidate = candidate.slice(0, -1);
+    } else {
+      break;
+    }
+  }
+
+  const protoEnd = candidate.indexOf("://") + 3;
+  if (protoEnd < 3 || candidate.length <= protoEnd) {
+    return null;
+  }
+  return pos + candidate.length;
+}
+
+function matchPathAt(
+  text: string,
+  pos: number,
+  canStartPath: boolean,
+  emphasis: EmphasisState,
+): number | null {
+  if (!canStartPath) return null;
+  const m = matchStickyAt(PATH_STICKY_RE, text, pos);
+  if (!m) return null;
+
+  let raw = m[0];
+  const urlMatch = /https?:\/\//.exec(raw);
+  if (urlMatch && urlMatch.index > 0 && matchUrlAt(text, pos + urlMatch.index, emphasis) !== null) {
+    raw = raw.slice(0, urlMatch.index);
+  }
+
+  const cut = findClosingMarkerInToken(raw, emphasis);
+  let token = cut === -1 ? raw : raw.slice(0, cut);
+  while (token.length > 0 && /[.,;:!?]$/.test(token)) {
+    token = token.slice(0, -1);
+  }
+
+  if (!/[\/\\]/.test(token) || !UNICODE_ALNUM_RE.test(token)) {
+    return null;
+  }
+
+  const tokenEnd = pos + token.length;
+  // Keep HTML/XML tag fragments such as </x> or <br/> as prose so stray-tag detection works.
+  if (pos > 0 && text[pos - 1] === "<" && token.startsWith("/")) {
+    return null;
+  }
+  if (tokenEnd < text.length && text[tokenEnd] === ">" && token.endsWith("/")) {
+    return null;
+  }
+
+  return tokenEnd;
+}
+
+function matchExtNameAt(text: string, pos: number): number | null {
+  const m = matchStickyAt(EXT_NAME_STICKY_RE, text, pos);
+  if (!m) return null;
+  const match = m[0];
+  if (!/[A-Za-z]/.test(match)) return null;
+  const end = pos + match.length;
+  if (text.startsWith("://", end) && /(?:^|\.)https?$/.test(match)) {
+    return null;
+  }
+  return end;
+}
+
+function matchFlagAt(text: string, pos: number): number | null {
+  if (text[pos] !== "-") return null;
+  const m = matchStickyAt(FLAG_STICKY_RE, text, pos);
+  if (!m) return null;
+  const match = m[0];
+  const end = pos + match.length;
+  if (text.startsWith("://", end) && /^--?https?$/.test(match)) {
+    return null;
+  }
+  return end;
+}
+
+function matchHashAt(text: string, pos: number): number | null {
+  const m = matchStickyAt(HASH_STICKY_RE, text, pos);
+  if (!m || !/\d/.test(m[0])) return null;
+  return pos + m[0].length;
+}
+
+function matchExitCodeAt(text: string, pos: number, emphasis: EmphasisState): number | null {
+  if (text[pos] !== "e") return null;
+  const m = matchStickyAt(EXIT_CODE_STICKY_RE, text, pos);
+  if (!m) return null;
+  const numPos = pos + 5;
+  if (
+    matchPathAt(text, numPos, true, emphasis) !== null ||
+    matchExtNameAt(text, numPos) !== null ||
+    matchHashAt(text, numPos) !== null
+  ) {
+    return null;
+  }
+  return pos + m[0].length;
+}
+
+function matchCodeTokenAt(
+  text: string,
+  pos: number,
+  canStartPath: boolean,
+  emphasis: EmphasisState,
+): number | null {
+  return (
+    matchUrlAt(text, pos, emphasis) ??
+    matchPathAt(text, pos, canStartPath, emphasis) ??
+    matchExtNameAt(text, pos) ??
+    matchFlagAt(text, pos) ??
+    matchHashAt(text, pos) ??
+    matchExitCodeAt(text, pos, emphasis)
+  );
+}
+
+function consumeEmphasisMarker(
+  text: string,
+  pos: number,
+  segIndex: number,
+  totalSegs: number,
+  emphasis: EmphasisState,
+): number | null {
+  const ch = text[pos];
+  if (ch !== "*" && ch !== "~") return null;
+
+  const runLen = markerRunLength(text, pos);
+  if (ch === "~" && runLen < 2) {
+    return null;
+  }
+
+  const markerLen = ch === "~" ? 2 : runLen;
+  const runEnd = pos + markerLen;
+
+  const prevChar = pos > 0 ? charBefore(text, pos) : segIndex > 0 ? "a" : "";
+  const nextChar = runEnd < text.length ? charAt(text, runEnd) : segIndex + 1 < totalSegs ? "a" : "";
+
+  const prevIsNonSpace = prevChar.length > 0 && !/\s/.test(prevChar);
+  const nextIsNonSpace = nextChar.length > 0 && !/\s/.test(nextChar);
+  const prevAllowsOpen = prevChar === "" || OPEN_PREDECESSOR_RE.test(prevChar);
+
+  const startsCodeAfter = (nextState: EmphasisState): boolean =>
+    pos === 0 && segIndex > 0 && matchCodeTokenAt(text, runEnd, true, nextState) !== null;
+
+  if (ch === "~") {
+    if (emphasis.strike && prevIsNonSpace) {
+      emphasis.strike = false;
+    } else if (
+      nextIsNonSpace &&
+      (prevAllowsOpen || startsCodeAfter({ ...emphasis, strike: true }))
+    ) {
+      emphasis.strike = true;
+    }
+    return runEnd;
+  }
+
+  if (runLen === 1) {
+    if (emphasis.italic && prevIsNonSpace) {
+      emphasis.italic = false;
+    } else if (
+      nextIsNonSpace &&
+      (prevAllowsOpen || startsCodeAfter({ ...emphasis, italic: true }))
+    ) {
+      emphasis.italic = true;
+    }
+  } else if (runLen === 2) {
+    if (emphasis.bold && prevIsNonSpace) {
+      emphasis.bold = false;
+    } else if (
+      nextIsNonSpace &&
+      (prevAllowsOpen || startsCodeAfter({ ...emphasis, bold: true }))
+    ) {
+      emphasis.bold = true;
+    }
+  } else if (runLen === 3) {
+    if (prevIsNonSpace && (emphasis.bold || emphasis.italic)) {
+      if (emphasis.bold && emphasis.italic) {
+        emphasis.bold = false;
+        emphasis.italic = false;
+      } else if (emphasis.bold) {
+        emphasis.bold = false;
+        if (nextIsNonSpace) emphasis.italic = true;
+      } else {
+        emphasis.italic = false;
+        if (nextIsNonSpace) emphasis.bold = true;
+      }
+    } else if (
+      nextIsNonSpace &&
+      (prevAllowsOpen || startsCodeAfter({ ...emphasis, bold: true, italic: true }))
+    ) {
+      emphasis.bold = true;
+      emphasis.italic = true;
+    }
+  } else if (prevIsNonSpace) {
+    emphasis.bold = false;
+    emphasis.italic = false;
+  }
+
+  return runEnd;
+}
+
+/**
+ * Extracts code tokens across prose segments on a line while tracking open
+ * emphasis left to right so markers inside open spans close the token cleanly
+ * and token-content markers stay byte-exact.
+ */
+function extractCodeTokens(segments: Segment[]): Segment[] {
+  const out: Segment[] = [];
+  const emphasis: EmphasisState = { bold: false, strike: false, italic: false };
+
+  for (let segIndex = 0; segIndex < segments.length; segIndex++) {
+    const seg = segments[segIndex];
+    if (seg.kind === "code") {
+      appendSegment(out, seg);
       continue;
     }
 
-    const markerKey = text.slice(i, openEnd);
-    const skipUntil = noCloserUntil.get(markerKey) ?? -1;
-    if (i < skipUntil) {
-      i = openEnd;
-      continue;
-    }
+    const text = seg.text;
+    let pos = 0;
+    let proseStart = 0;
+    let canStartPath = true;
 
-    let j = openEnd;
-    let closeStart = -1;
-    while (j < text.length && !/\s/.test(text[j])) {
-      if (text[j] === ch) {
-        const closeRunLen = markerRunLength(text, j);
-        const closeEnd = j + closeRunLen;
-        if (
-          closeRunLen === runLen &&
-          j > openEnd &&
-          isWrapperBoundary(charAt(text, closeEnd), true)
-        ) {
-          closeStart = j;
-          break;
-        }
-        j = closeEnd;
+    const flushProse = (end: number): void => {
+      if (end > proseStart) {
+        appendSegment(out, { kind: "prose", text: text.slice(proseStart, end) });
+      }
+    };
+
+    while (pos < text.length) {
+      const markerEnd = consumeEmphasisMarker(text, pos, segIndex, segments.length, emphasis);
+      if (markerEnd !== null) {
+        pos = markerEnd;
+        canStartPath = true;
         continue;
       }
-      j++;
-    }
 
-    if (closeStart !== -1) {
-      if (i > chunkStart) {
-        out.push({ kind: "prose", text: text.slice(chunkStart, i) });
+      const tokenEnd = matchCodeTokenAt(text, pos, canStartPath, emphasis);
+      if (tokenEnd !== null) {
+        flushProse(pos);
+        appendSegment(out, { kind: "code", text: text.slice(pos, tokenEnd) });
+        pos = tokenEnd;
+        proseStart = tokenEnd;
+        canStartPath = true;
+        continue;
       }
-      out.push({ kind: "prose", text: peelTightEmphasis(text.slice(openEnd, closeStart)) });
-      i = closeStart + runLen;
-      chunkStart = i;
-    } else {
-      noCloserUntil.set(markerKey, j);
-      i = openEnd;
+
+      const ch = charAt(text, pos);
+      canStartPath = PATH_DELIM_RE.test(ch);
+      pos += ch.length;
     }
+
+    flushProse(text.length);
   }
 
-  if (chunkStart < text.length) {
-    out.push({ kind: "prose", text: text.slice(chunkStart) });
-  }
-}
-
-function unwrapTightEmphasis(segments: Segment[]): Segment[] {
-  const out: Segment[] = [];
-  for (const seg of segments) {
-    if (seg.kind !== "prose") {
-      out.push(seg);
-      continue;
-    }
-    unwrapTightEmphasisText(seg.text, out);
-  }
   return out;
-}
-
-function findUrlMatches(prose: string): MatchRange[] {
-  const matches: MatchRange[] = [];
-  URL_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = URL_RE.exec(prose)) !== null) {
-    let candidate = m[0];
-    while (candidate.length > 0) {
-      const last = candidate[candidate.length - 1];
-      if (/[.,;:!?]/.test(last)) {
-        candidate = candidate.slice(0, -1);
-      } else if (
-        (last === ")" && hasUnmatchedClosing(candidate, "(", ")")) ||
-        (last === "]" && hasUnmatchedClosing(candidate, "[", "]")) ||
-        (last === "}" && hasUnmatchedClosing(candidate, "{", "}"))
-      ) {
-        candidate = candidate.slice(0, -1);
-      } else {
-        break;
-      }
-    }
-    const protoEnd = candidate.indexOf("://") + 3;
-    if (candidate.length > protoEnd) {
-      const end = m.index + candidate.length;
-      matches.push({ start: m.index, end });
-      URL_RE.lastIndex = end;
-    }
-  }
-  return matches;
-}
-
-function findPathMatches(prose: string): MatchRange[] {
-  const matches: MatchRange[] = [];
-  PATH_TOKEN_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = PATH_TOKEN_RE.exec(prose)) !== null) {
-    let token = m[0];
-    if (!/[\/\\]/.test(token)) {
-      continue;
-    }
-
-    const tokenStart = m.index;
-    let tokenEnd = tokenStart + token.length;
-    while (token.length > 0 && /[.,;:!?]$/.test(token)) {
-      token = token.slice(0, -1);
-      tokenEnd--;
-    }
-
-    if (!/[\/\\]/.test(token) || !UNICODE_ALNUM_RE.test(token)) {
-      continue;
-    }
-    // Keep HTML/XML tag fragments such as </x> or <br/> as prose so stray-tag detection works.
-    if (tokenStart > 0 && prose[tokenStart - 1] === "<" && token.startsWith("/")) {
-      continue;
-    }
-    if (tokenEnd < prose.length && prose[tokenEnd] === ">" && token.endsWith("/")) {
-      continue;
-    }
-
-    matches.push({ start: tokenStart, end: tokenEnd });
-  }
-  return matches;
-}
-
-function findRegexMatches(
-  prose: string,
-  re: RegExp,
-  accept?: (match: string) => boolean,
-): MatchRange[] {
-  const matches: MatchRange[] = [];
-  re.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(prose)) !== null) {
-    if (accept && !accept(m[0])) {
-      continue;
-    }
-    matches.push({ start: m.index, end: m.index + m[0].length });
-  }
-  return matches;
 }
 
 function stripEmphasisMarkers(text: string): string {
@@ -573,18 +658,7 @@ export function prepareQuote(text: string): PreparedQuote {
 
     let segments = extractBacktickSpans(line);
     segments = unlinkSegments(segments);
-    segments = unwrapTightEmphasis(segments);
-
-    segments = splitProseSegments(segments, findUrlMatches);
-    segments = splitProseSegments(segments, findPathMatches);
-    segments = splitProseSegments(segments, (prose) =>
-      findRegexMatches(prose, EXT_NAME_RE, (m) => /[A-Za-z]/.test(m)),
-    );
-    segments = splitProseSegments(segments, (prose) => findRegexMatches(prose, FLAG_RE));
-    segments = splitProseSegments(segments, (prose) =>
-      findRegexMatches(prose, HASH_RE, (m) => /\d/.test(m)),
-    );
-    segments = splitProseSegments(segments, (prose) => findRegexMatches(prose, EXIT_CODE_RE));
+    segments = extractCodeTokens(segments);
 
     segments = segments.map((seg) =>
       seg.kind === "prose"
