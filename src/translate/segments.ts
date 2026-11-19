@@ -34,6 +34,7 @@ const EXT_NAME_STICKY_RE = /(?<![\w-]|[\w-]\.)[\w-]+(?:\.[\w-]+)*\.[a-z0-9]{1,6}
 const FLAG_STICKY_RE = /(?<![\w-])--?[a-z][\w-]*/y;
 const HASH_STICKY_RE = /(?<![\w])[0-9a-fA-F]{7,}(?![\w])/y;
 const EXIT_CODE_STICKY_RE = /\bexit \d+\b/y;
+const URL_SCHEME_RE = /https?:\/\//;
 
 const PATH_DELIM_RE = /[\s"'<>()[\]{}]/;
 const OPEN_PREDECESSOR_RE = /[\s\p{P}\p{S}]/u;
@@ -310,7 +311,20 @@ function matchStickyAt(re: RegExp, text: string, pos: number): RegExpExecArray |
   return re.exec(text);
 }
 
-function matchUrlAt(text: string, pos: number, emphasis: EmphasisState): number | null {
+/**
+ * A matched code token. `closeAt` is the absolute index of the marker run that
+ * cut the token because it closes open emphasis, or -1 when the token was not cut.
+ */
+interface TokenMatch {
+  end: number;
+  closeAt: number;
+}
+
+function plainMatch(end: number | null): TokenMatch | null {
+  return end === null ? null : { end, closeAt: -1 };
+}
+
+function matchUrlAt(text: string, pos: number, emphasis: EmphasisState): TokenMatch | null {
   if (text[pos] !== "h") return null;
   const m = matchStickyAt(URL_STICKY_RE, text, pos);
   if (!m) return null;
@@ -338,7 +352,7 @@ function matchUrlAt(text: string, pos: number, emphasis: EmphasisState): number 
   if (protoEnd < 3 || candidate.length <= protoEnd) {
     return null;
   }
-  return pos + candidate.length;
+  return { end: pos + candidate.length, closeAt: cut === -1 ? -1 : pos + cut };
 }
 
 function matchPathAt(
@@ -346,13 +360,29 @@ function matchPathAt(
   pos: number,
   canStartPath: boolean,
   emphasis: EmphasisState,
-): number | null {
+): TokenMatch | null {
   if (!canStartPath) return null;
   const m = matchStickyAt(PATH_STICKY_RE, text, pos);
   if (!m) return null;
 
   const raw = m[0];
+  // Keep HTML/XML tag fragments such as </x> as prose so stray-tag detection works.
+  if (pos > 0 && text[pos - 1] === "<" && raw.startsWith("/")) {
+    return null;
+  }
+
   const cut = findClosingMarkerInToken(raw, emphasis);
+
+  // A URL that starts mid-candidate (`--url=https://...`) ends where the URL
+  // matcher ends, so brackets inside the URL stay protected with the prefix.
+  const schemeAt = raw.search(URL_SCHEME_RE);
+  if (schemeAt > 0 && (cut === -1 || cut > schemeAt)) {
+    const url = matchUrlAt(text, pos + schemeAt, emphasis);
+    if (url !== null) {
+      return isTagTail(text, pos, url.end) ? null : url;
+    }
+  }
+
   let token = cut === -1 ? raw : raw.slice(0, cut);
   while (token.length > 0 && /[.,;:!?]$/.test(token)) {
     token = token.slice(0, -1);
@@ -363,15 +393,16 @@ function matchPathAt(
   }
 
   const tokenEnd = pos + token.length;
-  // Keep HTML/XML tag fragments such as </x> or <br/> as prose so stray-tag detection works.
-  if (pos > 0 && text[pos - 1] === "<" && token.startsWith("/")) {
-    return null;
-  }
-  if (tokenEnd < text.length && text[tokenEnd] === ">" && token.endsWith("/")) {
+  if (isTagTail(text, pos, tokenEnd)) {
     return null;
   }
 
-  return tokenEnd;
+  return { end: tokenEnd, closeAt: cut === -1 ? -1 : pos + cut };
+}
+
+// Keep self-closing tag fragments such as <br/> as prose so stray-tag detection works.
+function isTagTail(text: string, start: number, end: number): boolean {
+  return end > start && end < text.length && text[end] === ">" && text[end - 1] === "/";
 }
 
 function matchExtNameAt(text: string, pos: number): number | null {
@@ -424,15 +455,34 @@ function matchCodeTokenAt(
   pos: number,
   canStartPath: boolean,
   emphasis: EmphasisState,
-): number | null {
+): TokenMatch | null {
   return (
     matchUrlAt(text, pos, emphasis) ??
     matchPathAt(text, pos, canStartPath, emphasis) ??
-    matchExtNameAt(text, pos) ??
-    matchFlagAt(text, pos) ??
-    matchHashAt(text, pos) ??
-    matchExitCodeAt(text, pos, emphasis)
+    plainMatch(matchExtNameAt(text, pos)) ??
+    plainMatch(matchFlagAt(text, pos)) ??
+    plainMatch(matchHashAt(text, pos)) ??
+    plainMatch(matchExitCodeAt(text, pos, emphasis))
   );
+}
+
+/**
+ * Consumes a marker run that already cut the preceding token as a closing
+ * marker. The run only closes; it never opens emphasis for the next token.
+ */
+function consumeClosingRun(text: string, pos: number, emphasis: EmphasisState): number {
+  const runLen = Math.max(1, markerRunLength(text, pos));
+  if (text[pos] === "~") {
+    emphasis.strike = false;
+  } else if (runLen === 1) {
+    emphasis.italic = false;
+  } else if (runLen === 2) {
+    emphasis.bold = false;
+  } else {
+    emphasis.bold = false;
+    emphasis.italic = false;
+  }
+  return pos + runLen;
 }
 
 function consumeEmphasisMarker(
@@ -561,6 +611,8 @@ function extractCodeTokens(segments: Segment[]): Segment[] {
     let pos = 0;
     let proseStart = 0;
     let canStartPath = true;
+    // Index of a marker run that closed emphasis when it cut the previous token.
+    let pendingClose = -1;
 
     const flushProse = (end: number): void => {
       if (end > proseStart) {
@@ -569,6 +621,16 @@ function extractCodeTokens(segments: Segment[]): Segment[] {
     };
 
     while (pos < text.length) {
+      if (pendingClose !== -1 && pos >= pendingClose) {
+        const closeAt = pendingClose;
+        pendingClose = -1;
+        if (pos === closeAt) {
+          pos = consumeClosingRun(text, pos, emphasis);
+          canStartPath = true;
+          continue;
+        }
+      }
+
       const markerEnd = consumeEmphasisMarker(text, pos, segIndex, segments.length, emphasis);
       if (markerEnd !== null) {
         pos = markerEnd;
@@ -576,13 +638,14 @@ function extractCodeTokens(segments: Segment[]): Segment[] {
         continue;
       }
 
-      const tokenEnd = matchCodeTokenAt(text, pos, canStartPath, emphasis);
-      if (tokenEnd !== null) {
+      const token = matchCodeTokenAt(text, pos, canStartPath, emphasis);
+      if (token !== null) {
         flushProse(pos);
-        appendSegment(out, { kind: "code", text: text.slice(pos, tokenEnd) });
-        pos = tokenEnd;
-        proseStart = tokenEnd;
+        appendSegment(out, { kind: "code", text: text.slice(pos, token.end) });
+        pos = token.end;
+        proseStart = token.end;
         canStartPath = true;
+        pendingClose = token.closeAt;
         continue;
       }
 

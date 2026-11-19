@@ -299,6 +299,21 @@ test("emphasis tracking across prose and code tokens", () => {
       codes: ["config.ahttps://x.dev/a"],
       restored: "Buka config.ahttps://x.dev/a sekarang.",
     },
+    {
+      input: "Buka --url=https://x.dev/a(b)c sekarang.",
+      codes: ["--url=https://x.dev/a(b)c"],
+      restored: "Buka --url=https://x.dev/a(b)c sekarang.",
+    },
+    {
+      input: "Buka --url=https://[::1]/health sekarang.",
+      codes: ["--url=https://[::1]/health"],
+      restored: "Buka --url=https://[::1]/health sekarang.",
+    },
+    {
+      input: "lihat **https://x.dev/**src/**/*.ts",
+      codes: ["https://x.dev/", "src/**/*.ts"],
+      restored: "lihat https://x.dev/src/**/*.ts",
+    },
   ];
 
   for (const row of cases) {
@@ -355,4 +370,12 @@ test("marker runs and url precedence stay whole across edge boundaries", () => {
   const closedParenProse = prepareQuote("Tolong **buka (penting)**—lanjut.").lines[0]!;
   assert.deepEqual(closedParenProse.codes, []);
   assert.equal(closedParenProse.html, "Tolong buka (penting)—lanjut.");
+
+  const wrappedPrefixedUrl = prepareQuote("lihat **--url=https://x.dev/a(b)c** dulu").lines[0]!;
+  assert.deepEqual(wrappedPrefixedUrl.codes.map((c) => c.text), ["--url=https://x.dev/a(b)c"]);
+  assert.equal(wrappedPrefixedUrl.html, 'lihat <x id="0"></x> dulu');
+
+  const closedAfterTrimmedPunct = prepareQuote("lihat **https://x.dev/a.**src/**/*.ts").lines[0]!;
+  assert.deepEqual(closedAfterTrimmedPunct.codes.map((c) => c.text), ["https://x.dev/a", "src/**/*.ts"]);
+  assert.equal(closedAfterTrimmedPunct.html, 'lihat <x id="0"></x>.<x id="1"></x>');
 });
