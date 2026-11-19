@@ -37,6 +37,8 @@ const EXIT_CODE_STICKY_RE = /\bexit \d+\b/y;
 
 const PATH_DELIM_RE = /[\s"'<>()[\]{}]/;
 const OPEN_PREDECESSOR_RE = /[\s\p{P}\p{S}]/u;
+const OPEN_BRACKET_RE = /[\p{Ps}\p{Pi}]/u;
+const CLOSE_BRACKET_RE = /[\p{Pe}\p{Pf}]/u;
 
 const PLACEHOLDER_SPLIT_RE = /<x id="(\d+)"><\/x>/;
 const STRAY_TAG_RE = /<[\p{L}/]/u;
@@ -277,13 +279,12 @@ function findClosingMarkerInToken(raw: string, emphasis: EmphasisState): number 
     const ch = raw[i];
     if (ch === "*") {
       const runLen = markerRunLength(raw, i);
-      if (runLen === 1) {
-        if (emphasis.italic) return i;
-      } else if (runLen === 2) {
-        if (emphasis.bold) return i;
-      } else {
-        const needed = (emphasis.bold ? 2 : 0) + (emphasis.italic ? 1 : 0);
-        if (needed > 0) return i + runLen - needed;
+      const closes =
+        (runLen === 1 && emphasis.italic) ||
+        (runLen === 2 && emphasis.bold) ||
+        (runLen >= 3 && (emphasis.bold || emphasis.italic));
+      if (closes) {
+        return i;
       }
       i += runLen;
       continue;
@@ -292,7 +293,7 @@ function findClosingMarkerInToken(raw: string, emphasis: EmphasisState): number 
     if (ch === "~") {
       const runLen = markerRunLength(raw, i);
       if (runLen >= 2 && emphasis.strike) {
-        return i + runLen - 2;
+        return i;
       }
       i += runLen;
       continue;
@@ -350,12 +351,7 @@ function matchPathAt(
   const m = matchStickyAt(PATH_STICKY_RE, text, pos);
   if (!m) return null;
 
-  let raw = m[0];
-  const urlMatch = /https?:\/\//.exec(raw);
-  if (urlMatch && urlMatch.index > 0 && matchUrlAt(text, pos + urlMatch.index, emphasis) !== null) {
-    raw = raw.slice(0, urlMatch.index);
-  }
-
+  const raw = m[0];
   const cut = findClosingMarkerInToken(raw, emphasis);
   let token = cut === -1 ? raw : raw.slice(0, cut);
   while (token.length > 0 && /[.,;:!?]$/.test(token)) {
@@ -384,7 +380,7 @@ function matchExtNameAt(text: string, pos: number): number | null {
   const match = m[0];
   if (!/[A-Za-z]/.test(match)) return null;
   const end = pos + match.length;
-  if (text.startsWith("://", end) && /(?:^|\.)https?$/.test(match)) {
+  if (text.startsWith("://", end) && /https?$/.test(match)) {
     return null;
   }
   return end;
@@ -396,7 +392,7 @@ function matchFlagAt(text: string, pos: number): number | null {
   if (!m) return null;
   const match = m[0];
   const end = pos + match.length;
-  if (text.startsWith("://", end) && /^--?https?$/.test(match)) {
+  if (text.startsWith("://", end) && /https?$/.test(match)) {
     return null;
   }
   return end;
@@ -454,8 +450,7 @@ function consumeEmphasisMarker(
     return null;
   }
 
-  const markerLen = ch === "~" ? 2 : runLen;
-  const runEnd = pos + markerLen;
+  const runEnd = pos + runLen;
 
   const prevChar = pos > 0 ? charBefore(text, pos) : segIndex > 0 ? "a" : "";
   const nextChar = runEnd < text.length ? charAt(text, runEnd) : segIndex + 1 < totalSegs ? "a" : "";
@@ -463,62 +458,84 @@ function consumeEmphasisMarker(
   const prevIsNonSpace = prevChar.length > 0 && !/\s/.test(prevChar);
   const nextIsNonSpace = nextChar.length > 0 && !/\s/.test(nextChar);
   const prevAllowsOpen = prevChar === "" || OPEN_PREDECESSOR_RE.test(prevChar);
+  const prevIsOpenPunct = prevChar.length > 0 && OPEN_BRACKET_RE.test(prevChar);
+  const prevIsClosePunct = prevChar.length > 0 && CLOSE_BRACKET_RE.test(prevChar);
+  const nextIsPunct = nextChar.length > 0 && OPEN_PREDECESSOR_RE.test(nextChar);
 
   const startsCodeAfter = (nextState: EmphasisState): boolean =>
-    pos === 0 && segIndex > 0 && matchCodeTokenAt(text, runEnd, true, nextState) !== null;
+    (runEnd === text.length && segIndex + 1 < totalSegs) ||
+    matchCodeTokenAt(text, runEnd, true, nextState) !== null;
+
+  const canOpenAsTokenPrefix = (nextState: EmphasisState): boolean =>
+    nextIsNonSpace &&
+    prevAllowsOpen &&
+    !prevIsClosePunct &&
+    (prevIsOpenPunct || startsCodeAfter(nextState));
+
+  const canOpenNormally = (nextState: EmphasisState): boolean =>
+    nextIsNonSpace &&
+    (prevAllowsOpen || (pos === 0 && segIndex > 0 && startsCodeAfter(nextState)));
+
+  const toggleSingleKind = (kind: keyof EmphasisState): void => {
+    const nextState = { ...emphasis, [kind]: true };
+    if (emphasis[kind] && canOpenAsTokenPrefix(nextState)) {
+      emphasis[kind] = true;
+    } else if (emphasis[kind] && prevIsNonSpace) {
+      emphasis[kind] = false;
+    } else if (canOpenNormally(nextState)) {
+      emphasis[kind] = true;
+    }
+  };
 
   if (ch === "~") {
-    if (emphasis.strike && prevIsNonSpace) {
-      emphasis.strike = false;
-    } else if (
-      nextIsNonSpace &&
-      (prevAllowsOpen || startsCodeAfter({ ...emphasis, strike: true }))
-    ) {
-      emphasis.strike = true;
-    }
+    toggleSingleKind("strike");
     return runEnd;
   }
 
   if (runLen === 1) {
-    if (emphasis.italic && prevIsNonSpace) {
-      emphasis.italic = false;
-    } else if (
-      nextIsNonSpace &&
-      (prevAllowsOpen || startsCodeAfter({ ...emphasis, italic: true }))
-    ) {
-      emphasis.italic = true;
-    }
+    toggleSingleKind("italic");
   } else if (runLen === 2) {
-    if (emphasis.bold && prevIsNonSpace) {
-      emphasis.bold = false;
-    } else if (
-      nextIsNonSpace &&
-      (prevAllowsOpen || startsCodeAfter({ ...emphasis, bold: true }))
-    ) {
-      emphasis.bold = true;
-    }
+    toggleSingleKind("bold");
   } else if (runLen === 3) {
-    if (prevIsNonSpace && (emphasis.bold || emphasis.italic)) {
+    const nextState = { ...emphasis, bold: true, italic: true };
+    if ((emphasis.bold || emphasis.italic) && canOpenAsTokenPrefix(nextState)) {
+      emphasis.bold = true;
+      emphasis.italic = true;
+    } else if (prevIsNonSpace && (emphasis.bold || emphasis.italic)) {
+      const canFollowOpen = (followState: EmphasisState): boolean =>
+        nextIsNonSpace &&
+        (!nextIsPunct || prevAllowsOpen || startsCodeAfter(followState));
       if (emphasis.bold && emphasis.italic) {
         emphasis.bold = false;
         emphasis.italic = false;
       } else if (emphasis.bold) {
         emphasis.bold = false;
-        if (nextIsNonSpace) emphasis.italic = true;
+        if (canFollowOpen({ ...emphasis, bold: false, italic: true })) {
+          emphasis.italic = true;
+        }
       } else {
         emphasis.italic = false;
-        if (nextIsNonSpace) emphasis.bold = true;
+        if (canFollowOpen({ ...emphasis, italic: false, bold: true })) {
+          emphasis.bold = true;
+        }
       }
-    } else if (
-      nextIsNonSpace &&
-      (prevAllowsOpen || startsCodeAfter({ ...emphasis, bold: true, italic: true }))
-    ) {
+    } else if (canOpenNormally(nextState)) {
       emphasis.bold = true;
       emphasis.italic = true;
     }
-  } else if (prevIsNonSpace) {
-    emphasis.bold = false;
-    emphasis.italic = false;
+  } else {
+    const odd = runLen % 2 === 1;
+    const nextState = { ...emphasis, bold: true, italic: odd ? true : emphasis.italic };
+    if ((emphasis.bold || emphasis.italic) && canOpenAsTokenPrefix(nextState)) {
+      emphasis.bold = true;
+      if (odd) emphasis.italic = true;
+    } else if (prevIsNonSpace && (emphasis.bold || emphasis.italic)) {
+      emphasis.bold = false;
+      emphasis.italic = false;
+    } else if (canOpenNormally(nextState)) {
+      emphasis.bold = true;
+      if (odd) emphasis.italic = true;
+    }
   }
 
   return runEnd;

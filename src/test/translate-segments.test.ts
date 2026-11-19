@@ -271,6 +271,34 @@ test("emphasis tracking across prose and code tokens", () => {
       forbiddenInHtml: ["*", "~~"],
       restored: "ubah src/a.ts dan b.ts",
     },
+    {
+      input: "Tolong **buka (**src/a.ts**) lalu lanjut.",
+      codes: ["src/a.ts"],
+      forbiddenInHtml: ["**"],
+      restored: "Tolong buka (src/a.ts) lalu lanjut.",
+    },
+    {
+      input: "lihat **https://x.dev/a*** dulu",
+      codes: ["https://x.dev/a"],
+      forbiddenInHtml: ["*"],
+      restored: "lihat https://x.dev/a dulu",
+    },
+    {
+      input: "lihat ~~https://x.dev/a~~~~ dulu",
+      codes: ["https://x.dev/a"],
+      forbiddenInHtml: ["~"],
+      restored: "lihat https://x.dev/a dulu",
+    },
+    {
+      input: "Buka --via-https://x.dev/a sekarang.",
+      codes: ["--via-https://x.dev/a"],
+      restored: "Buka --via-https://x.dev/a sekarang.",
+    },
+    {
+      input: "Buka config.ahttps://x.dev/a sekarang.",
+      codes: ["config.ahttps://x.dev/a"],
+      restored: "Buka config.ahttps://x.dev/a sekarang.",
+    },
   ];
 
   for (const row of cases) {
@@ -297,4 +325,34 @@ test("emphasis tracking across prose and code tokens", () => {
       assert.equal(restored!.includes(code), true, `${row.input}: restored missing ${code}`);
     }
   }
+});
+
+test("marker runs and url precedence stay whole across edge boundaries", () => {
+  const leadingFlag = prepareQuote("Tolong **buka (**--watch**) lalu lanjut.").lines[0]!;
+  assert.deepEqual(leadingFlag.codes.map((c) => c.text), ["--watch"]);
+  assert.equal(leadingFlag.html, 'Tolong buka (<x id="0"></x>) lalu lanjut.');
+
+  const leadingQuoted = prepareQuote('Tolong **buka "**src/a.ts**" lalu lanjut.').lines[0]!;
+  assert.deepEqual(leadingQuoted.codes.map((c) => c.text), ["src/a.ts"]);
+  assert.equal(leadingQuoted.html, 'Tolong buka "<x id="0"></x>" lalu lanjut.');
+
+  const closedBeforeGlob = prepareQuote("**lihat**src/**/*.ts").lines[0]!;
+  assert.deepEqual(closedBeforeGlob.codes.map((c) => c.text), ["src/**/*.ts"]);
+  assert.equal(closedBeforeGlob.html, 'lihat<x id="0"></x>');
+
+  const splitAfterUrl = prepareQuote("lihat **https://x.dev/a**src/b.ts").lines[0]!;
+  assert.deepEqual(splitAfterUrl.codes.map((c) => c.text), ["https://x.dev/a", "src/b.ts"]);
+  assert.equal(splitAfterUrl.html, 'lihat <x id="0"></x><x id="1"></x>');
+
+  const trailingRunBeforePunct = prepareQuote("lihat **https://x.dev/a***!").lines[0]!;
+  assert.deepEqual(trailingRunBeforePunct.codes.map((c) => c.text), ["https://x.dev/a"]);
+  assert.equal(trailingRunBeforePunct.html, 'lihat <x id="0"></x>!');
+
+  const fourStarsAndStrike = prepareQuote("lihat **https://x.dev/a**** dan ~~https://x.dev/b~~~~ dan ~~c.ts~~").lines[0]!;
+  assert.deepEqual(fourStarsAndStrike.codes.map((c) => c.text), ["https://x.dev/a", "https://x.dev/b", "c.ts"]);
+  assert.equal(fourStarsAndStrike.html, 'lihat <x id="0"></x> dan <x id="1"></x> dan <x id="2"></x>');
+
+  const closedParenProse = prepareQuote("Tolong **buka (penting)**—lanjut.").lines[0]!;
+  assert.deepEqual(closedParenProse.codes, []);
+  assert.equal(closedParenProse.html, "Tolong buka (penting)—lanjut.");
 });
