@@ -374,7 +374,7 @@ fn build_tooltip(blocks: &[&Block], lang: UiLang) -> Vec<TooltipLine> {
 
     for block in blocks {
         if let Some(quote) = &block.quote {
-            let clean = sanitize_single_line(&quote.text);
+            let clean = sanitize_single_line(&crate::plain_text::plain_quote(&quote.text));
             if !clean.is_empty() {
                 push_unique(
                     &mut lines,
