@@ -19,6 +19,7 @@ pub mod notified;
 pub mod notify;
 pub mod now_model;
 pub mod os_notice;
+pub mod plain_text;
 pub mod quit;
 pub mod relay;
 pub mod repo_banner;

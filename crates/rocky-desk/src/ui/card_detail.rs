@@ -248,7 +248,12 @@ fn snippet_line_view(line: &CodeLine) -> Div {
         CodeLine::Context(text) => (DiffLineTone::Context, text.clone()),
         CodeLine::Fold(text) => (DiffLineTone::Fold, text.clone()),
     };
-    diff_code_line(tone, text).min_w_0().truncate()
+    // Clip, never `.truncate()`: gpui 0.2.2 caches a nowrap text's first
+    // measurement, so a line first measured narrow stays "…" at full width.
+    diff_code_line(tone, text)
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
 }
 
 fn timeline_section(

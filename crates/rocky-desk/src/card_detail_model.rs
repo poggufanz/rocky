@@ -487,9 +487,8 @@ fn build_quote_groups(
         let quote = block
             .quote
             .as_ref()
-            .map(|q| q.text.as_str())
-            .filter(|t| !t.trim().is_empty())
-            .map(str::to_string);
+            .map(|q| crate::plain_text::plain_quote(&q.text))
+            .filter(|t| !t.is_empty());
         let view = build_block_view(block, &card.root, snippet_by_seq, lang);
         if let Some(last) = groups.last_mut()
             && last.quote == quote
