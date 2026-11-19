@@ -224,10 +224,15 @@ test("translate frees native response handles and cleans up input vector if opti
     runFreshNode(
       `
         import assert from "node:assert/strict";
+        import { join } from "node:path";
         const { loadEngine } = await import(process.argv[1]);
         const loaded = await loadEngine(process.argv[2]);
         assert.equal(loaded.ok, true);
         if (!loaded.ok) throw new Error("expected ok");
+        const sameHome = await loadEngine(join(process.argv[2], "."));
+        assert.equal(sameHome.ok, true);
+        if (!sameHome.ok) throw new Error("expected sameHome ok");
+        assert.equal(sameHome.engine, loaded.engine);
         const pairRes = loaded.engine.translator("id-en");
         assert.equal(pairRes.ok, true);
         if (!pairRes.ok) throw new Error("expected translator ok");
@@ -264,12 +269,14 @@ test("concurrent cold loadEngine calls both succeed and translate", { skip: skip
       assert.equal(a.ok, true);
       assert.equal(b.ok, true);
       if (!a.ok || !b.ok) throw new Error("expected both ok");
+      assert.equal(a.engine, b.engine);
 
       const ta = a.engine.translator("id-en");
       const tb = b.engine.translator("id-en");
       assert.equal(ta.ok, true);
       assert.equal(tb.ok, true);
       if (!ta.ok || !tb.ok) throw new Error("expected both translators ok");
+      assert.equal(ta.translator, tb.translator);
 
       const sample = 'Saya sengaja mengubah <x id="0"></x> supaya <x id="1"></x> lulus.';
       for (const translator of [ta.translator, tb.translator]) {

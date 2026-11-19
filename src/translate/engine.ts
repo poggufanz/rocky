@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { runInThisContext } from "node:vm";
 import { readInstalled } from "./install.js";
 import type { Pair } from "./language.js";
@@ -118,6 +118,7 @@ type RuntimeState =
 // Process-wide runtime promise: Emscripten glue binds globalThis.Module and
 // Embind types once per Node process, so initialization runs at most once.
 let runtimePromise: Promise<RuntimeState> | undefined;
+const enginesByHome = new Map<string, LoadedEngine>();
 
 function toFallbackExportName(snakeName: string): string {
   return snakeName.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()) + "Fallback";
@@ -361,15 +362,19 @@ export async function loadEngine(home: string): Promise<EngineLoadResult> {
   const wasmPath = join(eDir, wasmName);
 
   if (!runtimePromise) {
-    runtimePromise = initRuntime(gluePath, wasmPath);
+    runtimePromise = Promise.resolve().then(() => initRuntime(gluePath, wasmPath));
   }
   const runtime = await runtimePromise;
   if (!runtime.ok) {
     return runtime;
   }
 
-  return {
-    ok: true,
-    engine: makeLoadedEngine(home, runtime.module, runtime.service),
-  };
+  const resolvedHome = resolve(home);
+  let engine = enginesByHome.get(resolvedHome);
+  if (!engine) {
+    engine = makeLoadedEngine(resolvedHome, runtime.module, runtime.service);
+    enginesByHome.set(resolvedHome, engine);
+  }
+
+  return { ok: true, engine };
 }
