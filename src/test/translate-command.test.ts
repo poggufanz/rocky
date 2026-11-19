@@ -253,3 +253,46 @@ test("translate is hidden from help output and translation runtime opens no netw
     assert.doesNotMatch(text, network, `${file} must not open a network connection`);
   }
 });
+
+test("runTranslate rejects without unhandledRejection when writer throws before EOF", async (t) => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  t.after(() => {
+    process.off("unhandledRejection", onUnhandled);
+  });
+
+  for (const line of [
+    JSON.stringify({ v: 1, key: "k1", to: "fr", text: "Merah" }),
+    JSON.stringify({ v: 1, key: "k2", to: "en", text: "Merah. Implementasi." }),
+  ]) {
+    const input = new PassThrough();
+    t.after(() => input.destroy());
+    const boom = new Error("broken writer");
+
+    const running = runTranslate(
+      input,
+      () => {
+        throw boom;
+      },
+      async () => ({
+        ok: true,
+        translator: {
+          translate: (lines) => lines,
+        },
+      }),
+    );
+
+    input.write(`${line}\n`);
+    await assert.rejects(running, (err) => err === boom);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.deepEqual(unhandled, []);
+    assert.equal(input.listenerCount("data"), 0);
+    assert.equal(input.listenerCount("end"), 0);
+    assert.equal(input.listenerCount("error"), 0);
+    assert.equal(input.listenerCount("close"), 0);
+  }
+});

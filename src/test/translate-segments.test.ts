@@ -379,3 +379,25 @@ test("marker runs and url precedence stay whole across edge boundaries", () => {
   assert.deepEqual(closedAfterTrimmedPunct.codes.map((c) => c.text), ["https://x.dev/a", "src/**/*.ts"]);
   assert.equal(closedAfterTrimmedPunct.html, 'lihat <x id="0"></x>.<x id="1"></x>');
 });
+
+test("restore adds space when engine drops punctuation against alnum, unless source touched alnum", () => {
+  const colonDropped = prepareQuote("`npm test`: gagal").lines[0]!;
+  assert.equal(restoreLine('<x id="0"></x>Failed', colonDropped), "npm test Failed");
+
+  const commaDropped = prepareQuote("`tmp/ready`, tanpa").lines[0]!;
+  assert.equal(restoreLine('<x id="0"></x>without', commaDropped), "tmp/ready without");
+
+  const punctKept = prepareQuote("`a.ts`: ok").lines[0]!;
+  assert.equal(restoreLine('<x id="0"></x>: ok', punctKept), "a.ts: ok");
+
+  const leftColonDropped = prepareQuote("lihat: `a.ts`").lines[0]!;
+  assert.equal(restoreLine('see<x id="0"></x>', leftColonDropped), "see a.ts");
+
+  const touchedRight = prepareQuote("`a.ts`nya").lines[0]!;
+  assert.equal(touchedRight.codes[0].alnumAfter, true);
+  assert.equal(restoreLine('<x id="0"></x>nya', touchedRight), "a.tsnya");
+
+  const touchedLeft = prepareQuote("**lihat**src/**/*.ts").lines[0]!;
+  assert.equal(touchedLeft.codes[0].alnumBefore, true);
+  assert.equal(restoreLine('lihat<x id="0"></x>', touchedLeft), "lihatsrc/**/*.ts");
+});

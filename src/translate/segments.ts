@@ -2,8 +2,8 @@ export interface CodeSpan {
   text: string;
   spaceBefore: boolean;
   spaceAfter: boolean;
-  edgeBefore?: boolean;
-  edgeAfter?: boolean;
+  alnumBefore?: boolean;
+  alnumAfter?: boolean;
 }
 
 export interface PreparedLine {
@@ -770,11 +770,11 @@ export function prepareQuote(text: string): PreparedQuote {
         spaceBefore: /\s$/.test(prosePieces[i]),
         spaceAfter: /^\s/.test(prosePieces[i + 1]),
       };
-      if (i === 0 && prosePieces[0].length === 0) {
-        span.edgeBefore = true;
+      if (ENDS_ALNUM_RE.test(prosePieces[i])) {
+        span.alnumBefore = true;
       }
-      if (i === rawCodes.length - 1 && prosePieces[prosePieces.length - 1].length === 0) {
-        span.edgeAfter = true;
+      if (STARTS_ALNUM_RE.test(prosePieces[i + 1])) {
+        span.alnumAfter = true;
       }
       return span;
     });
@@ -866,7 +866,6 @@ export function restoreLine(out: string, line: PreparedLine): string | undefined
 
   let result = cleanedParts[0];
   let pendingSpace = false;
-  let pendingEdgeAfter = false;
 
   for (let i = 0; i < ids.length; i++) {
     const code = line.codes[ids[i]];
@@ -877,23 +876,20 @@ export function restoreLine(out: string, line: PreparedLine): string | undefined
       leftNonEmpty &&
       (pendingSpace ||
         code.spaceBefore ||
-        (Boolean(code.edgeBefore) && ENDS_ALNUM_RE.test(result)) ||
-        (pendingEdgeAfter && STARTS_ALNUM_RE.test(code.text)));
+        (!code.alnumBefore && ENDS_ALNUM_RE.test(cleanedParts[i])));
 
     if (needSpaceBefore) {
       result += " ";
     }
     result += code.text;
     pendingSpace = code.spaceAfter && rightHasMore;
-    pendingEdgeAfter = Boolean(code.edgeAfter) && rightHasMore;
 
     const nextPart = cleanedParts[i + 1];
     if (nextPart.length > 0) {
-      if (pendingSpace || (pendingEdgeAfter && STARTS_ALNUM_RE.test(nextPart))) {
+      if (pendingSpace || (!code.alnumAfter && STARTS_ALNUM_RE.test(nextPart))) {
         result += " ";
       }
       pendingSpace = false;
-      pendingEdgeAfter = false;
       result += nextPart;
     }
   }

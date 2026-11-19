@@ -79,8 +79,10 @@ export async function runTranslate(
   load: (pair: Pair) => Promise<TranslatorLoad>,
 ): Promise<void> {
   let chain: Promise<void> = Promise.resolve();
+  let failed = false;
 
   const handleLine = async (line: string): Promise<void> => {
+    if (failed) return;
     const parsed = parseTranslateRequest(line);
     if (!parsed) return;
 
@@ -124,22 +126,34 @@ export async function runTranslate(
     write(JSON.stringify(reply));
   };
 
-  const reader = createLineReader((line) => {
-    chain = chain.then(() => handleLine(line));
-  }, MAX_LINE_BYTES);
-
-  await new Promise<void>((resolve) => {
-    let finished = false;
-    const finish = (): void => {
-      if (finished) return;
-      finished = true;
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
       input.off("data", onData);
       input.off("end", finish);
       input.off("error", finish);
       input.off("close", finish);
+    };
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       reader.end();
       resolve();
     };
+    const onQueueError = (err: unknown): void => {
+      if (settled) return;
+      settled = true;
+      failed = true;
+      cleanup();
+      reject(err);
+    };
+    const reader = createLineReader((line) => {
+      if (failed) return;
+      const next = chain.then(() => handleLine(line));
+      next.catch(onQueueError);
+      chain = next;
+    }, MAX_LINE_BYTES);
     const onData = (chunk: Buffer | string): void => {
       reader.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
     };
