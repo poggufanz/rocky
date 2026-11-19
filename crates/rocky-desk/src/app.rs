@@ -15,6 +15,7 @@ use gpui::{Context, FocusHandle, Window, WindowHandle};
 use gpui_tray::Tray;
 use rocky_proto::pipe::{AgentKey, ClientMsg, ServerMsg, Status};
 use rocky_proto::settings::Lang;
+use rocky_proto::translate::QuoteLang;
 
 use crate::atlas_model::AtlasState;
 use crate::card_detail_model::{DetailModel, DiffModel};
@@ -220,6 +221,8 @@ struct DeskView {
     setup: SetupSettings,
     /// Quote translation download consent, status, and request error state.
     translate: TranslateFlow,
+    /// Last resolved quote translation target language, for change detection.
+    last_target: Option<QuoteLang>,
     /// Paginated, searchable change cards list state.
     cards: CardsModel,
     /// Open change card detail view-model, when viewing a card.
@@ -432,6 +435,35 @@ impl DeskView {
         self.ctl.last_tooltip = Msg::NoAgents;
         self.menu_stale = true;
         cx.notify();
+    }
+
+    /// Current quote translation target language, or `None` when disabled or not ready.
+    fn translate_target(&self) -> Option<QuoteLang> {
+        crate::translate_model::translate_target(
+            self.ctl.model.settings(),
+            self.ctl.model.translate_status(),
+            self.ctl.ui_lang,
+        )
+    }
+
+    /// Re-requests open views if the active translation target language changed.
+    fn sync_translate_target(&mut self) -> bool {
+        let target = self.translate_target();
+        if target == self.last_target {
+            return false;
+        }
+        self.last_target = target;
+        if self.card_detail.is_some() {
+            let id = self.next_id();
+            if let Some(msg) = self
+                .card_detail
+                .as_mut()
+                .and_then(|detail| detail.retarget(id, target))
+            {
+                self.send_card_msg(msg);
+            }
+        }
+        true
     }
 
     fn on_toggle_notices(&mut self, _window: &mut Window, cx: &mut Context<Self>) {

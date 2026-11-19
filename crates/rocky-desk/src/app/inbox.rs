@@ -141,6 +141,9 @@ impl DeskView {
         for msg in card_requests {
             self.send_card_msg(msg);
         }
+        if self.sync_translate_target() {
+            changed = true;
+        }
         if changed {
             cx.notify();
         }

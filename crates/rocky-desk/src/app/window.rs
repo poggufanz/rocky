@@ -228,6 +228,7 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                 consent: ConsentModel::default(),
                 setup: SetupSettings::default(),
                 translate: TranslateFlow::default(),
+                last_target: None,
                 cards: CardsModel::new(),
                 card_detail: None,
                 block_diff: None,

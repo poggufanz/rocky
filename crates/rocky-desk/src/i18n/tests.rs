@@ -651,10 +651,14 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::FlowReadBy { .. }
         | CardMsg::FlowChangedBy { .. }
         | CardMsg::FlowOpenLatest
-        | CardMsg::CloseCard => {}
+        | CardMsg::CloseCard
+        | CardMsg::TranslatedFrom { .. }
+        | CardMsg::ShowOriginal
+        | CardMsg::ShowTranslation
+        | CardMsg::Translating => {}
     };
     let _ = check;
-    57
+    61
 }
 
 #[test]
@@ -1001,5 +1005,68 @@ fn translate_settings_copy_in_both_languages() {
             reason: "disk full".into()
         }),
         "Permintaan gagal: disk full"
+    );
+}
+
+#[test]
+fn translated_from_names_the_source_language() {
+    use rocky_proto::translate::QuoteLang;
+
+    assert_eq!(
+        card_text(
+            UiLang::En,
+            &CardMsg::TranslatedFrom {
+                from: QuoteLang::Id
+            }
+        ),
+        "translated from Indonesian"
+    );
+    assert_eq!(
+        card_text(
+            UiLang::En,
+            &CardMsg::TranslatedFrom {
+                from: QuoteLang::En
+            }
+        ),
+        "translated from English"
+    );
+    assert_eq!(
+        card_text(
+            UiLang::Id,
+            &CardMsg::TranslatedFrom {
+                from: QuoteLang::En
+            }
+        ),
+        "diterjemahkan dari bahasa Inggris"
+    );
+    assert_eq!(
+        card_text(
+            UiLang::Id,
+            &CardMsg::TranslatedFrom {
+                from: QuoteLang::Id
+            }
+        ),
+        "diterjemahkan dari bahasa Indonesia"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::ShowOriginal),
+        "Show original"
+    );
+    assert_eq!(card_text(UiLang::Id, &CardMsg::ShowOriginal), "Lihat asli");
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::ShowTranslation),
+        "Show translation"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::ShowTranslation),
+        "Lihat terjemahan"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::Translating),
+        "Translating\u{2026}"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::Translating),
+        "Menerjemahkan\u{2026}"
     );
 }

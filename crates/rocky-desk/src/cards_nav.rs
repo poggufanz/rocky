@@ -979,4 +979,48 @@ mod tests {
         assert_eq!(d.quote_display(&ready.groups[0], UiLang::En).text, "First");
         assert!(!d.quote_display(&ready.groups[1], UiLang::En).translating);
     }
+
+    #[test]
+    fn open_detail_sends_target() {
+        use rocky_proto::translate::QuoteTranslation;
+
+        let mut view = View::Agents;
+        let mut cards = CardsModel::new();
+        let mut detail = None;
+        let mut diff = None;
+
+        let req = open_detail(
+            &mut view,
+            &mut detail,
+            &mut diff,
+            "c1".to_string(),
+            1,
+            Some(QuoteLang::En),
+        );
+        assert_eq!(
+            req,
+            ClientMsg::CardDetail {
+                id: 1,
+                card_id: "c1".to_string(),
+                translate_to: Some(QuoteLang::En),
+            }
+        );
+
+        let handled = route_card_msg(
+            &ServerMsg::QuoteTranslated {
+                card_id: "c1".to_string(),
+                item: QuoteTranslation {
+                    quote_key: "k1".to_string(),
+                    from: QuoteLang::Id,
+                    text: "Hello".to_string(),
+                },
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        );
+        assert!(handled);
+    }
 }

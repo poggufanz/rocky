@@ -4,6 +4,7 @@
 //! build until both English and Indonesian copy exist.
 
 use rocky_proto::cards::{CoverageReason, Label, SymbolKind};
+use rocky_proto::translate::QuoteLang;
 
 use super::{UiLang, plural};
 
@@ -119,6 +120,12 @@ pub enum CardMsg {
     },
     FlowOpenLatest,
     CloseCard,
+    TranslatedFrom {
+        from: QuoteLang,
+    },
+    ShowOriginal,
+    ShowTranslation,
+    Translating,
 }
 
 /// Every [`CardMsg`] variant with sample arguments for parity and text scans.
@@ -205,6 +212,15 @@ pub fn card_samples() -> Vec<CardMsg> {
         CardMsg::FlowChangedBy { n: 3 },
         CardMsg::FlowOpenLatest,
         CardMsg::CloseCard,
+        CardMsg::TranslatedFrom {
+            from: QuoteLang::Id,
+        },
+        CardMsg::TranslatedFrom {
+            from: QuoteLang::En,
+        },
+        CardMsg::ShowOriginal,
+        CardMsg::ShowTranslation,
+        CardMsg::Translating,
     ]
 }
 
@@ -321,6 +337,13 @@ fn card_en(msg: &CardMsg) -> String {
         }
         CardMsg::FlowOpenLatest => "Opens the latest card".to_string(),
         CardMsg::CloseCard => "Close".to_string(),
+        CardMsg::TranslatedFrom { from } => match from {
+            QuoteLang::Id => "translated from Indonesian".to_string(),
+            QuoteLang::En => "translated from English".to_string(),
+        },
+        CardMsg::ShowOriginal => "Show original".to_string(),
+        CardMsg::ShowTranslation => "Show translation".to_string(),
+        CardMsg::Translating => "Translating\u{2026}".to_string(),
     }
 }
 
@@ -418,6 +441,13 @@ fn card_id(msg: &CardMsg) -> String {
         CardMsg::FlowChangedBy { n } => format!("diubah {n} agent"),
         CardMsg::FlowOpenLatest => "Buka kartu terakhir".to_string(),
         CardMsg::CloseCard => "Tutup".to_string(),
+        CardMsg::TranslatedFrom { from } => match from {
+            QuoteLang::Id => "diterjemahkan dari bahasa Indonesia".to_string(),
+            QuoteLang::En => "diterjemahkan dari bahasa Inggris".to_string(),
+        },
+        CardMsg::ShowOriginal => "Lihat asli".to_string(),
+        CardMsg::ShowTranslation => "Lihat terjemahan".to_string(),
+        CardMsg::Translating => "Menerjemahkan\u{2026}".to_string(),
     }
 }
 
