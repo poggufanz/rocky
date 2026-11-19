@@ -396,6 +396,24 @@ mod tests {
     }
 
     #[test]
+    fn toggle_on_when_ready_clears_stale_ask() {
+        let mut flow = TranslateFlow::default();
+        let empty = TranslateStatus::default();
+        let ready = status_with(vec![TranslatePair::IdEn], None, None);
+
+        let out = flow.act(TranslateAction::Toggle, false, &empty, UiLang::En);
+        assert!(out.is_empty());
+        assert_eq!(flow.asking(), Some(TranslatePair::IdEn));
+
+        let out = flow.act(TranslateAction::Toggle, false, &ready, UiLang::En);
+        assert_eq!(out, vec![Outgoing::SetEnabled(true)]);
+        assert_eq!(flow.asking(), None);
+
+        let out = flow.act(TranslateAction::Confirm, false, &ready, UiLang::En);
+        assert!(out.is_empty());
+    }
+
+    #[test]
     fn download_when_on_installs_only() {
         let mut flow = TranslateFlow::default();
         let status = TranslateStatus::default();
