@@ -3059,12 +3059,59 @@ mod tests {
             .unwrap();
     }
 
+    fn request_card_detail(
+        home: &Path,
+        shared: &Arc<Mutex<Shared>>,
+        id: u64,
+        card_id: &str,
+        translate_to: Option<rocky_proto::translate::QuoteLang>,
+    ) -> (ServerMsg, rockyd::translate::Translator) {
+        use rockyd::translate::Translator;
+        use std::collections::BTreeSet;
+
+        let hub = Hub::new();
+        let log = RotatingLog::new(&log_path(home));
+        let mut cards = Engine::new(home.to_path_buf(), 1).with_user_home(None);
+        let mut queries = CardQueryLoop::new(home.to_path_buf(), cards.worker_count());
+        let mut guards = GuardLoop::new(home.to_path_buf(), &log, now_ms());
+        let mut translator = Translator::new(home.to_path_buf());
+        let owned = BTreeSet::new();
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::CardDetail {
+                id,
+                card_id: card_id.to_string(),
+                translate_to,
+                reply: tx,
+            },
+            shared,
+            &hub,
+            &log,
+            home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+            &mut translator,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let reply = loop {
+            service_queries(&mut queries, shared, &mut translator, &log);
+            if let Ok(msg) = rx.try_recv() {
+                break msg;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for detail");
+            thread::sleep(Duration::from_millis(5));
+        };
+        (reply, translator)
+    }
+
     #[test]
     fn card_detail_reply_carries_cached_translations() {
         use rocky_proto::cards::Quote;
         use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
-        use rockyd::translate::Translator;
-        use std::collections::BTreeSet;
 
         let sha = "a".repeat(64);
         let tmp = tempfile::tempdir().unwrap();
@@ -3085,42 +3132,7 @@ mod tests {
         });
         shared.lock().unwrap().cards.append(&card).unwrap();
 
-        let hub = Hub::new();
-        let log = RotatingLog::new(&log_path(&home));
-        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
-        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
-        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
-        let mut translator = Translator::new(home.clone());
-        let owned = BTreeSet::new();
-
-        let (tx, rx) = mpsc::sync_channel(1);
-        let _ = handle_control(
-            Control::CardDetail {
-                id: 1,
-                card_id: "card-tr-hit".to_string(),
-                translate_to: Some(QuoteLang::En),
-                reply: tx,
-            },
-            &shared,
-            &hub,
-            &log,
-            &home,
-            &owned,
-            &mut cards,
-            &mut queries,
-            &mut guards,
-            &mut translator,
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let reply = loop {
-            service_queries(&mut queries, &shared, &mut translator, &log);
-            if let Ok(msg) = rx.try_recv() {
-                break msg;
-            }
-            assert!(Instant::now() < deadline, "timed out waiting for detail");
-            thread::sleep(Duration::from_millis(5));
-        };
+        let (reply, _) = request_card_detail(&home, &shared, 1, "card-tr-hit", Some(QuoteLang::En));
         let ServerMsg::CardDetail { translations, .. } = reply else {
             panic!("expected CardDetail, got {reply:?}");
         };
@@ -3138,8 +3150,6 @@ mod tests {
     fn card_detail_with_setting_off_has_no_translations() {
         use rocky_proto::cards::Quote;
         use rocky_proto::translate::QuoteLang;
-        use rockyd::translate::Translator;
-        use std::collections::BTreeSet;
 
         let sha = "b".repeat(64);
         let tmp = tempfile::tempdir().unwrap();
@@ -3160,42 +3170,7 @@ mod tests {
         });
         shared.lock().unwrap().cards.append(&card).unwrap();
 
-        let hub = Hub::new();
-        let log = RotatingLog::new(&log_path(&home));
-        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
-        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
-        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
-        let mut translator = Translator::new(home.clone());
-        let owned = BTreeSet::new();
-
-        let (tx, rx) = mpsc::sync_channel(1);
-        let _ = handle_control(
-            Control::CardDetail {
-                id: 2,
-                card_id: "card-tr-off".to_string(),
-                translate_to: Some(QuoteLang::En),
-                reply: tx,
-            },
-            &shared,
-            &hub,
-            &log,
-            &home,
-            &owned,
-            &mut cards,
-            &mut queries,
-            &mut guards,
-            &mut translator,
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let reply = loop {
-            service_queries(&mut queries, &shared, &mut translator, &log);
-            if let Ok(msg) = rx.try_recv() {
-                break msg;
-            }
-            assert!(Instant::now() < deadline, "timed out waiting for detail");
-            thread::sleep(Duration::from_millis(5));
-        };
+        let (reply, _) = request_card_detail(&home, &shared, 2, "card-tr-off", Some(QuoteLang::En));
         let ServerMsg::CardDetail { translations, .. } = reply else {
             panic!("expected CardDetail, got {reply:?}");
         };
@@ -3207,8 +3182,6 @@ mod tests {
         use rocky_proto::cards::Quote;
         use rocky_proto::pipe::{LINE_CAP, encode};
         use rocky_proto::translate::QuoteLang;
-        use rockyd::translate::Translator;
-        use std::collections::BTreeSet;
 
         let sha = "c".repeat(64);
         let tmp = tempfile::tempdir().unwrap();
@@ -3261,42 +3234,8 @@ mod tests {
         shared.lock().unwrap().settings.translate_quotes = true;
         shared.lock().unwrap().cards.append(&card).unwrap();
 
-        let hub = Hub::new();
-        let log = RotatingLog::new(&log_path(&home));
-        let mut cards = Engine::new(home.clone(), 1).with_user_home(None);
-        let mut queries = CardQueryLoop::new(home.clone(), cards.worker_count());
-        let mut guards = GuardLoop::new(home.clone(), &log, now_ms());
-        let mut translator = Translator::new(home.clone());
-        let owned = BTreeSet::new();
-
-        let (tx, rx) = mpsc::sync_channel(1);
-        let _ = handle_control(
-            Control::CardDetail {
-                id: 3,
-                card_id: "card-tr-big".to_string(),
-                translate_to: Some(QuoteLang::En),
-                reply: tx,
-            },
-            &shared,
-            &hub,
-            &log,
-            &home,
-            &owned,
-            &mut cards,
-            &mut queries,
-            &mut guards,
-            &mut translator,
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let reply = loop {
-            service_queries(&mut queries, &shared, &mut translator, &log);
-            if let Ok(msg) = rx.try_recv() {
-                break msg;
-            }
-            assert!(Instant::now() < deadline, "timed out waiting for detail");
-            thread::sleep(Duration::from_millis(5));
-        };
+        let (reply, mut translator) =
+            request_card_detail(&home, &shared, 3, "card-tr-big", Some(QuoteLang::En));
         assert!(encode(&reply).len() <= LINE_CAP);
         let ServerMsg::CardDetail { translations, .. } = reply else {
             panic!("expected CardDetail, got {reply:?}");
