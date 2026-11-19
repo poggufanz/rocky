@@ -179,3 +179,39 @@ test("restore spaces a code span moved off a source line edge", () => {
   const sole = prepareQuote("src/a.ts").lines[0]!;
   assert.equal(restoreLine('Check (<x id="0"></x>).', sole), "Check (src/a.ts).");
 });
+
+test("wrapped url excludes closing emphasis marker before attached prose", () => {
+  const q = prepareQuote("lihat **https://x.dev/a**—situs resmi");
+  const line = q.lines[0]!;
+  assert.equal(line.html, 'lihat <x id="0"></x>—situs resmi');
+  assert.deepEqual(line.codes, [{ text: "https://x.dev/a", spaceBefore: true, spaceAfter: false }]);
+  assert.equal(q.prose, "lihat —situs resmi");
+  assert.equal(restoreLine('see <x id="0"></x>—official site', line), "see https://x.dev/a—official site");
+});
+
+test("bare globs do not truncate an unwrapped url ending in stars", () => {
+  const q = prepareQuote("lihat src/**/*.ts dan https://x.dev/objects/** sekarang");
+  const line = q.lines[0]!;
+  assert.equal(line.html, 'lihat <x id="0"></x> dan <x id="1"></x> sekarang');
+  assert.deepEqual(line.codes.map((c) => c.text), ["src/**/*.ts", "https://x.dev/objects/**"]);
+  assert.equal(q.prose, "lihat dan sekarang");
+});
+
+test("filename stays protected before an attached sentence", () => {
+  const attached = prepareQuote("Buka config.json.Berikutnya ulangi.");
+  const line = attached.lines[0]!;
+  assert.equal(line.html, 'Buka <x id="0"></x>.Berikutnya ulangi.');
+  assert.deepEqual(line.codes, [{ text: "config.json", spaceBefore: true, spaceAfter: false }]);
+  assert.match(attached.prose, /Berikutnya/);
+  assert.doesNotMatch(attached.prose, /config\.json/);
+
+  const multiDot = prepareQuote("cek foo.test.ts dulu").lines[0]!;
+  assert.deepEqual(multiDot.codes.map((c) => c.text), ["foo.test.ts"]);
+
+  const trailingPeriod = prepareQuote("ubah a.ts.").lines[0]!;
+  assert.equal(trailingPeriod.html, 'ubah <x id="0"></x>.');
+  assert.deepEqual(trailingPeriod.codes.map((c) => c.text), ["a.ts"]);
+
+  const nonCode = prepareQuote("Selesai.Lanjut 1.5").lines[0]!;
+  assert.deepEqual(nonCode.codes, []);
+});

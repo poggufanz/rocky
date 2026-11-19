@@ -27,15 +27,9 @@ interface MatchRange {
   end: number;
 }
 
-interface EmphasisState {
-  bold: boolean;
-  strike: boolean;
-  italic: boolean;
-}
-
 const URL_RE = /https?:\/\/[^\s"'<>]+/g;
 const PATH_TOKEN_RE = /[^\s"'<>()[\]{}]+/g;
-const EXT_NAME_RE = /(?<![\w-]|[\w-]\.)[\w-]+(?:\.[\w-]+)*\.[a-z0-9]{1,6}(?![\w-]|\.\w)/g;
+const EXT_NAME_RE = /(?<![\w-]|[\w-]\.)[\w-]+(?:\.[\w-]+)*\.[a-z0-9]{1,6}(?![\w-])/g;
 const FLAG_RE = /(?<![\w-])--?[a-z][\w-]*/g;
 const HASH_RE = /(?<![\w])[0-9a-fA-F]{7,}(?![\w])/g;
 const EXIT_CODE_RE = /\bexit \d+\b/g;
@@ -283,57 +277,149 @@ function charBefore(text: string, index: number): string {
   return text[index - 1];
 }
 
-function charAfter(text: string, index: number): string {
-  if (index + 1 >= text.length) return "";
-  const cp = text.codePointAt(index + 1);
+function charAt(text: string, index: number): string {
+  if (index < 0 || index >= text.length) return "";
+  const cp = text.codePointAt(index);
   return cp === undefined ? "" : String.fromCodePoint(cp);
 }
 
-function isOperatorStar(text: string, index: number): boolean {
-  const prev = charBefore(text, index);
-  const next = charAfter(text, index);
-  const keepSpaces = /\s/.test(prev) && /\s/.test(next);
-  const keepAlnum = UNICODE_ALNUM_RE.test(prev) && UNICODE_ALNUM_RE.test(next);
-  return keepSpaces || keepAlnum;
+function isWrapperBoundary(ch: string, allowDot: boolean): boolean {
+  if (ch === "" || /\s/.test(ch)) return true;
+  if (UNICODE_ALNUM_RE.test(ch)) return false;
+  if (!allowDot && ch === ".") return false;
+  return !/[\/\\_*~-]/.test(ch);
 }
 
-function advanceEmphasisState(
-  text: string,
-  start: number,
-  end: number,
-  state: EmphasisState,
-): void {
-  let i = start;
-  while (i < end) {
-    if (text[i] === "*" && i + 1 < end && text[i + 1] === "*") {
-      state.bold = !state.bold;
-      i += 2;
+function markerRunLength(text: string, index: number): number {
+  const ch = text[index];
+  if (ch !== "*" && ch !== "~") return 0;
+  let end = index + 1;
+  while (end < text.length && text[end] === ch) {
+    end++;
+  }
+  return end - index;
+}
+
+function isEmphasisMarker(ch: string, runLen: number): boolean {
+  if (ch === "*") return runLen >= 1 && runLen <= 3;
+  if (ch === "~") return runLen === 2;
+  return false;
+}
+
+function peelTightEmphasis(text: string): string {
+  let current = text;
+  while (current.length >= 3) {
+    const ch = current[0];
+    const runLen = markerRunLength(current, 0);
+    if (!isEmphasisMarker(ch, runLen) || current.length <= runLen * 2) {
+      break;
+    }
+    const closeStart = current.length - runLen;
+    if (
+      current.slice(closeStart) === current.slice(0, runLen) &&
+      current[closeStart - 1] !== ch &&
+      !/\s/.test(current[runLen]) &&
+      !/\s/.test(current[closeStart - 1])
+    ) {
+      current = current.slice(runLen, closeStart);
       continue;
     }
-    if (text[i] === "~" && i + 1 < end && text[i + 1] === "~") {
-      state.strike = !state.strike;
-      i += 2;
-      continue;
-    }
-    if (text[i] === "*") {
-      if (!isOperatorStar(text, i)) {
-        state.italic = !state.italic;
-      }
+    break;
+  }
+  return current;
+}
+
+function unwrapTightEmphasisText(text: string, out: Segment[]): void {
+  let chunkStart = 0;
+  let i = 0;
+  const noCloserUntil = new Map<string, number>();
+
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch !== "*" && ch !== "~") {
       i++;
       continue;
     }
-    i++;
+
+    const runLen = markerRunLength(text, i);
+    if (!isEmphasisMarker(ch, runLen)) {
+      i += runLen;
+      continue;
+    }
+
+    const before = charBefore(text, i);
+    const openEnd = i + runLen;
+    if (
+      !isWrapperBoundary(before, false) ||
+      openEnd >= text.length ||
+      /\s/.test(text[openEnd])
+    ) {
+      i = openEnd;
+      continue;
+    }
+
+    const markerKey = text.slice(i, openEnd);
+    const skipUntil = noCloserUntil.get(markerKey) ?? -1;
+    if (i < skipUntil) {
+      i = openEnd;
+      continue;
+    }
+
+    let j = openEnd;
+    let closeStart = -1;
+    while (j < text.length && !/\s/.test(text[j])) {
+      if (text[j] === ch) {
+        const closeRunLen = markerRunLength(text, j);
+        const closeEnd = j + closeRunLen;
+        if (
+          closeRunLen === runLen &&
+          j > openEnd &&
+          isWrapperBoundary(charAt(text, closeEnd), true)
+        ) {
+          closeStart = j;
+          break;
+        }
+        j = closeEnd;
+        continue;
+      }
+      j++;
+    }
+
+    if (closeStart !== -1) {
+      if (i > chunkStart) {
+        out.push({ kind: "prose", text: text.slice(chunkStart, i) });
+      }
+      out.push({ kind: "prose", text: peelTightEmphasis(text.slice(openEnd, closeStart)) });
+      i = closeStart + runLen;
+      chunkStart = i;
+    } else {
+      noCloserUntil.set(markerKey, j);
+      i = openEnd;
+    }
+  }
+
+  if (chunkStart < text.length) {
+    out.push({ kind: "prose", text: text.slice(chunkStart) });
   }
 }
 
-function findUrlMatches(prose: string, state: EmphasisState): MatchRange[] {
+function unwrapTightEmphasis(segments: Segment[]): Segment[] {
+  const out: Segment[] = [];
+  for (const seg of segments) {
+    if (seg.kind !== "prose") {
+      out.push(seg);
+      continue;
+    }
+    unwrapTightEmphasisText(seg.text, out);
+  }
+  return out;
+}
+
+function findUrlMatches(prose: string): MatchRange[] {
   const matches: MatchRange[] = [];
   URL_RE.lastIndex = 0;
-  let scanCursor = 0;
   let m: RegExpExecArray | null;
   while ((m = URL_RE.exec(prose)) !== null) {
-    advanceEmphasisState(prose, scanCursor, m.index, state);
-    const open = { ...state };
     let candidate = m[0];
     while (candidate.length > 0) {
       const last = candidate[candidate.length - 1];
@@ -345,15 +431,6 @@ function findUrlMatches(prose: string, state: EmphasisState): MatchRange[] {
         (last === "}" && hasUnmatchedClosing(candidate, "{", "}"))
       ) {
         candidate = candidate.slice(0, -1);
-      } else if (open.bold && candidate.endsWith("**")) {
-        candidate = candidate.slice(0, -2);
-        open.bold = false;
-      } else if (open.strike && candidate.endsWith("~~")) {
-        candidate = candidate.slice(0, -2);
-        open.strike = false;
-      } else if (open.italic && candidate.endsWith("*")) {
-        candidate = candidate.slice(0, -1);
-        open.italic = false;
       } else {
         break;
       }
@@ -363,12 +440,8 @@ function findUrlMatches(prose: string, state: EmphasisState): MatchRange[] {
       const end = m.index + candidate.length;
       matches.push({ start: m.index, end });
       URL_RE.lastIndex = end;
-      scanCursor = end;
-    } else {
-      scanCursor = m.index;
     }
   }
-  advanceEmphasisState(prose, scanCursor, prose.length, state);
   return matches;
 }
 
@@ -382,30 +455,11 @@ function findPathMatches(prose: string): MatchRange[] {
       continue;
     }
 
-    let tokenStart = m.index;
+    const tokenStart = m.index;
     let tokenEnd = tokenStart + token.length;
-    const leadMatch = token.match(/^(?:\*\*|~~|\*)+/);
-    let strippedSingleStar = false;
-    if (leadMatch) {
-      const lead = leadMatch[0];
-      strippedSingleStar = lead.replace(/\*\*|~~/g, "").includes("*");
-      tokenStart += lead.length;
-      token = token.slice(lead.length);
-    }
-
-    while (token.length > 0) {
-      if (/[.,;:!?]$/.test(token)) {
-        token = token.slice(0, -1);
-        tokenEnd--;
-      } else if (token.endsWith("**") || token.endsWith("~~")) {
-        token = token.slice(0, -2);
-        tokenEnd -= 2;
-      } else if (strippedSingleStar && token.endsWith("*")) {
-        token = token.slice(0, -1);
-        tokenEnd--;
-      } else {
-        break;
-      }
+    while (token.length > 0 && /[.,;:!?]$/.test(token)) {
+      token = token.slice(0, -1);
+      tokenEnd--;
     }
 
     if (!/[\/\\]/.test(token) || !UNICODE_ALNUM_RE.test(token)) {
@@ -519,9 +573,9 @@ export function prepareQuote(text: string): PreparedQuote {
 
     let segments = extractBacktickSpans(line);
     segments = unlinkSegments(segments);
+    segments = unwrapTightEmphasis(segments);
 
-    const emphasisState: EmphasisState = { bold: false, strike: false, italic: false };
-    segments = splitProseSegments(segments, (prose) => findUrlMatches(prose, emphasisState));
+    segments = splitProseSegments(segments, findUrlMatches);
     segments = splitProseSegments(segments, findPathMatches);
     segments = splitProseSegments(segments, (prose) =>
       findRegexMatches(prose, EXT_NAME_RE, (m) => /[A-Za-z]/.test(m)),
