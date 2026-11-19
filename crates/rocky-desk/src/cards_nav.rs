@@ -629,6 +629,55 @@ mod tests {
     }
 
     #[test]
+    fn reopened_detail_retargeted_not_found_returns_to_list() {
+        let mut cards = CardsModel::new();
+        let mut view = View::Agents;
+        let mut detail = None;
+        let mut diff = None;
+
+        let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1, None);
+        let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 7, 2);
+
+        let mut next = 2_u64;
+        let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), || {
+            next += 1;
+            next
+        });
+        assert_eq!(detail.as_ref().unwrap().pending_id(), Some(4));
+
+        // Retargeting while the reopen is still in-flight replaces the request id
+        // without clearing the reconnect flag until the replacement request resolves.
+        let req = detail.as_mut().unwrap().retarget(5, Some(QuoteLang::En));
+        assert_eq!(
+            req,
+            Some(ClientMsg::CardDetail {
+                id: 5,
+                card_id: "c1".to_string(),
+                translate_to: Some(QuoteLang::En),
+            })
+        );
+        assert_eq!(detail.as_ref().unwrap().pending_id(), Some(5));
+
+        let changed = route_card_msg(
+            &ServerMsg::Ack {
+                id: 5,
+                ok: false,
+                error: Some("not_found".to_string()),
+                cleanup_errors: 0,
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        );
+        assert!(changed);
+        assert_eq!(view, View::Agents);
+        assert!(detail.is_none());
+        assert!(diff.is_none());
+    }
+
+    #[test]
     fn direct_not_found_stays_on_view() {
         let mut cards = CardsModel::new();
         let mut view = View::Agents;

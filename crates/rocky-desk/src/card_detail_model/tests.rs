@@ -2133,3 +2133,90 @@ fn reopen_keeps_target() {
         }
     );
 }
+
+#[test]
+fn formatting_only_first_quote_keeps_raw_key_and_dim_fallback() {
+    let raw = "- *";
+    let k = quote_key(raw);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    let b2 = sample_block(2, "src/b.rs", Vec::new());
+    card.blocks = vec![b1, b2];
+
+    model.on_detail(1, card, Vec::new(), Vec::new(), vec![k.clone()], UiLang::En);
+
+    let group = {
+        let DetailState::Ready(view) = model.state() else {
+            panic!("expected Ready state");
+        };
+        assert_eq!(view.groups.len(), 1);
+        assert_eq!(view.groups[0].blocks.len(), 2);
+        assert_eq!(view.groups[0].quote, None);
+        assert_eq!(view.groups[0].raw_quote.as_deref(), Some(raw));
+        assert_eq!(view.groups[0].quote_key(), Some(k.clone()));
+        assert_eq!(
+            model.quote_display(&view.groups[0], UiLang::En),
+            QuoteDisplay {
+                text: "No agent words recorded for this edit".to_string(),
+                is_dim: true,
+                key: Some(k.clone()),
+                translated_from: None,
+                showing_original: false,
+                translating: true,
+            }
+        );
+        view.groups[0].clone()
+    };
+
+    assert!(model.on_settled("c1", &k, QuoteLang::En));
+    assert_eq!(
+        model.quote_display(&group, UiLang::En),
+        QuoteDisplay {
+            text: "No agent words recorded for this edit".to_string(),
+            is_dim: true,
+            key: Some(k.clone()),
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+
+    assert!(model.on_translated(
+        "c1",
+        &QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "Translated".to_string(),
+        },
+    ));
+    assert_eq!(
+        model.quote_display(&group, UiLang::En),
+        QuoteDisplay {
+            text: "Translated".to_string(),
+            is_dim: false,
+            key: Some(k.clone()),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: false,
+            translating: false,
+        }
+    );
+
+    model.toggle_original(&k);
+    assert_eq!(
+        model.quote_display(&group, UiLang::En),
+        QuoteDisplay {
+            text: "No agent words recorded for this edit".to_string(),
+            is_dim: true,
+            key: Some(k),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: true,
+            translating: false,
+        }
+    );
+}

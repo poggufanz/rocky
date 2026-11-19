@@ -93,7 +93,6 @@ impl DetailModel {
             }
             Some(_) => {
                 self.pending_id = Some(id);
-                self.reopened = false;
                 Some(ClientMsg::CardDetail {
                     id,
                     card_id: self.card_id.clone(),
@@ -190,27 +189,30 @@ impl DetailModel {
                 translating: false,
             };
         };
-        let original = || {
-            group.quote.clone().unwrap_or_else(|| {
-                group
-                    .raw_quote
-                    .as_deref()
-                    .map(crate::plain_text::plain_quote)
-                    .unwrap_or_default()
-            })
+        let original = || match &group.quote {
+            Some(text) if !text.is_empty() => (text.clone(), false),
+            _ => match group
+                .raw_quote
+                .as_deref()
+                .map(crate::plain_text::plain_quote)
+                .filter(|t| !t.is_empty())
+            {
+                Some(text) => (text, false),
+                None => (card_text(lang, &CardMsg::NoAgentWords), true),
+            },
         };
         if let Some(tr) = self.translations.get(&key) {
             let cleaned = crate::plain_text::plain_quote(&tr.text);
             if !cleaned.is_empty() {
                 let showing_original = self.shown_original.contains(&key);
-                let text = if showing_original {
+                let (text, is_dim) = if showing_original {
                     original()
                 } else {
-                    cleaned
+                    (cleaned, false)
                 };
                 return QuoteDisplay {
                     text,
-                    is_dim: false,
+                    is_dim,
                     key: Some(key),
                     translated_from: Some(tr.from),
                     showing_original,
@@ -219,9 +221,10 @@ impl DetailModel {
             }
         }
         let translating = self.pending.contains(&key);
+        let (text, is_dim) = original();
         QuoteDisplay {
-            text: original(),
-            is_dim: false,
+            text,
+            is_dim,
             key: Some(key),
             translated_from: None,
             showing_original: false,
@@ -656,7 +659,6 @@ fn build_quote_groups(
             .as_deref()
             .map(crate::plain_text::plain_quote)
             .filter(|t| !t.is_empty());
-        let raw_quote = if quote.is_some() { raw_quote } else { None };
         let view = build_block_view(block, &card.root, snippet_by_seq, lang);
         if let Some(last) = groups.last_mut()
             && last.quote == quote
