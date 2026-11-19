@@ -97,6 +97,19 @@ test("only prose lines reach the engine, and lines keep their shape", async () =
   });
 });
 
+test("translated prose is assembled with restored code placeholders", async () => {
+  const fake = makeFakeLoad((lines) => {
+    assert.deepEqual(lines, ['Ubah <x id="0"></x> sekarang.']);
+    return ['Change <x id="0"></x> now.'];
+  });
+  const result = await translateQuote("Ubah `src/a.ts` sekarang.", "en", fake.load);
+  assert.deepEqual(result, {
+    ok: true,
+    from: "id",
+    text: "Change src/a.ts now.",
+  });
+});
+
 test("engine drift fails the whole quote", async () => {
   const stripFake = makeFakeLoad((lines) =>
     lines.map((line) => line.replace(/<x id="\d+"><\/x>/g, "")),
@@ -129,6 +142,14 @@ test("engine drift fails the whole quote", async () => {
   const strayTagFake = makeFakeLoad((lines) => [lines[0], "<b>Line two</b>"]);
   const strayTag = await translateQuote("Baris satu.\nBaris dua.", "en", strayTagFake.load);
   assert.deepEqual(strayTag, { ok: false, reason: "placeholder-mismatch" });
+
+  const embeddedLfFake = makeFakeLoad((lines) => [`${lines[0]}\nExtra`, lines[1]]);
+  const embeddedLf = await translateQuote("Baris satu.\nBaris dua.", "en", embeddedLfFake.load);
+  assert.deepEqual(embeddedLf, { ok: false, reason: "placeholder-mismatch" });
+
+  const embeddedCrFake = makeFakeLoad((lines) => [lines[0], `${lines[1]}\rExtra`]);
+  const embeddedCr = await translateQuote("Baris satu.\nBaris dua.", "en", embeddedCrFake.load);
+  assert.deepEqual(embeddedCr, { ok: false, reason: "placeholder-mismatch" });
 });
 
 test("load failure and engine throw are reported", async () => {
@@ -138,6 +159,12 @@ test("load failure and engine throw are reported", async () => {
   });
   const missingResult = await translateQuote("Merah. Implementasi.", "en", missingLoad);
   assert.deepEqual(missingResult, { ok: false, reason: "model-missing" });
+
+  const rejectingLoad = async (): Promise<TranslatorLoad> => {
+    throw new Error("boom");
+  };
+  const rejectingResult = await translateQuote("Merah. Implementasi.", "en", rejectingLoad);
+  assert.deepEqual(rejectingResult, { ok: false, reason: "load-failed" });
 
   const throwingFake = makeFakeLoad(() => {
     throw new Error("boom");

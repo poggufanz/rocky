@@ -44,7 +44,12 @@ export async function translateQuote(
 
   const from: Lang = to === "en" ? "id" : "en";
   const pair: Pair = to === "en" ? "id-en" : "en-id";
-  const loaded = await load(pair);
+  let loaded: TranslatorLoad;
+  try {
+    loaded = await load(pair);
+  } catch {
+    return { ok: false, reason: "load-failed" };
+  }
   if (!loaded.ok) {
     return { ok: false, reason: loaded.reason };
   }
@@ -68,7 +73,7 @@ export async function translateQuote(
   const restored: string[] = [];
   for (let i = 0; i < sendLines.length; i++) {
     const outLine = translated[i];
-    if (typeof outLine !== "string") {
+    if (typeof outLine !== "string" || /[\r\n]/.test(outLine)) {
       return { ok: false, reason: "placeholder-mismatch" };
     }
     const lineText = restoreLine(outLine, sendLines[i]);
