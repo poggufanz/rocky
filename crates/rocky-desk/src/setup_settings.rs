@@ -762,7 +762,9 @@ fn control_of(kind: &RequestKind) -> Option<Control> {
         | RequestKind::Approve
         | RequestKind::Later
         | RequestKind::Remove
-        | RequestKind::RepoList => None,
+        | RequestKind::RepoList
+        | RequestKind::TranslateInstall(_)
+        | RequestKind::TranslateRemove => None,
     }
 }
 

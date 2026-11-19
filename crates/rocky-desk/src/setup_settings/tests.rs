@@ -617,3 +617,29 @@ fn repo_rows_carry_capture_tone_and_error() {
     assert_eq!(rows[3].tone, Tone::Warn);
     assert_eq!(rows[4].tone, Tone::Neutral);
 }
+
+#[test]
+fn translate_requests_have_no_setup_control_and_trigger_no_step() {
+    use rocky_proto::translate::TranslatePair;
+
+    assert_eq!(
+        control_of(&RequestKind::TranslateInstall(TranslatePair::IdEn)),
+        None
+    );
+    assert_eq!(control_of(&RequestKind::TranslateRemove), None);
+
+    let mut model = SetupSettings::default();
+    let step = model.route(
+        RequestKind::TranslateInstall(TranslatePair::IdEn),
+        Outcome::Done {
+            ok: false,
+            error: Some("busy".into()),
+            cleanup_errors: 0,
+        },
+        "expired",
+    );
+    assert_eq!(step, Step::default());
+
+    let step = model.route(RequestKind::TranslateRemove, Outcome::Expired, "expired");
+    assert_eq!(step, Step::default());
+}

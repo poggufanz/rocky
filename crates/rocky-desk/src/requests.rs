@@ -2,6 +2,7 @@
 //! matched by id, and a timeout so no control waits forever.
 
 use rocky_proto::pipe::{ClientMsg, ConsentState, RepoEntry, ServerMsg, SetupAction, SetupTarget};
+use rocky_proto::translate::TranslatePair;
 
 /// Node's 120 s guard plus slack.
 pub const REQUEST_TIMEOUT_MS: u64 = 130_000;
@@ -21,6 +22,8 @@ pub enum RequestKind {
     RepoAllow(String),
     RepoDecline(String),
     RepoPurge(String),
+    TranslateInstall(TranslatePair),
+    TranslateRemove,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +72,8 @@ pub fn client_msg(kind: &RequestKind, id: u64) -> ClientMsg {
             root: root.clone(),
             allow: false,
         },
+        RequestKind::TranslateInstall(pair) => ClientMsg::TranslateInstall { id, pair: *pair },
+        RequestKind::TranslateRemove => ClientMsg::TranslateRemove { id },
     }
 }
 
@@ -327,5 +332,29 @@ mod tests {
         for (kind, expected) in cases {
             assert_eq!(client_msg(&kind, 7), expected);
         }
+    }
+
+    #[test]
+    fn translate_kinds_map_to_wire() {
+        use rocky_proto::translate::TranslatePair;
+
+        assert_eq!(
+            client_msg(&RequestKind::TranslateInstall(TranslatePair::IdEn), 7),
+            ClientMsg::TranslateInstall {
+                id: 7,
+                pair: TranslatePair::IdEn,
+            }
+        );
+        assert_eq!(
+            client_msg(&RequestKind::TranslateInstall(TranslatePair::EnId), 8),
+            ClientMsg::TranslateInstall {
+                id: 8,
+                pair: TranslatePair::EnId,
+            }
+        );
+        assert_eq!(
+            client_msg(&RequestKind::TranslateRemove, 9),
+            ClientMsg::TranslateRemove { id: 9 }
+        );
     }
 }

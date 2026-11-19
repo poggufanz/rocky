@@ -3,6 +3,8 @@
 //! `setup_en` and `setup_id` match exhaustively, so adding a variant fails the
 //! build until both languages carry copy.
 
+use rocky_proto::translate::TranslateFailure;
+
 use super::{error_suffix, plural};
 
 /// One setup or capture message, rendered through [`setup_en`] or [`setup_id`].
@@ -169,6 +171,25 @@ pub enum SetupMsg {
     RemovedCardCleanupFailed,
     RemovedUninstall,
     RemovedClose,
+    TranslateQuotesToggle,
+    TranslateOff,
+    TranslateNeedsDownload,
+    TranslateDownloading {
+        percent: Option<u8>,
+    },
+    TranslateReady,
+    TranslateFailed {
+        failure: TranslateFailure,
+    },
+    TranslateDownload,
+    TranslateRetry,
+    TranslateRemove,
+    TranslateCancel,
+    TranslateConsentAsk,
+    TranslateBusy,
+    TranslateRequestFailed {
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -324,6 +345,33 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         SetupMsg::RemovedCardCleanupFailed,
         SetupMsg::RemovedUninstall,
         SetupMsg::RemovedClose,
+        SetupMsg::TranslateQuotesToggle,
+        SetupMsg::TranslateOff,
+        SetupMsg::TranslateNeedsDownload,
+        SetupMsg::TranslateDownloading { percent: Some(40) },
+        SetupMsg::TranslateDownloading { percent: None },
+        SetupMsg::TranslateReady,
+        SetupMsg::TranslateFailed {
+            failure: TranslateFailure::Download,
+        },
+        SetupMsg::TranslateFailed {
+            failure: TranslateFailure::Checksum,
+        },
+        SetupMsg::TranslateFailed {
+            failure: TranslateFailure::Write,
+        },
+        SetupMsg::TranslateFailed {
+            failure: TranslateFailure::Engine,
+        },
+        SetupMsg::TranslateDownload,
+        SetupMsg::TranslateRetry,
+        SetupMsg::TranslateRemove,
+        SetupMsg::TranslateCancel,
+        SetupMsg::TranslateConsentAsk,
+        SetupMsg::TranslateBusy,
+        SetupMsg::TranslateRequestFailed {
+            reason: "disk full".into(),
+        },
     ]
 }
 
@@ -483,6 +531,37 @@ pub fn setup_en(m: &SetupMsg) -> String {
         }
         SetupMsg::RemovedUninstall => "To remove the command line, run:".to_string(),
         SetupMsg::RemovedClose => "Close".to_string(),
+        SetupMsg::TranslateQuotesToggle => {
+            "Translate agent words to the display language".to_string()
+        }
+        SetupMsg::TranslateOff => "Off".to_string(),
+        SetupMsg::TranslateNeedsDownload => "Needs download (\u{2248}20 MB)".to_string(),
+        SetupMsg::TranslateDownloading { percent: Some(pct) } => {
+            format!("Downloading\u{2026} {pct}%")
+        }
+        SetupMsg::TranslateDownloading { percent: None } => "Downloading\u{2026}".to_string(),
+        SetupMsg::TranslateReady => "Ready".to_string(),
+        SetupMsg::TranslateFailed { failure } => {
+            let reason = match failure {
+                TranslateFailure::Download => "download",
+                TranslateFailure::Checksum => "checksum",
+                TranslateFailure::Write => "write",
+                TranslateFailure::Engine => "engine",
+            };
+            format!("Failed: {reason}")
+        }
+        SetupMsg::TranslateDownload => "Download".to_string(),
+        SetupMsg::TranslateRetry => "Retry".to_string(),
+        SetupMsg::TranslateRemove => "Remove downloaded files".to_string(),
+        SetupMsg::TranslateCancel => "Cancel".to_string(),
+        SetupMsg::TranslateConsentAsk => {
+            "Download about 20 MB from registry.npmjs.org and storage.googleapis.com? Your text never leaves this machine."
+                .to_string()
+        }
+        SetupMsg::TranslateBusy => {
+            "Busy finishing a translation. Try again in a moment.".to_string()
+        }
+        SetupMsg::TranslateRequestFailed { reason } => format!("Request failed: {reason}"),
     }
 }
 
@@ -643,5 +722,36 @@ pub fn setup_id(m: &SetupMsg) -> String {
         }
         SetupMsg::RemovedUninstall => "Untuk menghapus command line, jalankan:".to_string(),
         SetupMsg::RemovedClose => "Tutup".to_string(),
+        SetupMsg::TranslateQuotesToggle => {
+            "Terjemahkan kata agent ke bahasa tampilan".to_string()
+        }
+        SetupMsg::TranslateOff => "Mati".to_string(),
+        SetupMsg::TranslateNeedsDownload => "Perlu unduhan (\u{2248}20 MB)".to_string(),
+        SetupMsg::TranslateDownloading { percent: Some(pct) } => {
+            format!("Mengunduh\u{2026} {pct}%")
+        }
+        SetupMsg::TranslateDownloading { percent: None } => "Mengunduh\u{2026}".to_string(),
+        SetupMsg::TranslateReady => "Siap".to_string(),
+        SetupMsg::TranslateFailed { failure } => {
+            let reason = match failure {
+                TranslateFailure::Download => "unduhan",
+                TranslateFailure::Checksum => "checksum",
+                TranslateFailure::Write => "tulis",
+                TranslateFailure::Engine => "engine",
+            };
+            format!("Gagal: {reason}")
+        }
+        SetupMsg::TranslateDownload => "Unduh".to_string(),
+        SetupMsg::TranslateRetry => "Coba lagi".to_string(),
+        SetupMsg::TranslateRemove => "Hapus file unduhan".to_string(),
+        SetupMsg::TranslateCancel => "Batal".to_string(),
+        SetupMsg::TranslateConsentAsk => {
+            "Unduh sekitar 20 MB dari registry.npmjs.org dan storage.googleapis.com? Teksmu tidak pernah keluar dari mesin ini."
+                .to_string()
+        }
+        SetupMsg::TranslateBusy => {
+            "Masih menyelesaikan terjemahan. Coba lagi sebentar lagi.".to_string()
+        }
+        SetupMsg::TranslateRequestFailed { reason } => format!("Permintaan gagal: {reason}"),
     }
 }

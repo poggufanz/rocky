@@ -896,3 +896,110 @@ fn label_chips_en_match_shared_vectors() {
         );
     }
 }
+
+#[test]
+fn translate_settings_copy_in_both_languages() {
+    use rocky_proto::translate::TranslateFailure;
+
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateQuotesToggle),
+        "Translate agent words to the display language"
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateQuotesToggle),
+        "Terjemahkan kata agent ke bahasa tampilan"
+    );
+
+    assert_eq!(setup_en(&SetupMsg::TranslateOff), "Off");
+    assert_eq!(setup_id(&SetupMsg::TranslateOff), "Mati");
+
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateNeedsDownload),
+        "Needs download (≈20 MB)"
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateNeedsDownload),
+        "Perlu unduhan (≈20 MB)"
+    );
+
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateDownloading { percent: Some(40) }),
+        "Downloading… 40%"
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateDownloading { percent: Some(40) }),
+        "Mengunduh… 40%"
+    );
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateDownloading { percent: None }),
+        "Downloading…"
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateDownloading { percent: None }),
+        "Mengunduh…"
+    );
+
+    assert_eq!(setup_en(&SetupMsg::TranslateReady), "Ready");
+    assert_eq!(setup_id(&SetupMsg::TranslateReady), "Siap");
+
+    for (failure, en_str, id_str) in [
+        (
+            TranslateFailure::Download,
+            "Failed: download",
+            "Gagal: unduhan",
+        ),
+        (
+            TranslateFailure::Checksum,
+            "Failed: checksum",
+            "Gagal: checksum",
+        ),
+        (TranslateFailure::Write, "Failed: write", "Gagal: tulis"),
+        (TranslateFailure::Engine, "Failed: engine", "Gagal: engine"),
+    ] {
+        assert_eq!(setup_en(&SetupMsg::TranslateFailed { failure }), en_str);
+        assert_eq!(setup_id(&SetupMsg::TranslateFailed { failure }), id_str);
+    }
+
+    assert_eq!(setup_en(&SetupMsg::TranslateDownload), "Download");
+    assert_eq!(setup_id(&SetupMsg::TranslateDownload), "Unduh");
+    assert_eq!(setup_en(&SetupMsg::TranslateRetry), "Retry");
+    assert_eq!(setup_id(&SetupMsg::TranslateRetry), "Coba lagi");
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateRemove),
+        "Remove downloaded files"
+    );
+    assert_eq!(setup_id(&SetupMsg::TranslateRemove), "Hapus file unduhan");
+    assert_eq!(setup_en(&SetupMsg::TranslateCancel), "Cancel");
+    assert_eq!(setup_id(&SetupMsg::TranslateCancel), "Batal");
+
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateConsentAsk),
+        "Download about 20 MB from registry.npmjs.org and storage.googleapis.com? Your text never leaves this machine."
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateConsentAsk),
+        "Unduh sekitar 20 MB dari registry.npmjs.org dan storage.googleapis.com? Teksmu tidak pernah keluar dari mesin ini."
+    );
+
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateBusy),
+        "Busy finishing a translation. Try again in a moment."
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateBusy),
+        "Masih menyelesaikan terjemahan. Coba lagi sebentar lagi."
+    );
+
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateRequestFailed {
+            reason: "disk full".into()
+        }),
+        "Request failed: disk full"
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateRequestFailed {
+            reason: "disk full".into()
+        }),
+        "Permintaan gagal: disk full"
+    );
+}

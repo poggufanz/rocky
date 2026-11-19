@@ -29,11 +29,12 @@ use crate::notified::NotifiedStore;
 use crate::notify::Notifier;
 use crate::now_model::TimelineFetch;
 use crate::os_notice::OsNotices;
-use crate::requests::Requests;
+use crate::requests::{RequestKind, Requests};
 use crate::search_input::{Debounce, SearchInput};
-use crate::settings_view::{SettingId, View, set_bool, set_lang};
+use crate::settings_view::{SettingId, View, set_bool, set_lang, set_translate_quotes};
 use crate::setup_settings::SetupSettings;
 use crate::spawn::daemon_exe_name;
+use crate::translate_model::{Outgoing, TranslateAction, TranslateFlow};
 use crate::ui::cards_view::CardAction;
 use crate::ui::flow_view::FlowHover;
 use crate::ui::title_bar::Tab;
@@ -217,6 +218,8 @@ struct DeskView {
     consent: ConsentModel,
     /// Settings setup sections: switches, repos and Remove Rocky.
     setup: SetupSettings,
+    /// Quote translation download consent, status, and request error state.
+    translate: TranslateFlow,
     /// Paginated, searchable change cards list state.
     cards: CardsModel,
     /// Open change card detail view-model, when viewing a card.
@@ -291,6 +294,34 @@ impl DeskView {
         }
         let id = self.next_id();
         self.send_set(id, set_lang(id, lang));
+    }
+
+    /// Apply a quote translation settings action and emit any outgoing commands.
+    fn translate_act(&mut self, action: TranslateAction) {
+        if !self.ctl.model.editable() {
+            return;
+        }
+        let Some(enabled) = self.ctl.model.settings().map(|s| s.translate_quotes) else {
+            return;
+        };
+        let status = self.ctl.model.translate_status().clone();
+        let outgoing = self
+            .translate
+            .act(action, enabled, &status, self.ctl.ui_lang);
+        for cmd in outgoing {
+            match cmd {
+                Outgoing::SetEnabled(on) => {
+                    let id = self.next_id();
+                    self.send_set(id, set_translate_quotes(id, on));
+                }
+                Outgoing::Install(pair) => {
+                    self.start_request(RequestKind::TranslateInstall(pair));
+                }
+                Outgoing::Remove => {
+                    self.start_request(RequestKind::TranslateRemove);
+                }
+            }
+        }
     }
 
     fn toggle_view(&mut self, cx: &mut Context<Self>) {
