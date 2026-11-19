@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use rocky_proto::translate::QuoteLang;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::marker::{cache_dir, translate_dir};
@@ -32,6 +32,21 @@ enum CacheRecordOut<'a> {
         k: &'a str,
         keep: bool,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalRecordIn {
+    k: String,
+    keep: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TranslatedRecordIn {
+    k: String,
+    from: QuoteLang,
+    text: String,
 }
 
 /// Computes `sha256(model_sha256 + "\0" + to + "\0" + text)` as 64 lowercase hex characters.
@@ -318,25 +333,22 @@ fn serialize_line(key: &str, value: &Cached) -> io::Result<Vec<u8>> {
 
 fn parse_line(raw: &[u8]) -> Option<(String, Cached)> {
     let trimmed = trim_ascii_bytes(raw);
-    if trimmed.is_empty() {
+    if !trimmed.starts_with(b"{") {
         return None;
     }
-    let value: serde_json::Value = serde_json::from_slice(trimmed).ok()?;
-    let obj = value.as_object()?;
-    let key = obj.get("k")?.as_str()?.to_string();
 
-    if obj.len() == 2 && obj.get("keep").and_then(|v| v.as_bool()) == Some(true) {
-        return Some((key, Cached::Original));
+    if let Ok(rec) = serde_json::from_slice::<OriginalRecordIn>(trimmed) {
+        return rec.keep.then_some((rec.k, Cached::Original));
     }
 
-    if obj.len() == 3 {
-        let from = match obj.get("from")?.as_str()? {
-            "en" => QuoteLang::En,
-            "id" => QuoteLang::Id,
-            _ => return None,
-        };
-        let text = obj.get("text")?.as_str()?.to_string();
-        return Some((key, Cached::Translated { from, text }));
+    if let Ok(rec) = serde_json::from_slice::<TranslatedRecordIn>(trimmed) {
+        return Some((
+            rec.k,
+            Cached::Translated {
+                from: rec.from,
+                text: rec.text,
+            },
+        ));
     }
 
     None
@@ -619,6 +631,9 @@ mod tests {
             "{\"k\":\"k_null_tr\",\"from\":\"id\",\"text\":\"hi\",\"keep\":null}\n",
             "{\"k\":\"k_null_val\",\"from\":\"id\",\"text\":null}\n",
             "{\"k\":\"k1\",\"from\":\"id\",\"text\":\"second\"}\n",
+            "{\"k\":\"k1\",\"keep\":null,\"keep\":true}\n",
+            "{\"k\":\"k1\",\"keep\":true,\"keep\":true}\n",
+            "{\"k\":\"k1\",\"from\":\"id\",\"text\":\"dup1\",\"text\":\"dup2\"}\n",
             "{\"k\":\"k3\",\"keep\":true}\n",
             "{\"k\":\"k4\",\"from\":\"id\",\"text\":\"trun",
         );
