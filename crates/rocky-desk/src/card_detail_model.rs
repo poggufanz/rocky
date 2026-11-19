@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use rocky_proto::cards::{Block, Card, CoverageState, FlowKind, FlowStep, Importance, Sequence};
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, SnippetLine};
+use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
 
 use crate::cards_model::{
     block_kind, block_status, cut_to_limit, format_symbol, last_path_segment, prompt_display,
@@ -30,34 +31,79 @@ pub struct DetailModel {
     pending_id: Option<u64>,
     reopened: bool,
     state: DetailState,
+    target: Option<QuoteLang>,
+    translations: HashMap<String, QuoteTranslation>,
+    pending: HashSet<String>,
+    settled_early: HashSet<String>,
+    shown_original: HashSet<String>,
 }
 
 impl DetailModel {
     /// Starts loading `card_id` and returns the model alongside the outgoing `CardDetail` request.
-    pub fn open(card_id: String, id: u64) -> (DetailModel, ClientMsg) {
+    pub fn open(card_id: String, id: u64, target: Option<QuoteLang>) -> (DetailModel, ClientMsg) {
         let msg = ClientMsg::CardDetail {
             id,
             card_id: card_id.clone(),
-            translate_to: None,
+            translate_to: target,
         };
         let model = Self {
             card_id,
             pending_id: Some(id),
             reopened: false,
             state: DetailState::Loading,
+            target,
+            translations: HashMap::new(),
+            pending: HashSet::new(),
+            settled_early: HashSet::new(),
+            shown_original: HashSet::new(),
         };
         (model, msg)
     }
 
-    /// Resets to `Loading`, re-requests the open card after reconnect, and marks `NotFound` to close the view.
-    pub fn reopen(&mut self, id: u64) -> ClientMsg {
+    /// Resets to `Loading`, re-requests the open card after reconnect with `target`, and marks `NotFound` to close the view.
+    pub fn reopen(&mut self, id: u64, target: Option<QuoteLang>) -> ClientMsg {
         self.pending_id = Some(id);
         self.reopened = true;
         self.state = DetailState::Loading;
+        self.pending.clear();
+        self.settled_early.clear();
+        if self.target != target {
+            self.target = target;
+            self.translations.clear();
+            self.shown_original.clear();
+        }
         ClientMsg::CardDetail {
             id,
             card_id: self.card_id.clone(),
-            translate_to: None,
+            translate_to: target,
+        }
+    }
+
+    /// Switches the translation target language, keeping the current view state until the reply arrives.
+    pub fn retarget(&mut self, id: u64, target: Option<QuoteLang>) -> Option<ClientMsg> {
+        if self.target == target {
+            return None;
+        }
+        self.target = target;
+        self.translations.clear();
+        self.pending.clear();
+        self.settled_early.clear();
+        self.shown_original.clear();
+        match target {
+            None => {
+                if !matches!(self.state, DetailState::Loading) {
+                    self.pending_id = None;
+                }
+                None
+            }
+            Some(_) => {
+                self.pending_id = Some(id);
+                Some(ClientMsg::CardDetail {
+                    id,
+                    card_id: self.card_id.clone(),
+                    translate_to: target,
+                })
+            }
         }
     }
 
@@ -72,13 +118,115 @@ impl DetailModel {
     }
 
     /// Applies a `ServerMsg::CardDetail` reply if `id` matches the active pending request.
-    pub fn on_detail(&mut self, id: u64, card: Card, snippets: Vec<BlockSnippet>, lang: UiLang) {
+    pub fn on_detail(
+        &mut self,
+        id: u64,
+        card: Card,
+        snippets: Vec<BlockSnippet>,
+        translations: Vec<QuoteTranslation>,
+        pending: Vec<String>,
+        lang: UiLang,
+    ) {
         if self.pending_id != Some(id) {
             return;
         }
         self.pending_id = None;
         self.reopened = false;
         self.state = DetailState::Ready(build_detail_view(&card, &snippets, lang));
+        if self.target.is_some() {
+            for item in translations {
+                if Some(item.from.other()) == self.target {
+                    self.translations
+                        .entry(item.quote_key.clone())
+                        .or_insert(item);
+                }
+            }
+            self.pending = pending
+                .into_iter()
+                .filter(|k| !self.settled_early.contains(k) && !self.translations.contains_key(k))
+                .collect();
+        } else {
+            self.translations.clear();
+            self.pending.clear();
+        }
+        self.settled_early.clear();
+    }
+
+    /// Applies a pushed quote translation if `card_id` and active target language match.
+    pub fn on_translated(&mut self, card_id: &str, item: &QuoteTranslation) -> bool {
+        if self.card_id != card_id || Some(item.from.other()) != self.target {
+            return false;
+        }
+        self.pending.remove(&item.quote_key);
+        self.translations
+            .insert(item.quote_key.clone(), item.clone());
+        true
+    }
+
+    /// Clears pending state for `quote_key` when settled for the active target language.
+    pub fn on_settled(&mut self, card_id: &str, quote_key: &str, to: QuoteLang) -> bool {
+        if self.card_id != card_id || Some(to) != self.target {
+            return false;
+        }
+        self.pending.remove(quote_key);
+        if self.pending_id.is_some() {
+            self.settled_early.insert(quote_key.to_string());
+        }
+        true
+    }
+
+    /// Toggles whether `quote_key` shows its original text instead of its translation.
+    pub fn toggle_original(&mut self, quote_key: &str) {
+        if !self.shown_original.remove(quote_key) {
+            self.shown_original.insert(quote_key.to_string());
+        }
+    }
+
+    /// Resolves display text and translation flags for `group` in `lang`.
+    pub fn quote_display(&self, group: &QuoteGroup, lang: UiLang) -> QuoteDisplay {
+        let Some(key) = group.quote_key() else {
+            return QuoteDisplay {
+                text: card_text(lang, &CardMsg::NoAgentWords),
+                is_dim: true,
+                key: None,
+                translated_from: None,
+                showing_original: false,
+                translating: false,
+            };
+        };
+        let original = || match &group.quote {
+            Some(text) if !text.is_empty() => (text.clone(), false),
+            _ => (card_text(lang, &CardMsg::NoAgentWords), true),
+        };
+        if let Some(tr) = self.translations.get(&key) {
+            let cleaned = crate::plain_text::plain_quote(&tr.text);
+            if !cleaned.is_empty() {
+                let showing_original = self.shown_original.contains(&key);
+                let (text, is_dim) = if showing_original {
+                    original()
+                } else {
+                    (cleaned, false)
+                };
+                return QuoteDisplay {
+                    text,
+                    is_dim,
+                    key: Some(key),
+                    translated_from: Some(tr.from),
+                    showing_original,
+                    translating: false,
+                };
+            }
+        }
+        let translating = self.pending.contains(&key);
+        let (text, is_dim) = original();
+        QuoteDisplay {
+            text,
+            is_dim,
+            key: Some(key),
+            translated_from: None,
+            showing_original: false,
+            translating,
+        }
     }
 
     /// Applies an `Ack` reply for the pending detail request; failures transition to `NotFound`.
@@ -99,6 +247,17 @@ impl DetailModel {
     }
 }
 
+/// Resolved display state for one quote group, accounting for translation and toggle state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteDisplay {
+    pub text: String,
+    pub is_dim: bool,
+    pub key: Option<String>,
+    pub translated_from: Option<QuoteLang>,
+    pub showing_original: bool,
+    pub translating: bool,
+}
+
 /// Rendered data for a loaded change card detail view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailView {
@@ -117,16 +276,14 @@ pub struct DetailView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuoteGroup {
     pub quote: Option<String>,
+    pub raw_quote: Option<String>,
     pub blocks: Vec<BlockView>,
 }
 
 impl QuoteGroup {
-    /// Returns `(text, is_dim)` for rendering this group's quote line in `lang`.
-    pub fn quote_line(&self, lang: UiLang) -> (String, bool) {
-        match &self.quote {
-            Some(text) => (text.clone(), false),
-            None => (card_text(lang, &CardMsg::NoAgentWords), true),
-        }
+    /// Returns the SHA-256 key of the group's raw quote text, if present.
+    pub fn quote_key(&self) -> Option<String> {
+        self.raw_quote.as_deref().map(quote_key)
     }
 }
 
@@ -486,10 +643,10 @@ fn build_quote_groups(
 ) -> Vec<QuoteGroup> {
     let mut groups: Vec<QuoteGroup> = Vec::new();
     for block in &card.blocks {
-        let quote = block
-            .quote
-            .as_ref()
-            .map(|q| crate::plain_text::plain_quote(&q.text))
+        let raw_quote = block.quote.as_ref().map(|q| q.text.clone());
+        let quote = raw_quote
+            .as_deref()
+            .map(crate::plain_text::plain_quote)
             .filter(|t| !t.is_empty());
         let view = build_block_view(block, &card.root, snippet_by_seq, lang);
         if let Some(last) = groups.last_mut()
@@ -499,6 +656,7 @@ fn build_quote_groups(
         } else {
             groups.push(QuoteGroup {
                 quote,
+                raw_quote,
                 blocks: vec![view],
             });
         }

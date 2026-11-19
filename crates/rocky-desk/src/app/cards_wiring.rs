@@ -16,11 +16,14 @@ impl DeskView {
     }
 
     pub(super) fn cards_refresh_msgs(&mut self) -> Vec<ClientMsg> {
+        let target = self.translate_target();
+        self.last_target = target;
         let mut cmd_id = self.ctl.cmd_id;
         let msgs = cards_nav::on_reconnect(
             &mut self.cards,
             self.card_detail.as_mut(),
             self.block_diff.as_mut(),
+            target,
             || {
                 cmd_id += 1;
                 cmd_id
@@ -43,12 +46,14 @@ impl DeskView {
             }
             CardAction::OpenDetail(card_id) => {
                 let id = self.next_id();
+                let target = self.translate_target();
                 let msg = cards_nav::open_detail(
                     &mut self.ctl.view,
                     &mut self.card_detail,
                     &mut self.block_diff,
                     card_id,
                     id,
+                    target,
                 );
                 self.send_card_msg(msg);
                 // The card opens as a modal; focus it so Escape closes it.
@@ -93,6 +98,12 @@ impl DeskView {
                     && let Some(msg) = diff.go(page, id)
                 {
                     self.send_card_msg(msg);
+                    cx.notify();
+                }
+            }
+            CardAction::ToggleOriginal(quote_key) => {
+                if let Some(detail) = self.card_detail.as_mut() {
+                    detail.toggle_original(&quote_key);
                     cx.notify();
                 }
             }

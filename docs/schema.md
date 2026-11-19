@@ -834,7 +834,7 @@ at `10`) with a separate `cardsCoverage` read-completeness object
 
 ## Pipe v3
 
-> Superseded by [Pipe v4](#pipe-v4) below; peers sending another major version receive one `error` (`code: "version"`) and the connection closes.
+> Superseded by [Pipe v5](#pipe-v5) below; peers sending another major version receive one `error` (`code: "version"`) and the connection closes.
 
 One JSON object per line over the daemon pipe. Every message carries `v`
 (major) first and `type`. Historically this build spoke v3; a peer that sends another
@@ -1062,7 +1062,9 @@ Example:
 
 ## Pipe v4
 
-Current wire protocol between `rockyd` and `rocky-desk`. Shares v3's newline-delimited JSON framing, `1024`-message outbound queue per client, and `"version"` error close behavior. `LINE_CAP` (`64 KiB`) bounds client-to-daemon lines (the server disconnects on a longer client line); card replies (`cards`, `card_detail`, `block_diff`) and live `card` pushes apply their own `64 KiB` shrinking, drop, or `too_large` rules, while `rocky-desk` accepts general daemon-to-desk lines (such as large `snapshot` messages) up to `16 MiB` (`SERVER_LINE_CAP`). Changes from v3:
+> Superseded by [Pipe v5](#pipe-v5) below; peers sending another major version receive one `error` (`code: "version"`) and the connection closes.
+
+Historical wire protocol between `rockyd` and `rocky-desk` (originally v4). Shares v3's newline-delimited JSON framing, `1024`-message outbound queue per client, and `"version"` error close behavior. `LINE_CAP` (`64 KiB`) bounds client-to-daemon lines (the server disconnects on a longer client line); card replies (`cards`, `card_detail`, `block_diff`) and live `card` pushes apply their own `64 KiB` shrinking, drop, or `too_large` rules, while `rocky-desk` accepts general daemon-to-desk lines (such as large `snapshot` messages) up to `16 MiB` (`SERVER_LINE_CAP`). Changes from v3:
 
 ### Version and additive fields
 
@@ -1102,4 +1104,45 @@ Example (`cards` request):
 
 ```json
 {"v":4,"type":"cards","id":1,"limit":20}
+```
+
+## Pipe v5
+
+Current wire protocol between `rockyd` and `rocky-desk`. Shares v4's newline-delimited JSON framing, `1024`-message outbound queue per client, `"version"` error close behavior, `64 KiB` `LINE_CAP`, card shrinking / `too_large` rules, and `16 MiB` `SERVER_LINE_CAP`. Changes from v4:
+
+### Version and translation types
+
+- Every frame uses `"v": 5`.
+- `QuoteLang`: `"en" | "id"` (`#[serde(rename_all = "lowercase")]`).
+- `TranslatePair`: `"id-en" | "en-id"` (`#[serde(rename = "id-en")]` / `#[serde(rename = "en-id")]`).
+- `QuoteTranslation`: `{"quote_key": string, "from": QuoteLang, "text": string}`, where `quote_key` is the lowercase hex SHA-256 digest of the raw quote text.
+- `TranslateFailure`: `"download" | "checksum" | "write" | "engine"` (`#[serde(rename_all = "snake_case")]`).
+- `InstallProgress`: `{"pair": TranslatePair, "done_bytes": u64, "total_bytes": u64}`.
+- `TranslateStatus` (`#[serde(default)]`): `{"ready": TranslatePair[], "installing": InstallProgress | null, "failed": TranslateFailure | null}`.
+
+### Updated card and snapshot messages
+
+- `snapshot` (Daemon → Client): adds `translate: TranslateStatus` (`#[serde(default)]`).
+- `cards` (Client → Daemon): adds optional `translate_to: QuoteLang?` (`#[serde(default, skip_serializing_if = "Option::is_none")]`).
+- `cards` (Daemon → Client): adds `translations: QuoteTranslation[]` (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`, omitted when empty; carries already-cached translations only and drops entries past `64 KiB` without queueing work).
+- `card_detail` (Client → Daemon): adds optional `translate_to: QuoteLang?` (`#[serde(default, skip_serializing_if = "Option::is_none")]`).
+- `card_detail` (Daemon → Client): adds `translations: QuoteTranslation[]` and `pending: string[]` (quote keys currently queued or running; both use `#[serde(default, skip_serializing_if = "Vec::is_empty")]` and are omitted when empty; translations that do not fit in `64 KiB` are pushed separately as `quote_translated`). Pushes travel on a different path from replies, so a `quote_translated` or `quote_settled` can arrive before the `card_detail` reply it belongs to; a client treats a card whose detail request is in flight as open and keeps those pushes.
+
+### New translation messages
+
+Client → Daemon:
+
+- `translate_install`: `{"v":5,"type":"translate_install","id":u64,"pair":TranslatePair}` — downloads and installs the local translation model and engine for `pair`; answered with `ack` (`ok: true` or `ok: false` with `error`); the daemon also broadcasts `translate`, which may reach a client before or after the `ack`.
+- `translate_remove`: `{"v":5,"type":"translate_remove","id":u64}` — removes downloaded translation files and cache and turns `translate_quotes` off; answered with `ack`.
+
+Daemon → Client:
+
+- `quote_translated`: `{"v":5,"type":"quote_translated","card_id":string,"item":QuoteTranslation}` — pushed when a queued translation for `card_id` finishes or when cached translations overflow `card_detail`'s `64 KiB` cap.
+- `quote_settled`: `{"v":5,"type":"quote_settled","card_id":string,"quote_key":string,"to":QuoteLang}` — pushed when translation of `quote_key` for `card_id` into target `to` finishes without producing a replacement (`card_id`, `quote_key`, and `to` are all required).
+- `translate`: `{"v":5,"type":"translate","status":TranslateStatus}` — broadcast when translation readiness, install progress, or failure state changes.
+
+Example (`translate_install` request):
+
+```json
+{"v":5,"type":"translate_install","id":1,"pair":"id-en"}
 ```

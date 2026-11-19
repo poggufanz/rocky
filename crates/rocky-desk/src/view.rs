@@ -4,6 +4,7 @@ use rocky_proto::pipe::{
     AgentKey, AgentStatus, Health, ServerMsg, Status, StatusOp, TimelineEntry,
 };
 use rocky_proto::settings::Settings;
+use rocky_proto::translate::TranslateStatus;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capture_lines::capture_lines;
@@ -46,6 +47,7 @@ pub struct Model {
     sent: BTreeSet<u64>,
     /// Error from the last failed `set`, shown until the next settings broadcast.
     set_error: Option<String>,
+    translate: TranslateStatus,
 }
 
 impl Model {
@@ -64,11 +66,13 @@ impl Model {
                 agents,
                 health,
                 settings,
+                translate,
                 ..
             } => {
                 self.agents = agents.into_iter().map(|a| (a.key.clone(), a)).collect();
                 self.health = health;
                 self.settings = Some(settings);
+                self.translate = translate;
                 self.retain_timelines();
                 // A snapshot follows every (re)connect, so wanted rows ask again.
                 self.wanted
@@ -118,6 +122,10 @@ impl Model {
                 self.health = health;
                 Vec::new()
             }
+            ServerMsg::Translate { status } => {
+                self.translate = status;
+                Vec::new()
+            }
             ServerMsg::Error { code } if code == "version" => {
                 self.conn = Conn::VersionMismatch;
                 Vec::new()
@@ -155,6 +163,10 @@ impl Model {
 
     pub fn settings(&self) -> Option<&Settings> {
         self.settings.as_ref()
+    }
+
+    pub fn translate_status(&self) -> &TranslateStatus {
+        &self.translate
     }
 
     /// Record a `set` id so its failed ack can be attributed.

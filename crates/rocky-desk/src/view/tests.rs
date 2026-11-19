@@ -522,6 +522,7 @@ fn desk_ignores_card_messages() {
             id: 1,
             items: vec![sample_card.clone()],
             next: Some("1000:c1".into()),
+            translations: Vec::new(),
         })
         .is_empty()
     );
@@ -639,4 +640,45 @@ fn settings_broadcast_requests_nothing() {
         })
         .is_empty()
     );
+}
+
+#[test]
+fn view_model_keeps_translate_status() {
+    use rocky_proto::translate::{
+        InstallProgress, TranslateFailure, TranslatePair, TranslateStatus,
+    };
+
+    let s = TranslateStatus {
+        ready: vec![TranslatePair::IdEn],
+        installing: Some(InstallProgress {
+            pair: TranslatePair::EnId,
+            done_bytes: 100,
+            total_bytes: 1000,
+        }),
+        failed: None,
+    };
+    let s2 = TranslateStatus {
+        ready: vec![TranslatePair::IdEn, TranslatePair::EnId],
+        installing: None,
+        failed: Some(TranslateFailure::Download),
+    };
+
+    let mut m = Model::new();
+    assert_eq!(m.translate_status(), &TranslateStatus::default());
+
+    m.apply(ServerMsg::Snapshot {
+        agents: Vec::new(),
+        aggregate: Status::Idle,
+        health: Health::default(),
+        settings: Settings::default(),
+        repo_pending: Vec::new(),
+        translate: s.clone(),
+    });
+    assert_eq!(m.translate_status(), &s);
+
+    assert!(
+        m.apply(ServerMsg::Translate { status: s2.clone() })
+            .is_empty()
+    );
+    assert_eq!(m.translate_status(), &s2);
 }

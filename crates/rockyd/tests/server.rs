@@ -302,7 +302,7 @@ fn long_line_disconnects_client() {
     // No hello: one over-long line must be dropped without reading it all.
     let big = "x".repeat(LINE_CAP + 100);
     client.send(&format!(
-        "{{\"v\":4,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
+        "{{\"v\":5,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
     ));
     assert!(client.read_line().is_none(), "expected EOF");
 }
@@ -795,12 +795,14 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         query: None,
         before: None,
         limit: 20,
+        translate_to: None,
     }));
     let Control::Cards {
         id,
         query,
         before,
         limit,
+        translate_to: None,
         reply,
     } = next_control(&control_rx)
     else {
@@ -813,6 +815,7 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         id: 10,
         items,
         next,
+        translations: _,
     } = cards_msg
     else {
         panic!("expected ServerMsg::Cards");

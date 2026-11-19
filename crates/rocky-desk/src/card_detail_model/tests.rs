@@ -3,6 +3,7 @@ use rocky_proto::cards::{
     CoverageState, FlowKind, FlowStep, Importance, Label, Quote, Sequence, SymbolKind,
 };
 use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, DiffLineKind, SnippetLine};
+use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
 
 use super::*;
 use crate::i18n::UiLang;
@@ -63,7 +64,7 @@ pub(super) fn sample_block(seq: u32, path: &str, labels: Vec<Label>) -> Block {
 
 #[test]
 fn detail_request_and_ready() {
-    let (mut model, req) = DetailModel::open("card-42".to_string(), 7);
+    let (mut model, req) = DetailModel::open("card-42".to_string(), 7, None);
     assert_eq!(
         req,
         ClientMsg::CardDetail {
@@ -82,7 +83,14 @@ fn detail_request_and_ready() {
     card.root = "C:\\Work\\MyApp-wt".to_string();
     card.branch = Some("main".to_string());
 
-    model.on_detail(7, card.clone(), Vec::new(), UiLang::Id);
+    model.on_detail(
+        7,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -93,7 +101,7 @@ fn detail_request_and_ready() {
     );
 
     // Re-open in English with sub-minute duration and subagent type.
-    let (mut en_model, en_req) = DetailModel::open("card-43".to_string(), 8);
+    let (mut en_model, en_req) = DetailModel::open("card-43".to_string(), 8, None);
     assert_eq!(
         en_req,
         ClientMsg::CardDetail {
@@ -106,16 +114,16 @@ fn detail_request_and_ready() {
     sub.agent_id = "sub-1".to_string();
     sub.agent_type = "Explore".to_string();
     sub.branch = None;
-    en_model.on_detail(8, sub, Vec::new(), UiLang::En);
+    en_model.on_detail(8, sub, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(en_view) = en_model.state() else {
         panic!("expected Ready state");
     };
     assert_eq!(en_view.meta, "rocky \u{00b7} 45 s \u{00b7} Explore");
 
     // Open card (no ended_ms) omits duration without extra separators.
-    let (mut open_model, _) = DetailModel::open("card-44".to_string(), 9);
+    let (mut open_model, _) = DetailModel::open("card-44".to_string(), 9, None);
     let open_card = sample_card("card-44", 5_000, None);
-    open_model.on_detail(9, open_card, Vec::new(), UiLang::Id);
+    open_model.on_detail(9, open_card, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
     let DetailState::Ready(open_view) = open_model.state() else {
         panic!("expected Ready state");
     };
@@ -124,10 +132,12 @@ fn detail_request_and_ready() {
 
 #[test]
 fn stale_reply_ignored() {
-    let (mut detail, _) = DetailModel::open("c1".to_string(), 10);
+    let (mut detail, _) = DetailModel::open("c1".to_string(), 10, None);
     detail.on_detail(
         9,
         sample_card("stale", 1_000, Some(2_000)),
+        Vec::new(),
+        Vec::new(),
         Vec::new(),
         UiLang::Id,
     );
@@ -140,6 +150,8 @@ fn stale_reply_ignored() {
         10,
         sample_card("c1", 1_000, Some(2_000)),
         Vec::new(),
+        Vec::new(),
+        Vec::new(),
         UiLang::Id,
     );
     assert!(matches!(detail.state(), DetailState::Ready(_)));
@@ -149,7 +161,14 @@ fn stale_reply_ignored() {
     assert!(matches!(detail.state(), DetailState::Ready(_)));
     let mut replacement = sample_card("c1", 1_000, Some(2_000));
     replacement.prompt = "Should not overwrite".to_string();
-    detail.on_detail(10, replacement, Vec::new(), UiLang::Id);
+    detail.on_detail(
+        10,
+        replacement,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(view) = detail.state() else {
         panic!("expected Ready state");
     };
@@ -223,7 +242,7 @@ fn stale_reply_ignored() {
 #[test]
 fn not_found_ack_ends_loading() {
     // ok == true leaves Loading state unchanged for both DetailModel and DiffModel.
-    let (mut detail, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut detail, _) = DetailModel::open("c1".to_string(), 1, None);
     detail.on_ack(1, true);
     assert_eq!(detail.state(), &DetailState::Loading);
     detail.on_ack(1, false);
@@ -238,7 +257,7 @@ fn not_found_ack_ends_loading() {
 
 #[test]
 fn quote_groups_share_consecutive_quotes() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(5_000));
 
     let long_quote = format!("{}\nsecond paragraph", "q".repeat(260));
@@ -293,7 +312,7 @@ fn quote_groups_share_consecutive_quotes() {
     });
 
     card.blocks = vec![b1, b2, b3, b4];
-    model.on_detail(1, card, Vec::new(), UiLang::Id);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
 
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
@@ -301,10 +320,8 @@ fn quote_groups_share_consecutive_quotes() {
     assert_eq!(view.groups.len(), 3);
 
     assert_eq!(view.groups[0].quote.as_deref(), Some(long_quote.as_str()));
-    assert_eq!(
-        view.groups[0].quote_line(UiLang::Id),
-        (long_quote.clone(), false)
-    );
+    let disp0 = model.quote_display(&view.groups[0], UiLang::Id);
+    assert_eq!((disp0.text, disp0.is_dim), (long_quote.clone(), false));
     assert_eq!(view.groups[0].blocks.len(), 2);
     assert_eq!(view.groups[0].blocks[0].seq, 1);
     assert_eq!(view.groups[0].blocks[0].path, "src/auth.rs");
@@ -354,7 +371,7 @@ fn quote_groups_share_consecutive_quotes() {
 
 #[test]
 fn missing_quote_shows_dim_line() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(2_000));
 
     let b1 = sample_block(1, "src/a.rs", vec![Label::BodyChanged {}]);
@@ -370,32 +387,39 @@ fn missing_quote_shows_dim_line() {
     });
 
     card.blocks = vec![b1, b2, b3];
-    model.on_detail(1, card.clone(), Vec::new(), UiLang::Id);
+    model.on_detail(
+        1,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(id_view) = model.state() else {
         panic!("expected Ready state");
     };
     assert_eq!(id_view.groups.len(), 2);
     assert_eq!(id_view.groups[0].quote, None);
     assert_eq!(id_view.groups[0].blocks.len(), 2);
+    let d0_id = model.quote_display(&id_view.groups[0], UiLang::Id);
     assert_eq!(
-        id_view.groups[0].quote_line(UiLang::Id),
+        (d0_id.text, d0_id.is_dim),
         ("Kata agent tidak tercatat di edit ini".to_string(), true)
     );
+    let d0_en = model.quote_display(&id_view.groups[0], UiLang::En);
     assert_eq!(
-        id_view.groups[0].quote_line(UiLang::En),
+        (d0_en.text, d0_en.is_dim),
         ("No agent words recorded for this edit".to_string(), true)
     );
 
     assert_eq!(id_view.groups[1].quote.as_deref(), Some("Explained"));
-    assert_eq!(
-        id_view.groups[1].quote_line(UiLang::En),
-        ("Explained".to_string(), false)
-    );
+    let d1_en = model.quote_display(&id_view.groups[1], UiLang::En);
+    assert_eq!((d1_en.text, d1_en.is_dim), ("Explained".to_string(), false));
 }
 
 #[test]
 fn snippet_lines_map_and_fold_text() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(2_000));
     card.blocks = vec![
         sample_block(1, "src/a.rs", vec![Label::BodyChanged {}]),
@@ -418,7 +442,14 @@ fn snippet_lines_map_and_fold_text() {
         ],
     }];
 
-    model.on_detail(1, card.clone(), snippets.clone(), UiLang::Id);
+    model.on_detail(
+        1,
+        card.clone(),
+        snippets.clone(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(id_view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -434,8 +465,8 @@ fn snippet_lines_map_and_fold_text() {
     );
     assert!(id_view.groups[0].blocks[1].code.is_empty());
 
-    let (mut en_model, _) = DetailModel::open("c1".to_string(), 2);
-    en_model.on_detail(2, card, snippets, UiLang::En);
+    let (mut en_model, _) = DetailModel::open("c1".to_string(), 2, None);
+    en_model.on_detail(2, card, snippets, Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(en_view) = en_model.state() else {
         panic!("expected Ready state");
     };
@@ -451,7 +482,7 @@ fn snippet_lines_map_and_fold_text() {
 
 #[test]
 fn timeline_steps_with_subs_and_facts() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(90_000));
 
     let mut b1 = sample_block(1, "src/auth.rs", vec![Label::GuardAdded {}]);
@@ -499,7 +530,14 @@ fn timeline_steps_with_subs_and_facts() {
         },
     ];
 
-    model.on_detail(1, card.clone(), Vec::new(), UiLang::Id);
+    model.on_detail(
+        1,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(id_view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -536,8 +574,8 @@ fn timeline_steps_with_subs_and_facts() {
         }
     );
 
-    let (mut en_model, _) = DetailModel::open("c1".to_string(), 2);
-    en_model.on_detail(2, card, Vec::new(), UiLang::En);
+    let (mut en_model, _) = DetailModel::open("c1".to_string(), 2, None);
+    en_model.on_detail(2, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(en_view) = en_model.state() else {
         panic!("expected Ready state");
     };
@@ -571,8 +609,8 @@ fn timeline_facts_for(blocks: Vec<Block>) -> Vec<String> {
         })
         .collect();
 
-    let (mut model, _) = DetailModel::open("c-facts".to_string(), 1);
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let (mut model, _) = DetailModel::open("c-facts".to_string(), 1, None);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -670,10 +708,10 @@ fn timeline_caps_12_and_counts_flow_more() {
     };
 
     // Exactly 12 with flow_more == 0 -> no overflow line.
-    let (mut exact_model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut exact_model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut exact = sample_card("c1", 1_000, Some(2_000));
     exact.flow = (1..=12).map(make_step).collect();
-    exact_model.on_detail(1, exact, Vec::new(), UiLang::Id);
+    exact_model.on_detail(1, exact, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
     let DetailState::Ready(exact_view) = exact_model.state() else {
         panic!("expected Ready state");
     };
@@ -682,11 +720,18 @@ fn timeline_caps_12_and_counts_flow_more() {
     assert_eq!(exact_view.timeline_more, None);
 
     // 15 flow steps + flow_more 4 -> 12 displayed, +7 steps remaining.
-    let (mut over_model, _) = DetailModel::open("c2".to_string(), 2);
+    let (mut over_model, _) = DetailModel::open("c2".to_string(), 2, None);
     let mut over = sample_card("c2", 1_000, Some(2_000));
     over.flow = (1..=15).map(make_step).collect();
     over.flow_more = 4;
-    over_model.on_detail(2, over.clone(), Vec::new(), UiLang::Id);
+    over_model.on_detail(
+        2,
+        over.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(over_id) = over_model.state() else {
         panic!("expected Ready state");
     };
@@ -694,8 +739,8 @@ fn timeline_caps_12_and_counts_flow_more() {
     assert_eq!(over_id.timeline[11].title, "cmd-12");
     assert_eq!(over_id.timeline_more.as_deref(), Some("+7 langkah"));
 
-    let (mut en_model, _) = DetailModel::open("c2".to_string(), 3);
-    en_model.on_detail(3, over, Vec::new(), UiLang::En);
+    let (mut en_model, _) = DetailModel::open("c2".to_string(), 3, None);
+    en_model.on_detail(3, over, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(over_en) = en_model.state() else {
         panic!("expected Ready state");
     };
@@ -704,31 +749,45 @@ fn timeline_caps_12_and_counts_flow_more() {
 
 #[test]
 fn coverage_and_outside_lines() {
-    let (mut full_model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut full_model, _) = DetailModel::open("c1".to_string(), 1, None);
     let full = sample_card("c1", 1_000, Some(2_000));
-    full_model.on_detail(1, full.clone(), Vec::new(), UiLang::Id);
+    full_model.on_detail(
+        1,
+        full.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(full_id) = full_model.state() else {
         panic!("expected Ready state");
     };
     assert_eq!(full_id.coverage, "Rekaman lengkap");
     assert_eq!(full_id.outside, None);
 
-    let (mut en_full, _) = DetailModel::open("c1".to_string(), 2);
-    en_full.on_detail(2, full, Vec::new(), UiLang::En);
+    let (mut en_full, _) = DetailModel::open("c1".to_string(), 2, None);
+    en_full.on_detail(2, full, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(full_en) = en_full.state() else {
         panic!("expected Ready state");
     };
     assert_eq!(full_en.coverage, "Full record");
     assert_eq!(full_en.outside, None);
 
-    let (mut partial_model, _) = DetailModel::open("c2".to_string(), 3);
+    let (mut partial_model, _) = DetailModel::open("c2".to_string(), 3, None);
     let mut partial = sample_card("c2", 1_000, Some(2_000));
     partial.coverage = Coverage {
         state: CoverageState::Partial,
         reasons: vec![CoverageReason::DaemonGap, CoverageReason::CaptureLate],
     };
     partial.outside_count = 3;
-    partial_model.on_detail(3, partial.clone(), Vec::new(), UiLang::Id);
+    partial_model.on_detail(
+        3,
+        partial.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(partial_id) = partial_model.state() else {
         panic!("expected Ready state");
     };
@@ -741,8 +800,8 @@ fn coverage_and_outside_lines() {
         Some("3 file berubah di luar agent")
     );
 
-    let (mut en_partial, _) = DetailModel::open("c2".to_string(), 4);
-    en_partial.on_detail(4, partial, Vec::new(), UiLang::En);
+    let (mut en_partial, _) = DetailModel::open("c2".to_string(), 4, None);
+    en_partial.on_detail(4, partial, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(partial_en) = en_partial.state() else {
         panic!("expected Ready state");
     };
@@ -829,7 +888,7 @@ fn diff_pages_navigate_and_missing() {
 
 #[test]
 fn unrecorded_block_not_diffable() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(2_000));
     card.root = "/work/rocky".to_string();
 
@@ -857,7 +916,7 @@ fn unrecorded_block_not_diffable() {
     deleted_file.after = None;
 
     card.blocks = vec![unrecorded, outside, path_only, new_file, deleted_file];
-    model.on_detail(1, card, Vec::new(), UiLang::Id);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
 
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
@@ -881,7 +940,7 @@ fn unrecorded_block_not_diffable() {
 
 #[test]
 fn block_head_splits_path_and_symbol() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(2_000));
 
     let mut fn_block = sample_block(1, "src/cart.ts", vec![Label::SymbolAdded {}]);
@@ -920,7 +979,7 @@ fn block_head_splits_path_and_symbol() {
     );
 
     card.blocks = vec![fn_block, sep_in_path, empty_sym, no_sym];
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
 
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
@@ -948,10 +1007,10 @@ fn block_head_splits_path_and_symbol() {
 #[test]
 fn detail_prompt_formats_harness_envelopes_and_plain_prompts() {
     let open_prompt = |id: &str, prompt: &str, lang: UiLang| -> DetailView {
-        let (mut model, _) = DetailModel::open(id.to_string(), 1);
+        let (mut model, _) = DetailModel::open(id.to_string(), 1, None);
         let mut card = sample_card(id, 1_000, Some(2_000));
         card.prompt = prompt.to_string();
-        model.on_detail(1, card, Vec::new(), lang);
+        model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), lang);
         match model.state() {
             DetailState::Ready(view) => view.clone(),
             other => panic!("expected Ready state, got {other:?}"),
@@ -998,7 +1057,7 @@ fn detail_prompt_formats_harness_envelopes_and_plain_prompts() {
 
 #[test]
 fn failed_step_shows_exit_and_error() {
-    let (mut model, _) = DetailModel::open("c-fail".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c-fail".to_string(), 1, None);
     let mut card = sample_card("c-fail", 1_000, Some(5_000));
     card.flow = vec![FlowStep {
         kind: FlowKind::Cmd,
@@ -1010,7 +1069,7 @@ fn failed_step_shows_exit_and_error() {
         error: Some("Error: x\u{7}".into()),
     }];
 
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -1021,7 +1080,7 @@ fn failed_step_shows_exit_and_error() {
 
 #[test]
 fn ok_step_has_neither() {
-    let (mut model, _) = DetailModel::open("c-ok".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c-ok".to_string(), 1, None);
     let mut card = sample_card("c-ok", 1_000, Some(3_000));
     card.flow = vec![FlowStep {
         kind: FlowKind::Cmd,
@@ -1033,7 +1092,7 @@ fn ok_step_has_neither() {
         error: None,
     }];
 
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -1044,7 +1103,7 @@ fn ok_step_has_neither() {
 
 #[test]
 fn old_flow_step_renders_unchanged() {
-    let (mut model, _) = DetailModel::open("c-old-fail".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c-old-fail".to_string(), 1, None);
     let mut card = sample_card("c-old-fail", 1_000, Some(4_000));
     card.flow = vec![FlowStep {
         kind: FlowKind::Cmd,
@@ -1056,7 +1115,7 @@ fn old_flow_step_renders_unchanged() {
         error: None,
     }];
 
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -1078,8 +1137,15 @@ fn sequence_sentence_en_and_id_for_fail_edit_pass() {
         error_names: None,
     });
 
-    let (mut en_model, _) = DetailModel::open("c-seq".to_string(), 1);
-    en_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let (mut en_model, _) = DetailModel::open("c-seq".to_string(), 1, None);
+    en_model.on_detail(
+        1,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::En,
+    );
     let DetailState::Ready(en_view) = en_model.state() else {
         panic!("expected Ready state");
     };
@@ -1088,8 +1154,15 @@ fn sequence_sentence_en_and_id_for_fail_edit_pass() {
         Some("`npm test` failed (exit 1). Edited src/auth.ts. `npm test` passed.")
     );
 
-    let (mut id_model, _) = DetailModel::open("c-seq".to_string(), 1);
-    id_model.on_detail(1, card.clone(), Vec::new(), UiLang::Id);
+    let (mut id_model, _) = DetailModel::open("c-seq".to_string(), 1, None);
+    id_model.on_detail(
+        1,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::Id,
+    );
     let DetailState::Ready(id_view) = id_model.state() else {
         panic!("expected Ready state");
     };
@@ -1105,8 +1178,15 @@ fn sequence_sentence_en_and_id_for_fail_edit_pass() {
         error_names: Some("auth.ts".to_string()),
     });
 
-    let (mut en_err_model, _) = DetailModel::open("c-seq".to_string(), 1);
-    en_err_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let (mut en_err_model, _) = DetailModel::open("c-seq".to_string(), 1, None);
+    en_err_model.on_detail(
+        1,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::En,
+    );
     let DetailState::Ready(en_err_view) = en_err_model.state() else {
         panic!("expected Ready state");
     };
@@ -1117,8 +1197,8 @@ fn sequence_sentence_en_and_id_for_fail_edit_pass() {
         )
     );
 
-    let (mut id_err_model, _) = DetailModel::open("c-seq".to_string(), 1);
-    id_err_model.on_detail(1, card, Vec::new(), UiLang::Id);
+    let (mut id_err_model, _) = DetailModel::open("c-seq".to_string(), 1, None);
+    id_err_model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
     let DetailState::Ready(id_err_view) = id_err_model.state() else {
         panic!("expected Ready state");
     };
@@ -1145,8 +1225,15 @@ fn sequence_sentence_summarizes_three_edits() {
         error_names: None,
     });
 
-    let (mut en_model, _) = DetailModel::open("c-seq-3".to_string(), 1);
-    en_model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let (mut en_model, _) = DetailModel::open("c-seq-3".to_string(), 1, None);
+    en_model.on_detail(
+        1,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::En,
+    );
     let DetailState::Ready(en_view) = en_model.state() else {
         panic!("expected Ready state");
     };
@@ -1155,8 +1242,8 @@ fn sequence_sentence_summarizes_three_edits() {
         Some("`npm test` failed (exit 2). Edited src/a.ts and 2 more. `npm test` passed.")
     );
 
-    let (mut id_model, _) = DetailModel::open("c-seq-3".to_string(), 1);
-    id_model.on_detail(1, card, Vec::new(), UiLang::Id);
+    let (mut id_model, _) = DetailModel::open("c-seq-3".to_string(), 1, None);
+    id_model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
     let DetailState::Ready(id_view) = id_model.state() else {
         panic!("expected Ready state");
     };
@@ -1177,8 +1264,8 @@ fn sequence_sentence_cuts_long_command_and_sanitizes_control_chars() {
         error_names: None,
     });
 
-    let (mut long_model, _) = DetailModel::open("c-seq-long".to_string(), 1);
-    long_model.on_detail(1, long_card, Vec::new(), UiLang::En);
+    let (mut long_model, _) = DetailModel::open("c-seq-long".to_string(), 1, None);
+    long_model.on_detail(1, long_card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(long_view) = long_model.state() else {
         panic!("expected Ready state");
     };
@@ -1203,8 +1290,8 @@ fn sequence_sentence_cuts_long_command_and_sanitizes_control_chars() {
         error_names: None,
     });
 
-    let (mut ctrl_model, _) = DetailModel::open("c-seq-ctrl".to_string(), 1);
-    ctrl_model.on_detail(1, ctrl_card, Vec::new(), UiLang::En);
+    let (mut ctrl_model, _) = DetailModel::open("c-seq-ctrl".to_string(), 1, None);
+    ctrl_model.on_detail(1, ctrl_card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(ctrl_view) = ctrl_model.state() else {
         panic!("expected Ready state");
     };
@@ -1222,8 +1309,8 @@ fn sequence_sentence_cuts_long_command_and_sanitizes_control_chars() {
 #[test]
 fn card_without_sequence_has_no_sequence_line() {
     let card = sample_card("c-no-seq", 1_000, Some(5_000));
-    let (mut model, _) = DetailModel::open("c-no-seq".to_string(), 1);
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let (mut model, _) = DetailModel::open("c-no-seq".to_string(), 1, None);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -1245,8 +1332,15 @@ fn sequence_sentence_names_first_edit_in_chronological_order_and_deduplicates() 
         error_names: None,
     });
 
-    let (mut model, _) = DetailModel::open("c-seq-order".to_string(), 1);
-    model.on_detail(1, card.clone(), Vec::new(), UiLang::En);
+    let (mut model, _) = DetailModel::open("c-seq-order".to_string(), 1, None);
+    model.on_detail(
+        1,
+        card.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::En,
+    );
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -1264,8 +1358,8 @@ fn sequence_sentence_names_first_edit_in_chronological_order_and_deduplicates() 
         edit_seqs: vec![99, 2, 2, 1, 1],
         error_names: None,
     });
-    let (mut dedup_model, _) = DetailModel::open("c-seq-order".to_string(), 2);
-    dedup_model.on_detail(2, card, Vec::new(), UiLang::En);
+    let (mut dedup_model, _) = DetailModel::open("c-seq-order".to_string(), 2, None);
+    dedup_model.on_detail(2, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(dedup_view) = dedup_model.state() else {
         panic!("expected Ready state");
     };
@@ -1288,8 +1382,8 @@ fn sequence_sentence_is_none_when_no_edit_seq_resolves_to_block() {
         error_names: None,
     });
 
-    let (mut model, _) = DetailModel::open("c-seq-missing-blocks".to_string(), 1);
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    let (mut model, _) = DetailModel::open("c-seq-missing-blocks".to_string(), 1, None);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -1299,8 +1393,8 @@ fn sequence_sentence_is_none_when_no_edit_seq_resolves_to_block() {
 #[test]
 fn sequence_sentence_deduplicates_by_rendered_label_en_and_id() {
     let render = |id: &str, card: Card, lang: UiLang| -> Option<String> {
-        let (mut model, _) = DetailModel::open(id.to_string(), 1);
-        model.on_detail(1, card, Vec::new(), lang);
+        let (mut model, _) = DetailModel::open(id.to_string(), 1, None);
+        model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), lang);
         let DetailState::Ready(view) = model.state() else {
             panic!("expected Ready state");
         };
@@ -1434,8 +1528,8 @@ fn sequence_sentence_folds_symbol_labels_into_file_level_en_and_id() {
                 edit_seqs,
                 error_names: None,
             });
-            let (mut model, _) = DetailModel::open(id.to_string(), 1);
-            model.on_detail(1, card, Vec::new(), lang);
+            let (mut model, _) = DetailModel::open(id.to_string(), 1, None);
+            model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), lang);
             let DetailState::Ready(view) = model.state() else {
                 panic!("expected Ready state");
             };
@@ -1563,5 +1657,601 @@ fn sequence_sentence_folds_symbol_labels_into_file_level_en_and_id() {
     assert_eq!(
         render("c-pos", folded_first_pos, vec![1, 2, 3], UiLang::Id).as_deref(),
         Some("`npm test` gagal (exit 1). a.js dan 1 lainnya diedit. `npm test` lulus.")
+    );
+}
+
+#[test]
+fn push_before_reply_is_kept() {
+    let raw1 = "**Pertama**";
+    let raw2 = "Kedua";
+    let k1 = quote_key(raw1);
+    let k2 = quote_key(raw2);
+
+    let (mut model, req) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    assert_eq!(
+        req,
+        ClientMsg::CardDetail {
+            id: 1,
+            card_id: "c1".to_string(),
+            translate_to: Some(QuoteLang::En),
+        }
+    );
+
+    assert!(model.on_translated(
+        "c1",
+        &QuoteTranslation {
+            quote_key: k1.clone(),
+            from: QuoteLang::Id,
+            text: "**First**".to_string(),
+        },
+    ));
+    assert!(model.on_settled("c1", &k2, QuoteLang::En));
+
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw1.to_string(),
+        shared: false,
+    });
+    let mut b2 = sample_block(2, "src/b.rs", Vec::new());
+    b2.quote = Some(Quote {
+        text: raw2.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1, b2];
+
+    model.on_detail(
+        1,
+        card,
+        Vec::new(),
+        Vec::new(),
+        vec![k1.clone(), k2.clone()],
+        UiLang::En,
+    );
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::En),
+        QuoteDisplay {
+            text: "First".to_string(),
+            is_dim: false,
+            key: Some(k1),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: false,
+            translating: false,
+        }
+    );
+    assert_eq!(
+        model.quote_display(&view.groups[1], UiLang::En),
+        QuoteDisplay {
+            text: "Kedua".to_string(),
+            is_dim: false,
+            key: Some(k2),
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+}
+
+#[test]
+fn other_language_pushes_are_ignored() {
+    let raw = "Merah.";
+    let k = quote_key(raw);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1];
+
+    model.on_detail(1, card, Vec::new(), Vec::new(), vec![k.clone()], UiLang::En);
+
+    assert!(!model.on_settled("c1", &k, QuoteLang::Id));
+    assert!(!model.on_translated(
+        "c1",
+        &QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::En,
+            text: "Wrong target".to_string(),
+        },
+    ));
+    assert!(!model.on_settled("other", &k, QuoteLang::En));
+    assert!(!model.on_translated(
+        "other",
+        &QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "Wrong card".to_string(),
+        },
+    ));
+
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::En),
+        QuoteDisplay {
+            text: "Merah.".to_string(),
+            is_dim: false,
+            key: Some(k),
+            translated_from: None,
+            showing_original: false,
+            translating: true,
+        }
+    );
+}
+
+#[test]
+fn retarget_drops_old_state() {
+    let raw = "Asli";
+    let k = quote_key(raw);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1];
+
+    model.on_detail(
+        1,
+        card,
+        Vec::new(),
+        vec![QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "Original-en".to_string(),
+        }],
+        Vec::new(),
+        UiLang::En,
+    );
+    model.toggle_original(&k);
+
+    assert_eq!(model.retarget(2, Some(QuoteLang::En)), None);
+    let req = model.retarget(2, Some(QuoteLang::Id));
+    assert_eq!(
+        req,
+        Some(ClientMsg::CardDetail {
+            id: 2,
+            card_id: "c1".to_string(),
+            translate_to: Some(QuoteLang::Id),
+        })
+    );
+    assert_eq!(model.pending_id(), Some(2));
+
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state to stay without flicker");
+    };
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::Id),
+        QuoteDisplay {
+            text: "Asli".to_string(),
+            is_dim: false,
+            key: Some(k),
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+}
+
+#[test]
+fn retarget_to_none_shows_original_without_request() {
+    let raw1 = "Satu";
+    let raw2 = "Dua";
+    let k1 = quote_key(raw1);
+    let k2 = quote_key(raw2);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw1.to_string(),
+        shared: false,
+    });
+    let mut b2 = sample_block(2, "src/b.rs", Vec::new());
+    b2.quote = Some(Quote {
+        text: raw2.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1, b2];
+
+    model.on_detail(
+        1,
+        card,
+        Vec::new(),
+        vec![QuoteTranslation {
+            quote_key: k1.clone(),
+            from: QuoteLang::Id,
+            text: "One".to_string(),
+        }],
+        vec![k2.clone()],
+        UiLang::En,
+    );
+
+    assert_eq!(model.retarget(2, None), None);
+    assert_eq!(model.retarget(3, None), None);
+
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::En),
+        QuoteDisplay {
+            text: "Satu".to_string(),
+            is_dim: false,
+            key: Some(k1),
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+    assert_eq!(
+        model.quote_display(&view.groups[1], UiLang::En),
+        QuoteDisplay {
+            text: "Dua".to_string(),
+            is_dim: false,
+            key: Some(k2),
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+}
+
+#[test]
+fn toggle_original_flips_display() {
+    let raw = "Asli";
+    let k = quote_key(raw);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1];
+
+    model.on_detail(
+        1,
+        card,
+        Vec::new(),
+        vec![QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "Translated".to_string(),
+        }],
+        Vec::new(),
+        UiLang::En,
+    );
+
+    let DetailState::Ready(view) = model.state().clone() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::En),
+        QuoteDisplay {
+            text: "Translated".to_string(),
+            is_dim: false,
+            key: Some(k.clone()),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: false,
+            translating: false,
+        }
+    );
+
+    model.toggle_original(&k);
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::En),
+        QuoteDisplay {
+            text: "Asli".to_string(),
+            is_dim: false,
+            key: Some(k.clone()),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: true,
+            translating: false,
+        }
+    );
+
+    model.toggle_original(&k);
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::En),
+        QuoteDisplay {
+            text: "Translated".to_string(),
+            is_dim: false,
+            key: Some(k),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: false,
+            translating: false,
+        }
+    );
+}
+
+#[test]
+fn push_for_unlisted_key_applies() {
+    let raw = "Overflow quote";
+    let k = quote_key(raw);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::Id));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1];
+
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
+    assert!(model.on_translated(
+        "c1",
+        &QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::En,
+            text: "Kutipan meluap".to_string(),
+        },
+    ));
+
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::Id),
+        QuoteDisplay {
+            text: "Kutipan meluap".to_string(),
+            is_dim: false,
+            key: Some(k),
+            translated_from: Some(QuoteLang::En),
+            showing_original: false,
+            translating: false,
+        }
+    );
+}
+
+#[test]
+fn group_keeps_first_raw_quote() {
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: "**Same words**".to_string(),
+        shared: false,
+    });
+    let mut b2 = sample_block(2, "src/b.rs", Vec::new());
+    b2.quote = Some(Quote {
+        text: "Same words".to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1, b2];
+
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(view.groups.len(), 1);
+    assert_eq!(view.groups[0].blocks.len(), 2);
+    assert_eq!(view.groups[0].quote.as_deref(), Some("Same words"));
+    assert_eq!(view.groups[0].raw_quote.as_deref(), Some("**Same words**"));
+    assert_eq!(
+        view.groups[0].quote_key(),
+        Some(quote_key("**Same words**"))
+    );
+}
+
+#[test]
+fn empty_cleaned_translation_and_missing_quote_display() {
+    let raw = "Asli";
+    let k = quote_key(raw);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    let b2 = sample_block(2, "src/b.rs", Vec::new());
+    let mut b3 = sample_block(3, "src/c.rs", Vec::new());
+    b3.quote = Some(Quote {
+        text: "  \n\t ".to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1, b2, b3];
+
+    model.on_detail(
+        1,
+        card,
+        Vec::new(),
+        vec![QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "- *".to_string(),
+        }],
+        Vec::new(),
+        UiLang::En,
+    );
+
+    let DetailState::Ready(view) = model.state() else {
+        panic!("expected Ready state");
+    };
+    assert_eq!(view.groups.len(), 2);
+    assert_eq!(
+        model.quote_display(&view.groups[0], UiLang::En),
+        QuoteDisplay {
+            text: "Asli".to_string(),
+            is_dim: false,
+            key: Some(k),
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+    assert_eq!(view.groups[1].raw_quote, None);
+    assert_eq!(view.groups[1].quote_key(), None);
+    assert_eq!(
+        model.quote_display(&view.groups[1], UiLang::En),
+        QuoteDisplay {
+            text: "No agent words recorded for this edit".to_string(),
+            is_dim: true,
+            key: None,
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+}
+
+#[test]
+fn reopen_uses_resolved_target_and_drops_stale_translations() {
+    let raw = "Saya periksa parser dulu.";
+    let k = quote_key(raw);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/lib.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1];
+    model.on_detail(
+        1,
+        card,
+        Vec::new(),
+        vec![QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "I checked the parser first.".to_string(),
+        }],
+        Vec::new(),
+        UiLang::En,
+    );
+    model.toggle_original(&k);
+
+    // Same target keeps the target for the reconnect request.
+    let req = model.reopen(2, Some(QuoteLang::En));
+    assert_eq!(
+        req,
+        ClientMsg::CardDetail {
+            id: 2,
+            card_id: "c1".to_string(),
+            translate_to: Some(QuoteLang::En),
+        }
+    );
+
+    // Changing target on reopen updates the model target and clears stale translations/toggles.
+    let req2 = model.reopen(3, Some(QuoteLang::Id));
+    assert_eq!(
+        req2,
+        ClientMsg::CardDetail {
+            id: 3,
+            card_id: "c1".to_string(),
+            translate_to: Some(QuoteLang::Id),
+        }
+    );
+    assert_eq!(model.retarget(4, Some(QuoteLang::Id)), None);
+
+    let req3 = model.reopen(5, None);
+    assert_eq!(
+        req3,
+        ClientMsg::CardDetail {
+            id: 5,
+            card_id: "c1".to_string(),
+            translate_to: None,
+        }
+    );
+    assert_eq!(model.retarget(6, None), None);
+}
+
+#[test]
+fn formatting_only_first_quote_keeps_raw_key_and_dim_fallback() {
+    let raw = "- *";
+    let k = quote_key(raw);
+
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    let b2 = sample_block(2, "src/b.rs", Vec::new());
+    card.blocks = vec![b1, b2];
+
+    model.on_detail(1, card, Vec::new(), Vec::new(), vec![k.clone()], UiLang::En);
+
+    let group = {
+        let DetailState::Ready(view) = model.state() else {
+            panic!("expected Ready state");
+        };
+        assert_eq!(view.groups.len(), 1);
+        assert_eq!(view.groups[0].blocks.len(), 2);
+        assert_eq!(view.groups[0].quote, None);
+        assert_eq!(view.groups[0].raw_quote.as_deref(), Some(raw));
+        assert_eq!(view.groups[0].quote_key(), Some(k.clone()));
+        assert_eq!(
+            model.quote_display(&view.groups[0], UiLang::En),
+            QuoteDisplay {
+                text: "No agent words recorded for this edit".to_string(),
+                is_dim: true,
+                key: Some(k.clone()),
+                translated_from: None,
+                showing_original: false,
+                translating: true,
+            }
+        );
+        view.groups[0].clone()
+    };
+
+    assert!(model.on_settled("c1", &k, QuoteLang::En));
+    assert_eq!(
+        model.quote_display(&group, UiLang::En),
+        QuoteDisplay {
+            text: "No agent words recorded for this edit".to_string(),
+            is_dim: true,
+            key: Some(k.clone()),
+            translated_from: None,
+            showing_original: false,
+            translating: false,
+        }
+    );
+
+    assert!(model.on_translated(
+        "c1",
+        &QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "Translated".to_string(),
+        },
+    ));
+    assert_eq!(
+        model.quote_display(&group, UiLang::En),
+        QuoteDisplay {
+            text: "Translated".to_string(),
+            is_dim: false,
+            key: Some(k.clone()),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: false,
+            translating: false,
+        }
+    );
+
+    model.toggle_original(&k);
+    assert_eq!(
+        model.quote_display(&group, UiLang::En),
+        QuoteDisplay {
+            text: "No agent words recorded for this edit".to_string(),
+            is_dim: true,
+            key: Some(k),
+            translated_from: Some(QuoteLang::Id),
+            showing_original: true,
+            translating: false,
+        }
     );
 }

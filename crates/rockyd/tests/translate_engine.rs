@@ -251,12 +251,14 @@ fn quote_translated_items(msgs: &[ServerMsg]) -> Vec<(&str, &QuoteTranslation)> 
         .collect()
 }
 
-fn quote_settled_items(msgs: &[ServerMsg]) -> Vec<(&str, &str)> {
+fn quote_settled_items(msgs: &[ServerMsg]) -> Vec<(&str, &str, QuoteLang)> {
     msgs.iter()
         .filter_map(|msg| match msg {
-            ServerMsg::QuoteSettled { card_id, quote_key } => {
-                Some((card_id.as_str(), quote_key.as_str()))
-            }
+            ServerMsg::QuoteSettled {
+                card_id,
+                quote_key,
+                to,
+            } => Some((card_id.as_str(), quote_key.as_str(), *to)),
             _ => None,
         })
         .collect()
@@ -369,7 +371,7 @@ fn same_language_is_cached_as_original() {
     assert!(quote_translated_items(&settled_msgs).is_empty());
     assert_eq!(
         quote_settled_items(&settled_msgs),
-        vec![("c1", quote_key("Already English.").as_str())]
+        vec![("c1", quote_key("Already English.").as_str(), QuoteLang::En)]
     );
     assert_eq!(read_logged_argv(home.path()).len(), runs_before + 1);
 
@@ -499,7 +501,7 @@ fn crash_mid_run_requeues_on_next_detail() {
     assert_eq!(first_items[0].1.text, "T:Pertama.");
     assert_eq!(
         quote_settled_items(&first_msgs),
-        vec![("c1", quote_key("Kedua.").as_str())]
+        vec![("c1", quote_key("Kedua.").as_str(), QuoteLang::En)]
     );
     assert_eq!(
         logs,
@@ -754,7 +756,7 @@ fn failed_reply_is_dropped_and_not_cached() {
     });
     assert_eq!(
         quote_settled_items(&all_msgs),
-        vec![("c1", quote_key("Gagal.").as_str())]
+        vec![("c1", quote_key("Gagal.").as_str(), QuoteLang::En)]
     );
 
     // Not cached: clearing fail allows the next detail open to queue and translate it.
@@ -988,7 +990,7 @@ fn model_change_mid_run_drops_reply_without_caching() {
     });
     assert_eq!(
         quote_settled_items(&stale_msgs),
-        vec![("c1", quote_key("Merah.").as_str())]
+        vec![("c1", quote_key("Merah.").as_str(), QuoteLang::En)]
     );
 
     let mut cache = QuoteCache::new(home.path().to_path_buf());
@@ -1223,7 +1225,7 @@ fn wrong_from_reply_is_treated_as_failed_and_settles_quote() {
     });
     assert_eq!(
         quote_settled_items(&all_msgs),
-        vec![("c1", quote_key("Salah arah.").as_str())]
+        vec![("c1", quote_key("Salah arah.").as_str(), QuoteLang::En)]
     );
 
     // Not cached: clearing wrong_from lets the next detail open queue and translate it.

@@ -15,7 +15,7 @@ impl DeskView {
         self.drain_notice_errors();
         let mut changed = self.ctl.on_worker();
         let mut requests = Vec::new();
-        let mut card_requests = Vec::new();
+        let mut snapshot_seen = false;
         let mut outcomes = Vec::new();
         let mut open_consent = false;
         let mut health_seen = false;
@@ -48,8 +48,13 @@ impl DeskView {
                         }
                         let for_notify = msg.clone();
                         self.setup.on_server_msg(&for_notify);
+                        if let ServerMsg::Snapshot { translate, .. }
+                        | ServerMsg::Translate { status: translate } = &for_notify
+                        {
+                            self.translate.on_status(translate);
+                        }
                         if matches!(&for_notify, ServerMsg::Snapshot { .. }) {
-                            card_requests.extend(self.cards_refresh_msgs());
+                            snapshot_seen = true;
                         }
                         let card_lang = pending_lang
                             .map(|setting| resolve_lang(setting, self.ctl.detected))
@@ -138,8 +143,13 @@ impl DeskView {
         for key in requests {
             self.ctl.request_timeline(key);
         }
-        for msg in card_requests {
-            self.send_card_msg(msg);
+        if snapshot_seen {
+            for msg in self.cards_refresh_msgs() {
+                self.send_card_msg(msg);
+            }
+        }
+        if self.sync_translate_target() {
+            changed = true;
         }
         if changed {
             cx.notify();

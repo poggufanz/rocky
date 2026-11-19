@@ -28,7 +28,7 @@ impl DeskView {
         self.start_request(RequestKind::RepoList);
     }
 
-    fn not_connected_text(&self) -> String {
+    pub(super) fn not_connected_text(&self) -> String {
         tr(self.ctl.ui_lang, &Msg::Setup(SetupMsg::NotConnected))
     }
 

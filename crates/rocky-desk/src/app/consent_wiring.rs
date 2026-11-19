@@ -34,6 +34,13 @@ impl DeskView {
     /// Route one request outcome to the screen that owns its kind.
     pub(super) fn on_outcome(&mut self, kind: RequestKind, outcome: RequestOutcome) {
         let expired = tr(self.ctl.ui_lang, &Msg::Setup(SetupMsg::RequestTimedOut));
+        if matches!(
+            kind,
+            RequestKind::TranslateInstall(_) | RequestKind::TranslateRemove
+        ) {
+            self.translate.on_result(&outcome, &expired);
+            return;
+        }
         self.route_setup(kind.clone(), outcome.clone(), &expired);
         let step = self.consent.route(kind, outcome, &expired);
         if step.send_plan {

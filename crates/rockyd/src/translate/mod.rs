@@ -205,6 +205,7 @@ impl Translator {
                             self.staged_later.push(ServerMsg::QuoteSettled {
                                 card_id: waiting_card,
                                 quote_key: evicted.quote_key.clone(),
+                                to: evicted.to,
                             });
                         }
                     }
@@ -213,6 +214,43 @@ impl Translator {
             }
         }
         detail
+    }
+
+    /// Looks up cached translations for `quotes` into `to` without queueing, pending, or spawning.
+    pub fn cached(
+        &mut self,
+        enabled: bool,
+        to: QuoteLang,
+        quotes: &[String],
+    ) -> Vec<QuoteTranslation> {
+        if !enabled {
+            return Vec::new();
+        }
+        let pair = TranslatePair::to(to);
+        let Some(sha) = marker::model_sha(&self.home, pair) else {
+            return Vec::new();
+        };
+
+        let mut seen = HashSet::with_capacity(quotes.len());
+        let mut hits = Vec::new();
+        for text in quotes {
+            if !seen.insert(text.as_str()) {
+                continue;
+            }
+            let ckey = cache::cache_key(&sha, to, text);
+            if let Some(Cached::Translated {
+                from,
+                text: translated,
+            }) = self.cache.get(to, &ckey)
+            {
+                hits.push(QuoteTranslation {
+                    quote_key: quote_key(text),
+                    from,
+                    text: translated,
+                });
+            }
+        }
+        hits
     }
 
     pub fn push_later(&mut self, card_id: &str, items: Vec<QuoteTranslation>) {
@@ -403,7 +441,7 @@ impl Translator {
                 RunEvent::Done => {
                     let dropped = run.dropped + self.in_flight.len();
                     for (_, entry) in self.in_flight.drain() {
-                        emit_settled(out, entry.cards, &entry.quote_key);
+                        emit_settled(out, entry.cards, &entry.quote_key, entry.to);
                     }
                     self.log_lines.push(format!(
                         "translate run: {} ok, {} original, {} failed, {} dropped",
@@ -430,12 +468,12 @@ impl Translator {
                 };
                 if from != entry.to.other() {
                     run.failed += 1;
-                    emit_settled(out, entry.cards, &entry.quote_key);
+                    emit_settled(out, entry.cards, &entry.quote_key, entry.to);
                     return;
                 }
                 let Some(ckey) = self.valid_reply_cache_key(run, entry.to, &entry.text) else {
                     run.dropped += 1;
-                    emit_settled(out, entry.cards, &entry.quote_key);
+                    emit_settled(out, entry.cards, &entry.quote_key, entry.to);
                     return;
                 };
                 run.ok += 1;
@@ -464,17 +502,17 @@ impl Translator {
                 };
                 let Some(ckey) = self.valid_reply_cache_key(run, entry.to, &entry.text) else {
                     run.dropped += 1;
-                    emit_settled(out, entry.cards, &entry.quote_key);
+                    emit_settled(out, entry.cards, &entry.quote_key, entry.to);
                     return;
                 };
                 run.original += 1;
                 let _ = self.cache.put(entry.to, &ckey, &Cached::Original);
-                emit_settled(out, entry.cards, &entry.quote_key);
+                emit_settled(out, entry.cards, &entry.quote_key, entry.to);
             }
             RunReply::Failed { key } => {
                 if let Some(entry) = self.in_flight.remove(&key) {
                     run.failed += 1;
-                    emit_settled(out, entry.cards, &entry.quote_key);
+                    emit_settled(out, entry.cards, &entry.quote_key, entry.to);
                 }
             }
         }
@@ -580,7 +618,7 @@ impl Translator {
                 }
             };
             let Some(sha) = sha else {
-                emit_settled(out, item.cards, &item.quote_key);
+                emit_settled(out, item.cards, &item.quote_key, item.to);
                 continue;
             };
             let key = cache::cache_key(sha, item.to, &item.text);
@@ -598,7 +636,7 @@ impl Translator {
                     }
                 }
                 Some(Cached::Original) => {
-                    emit_settled(out, item.cards, &item.quote_key);
+                    emit_settled(out, item.cards, &item.quote_key, item.to);
                 }
                 None => {
                     requests.push(RunRequest {
@@ -670,11 +708,12 @@ fn read_usable_cli(home: &Path) -> Option<CliRecord> {
         .then_some(cli)
 }
 
-fn emit_settled(out: &mut Vec<ServerMsg>, cards: Vec<String>, quote_key: &str) {
+fn emit_settled(out: &mut Vec<ServerMsg>, cards: Vec<String>, quote_key: &str, to: QuoteLang) {
     for card_id in cards {
         out.push(ServerMsg::QuoteSettled {
             card_id,
             quote_key: quote_key.to_string(),
+            to,
         });
     }
 }
@@ -754,14 +793,17 @@ mod tests {
                 ServerMsg::QuoteSettled {
                     card_id: "c1".to_string(),
                     quote_key: quote_key("quote-0"),
+                    to: QuoteLang::En,
                 },
                 ServerMsg::QuoteSettled {
                     card_id: "c1".to_string(),
                     quote_key: quote_key("quote-1"),
+                    to: QuoteLang::En,
                 },
                 ServerMsg::QuoteSettled {
                     card_id: "c1".to_string(),
                     quote_key: quote_key("quote-2"),
+                    to: QuoteLang::En,
                 },
             ]
         );
@@ -771,6 +813,49 @@ mod tests {
         assert_eq!(translator.queue.len(), MAX_PENDING);
         assert_eq!(translator.queue.front().unwrap().text, "quote-3");
         assert_eq!(translator.queue.front().unwrap().cards, vec!["c1", "c2"]);
+    }
+
+    #[test]
+    fn settled_reply_names_the_target_language() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+        let mut translator = Translator::new(home.path().to_path_buf());
+
+        let text = "Already English.";
+        let detail = translator.on_detail(true, "c1", QuoteLang::En, &[text.to_string()]);
+        assert_eq!(detail.pending, vec![quote_key(text)]);
+
+        let pending = translator.queue.pop_front().unwrap();
+        let key = cache::cache_key(TEST_SHA, pending.to, &pending.text);
+        translator.in_flight.insert(
+            key.clone(),
+            InFlightQuote {
+                quote_key: pending.quote_key,
+                to: pending.to,
+                text: pending.text,
+                cards: pending.cards,
+            },
+        );
+        let mut shas = RunShas::default();
+        shas.set(QuoteLang::En, TEST_SHA.to_string());
+        translator.job = Some(ActiveJob::Run(ActiveRun {
+            job: RunJob::from_events([RunEvent::Reply(RunReply::Original { key }), RunEvent::Done]),
+            shas,
+            ok: 0,
+            original: 0,
+            failed: 0,
+            dropped: 0,
+        }));
+
+        let out = translator.service(true);
+        assert_eq!(
+            out,
+            vec![ServerMsg::QuoteSettled {
+                card_id: "c1".into(),
+                quote_key: quote_key(text),
+                to: QuoteLang::En,
+            }]
+        );
     }
 
     #[test]
@@ -966,5 +1051,79 @@ mod tests {
         let _ = translator.service(true);
         assert_eq!(translator.drain_log().len(), 1);
         assert_eq!(translator.queue.len(), 1);
+    }
+
+    #[test]
+    fn cached_lookup_never_queues() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+        write_valid_cli(home.path());
+
+        let hit_raw = "Merah.";
+        let miss_raw = "Biru.";
+        let mut cache = QuoteCache::new(home.path().to_path_buf());
+        let ckey = cache::cache_key(TEST_SHA, QuoteLang::En, hit_raw);
+        cache
+            .put(
+                QuoteLang::En,
+                &ckey,
+                &Cached::Translated {
+                    from: QuoteLang::Id,
+                    text: "Red.".to_string(),
+                },
+            )
+            .unwrap();
+
+        let mut translator = Translator::new(home.path().to_path_buf());
+        let quotes = vec![hit_raw.to_string(), miss_raw.to_string()];
+        let hits = translator.cached(true, QuoteLang::En, &quotes);
+        assert_eq!(
+            hits,
+            vec![QuoteTranslation {
+                quote_key: quote_key(hit_raw),
+                from: QuoteLang::Id,
+                text: "Red.".to_string(),
+            }]
+        );
+        assert_eq!(translator.queue.len(), 0);
+        assert!(!translator.has_job());
+
+        assert!(translator.service(true).is_empty());
+        assert_eq!(translator.queue.len(), 0);
+        assert!(!translator.has_job());
+    }
+
+    #[test]
+    fn cached_lookup_off_returns_nothing() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+
+        let hit_raw = "Merah.";
+        let mut cache = QuoteCache::new(home.path().to_path_buf());
+        let ckey = cache::cache_key(TEST_SHA, QuoteLang::En, hit_raw);
+        cache
+            .put(
+                QuoteLang::En,
+                &ckey,
+                &Cached::Translated {
+                    from: QuoteLang::Id,
+                    text: "Red.".to_string(),
+                },
+            )
+            .unwrap();
+
+        let mut translator = Translator::new(home.path().to_path_buf());
+        assert!(
+            translator
+                .cached(false, QuoteLang::En, &[hit_raw.to_string()])
+                .is_empty()
+        );
+        // Pair not ready (En -> Id) also returns empty.
+        assert!(
+            translator
+                .cached(true, QuoteLang::Id, &[hit_raw.to_string()])
+                .is_empty()
+        );
+        assert_eq!(translator.queue.len(), 0);
     }
 }

@@ -30,6 +30,7 @@ pub enum CardAction {
     OpenDiff(u32),
     BackFromDiff,
     DiffPage(u32),
+    ToggleOriginal(String),
 }
 
 /// Callback invoked by card UI elements when triggered.

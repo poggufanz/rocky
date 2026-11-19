@@ -1,4 +1,4 @@
-//! Desk client server (protocol v4): a single-instance user-only connection
+//! Desk client server (protocol v5): a single-instance user-only connection
 //! endpoint (a named pipe on Windows, a unix socket elsewhere), per-client
 //! threads, and a non-blocking broadcast hub.
 
@@ -83,6 +83,7 @@ pub enum Control {
         query: Option<String>,
         before: Option<String>,
         limit: u32,
+        translate_to: Option<QuoteLang>,
         reply: SyncSender<ServerMsg>,
     },
     /// A `card_detail` request; the daemon replies with `ServerMsg::CardDetail` or an ack error.
@@ -460,12 +461,14 @@ fn handle_client<S>(
                     query,
                     before,
                     limit,
+                    translate_to,
                 }) => {
                     if !relay(control, hub, client_id, id, |reply| Control::Cards {
                         id,
                         query,
                         before,
                         limit,
+                        translate_to,
                         reply,
                     }) {
                         break;

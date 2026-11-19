@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::{Context, Div, FontWeight, SharedString, div, px, relative, rgb};
 
 use crate::card_detail_model::{
-    BlockView, CodeLine, DetailModel, DetailState, DetailView, QuoteGroup, Step,
+    BlockView, CodeLine, DetailModel, DetailState, DetailView, QuoteDisplay, QuoteGroup, Step,
 };
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::ui::cards_view::{CardAction, OnCardAction};
@@ -26,8 +26,8 @@ pub fn card_detail_view<T: 'static>(
     let card_id = detail.map(DetailModel::card_id).unwrap_or("none");
     let mut out = div().flex().flex_col().gap_2();
 
-    match detail.map(DetailModel::state) {
-        None | Some(DetailState::Loading) => {
+    match detail.map(|d| (d, d.state())) {
+        None | Some((_, DetailState::Loading)) => {
             let loading = div()
                 .text_sm()
                 .text_color(rgb(TEXT_DIM))
@@ -37,7 +37,7 @@ pub fn card_detail_view<T: 'static>(
                 SharedString::from(format!("detail-loading:{card_id}")),
             ));
         }
-        Some(DetailState::NotFound) => {
+        Some((_, DetailState::NotFound)) => {
             out = out.child(
                 div()
                     .text_sm()
@@ -45,8 +45,8 @@ pub fn card_detail_view<T: 'static>(
                     .child(card_text(lang, &CardMsg::CardNotFound)),
             );
         }
-        Some(DetailState::Ready(view)) => {
-            out = out.child(ready_card(lang, card_id, view, cx, on_action));
+        Some((detail, DetailState::Ready(view))) => {
+            out = out.child(ready_card(lang, detail, view, cx, on_action));
         }
     }
 
@@ -55,11 +55,12 @@ pub fn card_detail_view<T: 'static>(
 
 fn ready_card<T: 'static>(
     lang: UiLang,
-    card_id: &str,
+    detail: &DetailModel,
     view: &DetailView,
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
 ) -> Div {
+    let card_id = detail.card_id();
     let prompt_line = div().text_size(px(14.0));
     let prompt_line = if view.prompt_is_notice {
         prompt_line
@@ -85,8 +86,9 @@ fn ready_card<T: 'static>(
             ),
     );
 
-    for group in &view.groups {
-        card = card.child(quote_group_view(lang, group, cx, on_action));
+    for (idx, group) in view.groups.iter().enumerate() {
+        let display = detail.quote_display(group, lang);
+        card = card.child(quote_group_view(lang, idx, display, group, cx, on_action));
     }
 
     if view.sequence_line.is_some() || !view.timeline.is_empty() || view.timeline_more.is_some() {
@@ -127,6 +129,8 @@ fn small_label(text: String) -> Div {
 
 fn quote_group_view<T: 'static>(
     lang: UiLang,
+    idx: usize,
+    display: QuoteDisplay,
     group: &QuoteGroup,
     cx: &mut Context<T>,
     on_action: OnCardAction<T>,
@@ -141,7 +145,6 @@ fn quote_group_view<T: 'static>(
         .px(px(12.0))
         .pb(px(10.0));
 
-    let (quote_line, is_dim) = group.quote_line(lang);
     let mut quote = div()
         .flex()
         .flex_col()
@@ -149,27 +152,22 @@ fn quote_group_view<T: 'static>(
         .border_l_2()
         .border_color(rgb(TEXT_DIM))
         .pl(px(8.0));
-    if is_dim {
-        quote = quote.child(
-            div()
-                .text_size(px(12.5))
-                .line_height(relative(1.45))
-                .italic()
-                .text_color(rgb(TEXT_DIM))
-                .child(quote_line),
-        );
-    } else {
+    let show_label = !display.is_dim || display.translated_from.is_some() || display.translating;
+    if show_label {
         quote = quote
             .gap(px(1.0))
-            .child(small_label(card_text(lang, &CardMsg::AgentSaid)))
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .line_height(relative(1.45))
-                    .text_color(rgb(TEXT_DARK))
-                    .child(quote_line),
-            );
+            .child(quote_label_row(lang, idx, &display, cx, on_action));
     }
+    let text_div = div()
+        .text_size(px(12.5))
+        .line_height(relative(1.45))
+        .child(display.text);
+    let text_div = if display.is_dim {
+        text_div.italic().text_color(rgb(TEXT_DIM))
+    } else {
+        text_div.text_color(rgb(TEXT_DARK))
+    };
+    quote = quote.child(text_div);
     out = out.child(quote);
 
     if !group.blocks.is_empty() {
@@ -180,6 +178,72 @@ fn quote_group_view<T: 'static>(
         out = out.child(blocks);
     }
     out
+}
+
+fn quote_label_row<T: 'static>(
+    lang: UiLang,
+    idx: usize,
+    display: &QuoteDisplay,
+    cx: &mut Context<T>,
+    on_action: OnCardAction<T>,
+) -> Div {
+    let label = small_label(card_text(lang, &CardMsg::AgentSaid));
+    if let Some(from) = display.translated_from {
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .items_baseline()
+            .gap(px(5.0))
+            .child(label)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(format!(
+                        "\u{00b7} {}",
+                        card_text(lang, &CardMsg::TranslatedFrom { from })
+                    )),
+            );
+        if let Some(key) = display.key.clone() {
+            let link_msg = if display.showing_original {
+                &CardMsg::ShowTranslation
+            } else {
+                &CardMsg::ShowOriginal
+            };
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("quote-toggle:{idx}")))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(LINK))
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .child(card_text(lang, link_msg))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_action(this, CardAction::ToggleOriginal(key.clone()), window, cx);
+                    })),
+            );
+        }
+        row
+    } else if display.translating {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_baseline()
+            .gap(px(5.0))
+            .child(label)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(TEXT_DIM))
+                    .child(format!(
+                        "\u{00b7} {}",
+                        card_text(lang, &CardMsg::Translating)
+                    )),
+            )
+    } else {
+        label
+    }
 }
 
 fn block_view<T: 'static>(

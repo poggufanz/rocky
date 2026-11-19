@@ -39,6 +39,13 @@ pub fn card_cursor(card: &Card) -> String {
     format!("{key_ms}:{}", card.card_id)
 }
 
+/// Pairs a list-view quote (`shown`, truncated to [`LIST_QUOTE_MAX_CHARS`]) with its full stored text (`full`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardsQuote {
+    pub shown: String,
+    pub full: String,
+}
+
 /// Truncates list-view fields on a card (block `quote.text` capped to 200 chars).
 pub fn prepare_list_card(card: &mut Card) {
     for block in &mut card.blocks {
@@ -49,30 +56,58 @@ pub fn prepare_list_card(card: &mut Card) {
 }
 
 /// Builds a `ServerMsg::Cards` reply that fits within `LINE_CAP`.
-pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>) -> ServerMsg {
+pub fn build_cards_reply(id: u64, items: Vec<Card>, next: Option<String>) -> ServerMsg {
+    build_cards_reply_with_quotes(id, items, next).0
+}
+
+/// Builds a `ServerMsg::Cards` reply that fits within `LINE_CAP` along with
+/// unambiguous `(shown, full)` quote pairs for the surviving reply blocks.
+pub fn build_cards_reply_with_quotes(
+    id: u64,
+    mut items: Vec<Card>,
+    mut next: Option<String>,
+) -> (ServerMsg, Vec<CardsQuote>) {
     if items.len() > MAX_CARD_LIST_LIMIT {
         items.truncate(MAX_CARD_LIST_LIMIT);
         next = items.last().map(card_cursor);
     }
+    let full_quotes: Vec<Vec<Option<String>>> = items
+        .iter()
+        .map(|card| {
+            card.blocks
+                .iter()
+                .map(|b| b.quote.as_ref().map(|q| q.text.clone()))
+                .collect()
+        })
+        .collect();
     for card in &mut items {
         prepare_list_card(card);
     }
 
-    let mut msg = ServerMsg::Cards { id, items, next };
+    let mut msg = ServerMsg::Cards {
+        id,
+        items,
+        next,
+        translations: Vec::new(),
+    };
+    let finish = |reply: ServerMsg| {
+        let quotes = collect_surviving_cards_quotes(&reply, &full_quotes);
+        (reply, quotes)
+    };
     if encode(&msg).len() <= LINE_CAP {
-        return msg;
+        return finish(msg);
     }
 
     // Step 1: Trim flow steps proportionally before touching blocks or dropping cards.
     shrink_cards_vec_field(&mut msg, CardTrimField::Flow);
     if encode(&msg).len() <= LINE_CAP {
-        return msg;
+        return finish(msg);
     }
 
     // Step 2: Trim blocks proportionally before dropping whole cards from the page.
     shrink_cards_vec_field(&mut msg, CardTrimField::Blocks);
     if encode(&msg).len() <= LINE_CAP {
-        return msg;
+        return finish(msg);
     }
 
     // Step 3: Truncate or clear prompts before dropping trailing cards.
@@ -84,7 +119,7 @@ pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>
         }
     }
     if encode(&msg).len() <= LINE_CAP {
-        return msg;
+        return finish(msg);
     }
     if let ServerMsg::Cards { ref mut items, .. } = msg {
         for card in items.iter_mut() {
@@ -95,7 +130,7 @@ pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>
         }
     }
     if encode(&msg).len() <= LINE_CAP {
-        return msg;
+        return finish(msg);
     }
 
     // Step 4: Drop trailing cards only while more than one card remains on the page.
@@ -112,7 +147,7 @@ pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>
         *cursor = list.last().map(card_cursor);
     }
     if encode(&msg).len() <= LINE_CAP {
-        return msg;
+        return finish(msg);
     }
 
     // Step 5: Never silently drop the last remaining card; collapse oversized metadata fields.
@@ -141,7 +176,53 @@ pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>
         truncate_chars_in_place(&mut card.card_id, LIST_QUOTE_MAX_CHARS);
         truncate_chars_in_place(&mut card.repo_id, LIST_QUOTE_MAX_CHARS);
     }
-    msg
+    finish(msg)
+}
+
+/// Collects `(shown, full)` pairs for surviving blocks in `msg`, omitting any
+/// `shown` text produced by two different `full` quotes in the reply.
+fn collect_surviving_cards_quotes(
+    msg: &ServerMsg,
+    full_quotes: &[Vec<Option<String>>],
+) -> Vec<CardsQuote> {
+    let ServerMsg::Cards { items, .. } = msg else {
+        return Vec::new();
+    };
+    let mut order: Vec<String> = Vec::new();
+    let mut by_shown: HashMap<String, Option<String>> = HashMap::new();
+    for (card_idx, card) in items.iter().enumerate() {
+        let card_full = &full_quotes[card_idx];
+        for (block_idx, block) in card.blocks.iter().enumerate() {
+            let Some(quote) = &block.quote else {
+                continue;
+            };
+            let Some(full) = card_full[block_idx].as_deref() else {
+                continue;
+            };
+            match by_shown.get_mut(&quote.text) {
+                None => {
+                    order.push(quote.text.clone());
+                    by_shown.insert(quote.text.clone(), Some(full.to_string()));
+                }
+                Some(slot) => {
+                    if let Some(prev_full) = slot
+                        && prev_full != full
+                    {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|shown| {
+            by_shown
+                .remove(&shown)
+                .flatten()
+                .map(|full| CardsQuote { shown, full })
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -155,12 +236,16 @@ fn encode_len_cards(id: u64, items: &[Card], next: Option<&str>) -> usize {
         id,
         items: items.to_vec(),
         next: next.map(str::to_string),
+        translations: Vec::new(),
     };
     encode(&probe).len()
 }
 
 fn shrink_cards_vec_field(msg: &mut ServerMsg, field: CardTrimField) {
-    let ServerMsg::Cards { id, items, next } = msg else {
+    let ServerMsg::Cards {
+        id, items, next, ..
+    } = msg
+    else {
         unreachable!();
     };
     enum Saved {
@@ -970,7 +1055,10 @@ mod tests {
             wire.len()
         );
 
-        let ServerMsg::Cards { id, items, next } = reply else {
+        let ServerMsg::Cards {
+            id, items, next, ..
+        } = reply
+        else {
             panic!("expected ServerMsg::Cards");
         };
         assert_eq!(id, 7);
@@ -1014,7 +1102,10 @@ mod tests {
             "reply exceeded LINE_CAP: {}",
             wire.len()
         );
-        let ServerMsg::Cards { id, items, next } = reply else {
+        let ServerMsg::Cards {
+            id, items, next, ..
+        } = reply
+        else {
             panic!("expected ServerMsg::Cards");
         };
         assert_eq!(id, 8);
@@ -1637,5 +1728,57 @@ mod tests {
         assert!(!snippets[0].lines.is_empty());
         assert_eq!(out_card.coverage.state, CoverageState::Full);
         assert!(out_card.coverage.reasons.is_empty());
+    }
+
+    #[test]
+    fn build_cards_reply_with_quotes_tracks_full_text_and_ambiguity() {
+        let prefix = "x".repeat(LIST_QUOTE_MAX_CHARS);
+        let full_a = format!("{prefix}-alpha");
+        let full_b = format!("{prefix}-beta");
+        let unique_full = format!("{}z", "y".repeat(LIST_QUOTE_MAX_CHARS));
+        let unique_shown = "y".repeat(LIST_QUOTE_MAX_CHARS);
+
+        let mut card_keep = test_card(
+            "c-keep",
+            vec![
+                Block {
+                    quote: Some(Quote {
+                        text: unique_full.clone(),
+                        shared: false,
+                    }),
+                    ..test_block(1, "src/u.rs", None, None, None, true)
+                },
+                Block {
+                    quote: Some(Quote {
+                        text: full_a.clone(),
+                        shared: false,
+                    }),
+                    ..test_block(2, "src/a.rs", None, None, None, true)
+                },
+            ],
+        );
+        card_keep.ended_ms = Some(3_000);
+
+        let mut card_ambig = test_card(
+            "c-ambig",
+            vec![Block {
+                quote: Some(Quote {
+                    text: full_b,
+                    shared: false,
+                }),
+                ..test_block(1, "src/b.rs", None, None, None, true)
+            }],
+        );
+        card_ambig.ended_ms = Some(2_000);
+
+        let (reply, quotes) = build_cards_reply_with_quotes(1, vec![card_keep, card_ambig], None);
+        assert!(matches!(reply, ServerMsg::Cards { .. }));
+        assert_eq!(
+            quotes,
+            vec![CardsQuote {
+                shown: unique_shown,
+                full: unique_full,
+            }]
+        );
     }
 }

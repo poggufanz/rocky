@@ -34,6 +34,7 @@ use crate::settings_view::View;
 use crate::setup_settings::SetupSettings;
 #[cfg(windows)]
 use crate::toast::set_process_aumid;
+use crate::translate_model::TranslateFlow;
 use crate::view::{Conn, Model};
 
 /// Restore and focus the desk window. Call it outside any `view.update`: the
@@ -226,6 +227,8 @@ pub fn run(rocky_home: PathBuf, opts: RunOptions) {
                 requests: Requests::default(),
                 consent: ConsentModel::default(),
                 setup: SetupSettings::default(),
+                translate: TranslateFlow::default(),
+                last_target: None,
                 cards: CardsModel::new(),
                 card_detail: None,
                 block_diff: None,

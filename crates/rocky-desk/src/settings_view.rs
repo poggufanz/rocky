@@ -104,6 +104,15 @@ pub fn set_autostart_asked(id: u64) -> ClientMsg {
     }
 }
 
+/// `set` message toggling quote translation.
+pub fn set_translate_quotes(id: u64, on: bool) -> ClientMsg {
+    ClientMsg::Set {
+        id,
+        name: "translate_quotes".to_string(),
+        value: serde_json::json!(on),
+    }
+}
+
 /// The panels the window shows. The header button switches Agents and
 /// Settings; the consent screen replaces the whole window until answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -260,6 +269,26 @@ mod tests {
         assert_eq!(
             crate::i18n::tr(crate::i18n::UiLang::Id, &SettingId::Cards.label()),
             "Kartu perubahan"
+        );
+    }
+
+    #[test]
+    fn set_translate_quotes_names_the_key() {
+        assert_eq!(
+            set_translate_quotes(11, true),
+            ClientMsg::Set {
+                id: 11,
+                name: "translate_quotes".into(),
+                value: serde_json::json!(true),
+            }
+        );
+        assert_eq!(
+            set_translate_quotes(12, false),
+            ClientMsg::Set {
+                id: 12,
+                name: "translate_quotes".into(),
+                value: serde_json::json!(false),
+            }
         );
     }
 }
