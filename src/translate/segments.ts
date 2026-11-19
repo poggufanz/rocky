@@ -1,3 +1,5 @@
+import { isCommonWord } from "./language.js";
+
 export interface CodeSpan {
   text: string;
   spaceBefore: boolean;
@@ -35,6 +37,19 @@ const EXT_NAME_STICKY_RE = /(?<![\w-]|[\w-]\.)[\w-]+(?:\.[\w-]+)*\.[a-z0-9]{1,6}
 const FLAG_STICKY_RE = /(?<![\w-])--?[a-z][\w-]*/y;
 const HASH_STICKY_RE = /(?<![\w])[0-9a-fA-F]{7,}(?![\w])/y;
 const EXIT_CODE_STICKY_RE = /\bexit \d+\b/y;
+// `go` and `make` stay off: both are ordinary English verbs ("go to", "make sure").
+// ponytail: a fixed list; a command from an unlisted program is still prose.
+const COMMAND_PROGRAMS = [
+  "npm", "npx", "pnpm", "yarn", "bun", "node", "deno", "git", "gh", "cargo", "rustc", "rustup",
+  "python", "python3", "pip", "uv", "docker", "kubectl", "rocky", "tsc", "eslint", "prettier",
+  "vitest", "jest", "pytest",
+];
+// A word ends where no name character follows; a dot ends it only when no word character follows it.
+const WORD_END = String.raw`(?![\w/\\-]|\.\w)`;
+const COMMAND_PROGRAM_STICKY_RE = new RegExp(String.raw`(?<![\w./\\-])(?:${COMMAND_PROGRAMS.join("|")})${WORD_END}`, "y");
+const SUBCOMMAND_STICKY_RE = new RegExp(String.raw`[\t ]+[a-z][\w-]*(?:[:.][\w-]+)*${WORD_END}`, "y");
+// These subcommands take one more word: `npm run build`, `pnpm dlx tsx`.
+const RUNNER_SUBCOMMANDS = new Set(["run", "exec", "dlx"]);
 const URL_SCHEME_RE = /https?:\/\//;
 
 const PATH_DELIM_RE = /[\s"'<>()[\]{}]/;
@@ -451,6 +466,25 @@ function matchExitCodeAt(text: string, pos: number, emphasis: EmphasisState): nu
   return pos + m[0].length;
 }
 
+/** The end of a subcommand-shaped word at `pos`, or null. A common prose word ("untuk", "the") is not one. */
+function matchSubcommandAt(text: string, pos: number): { end: number; word: string } | null {
+  const m = matchStickyAt(SUBCOMMAND_STICKY_RE, text, pos);
+  if (!m) return null;
+  const word = m[0].trim();
+  return isCommonWord(word) ? null : { end: pos + m[0].length, word };
+}
+
+/** A known program name plus one subcommand word (two after `run`/`exec`/`dlx`). */
+function matchCommandAt(text: string, pos: number): number | null {
+  const program = matchStickyAt(COMMAND_PROGRAM_STICKY_RE, text, pos);
+  if (!program) return null;
+  const end = pos + program[0].length;
+  const sub = matchSubcommandAt(text, end);
+  if (!sub) return end;
+  if (!RUNNER_SUBCOMMANDS.has(sub.word)) return sub.end;
+  return matchSubcommandAt(text, sub.end)?.end ?? sub.end;
+}
+
 function matchCodeTokenAt(
   text: string,
   pos: number,
@@ -460,6 +494,7 @@ function matchCodeTokenAt(
   return (
     matchUrlAt(text, pos, emphasis) ??
     matchPathAt(text, pos, canStartPath, emphasis) ??
+    plainMatch(matchCommandAt(text, pos)) ??
     plainMatch(matchExtNameAt(text, pos)) ??
     plainMatch(matchFlagAt(text, pos)) ??
     plainMatch(matchHashAt(text, pos)) ??
