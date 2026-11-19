@@ -2111,9 +2111,33 @@ fn empty_cleaned_translation_and_missing_quote_display() {
 }
 
 #[test]
-fn reopen_keeps_target() {
+fn reopen_uses_resolved_target_and_drops_stale_translations() {
+    let raw = "Saya periksa parser dulu.";
+    let k = quote_key(raw);
     let (mut model, _) = DetailModel::open("c1".to_string(), 1, Some(QuoteLang::En));
-    let req = model.reopen(2);
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut b1 = sample_block(1, "src/lib.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1];
+    model.on_detail(
+        1,
+        card,
+        Vec::new(),
+        vec![QuoteTranslation {
+            quote_key: k.clone(),
+            from: QuoteLang::Id,
+            text: "I checked the parser first.".to_string(),
+        }],
+        Vec::new(),
+        UiLang::En,
+    );
+    model.toggle_original(&k);
+
+    // Same target keeps the target for the reconnect request.
+    let req = model.reopen(2, Some(QuoteLang::En));
     assert_eq!(
         req,
         ClientMsg::CardDetail {
@@ -2122,16 +2146,29 @@ fn reopen_keeps_target() {
             translate_to: Some(QuoteLang::En),
         }
     );
-    let _ = model.retarget(3, Some(QuoteLang::Id));
-    let req2 = model.reopen(4);
+
+    // Changing target on reopen updates the model target and clears stale translations/toggles.
+    let req2 = model.reopen(3, Some(QuoteLang::Id));
     assert_eq!(
         req2,
         ClientMsg::CardDetail {
-            id: 4,
+            id: 3,
             card_id: "c1".to_string(),
             translate_to: Some(QuoteLang::Id),
         }
     );
+    assert_eq!(model.retarget(4, Some(QuoteLang::Id)), None);
+
+    let req3 = model.reopen(5, None);
+    assert_eq!(
+        req3,
+        ClientMsg::CardDetail {
+            id: 5,
+            card_id: "c1".to_string(),
+            translate_to: None,
+        }
+    );
+    assert_eq!(model.retarget(6, None), None);
 }
 
 #[test]

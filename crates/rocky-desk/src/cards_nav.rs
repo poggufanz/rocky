@@ -52,11 +52,12 @@ pub fn on_reconnect(
     cards: &mut CardsModel,
     detail: Option<&mut DetailModel>,
     diff: Option<&mut DiffModel>,
+    target: Option<QuoteLang>,
     mut next_id: impl FnMut() -> u64,
 ) -> Vec<ClientMsg> {
     let mut out = vec![cards.request_first_page(next_id())];
     if let Some(d) = detail {
-        out.push(d.reopen(next_id()));
+        out.push(d.reopen(next_id(), target));
     }
     if let Some(df) = diff {
         out.push(df.reopen(next_id()));
@@ -285,7 +286,7 @@ mod tests {
         let _ = cards.set_query("auth".to_string(), alloc());
 
         // List only: requests page 1 keeping query "auth".
-        let msgs = on_reconnect(&mut cards, None, None, &mut alloc);
+        let msgs = on_reconnect(&mut cards, None, None, None, &mut alloc);
         assert_eq!(
             msgs,
             vec![ClientMsg::Cards {
@@ -332,7 +333,13 @@ mod tests {
         );
         assert!(matches!(diff.state(), DiffState::Page { page: 2, .. }));
 
-        let msgs = on_reconnect(&mut cards, Some(&mut detail), Some(&mut diff), &mut alloc);
+        let msgs = on_reconnect(
+            &mut cards,
+            Some(&mut detail),
+            Some(&mut diff),
+            None,
+            &mut alloc,
+        );
         assert_eq!(
             msgs,
             vec![
@@ -519,7 +526,7 @@ mod tests {
 
         // Reconnect re-opens diff (id 5) and ends NotFound -> clears both diff and detail, returns to list.
         let mut seq_id = 3_u64;
-        let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), || {
+        let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), None, || {
             seq_id += 1;
             seq_id
         });
@@ -602,7 +609,7 @@ mod tests {
         let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 7, 2);
 
         let mut next = 2_u64;
-        let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), || {
+        let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), None, || {
             next += 1;
             next
         });
@@ -639,7 +646,7 @@ mod tests {
         let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 7, 2);
 
         let mut next = 2_u64;
-        let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), || {
+        let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), None, || {
             next += 1;
             next
         });
@@ -1022,5 +1029,192 @@ mod tests {
             UiLang::En,
         );
         assert!(handled);
+    }
+
+    struct ReconnectHarness {
+        view: View,
+        cards: CardsModel,
+        detail: Option<DetailModel>,
+        diff: Option<DiffModel>,
+        model: crate::view::Model,
+        detected: UiLang,
+        ui_lang: UiLang,
+        last_target: Option<QuoteLang>,
+        next_id: u64,
+    }
+
+    impl ReconnectHarness {
+        fn with_open_en_detail() -> Self {
+            use rocky_proto::cards::Quote;
+            use rocky_proto::translate::{QuoteTranslation, quote_key};
+
+            let mut view = View::Agents;
+            let mut cards = CardsModel::new();
+            let mut detail = None;
+            let mut diff = None;
+
+            let raw = "Saya periksa parser dulu.";
+            let open_id = 1_u64;
+            let _ = open_detail(
+                &mut view,
+                &mut detail,
+                &mut diff,
+                "c1".to_string(),
+                open_id,
+                Some(QuoteLang::En),
+            );
+            let mut card = sample_card("c1");
+            card.blocks[0].quote = Some(Quote {
+                text: raw.to_string(),
+                shared: false,
+            });
+            assert!(route_card_msg(
+                &ServerMsg::CardDetail {
+                    id: open_id,
+                    card,
+                    snippets: Vec::new(),
+                    translations: vec![QuoteTranslation {
+                        quote_key: quote_key(raw),
+                        from: QuoteLang::Id,
+                        text: "I checked the parser first.".to_string(),
+                    }],
+                    pending: Vec::new(),
+                },
+                &mut view,
+                &mut cards,
+                &mut detail,
+                &mut diff,
+                UiLang::En,
+            ));
+
+            Self {
+                view,
+                cards,
+                detail,
+                diff,
+                model: crate::view::Model::new(),
+                detected: UiLang::En,
+                ui_lang: UiLang::En,
+                last_target: Some(QuoteLang::En),
+                next_id: 1,
+            }
+        }
+
+        fn alloc(&mut self) -> u64 {
+            self.next_id += 1;
+            self.next_id
+        }
+
+        fn reconnect(
+            &mut self,
+            settings: rocky_proto::settings::Settings,
+            translate: rocky_proto::translate::TranslateStatus,
+        ) -> Vec<ClientMsg> {
+            use rocky_proto::pipe::{Health, Status};
+
+            let lang_setting = settings.lang;
+            let _ = self.model.apply(ServerMsg::Snapshot {
+                agents: Vec::new(),
+                aggregate: Status::Idle,
+                health: Health::default(),
+                settings,
+                repo_pending: Vec::new(),
+                translate,
+            });
+            self.ui_lang = crate::i18n::resolve_lang(lang_setting, self.detected);
+            let target = crate::translate_model::translate_target(
+                self.model.settings(),
+                self.model.translate_status(),
+                self.ui_lang,
+            );
+            self.last_target = target;
+            let mut next = self.next_id;
+            let msgs = on_reconnect(
+                &mut self.cards,
+                self.detail.as_mut(),
+                self.diff.as_mut(),
+                target,
+                || {
+                    next += 1;
+                    next
+                },
+            );
+            self.next_id = next;
+            msgs
+        }
+    }
+
+    #[test]
+    fn reconnect_enabled_to_off_emits_single_none_detail_request() {
+        use rocky_proto::settings::{Lang, Settings};
+        use rocky_proto::translate::{TranslatePair, TranslateStatus};
+
+        let mut h = ReconnectHarness::with_open_en_detail();
+        let settings = Settings {
+            lang: Lang::En,
+            translate_quotes: false,
+            ..Settings::default()
+        };
+        let translate = TranslateStatus {
+            ready: vec![TranslatePair::to(QuoteLang::En)],
+            ..TranslateStatus::default()
+        };
+        let emitted = h.reconnect(settings, translate);
+
+        let detail_reqs: Vec<_> = emitted
+            .into_iter()
+            .filter(|m| matches!(m, ClientMsg::CardDetail { .. }))
+            .collect();
+        assert_eq!(
+            detail_reqs,
+            vec![ClientMsg::CardDetail {
+                id: 3,
+                card_id: "c1".to_string(),
+                translate_to: None,
+            }]
+        );
+        assert_eq!(h.last_target, None);
+        let id = h.alloc();
+        assert_eq!(h.detail.as_mut().unwrap().retarget(id, h.last_target), None);
+        assert_eq!(h.view, View::CardDetail);
+    }
+
+    #[test]
+    fn reconnect_english_to_indonesian_emits_single_indonesian_detail_request() {
+        use rocky_proto::settings::{Lang, Settings};
+        use rocky_proto::translate::{TranslatePair, TranslateStatus};
+
+        let mut h = ReconnectHarness::with_open_en_detail();
+        let settings = Settings {
+            lang: Lang::Id,
+            translate_quotes: true,
+            ..Settings::default()
+        };
+        let translate = TranslateStatus {
+            ready: vec![
+                TranslatePair::to(QuoteLang::En),
+                TranslatePair::to(QuoteLang::Id),
+            ],
+            ..TranslateStatus::default()
+        };
+        let emitted = h.reconnect(settings, translate);
+
+        assert_eq!(h.ui_lang, UiLang::Id);
+        let detail_reqs: Vec<_> = emitted
+            .into_iter()
+            .filter(|m| matches!(m, ClientMsg::CardDetail { .. }))
+            .collect();
+        assert_eq!(
+            detail_reqs,
+            vec![ClientMsg::CardDetail {
+                id: 3,
+                card_id: "c1".to_string(),
+                translate_to: Some(QuoteLang::Id),
+            }]
+        );
+        assert_eq!(h.last_target, Some(QuoteLang::Id));
+        let id = h.alloc();
+        assert_eq!(h.detail.as_mut().unwrap().retarget(id, h.last_target), None);
+        assert_eq!(h.view, View::CardDetail);
     }
 }

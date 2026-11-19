@@ -16,11 +16,14 @@ impl DeskView {
     }
 
     pub(super) fn cards_refresh_msgs(&mut self) -> Vec<ClientMsg> {
+        let target = self.translate_target();
+        self.last_target = target;
         let mut cmd_id = self.ctl.cmd_id;
         let msgs = cards_nav::on_reconnect(
             &mut self.cards,
             self.card_detail.as_mut(),
             self.block_diff.as_mut(),
+            target,
             || {
                 cmd_id += 1;
                 cmd_id

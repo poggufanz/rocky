@@ -60,17 +60,22 @@ impl DetailModel {
         (model, msg)
     }
 
-    /// Resets to `Loading`, re-requests the open card after reconnect, and marks `NotFound` to close the view.
-    pub fn reopen(&mut self, id: u64) -> ClientMsg {
+    /// Resets to `Loading`, re-requests the open card after reconnect with `target`, and marks `NotFound` to close the view.
+    pub fn reopen(&mut self, id: u64, target: Option<QuoteLang>) -> ClientMsg {
         self.pending_id = Some(id);
         self.reopened = true;
         self.state = DetailState::Loading;
         self.pending.clear();
         self.settled_early.clear();
+        if self.target != target {
+            self.target = target;
+            self.translations.clear();
+            self.shown_original.clear();
+        }
         ClientMsg::CardDetail {
             id,
             card_id: self.card_id.clone(),
-            translate_to: self.target,
+            translate_to: target,
         }
     }
 

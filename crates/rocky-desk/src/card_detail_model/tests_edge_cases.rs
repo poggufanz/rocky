@@ -215,7 +215,7 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
     );
     assert!(matches!(detail.state(), DetailState::Ready(_)));
 
-    let req = detail.reopen(2);
+    let req = detail.reopen(2, None);
     assert_eq!(
         req,
         ClientMsg::CardDetail {
@@ -249,7 +249,7 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
     assert_eq!(detail.pending_id(), None);
 
     // Reopen followed by NotFound Ack transitions Loading -> NotFound with reopened_not_found set.
-    let _ = detail.reopen(3);
+    let _ = detail.reopen(3, None);
     assert_eq!(detail.state(), &DetailState::Loading);
     detail.on_ack(3, false);
     assert_eq!(detail.state(), &DetailState::NotFound);
