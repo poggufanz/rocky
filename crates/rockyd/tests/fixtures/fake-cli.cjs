@@ -136,7 +136,7 @@ function translate() {
     let replies = 0;
     let stopped = false;
     const lines = readline.createInterface({ input: process.stdin });
-    lines.on("line", (line) => {
+    const handleLine = (line) => {
       if (stopped || !line.trim()) {
         return;
       }
@@ -165,7 +165,29 @@ function translate() {
         process.stdin.destroy();
         process.exitCode = 1;
       }
-    });
+    };
+    if (cfg.wait_file) {
+      const pending = [];
+      let released = false;
+      lines.on("line", (line) => {
+        if (released) {
+          handleLine(line);
+        } else {
+          pending.push(line);
+        }
+      });
+      const timer = setInterval(() => {
+        if (fs.existsSync(cfg.wait_file)) {
+          clearInterval(timer);
+          released = true;
+          while (pending.length > 0) {
+            handleLine(pending.shift());
+          }
+        }
+      }, 15);
+    } else {
+      lines.on("line", handleLine);
+    }
     return;
   }
 

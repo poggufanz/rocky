@@ -2,6 +2,7 @@
 //! Each test uses a temporary Rocky home and requires `node` on `PATH`.
 
 use std::fs;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -13,12 +14,73 @@ use rocky_proto::translate::{
     QuoteLang, QuoteTranslation, TranslateFailure, TranslatePair, TranslateStatus, quote_key,
 };
 use rockyd::guard::records::CliRecord;
+use rockyd::translate::cache::{Cached, QuoteCache, cache_key};
 use rockyd::translate::{Translator, marker};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 /// Longest any wait may take. A test that goes past it fails instead of hanging.
 const GUARD: Duration = Duration::from_secs(20);
+
+/// Wraps `Translator` so `service(false)` and `Drop` run behind [`GUARD`] on a helper thread.
+struct GuardedTranslator(Option<Translator>);
+
+impl GuardedTranslator {
+    fn new(home: PathBuf) -> Self {
+        Self(Some(Translator::new(home)))
+    }
+
+    fn service_off(&mut self) -> Vec<ServerMsg> {
+        let mut translator = self.0.take().expect("translator already taken");
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let msgs = translator.service(false);
+            let _ = tx.send((translator, msgs));
+        });
+        match rx.recv_timeout(GUARD) {
+            Ok((translator, msgs)) => {
+                self.0 = Some(translator);
+                msgs
+            }
+            Err(_) => panic!("timed out waiting for service(false) within {GUARD:?}"),
+        }
+    }
+}
+
+impl Deref for GuardedTranslator {
+    type Target = Translator;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("translator already taken")
+    }
+}
+
+impl DerefMut for GuardedTranslator {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("translator already taken")
+    }
+}
+
+impl Drop for GuardedTranslator {
+    fn drop(&mut self) {
+        if let Some(translator) = self.0.take() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            thread::spawn(move || {
+                drop(translator);
+                let _ = tx.send(());
+            });
+            if rx.recv_timeout(GUARD).is_err() {
+                if thread::panicking() {
+                    eprintln!(
+                        "timed out waiting for Translator drop within {GUARD:?} during unwind"
+                    );
+                } else {
+                    panic!("timed out waiting for Translator drop within {GUARD:?}");
+                }
+            }
+        }
+    }
+}
 
 fn node_on_path() -> PathBuf {
     let names: &[&str] = if cfg!(windows) {
@@ -351,7 +413,7 @@ fn two_cards_waiting_on_one_quote_both_get_it() {
 fn turning_off_mid_run_kills_it() {
     let home = TempDir::new().expect("temp home");
     seed_cli(home.path());
-    let mut translator = Translator::new(home.path().to_path_buf());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
     run_install(&mut translator, TranslatePair::IdEn);
 
     let _ = fs::remove_file(home.path().join("fake-translate.pid"));
@@ -367,7 +429,7 @@ fn turning_off_mid_run_kills_it() {
     let pid = wait_for_pid(home.path());
     assert!(is_pid_alive(pid), "run child {pid} should be running");
 
-    let off_msgs = translator.service(false);
+    let off_msgs = translator.service_off();
     assert!(quote_translated_items(&off_msgs).is_empty());
     assert!(!is_pid_alive(pid), "killed run child {pid} should be gone");
 
@@ -532,7 +594,7 @@ fn missing_cli_is_engine_failure() {
 fn remove_clears_files_cache_and_status() {
     let home = TempDir::new().expect("temp home");
     seed_cli(home.path());
-    let mut translator = Translator::new(home.path().to_path_buf());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
     run_install(&mut translator, TranslatePair::IdEn);
 
     // Populate cache.
@@ -563,7 +625,7 @@ fn remove_clears_files_cache_and_status() {
     assert_eq!(translator.remove(), Err("busy"));
 
     // Stop the hanging run, then remove succeeds.
-    let _ = translator.service(false);
+    let _ = translator.service_off();
     clear_config(home.path());
     assert_eq!(translator.remove(), Ok(()));
     assert!(!marker::translate_dir(home.path()).exists());
@@ -583,7 +645,7 @@ fn remove_clears_files_cache_and_status() {
 fn install_checks_disabled_and_busy_and_turning_off_kills_install() {
     let home = TempDir::new().expect("temp home");
     seed_cli(home.path());
-    let mut translator = Translator::new(home.path().to_path_buf());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
 
     assert_eq!(
         translator.install(false, TranslatePair::IdEn),
@@ -601,7 +663,7 @@ fn install_checks_disabled_and_busy_and_turning_off_kills_install() {
     let pid = wait_for_pid(home.path());
     assert!(is_pid_alive(pid));
 
-    let msgs = translator.service(false);
+    let msgs = translator.service_off();
     assert!(!is_pid_alive(pid), "install child {pid} should be gone");
     assert_eq!(translator.status().installing, None);
     assert!(msgs.iter().any(|m| matches!(
@@ -678,4 +740,265 @@ fn failed_reply_is_dropped_and_not_cached() {
     let items = quote_translated_items(&msgs);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].1.text, "T:Gagal.");
+}
+
+fn write_ready_pair_with_sha(home: &Path, pair: TranslatePair, sha: &str) {
+    let edir = marker::engine_dir(home);
+    fs::create_dir_all(&edir).expect("create engine dir");
+    let glue = b"console.log(1);";
+    let wasm = b"wasm-bytes";
+    fs::write(edir.join("bergamot.js"), glue).expect("write glue");
+    fs::write(edir.join("bergamot.wasm"), wasm).expect("write wasm");
+    fs::write(
+        edir.join("installed.json"),
+        json!({
+            "v": 1,
+            "files": [
+                { "role": "glue", "name": "bergamot.js", "size": glue.len() },
+                { "role": "wasm", "name": "bergamot.wasm", "size": wasm.len() },
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write engine marker");
+
+    let mdir = marker::model_dir(home, pair);
+    fs::create_dir_all(&mdir).expect("create model dir");
+    let model = b"model-payload";
+    let lex = b"lex";
+    let vocab = b"vocab";
+    fs::write(mdir.join("model.bin"), model).expect("write model");
+    fs::write(mdir.join("lex.bin"), lex).expect("write lex");
+    fs::write(mdir.join("vocab.spm"), vocab).expect("write vocab");
+    fs::write(
+        mdir.join("installed.json"),
+        json!({
+            "v": 1,
+            "pair": pair.as_str(),
+            "model_sha256": sha,
+            "files": [
+                { "role": "model", "name": "model.bin", "size": model.len() },
+                { "role": "lex", "name": "lex.bin", "size": lex.len() },
+                { "role": "vocab", "name": "vocab.spm", "size": vocab.len() },
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write pair marker");
+}
+
+#[test]
+fn checksum_failure_survives_temporary_cli_loss() {
+    let home = TempDir::new().expect("temp home");
+    seed_cli(home.path());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+    run_install(&mut translator, TranslatePair::IdEn);
+
+    // Trigger an install checksum failure.
+    configure(home.path(), &json!({ "install": "checksum" }));
+    let fail_statuses = run_install(&mut translator, TranslatePair::EnId);
+    assert_eq!(
+        fail_statuses.last().expect("final status").failed,
+        Some(TranslateFailure::Checksum)
+    );
+
+    // Starting a run does not erase the Checksum failure.
+    clear_config(home.path());
+    assert!(
+        translator
+            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
+            .is_empty()
+    );
+    service_until(&mut translator, true, "run finishes", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    wait_until("run log line", || {
+        let _ = translator.service(true);
+        !translator.drain_log().is_empty()
+    });
+    assert_eq!(translator.status().failed, Some(TranslateFailure::Checksum));
+
+    // Removing CLI surfaces Engine, and restoring CLI brings Checksum back.
+    fs::remove_file(cli_record_path(home.path())).expect("remove cli.json");
+    let lost = translator.check().expect("status should change to Engine");
+    assert_eq!(lost.failed, Some(TranslateFailure::Engine));
+    assert_eq!(translator.install(true, TranslatePair::EnId), Err("engine"));
+    assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+
+    seed_cli(home.path());
+    let restored = translator.check().expect("status should restore Checksum");
+    assert_eq!(restored.failed, Some(TranslateFailure::Checksum));
+
+    // Starting a new install also leaves Checksum intact until it succeeds.
+    let _ = fs::remove_file(home.path().join("fake-translate.pid"));
+    configure(home.path(), &json!({ "install": "hang" }));
+    assert_eq!(translator.install(true, TranslatePair::EnId), Ok(()));
+    assert_eq!(translator.status().failed, Some(TranslateFailure::Checksum));
+    let _ = translator.service(true);
+    let _ = wait_for_pid(home.path());
+    let _ = translator.service_off();
+    assert_eq!(translator.status().failed, Some(TranslateFailure::Checksum));
+}
+
+#[test]
+fn missing_cli_keeps_queue_and_resumes_when_restored() {
+    let home = TempDir::new().expect("temp home");
+    seed_cli(home.path());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+    run_install(&mut translator, TranslatePair::IdEn);
+
+    // Queue a miss while markers are ready, then lose cli.json.
+    assert!(
+        translator
+            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
+            .is_empty()
+    );
+    fs::remove_file(cli_record_path(home.path())).expect("remove cli.json");
+
+    for _ in 0..5 {
+        let msgs = translator.service(true);
+        assert!(quote_translated_items(&msgs).is_empty());
+    }
+    assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+
+    // Restore cli.json without calling check(); the queued item starts and arrives.
+    seed_cli(home.path());
+    let msgs = service_until(&mut translator, true, "resumed QuoteTranslated", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    let items = quote_translated_items(&msgs);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0, "c1");
+    assert_eq!(items[0].1.text, "T:Merah.");
+    assert_eq!(translator.status().failed, None);
+}
+
+#[test]
+fn model_update_between_enqueue_and_launch_uses_new_digest() {
+    const OLD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let home = TempDir::new().expect("temp home");
+    seed_cli(home.path());
+    write_ready_pair_with_sha(home.path(), TranslatePair::IdEn, OLD_SHA);
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+
+    // Queue a quote while OLD_SHA is installed, before service(true) launches a run.
+    assert!(
+        translator
+            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
+            .is_empty()
+    );
+
+    // Installing IdEn replaces the marker with the fake CLI's digest before the run launches.
+    run_install(&mut translator, TranslatePair::IdEn);
+    let new_sha = marker::model_sha(home.path(), TranslatePair::IdEn).expect("new sha");
+    assert_ne!(new_sha, OLD_SHA);
+
+    let msgs = service_until(&mut translator, true, "translated after update", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    let items = quote_translated_items(&msgs);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0, "c1");
+    assert_eq!(items[0].1.text, "T:Merah.");
+    wait_until("run log line", || {
+        let _ = translator.service(true);
+        !translator.drain_log().is_empty()
+    });
+
+    let mut cache = QuoteCache::new(home.path().to_path_buf());
+    assert_eq!(
+        cache.get(QuoteLang::En, &cache_key(OLD_SHA, QuoteLang::En, "Merah.")),
+        None
+    );
+    assert_eq!(
+        cache.get(QuoteLang::En, &cache_key(&new_sha, QuoteLang::En, "Merah.")),
+        Some(Cached::Translated {
+            from: QuoteLang::Id,
+            text: "T:Merah.".to_string(),
+        })
+    );
+}
+
+#[test]
+fn model_change_mid_run_drops_reply_without_caching() {
+    const NEW_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    let home = TempDir::new().expect("temp home");
+    seed_cli(home.path());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+    run_install(&mut translator, TranslatePair::IdEn);
+    let old_sha = marker::model_sha(home.path(), TranslatePair::IdEn).expect("old sha");
+    assert_ne!(old_sha, NEW_SHA);
+
+    let release_file = home.path().join("release");
+    let _ = fs::remove_file(home.path().join("fake-translate.pid"));
+    configure(home.path(), &json!({ "wait_file": release_file }));
+
+    let quotes = vec!["Merah.".to_string()];
+    assert!(
+        translator
+            .on_detail(true, "c1", QuoteLang::En, &quotes)
+            .is_empty()
+    );
+    let _ = translator.service(true);
+    let _pid = wait_for_pid(home.path());
+
+    // Change model_sha256 while the run is in flight, then let the child reply.
+    write_ready_pair_with_sha(home.path(), TranslatePair::IdEn, NEW_SHA);
+    fs::write(&release_file, b"go").expect("write release file");
+
+    wait_until("stale run finishes and drops reply", || {
+        let msgs = translator.service(true);
+        assert!(quote_translated_items(&msgs).is_empty());
+        let logs = translator.drain_log();
+        if logs.is_empty() {
+            false
+        } else {
+            assert_eq!(
+                logs,
+                vec!["translate run: 0 ok, 0 original, 0 failed, 1 dropped"]
+            );
+            true
+        }
+    });
+
+    let mut cache = QuoteCache::new(home.path().to_path_buf());
+    assert_eq!(
+        cache.get(QuoteLang::En, &cache_key(&old_sha, QuoteLang::En, "Merah.")),
+        None
+    );
+    assert_eq!(
+        cache.get(QuoteLang::En, &cache_key(NEW_SHA, QuoteLang::En, "Merah.")),
+        None
+    );
+
+    // Next detail open re-queues and caches under NEW_SHA.
+    clear_config(home.path());
+    assert!(
+        translator
+            .on_detail(true, "c1", QuoteLang::En, &quotes)
+            .is_empty()
+    );
+    let msgs = service_until(&mut translator, true, "translated under new sha", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    let items = quote_translated_items(&msgs);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].1.text, "T:Merah.");
+
+    wait_until("second run finishes", || {
+        let _ = translator.service(true);
+        !translator.drain_log().is_empty()
+    });
+    let mut cache = QuoteCache::new(home.path().to_path_buf());
+    assert_eq!(
+        cache.get(QuoteLang::En, &cache_key(&old_sha, QuoteLang::En, "Merah.")),
+        None
+    );
+    assert!(
+        cache
+            .get(QuoteLang::En, &cache_key(NEW_SHA, QuoteLang::En, "Merah."))
+            .is_some()
+    );
 }
