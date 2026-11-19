@@ -599,6 +599,9 @@ async function main(): Promise<number> {
       case "listen":
         // Hidden: the desktop daemon's capture process, not listed in help.
         return (await import("./commands/listen.js")).listenCommand(rest);
+      case "translate":
+        // Hidden: the desktop daemon's translation process, not listed in help.
+        return await (await import("./commands/translate.js")).translateCommand(rest);
       case "--version":
         if (rest.length !== 0) throw new CliUsageError(`unexpected argument: ${rest[0]}`, "rocky --version");
         console.log(PACKAGE_VERSION);
