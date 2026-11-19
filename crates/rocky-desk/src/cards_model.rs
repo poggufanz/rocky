@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use rocky_proto::cards::Card;
 use rocky_proto::paths::canonical_path;
 use rocky_proto::pipe::ClientMsg;
-use rocky_proto::translate::{QuoteLang, QuoteTranslation};
+use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
 
 use crate::atlas_model::ProjectId;
 use crate::i18n::{CardMsg, UiLang};
@@ -106,7 +106,7 @@ pub struct CardsModel {
     loading: bool,
     requested: bool,
     target: Option<QuoteLang>,
-    translations: HashMap<String, QuoteTranslation>,
+    translations: HashMap<String, HashMap<String, QuoteTranslation>>,
 }
 
 impl CardsModel {
@@ -182,6 +182,7 @@ impl CardsModel {
     pub fn set_query(&mut self, q: String, id: u64) -> ClientMsg {
         self.query = q;
         self.items.clear();
+        self.translations.clear();
         self.request_first_page(id)
     }
 
@@ -230,17 +231,36 @@ impl CardsModel {
         } else {
             Vec::new()
         };
+        let mut reply_translations = HashMap::new();
         for item in translations {
             if Some(item.from.other()) == self.target
                 && !crate::plain_text::plain_quote(&item.text).trim().is_empty()
             {
-                self.translations
+                reply_translations
                     .entry(item.quote_key.clone())
                     .or_insert(item);
             }
         }
         for card in items {
-            upsert_by_rev(&mut self.items, card);
+            let card_id = card.card_id.clone();
+            let card_keys: HashSet<String> = card
+                .blocks
+                .iter()
+                .filter_map(|b| b.quote.as_ref().map(|q| quote_key(&q.text)))
+                .collect();
+            if upsert_by_rev(&mut self.items, card) {
+                let mut per_card = HashMap::new();
+                for key in card_keys {
+                    if let Some(tr) = reply_translations.get(&key) {
+                        per_card.insert(key, tr.clone());
+                    }
+                }
+                if per_card.is_empty() {
+                    self.translations.remove(&card_id);
+                } else {
+                    self.translations.insert(card_id, per_card);
+                }
+            }
         }
         for pushed in pending_pushes {
             self.apply_push(pushed);
@@ -319,6 +339,7 @@ impl CardsModel {
     fn apply_push(&mut self, card: Card) -> bool {
         if let Some(existing) = self.items.iter_mut().find(|c| c.card_id == card.card_id) {
             if card.rev > existing.rev {
+                self.translations.remove(&card.card_id);
                 *existing = card;
                 return true;
             }
@@ -327,6 +348,7 @@ impl CardsModel {
         if !self.query.is_empty() && !card_matches_query(&card, &self.query.to_lowercase()) {
             return false;
         }
+        self.translations.remove(&card.card_id);
         let new_key = (card_sort_key(&card), card.card_id.as_str());
         let pos = self
             .items
@@ -348,14 +370,16 @@ impl CardsModel {
     }
 }
 
-fn upsert_by_rev(cards: &mut Vec<Card>, card: Card) {
+fn upsert_by_rev(cards: &mut Vec<Card>, card: Card) -> bool {
     if let Some(existing) = cards.iter_mut().find(|c| c.card_id == card.card_id) {
         if card.rev > existing.rev {
             *existing = card;
+            return true;
         }
-    } else {
-        cards.push(card);
+        return false;
     }
+    cards.push(card);
+    true
 }
 
 /// True when the card's main checkout (else its root) is `project`. The daemon
@@ -374,19 +398,20 @@ fn emit_subtree(
     visited: &mut [bool],
     query_lower: &str,
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: &HashMap<String, HashMap<String, QuoteTranslation>>,
     out: &mut Vec<CardRow>,
 ) {
     if visited[idx] {
         return;
     }
     visited[idx] = true;
+    let card = &items[idx];
     out.push(build_card_row(
-        &items[idx],
+        card,
         indent,
         query_lower,
         lang,
-        translations,
+        translations.get(&card.card_id),
     ));
 
     let parent_id = items[idx].card_id.as_str();

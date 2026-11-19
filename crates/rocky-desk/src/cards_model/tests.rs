@@ -1339,3 +1339,88 @@ fn tooltip_credits_only_translated_lines_when_mixed_with_misses() {
         ]
     );
 }
+
+#[test]
+fn tooltip_translations_stay_scoped_per_card_and_drop_on_push() {
+    use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+    let shown = format!("{}...", "x".repeat(197));
+    let translated_a = "Translated card A quote.";
+
+    let mut card_a = sample_card("card-a", 2_000, Some(3_000));
+    let mut blk_a = sample_block(1, "src/a.rs", Vec::new());
+    blk_a.quote = Some(Quote {
+        text: shown.clone(),
+        shared: false,
+    });
+    card_a.blocks = vec![blk_a];
+
+    let mut card_b = sample_card("card-b", 1_000, Some(2_000));
+    let mut blk_b = sample_block(1, "src/b.rs", Vec::new());
+    blk_b.quote = Some(Quote {
+        text: shown.clone(),
+        shared: false,
+    });
+    card_b.blocks = vec![blk_b];
+
+    let mut model = CardsModel::new();
+    let _ = model.set_target(Some(QuoteLang::En), 1);
+    model.on_cards(
+        1,
+        vec![card_a.clone()],
+        Some("3000:card-a".to_string()),
+        vec![QuoteTranslation {
+            quote_key: quote_key(&shown),
+            from: QuoteLang::Id,
+            text: translated_a.to_string(),
+        }],
+    );
+
+    let _ = model.request_more(2).expect("load page 2");
+    model.on_cards(2, vec![card_b], None, Vec::new());
+
+    let rows = model.rows(UiLang::En);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].card_id, "card-a");
+    assert_eq!(
+        rows[0].edits[0].tooltip,
+        vec![
+            TooltipLine::text(translated_a),
+            TooltipLine::text("translated from Indonesian"),
+        ]
+    );
+    assert_eq!(
+        rows[0].files[0].tooltip,
+        vec![
+            TooltipLine::text("src/a.rs"),
+            TooltipLine::text(translated_a),
+            TooltipLine::text("translated from Indonesian"),
+        ]
+    );
+
+    assert_eq!(rows[1].card_id, "card-b");
+    assert_eq!(rows[1].edits[0].tooltip, vec![TooltipLine::text(&shown)]);
+    assert_eq!(
+        rows[1].files[0].tooltip,
+        vec![TooltipLine::text("src/b.rs"), TooltipLine::text(&shown)]
+    );
+    assert!(
+        !rows[1].edits[0]
+            .tooltip
+            .iter()
+            .any(|l| l.text.starts_with("translated from"))
+    );
+
+    // A pushed revision of card-a drops its cached translation until refetched.
+    let mut pushed_a = card_a;
+    pushed_a.rev = 2;
+    model.on_push(pushed_a);
+
+    let rows = model.rows(UiLang::En);
+    assert_eq!(rows[0].card_id, "card-a");
+    assert_eq!(rows[0].edits[0].tooltip, vec![TooltipLine::text(&shown)]);
+    assert_eq!(
+        rows[0].files[0].tooltip,
+        vec![TooltipLine::text("src/a.rs"), TooltipLine::text(&shown)]
+    );
+}

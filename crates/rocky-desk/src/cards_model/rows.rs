@@ -29,7 +29,7 @@ pub(super) fn build_card_row(
     indent: bool,
     query_lower: &str,
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: Option<&HashMap<String, QuoteTranslation>>,
 ) -> CardRow {
     let (display_prompt, _) = prompt_display(&card.prompt, lang);
     let first_line = sanitize_single_line(first_non_empty_line(&display_prompt));
@@ -72,7 +72,7 @@ fn build_file_chips(
     card: &Card,
     query_lower: &str,
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: Option<&HashMap<String, QuoteTranslation>>,
 ) -> (Vec<FileChip>, usize) {
     let mut order: Vec<&str> = Vec::new();
     for block in &card.blocks {
@@ -203,7 +203,7 @@ fn build_edit_rows(
     card: &Card,
     query_lower: &str,
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: Option<&HashMap<String, QuoteTranslation>>,
 ) -> (Vec<EditRow>, Option<String>) {
     let mut used = vec![false; card.blocks.len()];
     let mut grouped: Vec<(usize, EditRow)> = Vec::new();
@@ -305,7 +305,7 @@ fn build_normal_edit_row(
     card_root: &str,
     query_lower: &str,
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: Option<&HashMap<String, QuoteTranslation>>,
 ) -> EditRow {
     let raw_chip = status_chip(block_status(block, card_root), lang).unwrap_or_else(|| {
         block
@@ -331,7 +331,7 @@ fn build_format_collapse_row(
     group: &[&Block],
     query_lower: &str,
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: Option<&HashMap<String, QuoteTranslation>>,
 ) -> EditRow {
     EditRow {
         seq: group[0].seq,
@@ -354,7 +354,7 @@ fn build_bash_group_row(
     status: BlockStatus,
     query_lower: &str,
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: Option<&HashMap<String, QuoteTranslation>>,
 ) -> EditRow {
     let uncertain = group
         .iter()
@@ -388,7 +388,7 @@ fn build_bash_group_row(
 fn build_tooltip(
     blocks: &[&Block],
     lang: UiLang,
-    translations: &HashMap<String, QuoteTranslation>,
+    translations: Option<&HashMap<String, QuoteTranslation>>,
 ) -> Vec<TooltipLine> {
     let mut lines = Vec::new();
     let push_unique = |out: &mut Vec<TooltipLine>, line: TooltipLine| {
@@ -409,10 +409,12 @@ fn build_tooltip(
     let mut translated_from: Option<QuoteLang> = None;
     for block in blocks {
         if let Some(quote) = &block.quote {
-            let tr = translations.get(&quote_key(&quote.text)).and_then(|tr| {
-                let clean = sanitize_single_line(&crate::plain_text::plain_quote(&tr.text));
-                (!clean.trim().is_empty()).then_some((clean, tr.from))
-            });
+            let tr = translations
+                .and_then(|map| map.get(&quote_key(&quote.text)))
+                .and_then(|tr| {
+                    let clean = sanitize_single_line(&crate::plain_text::plain_quote(&tr.text));
+                    (!clean.trim().is_empty()).then_some((clean, tr.from))
+                });
             match tr {
                 Some((clean, from)) => {
                     translated_from = Some(from);
