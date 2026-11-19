@@ -827,7 +827,13 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         card_id: "card-pipe-1".into(),
         translate_to: None,
     }));
-    let Control::CardDetail { id, card_id, reply } = next_control(&control_rx) else {
+    let Control::CardDetail {
+        id,
+        card_id,
+        translate_to: None,
+        reply,
+    } = next_control(&control_rx)
+    else {
         panic!("expected Control::CardDetail");
     };
     let found = store.get(&card_id).unwrap();
@@ -882,4 +888,139 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         panic!("expected ServerMsg::BlockDiff");
     };
     assert!(!lines.is_empty());
+}
+
+#[test]
+fn server_relays_translate_messages() {
+    use rocky_proto::translate::{QuoteLang, TranslatePair};
+    use rockyd::cards::detail::build_card_detail;
+    use rockyd::cards::storage::CardStore;
+
+    let home = home();
+    let hub = Arc::new(Hub::new());
+    let (control_tx, control_rx) = mpsc::channel();
+    let _handle = serve(
+        home.path(),
+        Arc::clone(&hub),
+        Arc::new(snapshot_msg),
+        control_tx,
+    )
+    .unwrap();
+
+    let pipe = pipe_name(home.path());
+    let mut client = connect(&pipe);
+    hello_subscribe(&mut client);
+
+    // 1. translate_install
+    client.send(&encode(&ClientMsg::TranslateInstall {
+        id: 1,
+        pair: TranslatePair::IdEn,
+    }));
+    let Control::TranslateInstall { id, pair, reply } = next_control(&control_rx) else {
+        panic!("expected Control::TranslateInstall");
+    };
+    assert_eq!(id, 1);
+    assert_eq!(pair, TranslatePair::IdEn);
+    reply
+        .send(ServerMsg::Ack {
+            id,
+            ok: true,
+            error: None,
+            cleanup_errors: 0,
+        })
+        .unwrap();
+    let ack: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert_eq!(
+        ack,
+        ServerMsg::Ack {
+            id: 1,
+            ok: true,
+            error: None,
+            cleanup_errors: 0,
+        }
+    );
+
+    // 2. translate_remove
+    client.send(&encode(&ClientMsg::TranslateRemove { id: 2 }));
+    let Control::TranslateRemove { id, reply } = next_control(&control_rx) else {
+        panic!("expected Control::TranslateRemove");
+    };
+    assert_eq!(id, 2);
+    reply
+        .send(ServerMsg::Ack {
+            id,
+            ok: true,
+            error: None,
+            cleanup_errors: 0,
+        })
+        .unwrap();
+    let ack: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert_eq!(
+        ack,
+        ServerMsg::Ack {
+            id: 2,
+            ok: true,
+            error: None,
+            cleanup_errors: 0,
+        }
+    );
+
+    // 3. card_detail with translate_to
+    let card = rocky_proto::cards::Card {
+        v: rocky_proto::cards::CARD_VERSION,
+        card_id: "card-tr".into(),
+        rev: 1,
+        repo_id: "r1".into(),
+        root: String::new(),
+        main_root: None,
+        branch: Some("main".into()),
+        session_id: "s1".into(),
+        agent_id: String::new(),
+        agent_type: "claude".into(),
+        parent_card_id: None,
+        started_ms: 1_000,
+        ended_ms: Some(2_000),
+        status: rocky_proto::cards::CardStatus::Done,
+        prompt: "demo".into(),
+        prompt_truncated: false,
+        importance: rocky_proto::cards::Importance::Medium,
+        blocks: Vec::new(),
+        more_count: 0,
+        flow: Vec::new(),
+        flow_more: 0,
+        outside_count: 0,
+        reads: Vec::new(),
+        reads_more: 0,
+        sequence: None,
+        coverage: rocky_proto::cards::Coverage {
+            state: rocky_proto::cards::CoverageState::Full,
+            reasons: Vec::new(),
+        },
+    };
+    let mut store = CardStore::new(home.path().to_path_buf());
+    store.append(&card).unwrap();
+
+    client.send(&encode(&ClientMsg::CardDetail {
+        id: 3,
+        card_id: "card-tr".into(),
+        translate_to: Some(QuoteLang::En),
+    }));
+    let Control::CardDetail {
+        id,
+        card_id,
+        translate_to,
+        reply,
+    } = next_control(&control_rx)
+    else {
+        panic!("expected Control::CardDetail");
+    };
+    assert_eq!(id, 3);
+    assert_eq!(card_id, "card-tr");
+    assert_eq!(translate_to, Some(QuoteLang::En));
+    let found = store.get(&card_id).unwrap();
+    reply
+        .send(build_card_detail(id, &found, home.path()))
+        .unwrap();
+    let detail: ServerMsg = decode(&client.read_line().unwrap()).unwrap();
+    assert!(matches!(detail, ServerMsg::CardDetail { id: 3, .. }));
 }

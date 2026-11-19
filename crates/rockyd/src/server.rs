@@ -19,6 +19,7 @@ use rocky_proto::pipe::CLIENT_QUEUE_CAP;
 use rocky_proto::pipe::{
     AgentKey, ClientMsg, CmdName, LINE_CAP, ServerMsg, SetupAction, WireError, decode, encode,
 };
+use rocky_proto::translate::{QuoteLang, TranslatePair};
 use serde_json::Value;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -88,6 +89,7 @@ pub enum Control {
     CardDetail {
         id: u64,
         card_id: String,
+        translate_to: Option<QuoteLang>,
         reply: SyncSender<ServerMsg>,
     },
     /// A `block_diff` page request; the daemon replies with `ServerMsg::BlockDiff`.
@@ -96,6 +98,17 @@ pub enum Control {
         card_id: String,
         seq: u32,
         page: u32,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A `translate_install` request; the daemon replies with an ack.
+    TranslateInstall {
+        id: u64,
+        pair: TranslatePair,
+        reply: SyncSender<ServerMsg>,
+    },
+    /// A `translate_remove` request; the daemon replies with an ack.
+    TranslateRemove {
+        id: u64,
         reply: SyncSender<ServerMsg>,
     },
 }
@@ -458,10 +471,15 @@ fn handle_client<S>(
                         break;
                     }
                 }
-                Ok(ClientMsg::CardDetail { id, card_id, .. }) => {
+                Ok(ClientMsg::CardDetail {
+                    id,
+                    card_id,
+                    translate_to,
+                }) => {
                     if !relay(control, hub, client_id, id, |reply| Control::CardDetail {
                         id,
                         card_id,
+                        translate_to,
                         reply,
                     }) {
                         break;
@@ -479,6 +497,20 @@ fn handle_client<S>(
                         seq,
                         page,
                         reply,
+                    }) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::TranslateInstall { id, pair }) => {
+                    if !relay(control, hub, client_id, id, |reply| {
+                        Control::TranslateInstall { id, pair, reply }
+                    }) {
+                        break;
+                    }
+                }
+                Ok(ClientMsg::TranslateRemove { id }) => {
+                    if !relay(control, hub, client_id, id, |reply| {
+                        Control::TranslateRemove { id, reply }
                     }) {
                         break;
                     }
