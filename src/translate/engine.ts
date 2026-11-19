@@ -54,6 +54,7 @@ interface TranslationModelInstance {
 
 interface TranslationResponse {
   getTranslatedText(): string;
+  delete(): void;
 }
 
 interface ResponseOptions {
@@ -110,14 +111,13 @@ const WASM_GEMM_EXPORTS = [
   "int8_select_columns_of_b",
 ] as const;
 
-interface CachedRuntime {
-  glue: Buffer;
-  wasm: Buffer;
-  module: BergamotModule;
-  service: BlockingServiceInstance;
-}
+type RuntimeState =
+  | { ok: true; module: BergamotModule; service: BlockingServiceInstance }
+  | { ok: false; reason: "load-failed" };
 
-let cachedRuntime: CachedRuntime | undefined;
+// Process-wide runtime promise: Emscripten glue binds globalThis.Module and
+// Embind types once per Node process, so initialization runs at most once.
+let runtimePromise: Promise<RuntimeState> | undefined;
 
 function toFallbackExportName(snakeName: string): string {
   return snakeName.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()) + "Fallback";
@@ -210,10 +210,12 @@ function createPairTranslator(
   const loadedModel = model;
   const translator: Translator = {
     translate(htmlLines: string[]): string[] {
-      const input = new mod.VectorString();
-      const options = new mod.VectorResponseOptions();
+      let input: EmscriptenVector<string> | undefined;
+      let options: EmscriptenVector<ResponseOptions> | undefined;
       let responses: EmscriptenVector<TranslationResponse> | undefined;
       try {
+        input = new mod.VectorString();
+        options = new mod.VectorResponseOptions();
         for (const line of htmlLines) {
           input.push_back(line);
           options.push_back({ alignment: false, html: true, qualityScores: false });
@@ -222,13 +224,18 @@ function createPairTranslator(
         const count = responses.size();
         const out: string[] = [];
         for (let i = 0; i < count; i++) {
-          out.push(responses.get(i).getTranslatedText());
+          const response = responses.get(i);
+          try {
+            out.push(response.getTranslatedText());
+          } finally {
+            response.delete();
+          }
         }
         return out;
       } finally {
         responses?.delete();
-        options.delete();
-        input.delete();
+        options?.delete();
+        input?.delete();
       }
     },
   };
@@ -253,6 +260,86 @@ function makeLoadedEngine(
   };
 }
 
+async function initRuntime(gluePath: string, wasmPath: string): Promise<RuntimeState> {
+  let glueBytes: Buffer;
+  let wasmBytes: Buffer;
+  try {
+    glueBytes = readFileSync(gluePath);
+    wasmBytes = readFileSync(wasmPath);
+  } catch {
+    return { ok: false, reason: "load-failed" };
+  }
+
+  let settled = false;
+  let settle!: { resolve: () => void; reject: (err: unknown) => void };
+  const ready = new Promise<void>((resolve, reject) => {
+    settle = {
+      resolve() {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      },
+      reject(err: unknown) {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      },
+    };
+  });
+  // Attach a no-op handler so synchronous init throws cannot trigger an unhandled rejection.
+  ready.catch(() => {});
+
+  try {
+    const glueSource = glueBytes.toString("utf8");
+    const wasmCopy = new Uint8Array(wasmBytes.byteLength);
+    wasmCopy.set(wasmBytes);
+
+    const modInit: BergamotModuleInit = {
+      instantiateWasm(info, accept) {
+        try {
+          const wasm_gemm = buildWasmGemmImports(modInit);
+          WebAssembly.instantiate(wasmCopy, {
+            ...(info as WebAssembly.Imports),
+            wasm_gemm,
+          })
+            .then((result) => accept(result.instance, result.module))
+            .catch((err) => {
+              settle.reject(err);
+            });
+        } catch (err) {
+          settle.reject(err);
+        }
+        return {};
+      },
+      onRuntimeInitialized() {
+        settle.resolve();
+      },
+      onAbort(what) {
+        settle.reject(new Error(String(what)));
+      },
+      print() {},
+      printErr() {},
+    };
+
+    // ponytail: Module and require stay global; this process exists only to translate.
+    Object.assign(globalThis, {
+      Module: modInit,
+      require: createRequire(import.meta.url),
+    });
+
+    runInThisContext(glueSource, { filename: gluePath });
+    await ready;
+
+    const mod = modInit as BergamotModule;
+    const service = new mod.BlockingService({ cacheSize: 0 });
+    return { ok: true, module: mod, service };
+  } catch {
+    return { ok: false, reason: "load-failed" };
+  }
+}
+
 /**
  * Loads the Bergamot WASM engine onto Node's main thread and exposes a per-pair
  * translator loader backed by local files under `home`.
@@ -273,75 +360,16 @@ export async function loadEngine(home: string): Promise<EngineLoadResult> {
   const gluePath = join(eDir, glueName);
   const wasmPath = join(eDir, wasmName);
 
-  let glueBytes: Buffer;
-  let wasmBytes: Buffer;
-  try {
-    glueBytes = readFileSync(gluePath);
-    wasmBytes = readFileSync(wasmPath);
-  } catch {
-    return { ok: false, reason: "load-failed" };
+  if (!runtimePromise) {
+    runtimePromise = initRuntime(gluePath, wasmPath);
+  }
+  const runtime = await runtimePromise;
+  if (!runtime.ok) {
+    return runtime;
   }
 
-  if (cachedRuntime) {
-    if (glueBytes.equals(cachedRuntime.glue) && wasmBytes.equals(cachedRuntime.wasm)) {
-      return {
-        ok: true,
-        engine: makeLoadedEngine(home, cachedRuntime.module, cachedRuntime.service),
-      };
-    }
-    return { ok: false, reason: "load-failed" };
-  }
-
-  try {
-    const glueSource = glueBytes.toString("utf8");
-    const wasmCopy = new Uint8Array(wasmBytes.byteLength);
-    wasmCopy.set(wasmBytes);
-
-    let settle: { resolve: () => void; reject: (err: unknown) => void } | undefined;
-    const ready = new Promise<void>((resolve, reject) => {
-      settle = { resolve, reject };
-    });
-
-    const modInit: BergamotModuleInit = {
-      instantiateWasm(info, accept) {
-        const wasm_gemm = buildWasmGemmImports(modInit);
-        WebAssembly.instantiate(wasmCopy, {
-          ...(info as WebAssembly.Imports),
-          wasm_gemm,
-        }).then(
-          (result) => accept(result.instance, result.module),
-          (err) => settle?.reject(err),
-        );
-        return {};
-      },
-      onRuntimeInitialized() {
-        settle?.resolve();
-      },
-      onAbort(what) {
-        settle?.reject(new Error(String(what)));
-      },
-      print() {},
-      printErr() {},
-    };
-
-    // ponytail: Module and require stay global; this process exists only to translate.
-    Object.assign(globalThis, {
-      Module: modInit,
-      require: createRequire(import.meta.url),
-    });
-
-    runInThisContext(glueSource, { filename: gluePath });
-    await ready;
-
-    const mod = modInit as BergamotModule;
-    const service = new mod.BlockingService({ cacheSize: 0 });
-    cachedRuntime = { glue: glueBytes, wasm: wasmBytes, module: mod, service };
-
-    return {
-      ok: true,
-      engine: makeLoadedEngine(home, mod, service),
-    };
-  } catch {
-    return { ok: false, reason: "load-failed" };
-  }
+  return {
+    ok: true,
+    engine: makeLoadedEngine(home, runtime.module, runtime.service),
+  };
 }
