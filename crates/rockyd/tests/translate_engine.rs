@@ -1002,3 +1002,142 @@ fn model_change_mid_run_drops_reply_without_caching() {
             .is_some()
     );
 }
+
+fn write_unlaunchable_cli(home: &Path) {
+    let bad_node = home.join("not-executable-node");
+    fs::write(&bad_node, b"not executable").expect("write non-executable node placeholder");
+    write_cli_record(
+        home,
+        &CliRecord {
+            node: bad_node,
+            entry: fake_cli().entry,
+            version: "0.0.0".to_string(),
+        },
+    );
+}
+
+#[test]
+fn launch_error_paces_retries_and_recovers_after_backoff() {
+    const SHA: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    let home = TempDir::new().expect("temp home");
+    write_ready_pair_with_sha(home.path(), TranslatePair::IdEn, SHA);
+    write_unlaunchable_cli(home.path());
+
+    let mut translator =
+        Translator::with_launch_retry(home.path().to_path_buf(), Duration::from_millis(300));
+    assert_eq!(translator.status().failed, None);
+
+    assert!(
+        translator
+            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
+            .is_empty()
+    );
+
+    let mut launch_logs = Vec::new();
+    for _ in 0..20 {
+        let msgs = translator.service(true);
+        assert!(quote_translated_items(&msgs).is_empty());
+        launch_logs.extend(translator.drain_log());
+    }
+    assert_eq!(launch_logs.len(), 1);
+    assert!(launch_logs[0].starts_with("translate run launch failed: 1 quotes, "));
+    assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+    assert!(read_logged_argv(home.path()).is_empty());
+
+    // Restoring cli.json without check() still waits for the backoff window to pass.
+    seed_cli(home.path());
+    for _ in 0..5 {
+        let msgs = translator.service(true);
+        assert!(quote_translated_items(&msgs).is_empty());
+    }
+    assert!(translator.drain_log().is_empty());
+    assert!(read_logged_argv(home.path()).is_empty());
+
+    // Once the backoff passes, the pending queue launches and translates.
+    thread::sleep(Duration::from_millis(350));
+    let msgs = service_until(&mut translator, true, "translated after backoff", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    let items = quote_translated_items(&msgs);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0, "c1");
+    assert_eq!(items[0].1.text, "T:Merah.");
+    assert_eq!(translator.status().failed, None);
+    wait_until("run log line", || {
+        let _ = translator.service(true);
+        let logs = translator.drain_log();
+        if logs.is_empty() {
+            false
+        } else {
+            assert_eq!(
+                logs,
+                vec!["translate run: 1 ok, 0 original, 0 failed, 0 dropped"]
+            );
+            true
+        }
+    });
+}
+
+#[test]
+fn launch_error_backoff_clears_early_when_check_sees_changed_cli() {
+    const SHA: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    let home = TempDir::new().expect("temp home");
+    write_ready_pair_with_sha(home.path(), TranslatePair::IdEn, SHA);
+    write_unlaunchable_cli(home.path());
+
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+    assert!(
+        translator
+            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
+            .is_empty()
+    );
+
+    let mut launch_logs = Vec::new();
+    for _ in 0..20 {
+        let msgs = translator.service(true);
+        assert!(quote_translated_items(&msgs).is_empty());
+        launch_logs.extend(translator.drain_log());
+    }
+    assert_eq!(launch_logs.len(), 1);
+    assert!(launch_logs[0].starts_with("translate run launch failed: 1 quotes, "));
+    assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+
+    // Unchanged cli.json keeps the backoff active across check().
+    assert_eq!(translator.check(), None);
+    for _ in 0..5 {
+        let msgs = translator.service(true);
+        assert!(quote_translated_items(&msgs).is_empty());
+    }
+    assert!(translator.drain_log().is_empty());
+
+    // Updating cli.json and running check() clears backoff early.
+    seed_cli(home.path());
+    let updated = translator
+        .check()
+        .expect("changed cli.json should clear Engine");
+    assert_eq!(updated.failed, None);
+
+    let msgs = service_until(&mut translator, true, "translated after check", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    let items = quote_translated_items(&msgs);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0, "c1");
+    assert_eq!(items[0].1.text, "T:Merah.");
+    assert_eq!(translator.status().failed, None);
+    wait_until("run log line", || {
+        let _ = translator.service(true);
+        let logs = translator.drain_log();
+        if logs.is_empty() {
+            false
+        } else {
+            assert_eq!(
+                logs,
+                vec!["translate run: 1 ok, 0 original, 0 failed, 0 dropped"]
+            );
+            true
+        }
+    });
+}

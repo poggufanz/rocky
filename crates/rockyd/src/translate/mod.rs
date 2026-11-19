@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rocky_proto::pipe::ServerMsg;
 use rocky_proto::translate::{
@@ -18,6 +19,7 @@ use cache::{Cached, QuoteCache};
 use child::{InstallEvent, InstallJob, RunEvent, RunJob, RunReply, RunRequest};
 
 pub const MAX_PENDING: usize = 512;
+pub const LAUNCH_RETRY: Duration = Duration::from_secs(30);
 
 struct PendingQuote {
     quote_key: String,
@@ -81,6 +83,9 @@ pub struct Translator {
     last_emitted_status: TranslateStatus,
     install_failure: Option<TranslateFailure>,
     engine_failed: bool,
+    last_cli: Option<CliRecord>,
+    launch_retry: Duration,
+    next_launch_at: Option<Instant>,
     queue: VecDeque<PendingQuote>,
     in_flight: HashMap<String, InFlightQuote>,
     pushed_later: Vec<(String, QuoteTranslation)>,
@@ -90,6 +95,10 @@ pub struct Translator {
 
 impl Translator {
     pub fn new(home: PathBuf) -> Self {
+        Self::with_launch_retry(home, LAUNCH_RETRY)
+    }
+
+    pub fn with_launch_retry(home: PathBuf, launch_retry: Duration) -> Self {
         let mut translator = Self {
             cache: QuoteCache::new(home.clone()),
             home,
@@ -97,6 +106,9 @@ impl Translator {
             last_emitted_status: TranslateStatus::default(),
             install_failure: None,
             engine_failed: false,
+            last_cli: None,
+            launch_retry,
+            next_launch_at: None,
             queue: VecDeque::new(),
             in_flight: HashMap::new(),
             pushed_later: Vec::new(),
@@ -172,15 +184,19 @@ impl Translator {
             return Err("busy");
         }
         let Some(cli) = read_usable_cli(&self.home) else {
+            self.last_cli = None;
+            self.next_launch_at = None;
             self.engine_failed = true;
             self.refresh_failed();
             return Err("engine");
         };
+        self.last_cli = Some(cli.clone());
         let Ok(job) = child::start_install(&cli, &self.home, pair, child::INSTALL_TIMEOUT) else {
             self.engine_failed = true;
             self.refresh_failed();
             return Err("engine");
         };
+        self.next_launch_at = None;
         self.engine_failed = false;
         self.refresh_failed();
         self.job = Some(ActiveJob::Install(ActiveInstall { pair, job }));
@@ -206,6 +222,7 @@ impl Translator {
         self.in_flight.clear();
         self.pushed_later.clear();
         self.install_failure = None;
+        self.next_launch_at = None;
         self.recheck_from_disk();
         Ok(())
     }
@@ -238,7 +255,20 @@ impl Translator {
 
     fn recheck_from_disk(&mut self) {
         self.status.ready = marker::ready_pairs(&self.home);
-        self.engine_failed = read_usable_cli(&self.home).is_none();
+        let cli = read_usable_cli(&self.home);
+        if cli != self.last_cli {
+            self.last_cli = cli;
+            self.next_launch_at = None;
+            self.engine_failed = self.last_cli.is_none();
+        } else if self.last_cli.is_none() {
+            self.engine_failed = true;
+        } else if self
+            .next_launch_at
+            .is_none_or(|retry_at| Instant::now() >= retry_at)
+        {
+            self.next_launch_at = None;
+            self.engine_failed = false;
+        }
         self.refresh_failed();
     }
 
@@ -424,11 +454,20 @@ impl Translator {
         if self.job.is_some() || self.queue.is_empty() {
             return;
         }
+        if self
+            .next_launch_at
+            .is_some_and(|retry_at| Instant::now() < retry_at)
+        {
+            return;
+        }
+        self.next_launch_at = None;
         let Some(cli) = read_usable_cli(&self.home) else {
+            self.last_cli = None;
             self.engine_failed = true;
             self.refresh_failed();
             return;
         };
+        self.last_cli = Some(cli.clone());
         self.engine_failed = false;
         self.refresh_failed();
 
@@ -517,12 +556,18 @@ impl Translator {
                     dropped: 0,
                 }));
             }
-            Err(_) => {
+            Err(err) => {
                 for (_, item) in batch.into_iter().rev() {
                     self.queue.push_front(item);
                 }
                 self.engine_failed = true;
                 self.refresh_failed();
+                self.next_launch_at = Some(Instant::now() + self.launch_retry);
+                self.log_lines.push(format!(
+                    "translate run launch failed: {} quotes, {:?}",
+                    requests.len(),
+                    err.kind()
+                ));
             }
         }
     }
@@ -710,5 +755,87 @@ mod tests {
         let _ = translator.service(true);
         assert_eq!(translator.queue.len(), 1);
         assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+        assert_eq!(translator.drain_log().len(), 1);
+    }
+
+    fn write_cli_with_node(home: &Path, node_name: &str) {
+        let node = home.join(node_name);
+        fs::write(&node, b"x").unwrap();
+        let path = cli_record_path(home);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let json = serde_json::json!({
+            "v": 1,
+            "node": node.to_string_lossy(),
+            "entry": home.join("index.js").to_string_lossy(),
+            "version": "1.0.0",
+        });
+        fs::write(path, json.to_string()).unwrap();
+    }
+
+    #[test]
+    fn launch_error_paces_retries_and_check_clears_when_cli_changes() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+        write_valid_cli(home.path());
+        let mut translator = Translator::new(home.path().to_path_buf());
+
+        assert!(
+            translator
+                .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
+                .is_empty()
+        );
+
+        for _ in 0..20 {
+            let _ = translator.service(true);
+        }
+        let logs = translator.drain_log();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].starts_with("translate run launch failed: 1 quotes, "));
+        assert_eq!(translator.queue.len(), 1);
+        assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+
+        // Unchanged CLI record does not clear backoff or flip status on check().
+        assert_eq!(translator.check(), None);
+        assert!(translator.service(true).is_empty());
+        assert!(translator.drain_log().is_empty());
+
+        // Changed CLI record clears backoff early and lets the next pass retry once.
+        write_cli_with_node(home.path(), "fake-node-2");
+        let updated = translator.check().expect("changed cli clears engine error");
+        assert_eq!(updated.failed, None);
+        assert!(translator.next_launch_at.is_none());
+
+        let _ = translator.service(true);
+        assert_eq!(translator.drain_log().len(), 1);
+        assert_eq!(translator.queue.len(), 1);
+        assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+    }
+
+    #[test]
+    fn launch_retry_resumes_once_backoff_expires() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+        write_valid_cli(home.path());
+        let mut translator =
+            Translator::with_launch_retry(home.path().to_path_buf(), Duration::from_millis(60));
+
+        assert!(
+            translator
+                .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
+                .is_empty()
+        );
+        let _ = translator.service(true);
+        assert_eq!(translator.drain_log().len(), 1);
+
+        // Passes within the backoff window do not retry.
+        for _ in 0..10 {
+            let _ = translator.service(true);
+        }
+        assert!(translator.drain_log().is_empty());
+
+        std::thread::sleep(Duration::from_millis(80));
+        let _ = translator.service(true);
+        assert_eq!(translator.drain_log().len(), 1);
+        assert_eq!(translator.queue.len(), 1);
     }
 }
