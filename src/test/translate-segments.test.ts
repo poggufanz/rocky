@@ -77,3 +77,105 @@ test("literal full placeholder tag in prose and html-like code round-trip", () =
   const htmlCode = prepareQuote("cek `x<y` dulu").lines[0]!;
   assert.equal(restoreLine('check <x id="0"></x> first', htmlCode), "check x<y first");
 });
+
+test("unterminated markdown link does not stall preparation", () => {
+  const input = `lihat [docs](${"a".repeat(500)}`;
+  const [line] = prepareQuote(input).lines;
+  assert.equal(line!.html, input);
+  assert.deepEqual(line!.codes, []);
+});
+
+test("links unlink after word characters and across inline code labels", () => {
+  const glued = prepareQuote("Lihat[docs](https://x.dev/a).").lines[0]!;
+  assert.equal(glued.html, "Lihatdocs.");
+  assert.deepEqual(glued.codes, []);
+
+  const codeOnlyLabel = prepareQuote("Lihat [`src/a.ts`](https://x.dev/a) dulu").lines[0]!;
+  assert.equal(codeOnlyLabel.html, 'Lihat <x id="0"></x> dulu');
+  assert.deepEqual(codeOnlyLabel.codes.map((c) => c.text), ["src/a.ts"]);
+
+  const mixedLabel = prepareQuote("Lihat [file `src/a.ts` ini](https://x.dev/a).").lines[0]!;
+  assert.equal(mixedLabel.html, 'Lihat file <x id="0"></x> ini.');
+  assert.deepEqual(mixedLabel.codes.map((c) => c.text), ["src/a.ts"]);
+});
+
+test("urls in paired emphasis exclude wrapper markers", () => {
+  const bold = prepareQuote("lihat **https://x.dev/a** dulu").lines[0]!;
+  assert.equal(bold.html, 'lihat <x id="0"></x> dulu');
+  assert.deepEqual(bold.codes.map((c) => c.text), ["https://x.dev/a"]);
+
+  const italicAndStrike = prepareQuote("lihat *https://x.dev/a* dan ~~https://x.dev/b~~ dulu").lines[0]!;
+  assert.equal(italicAndStrike.html, 'lihat <x id="0"></x> dan <x id="1"></x> dulu');
+  assert.deepEqual(italicAndStrike.codes.map((c) => c.text), ["https://x.dev/a", "https://x.dev/b"]);
+});
+
+test("unicode paths and hyphen-prefixed filenames stay protected", () => {
+  const unicodePath = prepareQuote("查看 源/文件");
+  assert.equal(unicodePath.lines[0]!.html, '查看 <x id="0"></x>');
+  assert.deepEqual(unicodePath.lines[0]!.codes.map((c) => c.text), ["源/文件"]);
+  assert.equal(unicodePath.prose, "查看");
+
+  const hyphenFile = prepareQuote("ubah -config.json dulu");
+  assert.equal(hyphenFile.lines[0]!.html, 'ubah <x id="0"></x> dulu');
+  assert.deepEqual(hyphenFile.lines[0]!.codes.map((c) => c.text), ["-config.json"]);
+  assert.equal(hyphenFile.prose, "ubah dulu");
+});
+
+test("fenced blank lines stay unsent without collapsing or trimming", () => {
+  const q = prepareQuote("Lihat:\n```js\n\nconst a = 1;\n\n\nconst b = 2;\n\n```\nSelesai.");
+  assert.equal(q.lines.includes(null), false);
+  assert.deepEqual(
+    q.lines.map((l) => l && [l.send, l.plain]),
+    [
+      [true, "Lihat:"],
+      [false, ""],
+      [false, "const a = 1;"],
+      [false, ""],
+      [false, ""],
+      [false, "const b = 2;"],
+      [false, ""],
+      [true, "Selesai."],
+    ],
+  );
+  assert.deepEqual(q.lines[1], { send: false, html: "", codes: [], plain: "" });
+});
+
+test("restore rejects raw tags with non-ascii letters", () => {
+  const line = prepareQuote("ubah `a.ts` dulu").lines[0]!;
+  assert.equal(restoreLine('change <x id="0"></x> <é> first', line), undefined);
+  assert.equal(restoreLine('change <x id="0"></x> &lt;é&gt; first', line), "change a.ts <é> first");
+});
+
+test("restore trims unicode horizontal spaces at placeholder boundaries", () => {
+  const line = prepareQuote("lihat (src/a.ts) sekarang").lines[0]!;
+  assert.equal(restoreLine('see (\u00a0<x id="0"></x>\u00a0) now', line), "see (src/a.ts) now");
+  assert.equal(restoreLine('see (\u202f<x id="0"></x>\u2009) now', line), "see (src/a.ts) now");
+});
+
+test("block markers loop and markup-only lines drop without paragraph breaks", () => {
+  const nested = prepareQuote("> ## Title\n## > x\n> - item");
+  assert.deepEqual(nested.lines.map((l) => l && l.plain), ["Title", "x", "item"]);
+
+  const markupOnly = prepareQuote("a\n- \nb\n>\nc\n##\nd\n- *\ne");
+  assert.deepEqual(markupOnly.lines.map((l) => l && l.plain), ["a", "b", "c", "d", "e"]);
+
+  const blankLine = prepareQuote("a\n\nb");
+  assert.deepEqual(blankLine.lines.map((l) => l && l.plain), ["a", null, "b"]);
+});
+
+test("restore spaces a code span moved off a source line edge", () => {
+  const leading = prepareQuote("src/a.ts gagal").lines[0]!;
+  assert.equal(leading.codes[0].spaceBefore, false);
+  assert.equal(leading.codes[0].spaceAfter, true);
+  assert.equal(restoreLine('Failed <x id="0"></x>', leading), "Failed src/a.ts");
+  assert.equal(restoreLine(' <x id="0"></x>Failed', leading), "src/a.ts Failed");
+
+  const trailing = prepareQuote("gagal src/a.ts").lines[0]!;
+  assert.equal(trailing.codes[0].spaceBefore, true);
+  assert.equal(trailing.codes[0].spaceAfter, false);
+  assert.equal(restoreLine('<x id="0"></x> failed', trailing), "src/a.ts failed");
+  assert.equal(restoreLine('Check <x id="0"></x>.', trailing), "Check src/a.ts.");
+
+  const sole = prepareQuote("src/a.ts").lines[0]!;
+  assert.equal(restoreLine('Check (<x id="0"></x>).', sole), "Check (src/a.ts).");
+});
