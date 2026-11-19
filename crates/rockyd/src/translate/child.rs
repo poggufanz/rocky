@@ -74,6 +74,22 @@ impl RunJob {
     pub fn try_next(&mut self) -> Option<RunEvent> {
         self.inner.try_next()
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_events(events: impl IntoIterator<Item = RunEvent>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        for event in events {
+            let _ = tx.send(event);
+        }
+        Self {
+            inner: JobHandle {
+                events: rx,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                cancel: None,
+                supervisor: None,
+            },
+        }
+    }
 }
 
 /// A running `rocky translate install` child. Dropping it kills and reaps the process.
