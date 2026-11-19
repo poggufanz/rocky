@@ -31,6 +31,7 @@ pub mod setup_lines;
 pub mod setup_settings;
 pub mod spawn;
 pub mod toast;
+pub mod translate_model;
 pub mod ui;
 pub mod view;
 
