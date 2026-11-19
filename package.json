@@ -19,6 +19,7 @@
     "dist/shell",
     "dist/gui",
     "dist/listening",
+    "dist/translate",
     "dist/desk",
     "assets/gui",
     "assets/teach-agent.md",

@@ -134,6 +134,7 @@ function allowedPackPath(path) {
     || path.startsWith("dist/shell/")
     || path.startsWith("dist/gui/")
     || path.startsWith("dist/listening/")
+    || path.startsWith("dist/translate/")
     || path.startsWith("dist/desk/")
     || path.startsWith("assets/gui/")
     || path === "assets/teach-agent.md"
