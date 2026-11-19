@@ -142,6 +142,7 @@ fn snapshot_msg() -> ServerMsg {
         health: Health::default(),
         settings: Settings::default(),
         repo_pending: Vec::new(),
+        translate: rocky_proto::translate::TranslateStatus::default(),
     }
 }
 
@@ -824,6 +825,7 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
     sub.send(&encode(&ClientMsg::CardDetail {
         id: 11,
         card_id: "card-pipe-1".into(),
+        translate_to: None,
     }));
     let Control::CardDetail { id, card_id, reply } = next_control(&control_rx) else {
         panic!("expected Control::CardDetail");
@@ -837,6 +839,7 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         id: 11,
         card: detail_card,
         snippets,
+        ..
     } = detail_msg
     else {
         panic!("expected ServerMsg::CardDetail");

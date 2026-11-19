@@ -458,7 +458,7 @@ fn handle_client<S>(
                         break;
                     }
                 }
-                Ok(ClientMsg::CardDetail { id, card_id }) => {
+                Ok(ClientMsg::CardDetail { id, card_id, .. }) => {
                     if !relay(control, hub, client_id, id, |reply| Control::CardDetail {
                         id,
                         card_id,

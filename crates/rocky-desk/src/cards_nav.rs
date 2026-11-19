@@ -81,7 +81,9 @@ pub fn route_card_msg(
             cards.on_push(item.clone());
             true
         }
-        ServerMsg::CardDetail { id, card, snippets } => {
+        ServerMsg::CardDetail {
+            id, card, snippets, ..
+        } => {
             if let Some(d) = detail.as_mut()
                 && d.pending_id() == Some(*id)
             {
@@ -313,6 +315,7 @@ mod tests {
                 ClientMsg::CardDetail {
                     id: 17,
                     card_id: "c1".to_string(),
+                    translate_to: None,
                 },
                 ClientMsg::BlockDiff {
                     id: 18,
@@ -335,6 +338,7 @@ mod tests {
                 id: 17,
                 card: sample_card("c1"),
                 snippets: Vec::new(),
+                translations: Vec::new(),
             },
             &mut view,
             &mut cards,
@@ -442,6 +446,7 @@ mod tests {
                         text: "+x".to_string(),
                     }],
                 }],
+                translations: Vec::new(),
             },
             &mut view,
             &mut cards,
@@ -522,6 +527,7 @@ mod tests {
             ClientMsg::CardDetail {
                 id: 1,
                 card_id: "c1".to_string(),
+                translate_to: None,
             }
         );
         assert_eq!(view, View::CardDetail);

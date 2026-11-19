@@ -112,6 +112,7 @@ fn snapshot_of(s: &Shared) -> ServerMsg {
         health: s.health.clone(),
         settings: s.settings.clone(),
         repo_pending: s.repo_pending.clone(),
+        translate: rocky_proto::translate::TranslateStatus::default(),
     }
 }
 

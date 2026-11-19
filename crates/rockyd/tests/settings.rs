@@ -235,3 +235,29 @@ fn settings_without_cards_default_on() {
     assert!(l.settings.cards);
     assert!(!l.unreadable);
 }
+
+#[test]
+fn translate_quotes_defaults_false_and_validates() {
+    let tmp = home();
+    let path = settings_path(tmp.path());
+    write(
+        &path,
+        br#"{"v":1,"subagent_tree":true,"history":true,"tool_text":true,"cards":true,"notify_needs_you":true,"notify_failed":true,"notify_done":true,"lang":"auto","autostart_asked":false}"#,
+    );
+    let l = load(&path);
+    assert!(!l.settings.translate_quotes);
+    assert!(!l.unreadable);
+
+    let d = Settings::default();
+    assert!(!d.translate_quotes);
+    let next = apply_set(&d, "translate_quotes", &json!(true)).unwrap();
+    assert!(next.translate_quotes);
+    assert_eq!(
+        apply_set(&d, "translate_quotes", &json!("yes")),
+        Err("invalid value")
+    );
+    assert_eq!(
+        apply_set(&d, "translate_quotes", &json!(1)),
+        Err("invalid value")
+    );
+}

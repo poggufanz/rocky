@@ -88,6 +88,7 @@ fn working_snapshot(agents: Vec<AgentStatus>) -> ServerMsg {
         health: Health::default(),
         settings: Settings::default(),
         repo_pending: Vec::new(),
+        translate: rocky_proto::translate::TranslateStatus::default(),
     }
 }
 
@@ -340,6 +341,7 @@ fn atlas_sync_requests_idle_session_timelines_once() {
             health: Health::default(),
             settings: Settings::default(),
             repo_pending: Vec::new(),
+            translate: rocky_proto::translate::TranslateStatus::default(),
         },
         100_000,
     );
@@ -365,6 +367,7 @@ fn atlas_sync_before_connect_is_requested_by_the_next_snapshot() {
         health: Health::default(),
         settings: Settings::default(),
         repo_pending: Vec::new(),
+        translate: rocky_proto::translate::TranslateStatus::default(),
     };
     ctl.outbox = None;
     ctl.model.apply(snapshot.clone());

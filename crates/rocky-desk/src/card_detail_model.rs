@@ -38,6 +38,7 @@ impl DetailModel {
         let msg = ClientMsg::CardDetail {
             id,
             card_id: card_id.clone(),
+            translate_to: None,
         };
         let model = Self {
             card_id,
@@ -56,6 +57,7 @@ impl DetailModel {
         ClientMsg::CardDetail {
             id,
             card_id: self.card_id.clone(),
+            translate_to: None,
         }
     }
 

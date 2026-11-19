@@ -731,6 +731,7 @@ mod tests {
             id: 10,
             card: detail_card,
             snippets,
+            ..
         } = wait_reply(&rx1, &mut queries)
         else {
             panic!("expected CardDetail without snippets for unowned root");

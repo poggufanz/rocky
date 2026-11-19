@@ -226,6 +226,7 @@ mod tests {
                 ..Default::default()
             },
             repo_pending,
+            translate: rocky_proto::translate::TranslateStatus::default(),
         }
     }
 

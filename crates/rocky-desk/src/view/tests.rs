@@ -42,6 +42,7 @@ fn snapshot(agents: Vec<AgentStatus>) -> ServerMsg {
         health: Health::default(),
         settings: Settings::default(),
         repo_pending: Vec::new(),
+        translate: rocky_proto::translate::TranslateStatus::default(),
     }
 }
 
@@ -540,6 +541,7 @@ fn desk_ignores_card_messages() {
                     text: "fn main() {}".into(),
                 }],
             }],
+            translations: Vec::new(),
         })
         .is_empty()
     );
