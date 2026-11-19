@@ -4,9 +4,24 @@ import { prepareQuote, restoreLine } from "../translate/segments.js";
 
 test("code spans become numbered placeholders", () => {
   const [line] = prepareQuote("Saya ubah `src/mul.js` lalu npm test --watch di C:\\repo\\a.ts dan https://x.dev/a, commit 3f2a9c1, exit 1.").lines;
-  assert.equal(line!.html, 'Saya ubah <x id="0"></x> lalu npm test <x id="1"></x> di <x id="2"></x> dan <x id="3"></x>, commit <x id="4"></x>, <x id="5"></x>.');
-  assert.deepEqual(line!.codes.map((c) => c.text), ["src/mul.js", "--watch", "C:\\repo\\a.ts", "https://x.dev/a", "3f2a9c1", "exit 1"]);
+  assert.equal(line!.html, 'Saya ubah <x id="0"></x> lalu <x id="1"></x> <x id="2"></x> di <x id="3"></x> dan <x id="4"></x>, commit <x id="5"></x>, <x id="6"></x>.');
+  assert.deepEqual(line!.codes.map((c) => c.text), ["src/mul.js", "npm test", "--watch", "C:\\repo\\a.ts", "https://x.dev/a", "3f2a9c1", "exit 1"]);
   assert.deepEqual(line!.codes.at(-1), { text: "exit 1", spaceBefore: true, spaceAfter: false });
+});
+test("known programs and their subcommand are code", () => {
+  const codes = (text: string): string[] => prepareQuote(text).lines[0]!.codes.map((c) => c.text);
+  assert.deepEqual(codes("Jalankan npm test lalu git commit -m pesan dan npm run build:prod."), ["npm test", "git commit", "-m", "npm run build:prod"]);
+  assert.deepEqual(codes("node --test src/a.test.js"), ["node", "--test", "src/a.test.js"]);
+  // a common prose word after the program is not a subcommand
+  assert.deepEqual(codes("pakai git untuk itu"), ["git"]);
+  assert.deepEqual(codes("run git and then npm run the build"), ["git", "npm run"]);
+  assert.deepEqual(codes("lalu jalankan cargo test."), ["cargo test"]);
+  assert.equal(prepareQuote("lalu jalankan cargo test.").lines[0]!.html, 'lalu jalankan <x id="0"></x>.');
+  assert.deepEqual(codes("**npm test** lulus"), ["npm test"]);
+  // the extension name wins over the bare program; names that merely contain one stay prose
+  assert.deepEqual(codes("pakai node.js dan node_modules, Git, pnpmx"), ["node.js"]);
+  // go and make are ordinary English verbs, so they are not on the list
+  assert.deepEqual(codes("go to the docs and make sure it passes"), []);
 });
 test("plain words are not code", () => {
   // re-run, kata-kata, defaced (all hex letters, no digit), 3 jam
