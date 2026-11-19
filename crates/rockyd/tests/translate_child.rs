@@ -74,6 +74,10 @@ fn collect_run(job: &mut rockyd::translate::child::RunJob, limit: Duration) -> V
     let start = Instant::now();
     let mut replies = Vec::new();
     loop {
+        assert!(
+            start.elapsed() < limit,
+            "timed out waiting for RunEvent::Done"
+        );
         if let Some(event) = job.try_next() {
             match event {
                 RunEvent::Reply(reply) => replies.push(reply),
@@ -81,10 +85,6 @@ fn collect_run(job: &mut rockyd::translate::child::RunJob, limit: Duration) -> V
             }
             continue;
         }
-        assert!(
-            start.elapsed() < limit,
-            "timed out waiting for RunEvent::Done"
-        );
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -96,6 +96,10 @@ fn collect_install(
     let start = Instant::now();
     let mut progress = Vec::new();
     loop {
+        assert!(
+            start.elapsed() < limit,
+            "timed out waiting for InstallEvent::Finished"
+        );
         if let Some(event) = job.try_next() {
             match event {
                 InstallEvent::Progress {
@@ -106,12 +110,18 @@ fn collect_install(
             }
             continue;
         }
-        assert!(
-            start.elapsed() < limit,
-            "timed out waiting for InstallEvent::Finished"
-        );
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn drop_within<T: Send + 'static>(value: T, limit: Duration, what: &str) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        drop(value);
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(limit)
+        .unwrap_or_else(|_| panic!("timed out waiting for {what} drop within {limit:?}"));
 }
 
 fn read_logged_argv(home: &Path) -> Vec<Vec<String>> {
@@ -305,6 +315,39 @@ fn hang_ends_at_deadline() {
 }
 
 #[test]
+fn hang_after_keeps_pre_deadline_replies_then_ends_with_done() {
+    let home = TempDir::new().expect("temp home");
+    configure(home.path(), &json!({ "hang_after": 1 }));
+    let requests = vec![
+        req("k1", QuoteLang::En, "satu"),
+        req("k2", QuoteLang::En, "dua"),
+        req("k3", QuoteLang::En, "tiga"),
+    ];
+
+    let started = Instant::now();
+    let mut job = start_run(
+        &fake_cli(),
+        home.path(),
+        &requests,
+        Duration::from_millis(500),
+    )
+    .expect("start run");
+    let pid = wait_for_pid(home.path());
+    let replies = collect_run(&mut job, Duration::from_secs(5));
+
+    assert_eq!(
+        replies,
+        vec![RunReply::Translated {
+            key: "k1".to_string(),
+            from: QuoteLang::Id,
+            text: "T:satu".to_string(),
+        }]
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!is_pid_alive(pid), "hung child {pid} should be gone");
+}
+
+#[test]
 fn install_reports_progress_and_writes_markers() {
     let home = TempDir::new().expect("temp home");
 
@@ -388,12 +431,7 @@ fn dropping_a_job_kills_the_child() {
     let run_pid = wait_for_pid(home_run.path());
     assert!(is_pid_alive(run_pid), "run child should be running");
 
-    let dropped = Instant::now();
-    drop(job);
-    assert!(
-        dropped.elapsed() < Duration::from_secs(5),
-        "dropping RunJob took too long"
-    );
+    drop_within(job, GUARD, "RunJob");
     assert!(
         !is_pid_alive(run_pid),
         "dropped RunJob child {run_pid} should be gone"
@@ -412,12 +450,7 @@ fn dropping_a_job_kills_the_child() {
     let install_pid = wait_for_pid(home_install.path());
     assert!(is_pid_alive(install_pid), "install child should be running");
 
-    let dropped_install = Instant::now();
-    drop(install_job);
-    assert!(
-        dropped_install.elapsed() < Duration::from_secs(5),
-        "dropping InstallJob took too long"
-    );
+    drop_within(install_job, GUARD, "InstallJob");
     assert!(
         !is_pid_alive(install_pid),
         "dropped InstallJob child {install_pid} should be gone"

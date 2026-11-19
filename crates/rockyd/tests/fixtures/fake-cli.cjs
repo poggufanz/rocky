@@ -123,10 +123,10 @@ function translate() {
   const sub = process.argv[3];
 
   if (sub === "run") {
-    if (cfg.hang) {
+    if (cfg.hang || cfg.hang_after === 0) {
       const lines = readline.createInterface({ input: process.stdin });
       lines.on("line", () => {});
-      setTimeout(() => {}, 60_000);
+      setInterval(() => {}, 60_000);
       return;
     }
     if (cfg.crash_after === 0) {
@@ -156,7 +156,10 @@ function translate() {
         out({ v: 1, key: req.key, ok: true, from, text: "T:" + req.text });
       }
       replies += 1;
-      if (typeof cfg.crash_after === "number" && replies >= cfg.crash_after) {
+      if (typeof cfg.hang_after === "number" && replies >= cfg.hang_after) {
+        stopped = true;
+        setInterval(() => {}, 60_000);
+      } else if (typeof cfg.crash_after === "number" && replies >= cfg.crash_after) {
         stopped = true;
         lines.close();
         process.stdin.destroy();
@@ -170,7 +173,7 @@ function translate() {
     const pairIdx = process.argv.indexOf("--pair", 4);
     const pair = pairIdx !== -1 ? process.argv[pairIdx + 1] : "";
     if (cfg.install === "hang") {
-      setTimeout(() => {}, 60_000);
+      setInterval(() => {}, 60_000);
       return;
     }
     if (cfg.install === "crash") {

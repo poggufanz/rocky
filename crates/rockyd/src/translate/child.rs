@@ -116,6 +116,7 @@ pub fn start_run(
         requested_keys.insert(req.key.clone());
     }
 
+    let deadline = Instant::now() + timeout;
     let mut child = ChildGuard::new(spawn_node_child(cli, home, &["translate", "run"], true)?);
     let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
         return Err(io::Error::other("translate run pipes were not set up"));
@@ -141,7 +142,7 @@ pub fn start_run(
             msg_rx,
             events_tx,
             &cancelled_flag,
-            timeout,
+            deadline,
             requested_keys,
             |keys, reply, out| {
                 if keys.contains(reply.key()) {
@@ -168,6 +169,7 @@ pub fn start_install(
     pair: TranslatePair,
     timeout: Duration,
 ) -> io::Result<InstallJob> {
+    let deadline = Instant::now() + timeout;
     let mut child = ChildGuard::new(spawn_node_child(
         cli,
         home,
@@ -193,7 +195,7 @@ pub fn start_install(
             msg_rx,
             events_tx,
             &cancelled_flag,
-            timeout,
+            deadline,
             None,
             |outcome, line, out| match line {
                 InstallLine::Progress {
@@ -265,7 +267,7 @@ impl<E, L> Drop for JobHandle<E, L> {
 }
 
 enum SupervisorMsg<L> {
-    Line(L),
+    Line { line: L, received_at: Instant },
     StdoutClosed,
     Cancel,
 }
@@ -473,12 +475,11 @@ fn supervise<L, S, E>(
     rx: Receiver<SupervisorMsg<L>>,
     events_tx: Sender<E>,
     cancelled: &AtomicBool,
-    timeout: Duration,
+    deadline: Instant,
     mut state: S,
     mut on_line: impl FnMut(&mut S, L, &Sender<E>),
     on_finish: impl FnOnce(S, bool) -> E,
 ) {
-    let deadline = Instant::now() + timeout;
     let mut stdout_closed = false;
 
     loop {
@@ -486,6 +487,20 @@ fn supervise<L, S, E>(
             child.kill_and_reap();
             return;
         }
+
+        // Check the deadline before reaping so expiry wins over a late child exit.
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            child.kill_and_reap();
+            while let Ok(msg) = rx.try_recv() {
+                if let SupervisorMsg::Line { line, received_at } = msg
+                    && received_at <= deadline
+                {
+                    on_line(&mut state, line, &events_tx);
+                }
+            }
+            let _ = events_tx.send(on_finish(state, true));
+            return;
+        };
 
         if stdout_closed {
             match child.try_reap() {
@@ -502,12 +517,6 @@ fn supervise<L, S, E>(
             }
         }
 
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            child.kill_and_reap();
-            let _ = events_tx.send(on_finish(state, true));
-            return;
-        };
-
         let wait_for = if stdout_closed {
             remaining.min(EXIT_POLL_INTERVAL)
         } else {
@@ -515,8 +524,10 @@ fn supervise<L, S, E>(
         };
 
         match rx.recv_timeout(wait_for) {
-            Ok(SupervisorMsg::Line(line)) => {
-                on_line(&mut state, line, &events_tx);
+            Ok(SupervisorMsg::Line { line, received_at }) => {
+                if received_at <= deadline {
+                    on_line(&mut state, line, &events_tx);
+                }
             }
             Ok(SupervisorMsg::StdoutClosed) => {
                 stdout_closed = true;
@@ -568,7 +579,12 @@ fn read_lines<L>(
             Some(end) => {
                 pending.extend(&chunk[..end]);
                 if let Some(line) = pending.finish(parse)
-                    && sender.send(SupervisorMsg::Line(line)).is_err()
+                    && sender
+                        .send(SupervisorMsg::Line {
+                            line,
+                            received_at: Instant::now(),
+                        })
+                        .is_err()
                 {
                     return;
                 }
@@ -746,7 +762,124 @@ mod tests {
 
         let msgs: Vec<_> = receiver.try_iter().collect();
         assert_eq!(msgs.len(), 2);
-        assert!(matches!(msgs[0], SupervisorMsg::Line(_)));
+        assert!(matches!(msgs[0], SupervisorMsg::Line { .. }));
         assert!(matches!(msgs[1], SupervisorMsg::StdoutClosed));
+    }
+
+    fn spawn_fast_dummy_child() -> Child {
+        Command::new(std::env::current_exe().expect("current exe"))
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn dummy child")
+    }
+
+    #[test]
+    fn expired_deadline_drains_pre_cutoff_replies_and_drops_post_cutoff() {
+        let mut child = spawn_fast_dummy_child();
+        let _ = child.wait();
+        let guard = ChildGuard::new(child);
+
+        let deadline = Instant::now() - Duration::from_millis(5);
+        let (msg_tx, msg_rx) = mpsc::channel();
+        msg_tx
+            .send(SupervisorMsg::Line {
+                line: RunReply::Translated {
+                    key: "early".to_string(),
+                    from: QuoteLang::Id,
+                    text: "before".to_string(),
+                },
+                received_at: deadline - Duration::from_millis(10),
+            })
+            .expect("send early reply");
+        msg_tx
+            .send(SupervisorMsg::Line {
+                line: RunReply::Translated {
+                    key: "late".to_string(),
+                    from: QuoteLang::Id,
+                    text: "after".to_string(),
+                },
+                received_at: deadline + Duration::from_millis(2),
+            })
+            .expect("send late reply");
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let cancelled = AtomicBool::new(false);
+        supervise(
+            guard,
+            msg_rx,
+            events_tx,
+            &cancelled,
+            deadline,
+            (),
+            |(), reply, out| {
+                let _ = out.send(RunEvent::Reply(reply));
+            },
+            |(), _timed_out| RunEvent::Done,
+        );
+
+        let events: Vec<_> = events_rx.try_iter().collect();
+        assert_eq!(
+            events,
+            vec![
+                RunEvent::Reply(RunReply::Translated {
+                    key: "early".to_string(),
+                    from: QuoteLang::Id,
+                    text: "before".to_string(),
+                }),
+                RunEvent::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn expired_deadline_beats_late_install_completion() {
+        let mut child = spawn_fast_dummy_child();
+        let _ = child.wait();
+        let guard = ChildGuard::new(child);
+
+        let deadline = Instant::now() - Duration::from_millis(5);
+        let (msg_tx, msg_rx) = mpsc::channel();
+        msg_tx
+            .send(SupervisorMsg::Line {
+                line: InstallLine::Result(Ok(())),
+                received_at: deadline - Duration::from_millis(1),
+            })
+            .expect("send result");
+        msg_tx
+            .send(SupervisorMsg::StdoutClosed)
+            .expect("send close");
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let cancelled = AtomicBool::new(false);
+        supervise(
+            guard,
+            msg_rx,
+            events_tx,
+            &cancelled,
+            deadline,
+            None,
+            |outcome, line, _out| {
+                if let InstallLine::Result(result) = line {
+                    *outcome = Some(result);
+                }
+            },
+            |outcome, timed_out| {
+                let result = if timed_out {
+                    Err(TranslateFailure::Download)
+                } else {
+                    outcome.unwrap_or(Err(TranslateFailure::Engine))
+                };
+                InstallEvent::Finished(result)
+            },
+        );
+
+        let events: Vec<_> = events_rx.try_iter().collect();
+        assert_eq!(
+            events,
+            vec![InstallEvent::Finished(Err(TranslateFailure::Download))]
+        );
     }
 }
