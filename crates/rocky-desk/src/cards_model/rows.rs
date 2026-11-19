@@ -404,6 +404,8 @@ fn build_tooltip(
         }
     }
 
+    let mut translated_quotes = Vec::new();
+    let mut original_quotes = Vec::new();
     let mut translated_from: Option<QuoteLang> = None;
     for block in blocks {
         if let Some(quote) = &block.quote {
@@ -411,29 +413,37 @@ fn build_tooltip(
                 let clean = sanitize_single_line(&crate::plain_text::plain_quote(&tr.text));
                 (!clean.trim().is_empty()).then_some((clean, tr.from))
             });
-            let (clean, from) = match tr {
-                Some((clean, from)) => (clean, Some(from)),
-                None => (
-                    sanitize_single_line(&crate::plain_text::plain_quote(&quote.text)),
-                    None,
-                ),
-            };
-            if !clean.is_empty() {
-                if from.is_some() {
-                    translated_from = from;
+            match tr {
+                Some((clean, from)) => {
+                    translated_from = Some(from);
+                    push_unique(
+                        &mut translated_quotes,
+                        TooltipLine::text(cut_to_limit(&clean, QUOTE_MAX_CHARS)),
+                    );
                 }
-                push_unique(
-                    &mut lines,
-                    TooltipLine::text(cut_to_limit(&clean, QUOTE_MAX_CHARS)),
-                );
+                None => {
+                    let clean = sanitize_single_line(&crate::plain_text::plain_quote(&quote.text));
+                    if !clean.is_empty() {
+                        push_unique(
+                            &mut original_quotes,
+                            TooltipLine::text(cut_to_limit(&clean, QUOTE_MAX_CHARS)),
+                        );
+                    }
+                }
             }
         }
+    }
+    for line in translated_quotes {
+        push_unique(&mut lines, line);
     }
     if let Some(from) = translated_from {
         push_unique(
             &mut lines,
             TooltipLine::text(card_text(lang, &CardMsg::TranslatedFrom { from })),
         );
+    }
+    for line in original_quotes {
+        push_unique(&mut lines, line);
     }
 
     for block in blocks {

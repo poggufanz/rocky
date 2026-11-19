@@ -1254,3 +1254,88 @@ fn tooltip_filters_wrong_language_empty_clean_and_clears_on_retarget() {
         vec![TooltipLine::text(raw_kept)]
     );
 }
+
+#[test]
+fn tooltip_credits_only_translated_lines_when_mixed_with_misses() {
+    use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+    let raw_hit_a = "Merah.";
+    let raw_miss_a = "Biru.";
+    let raw_miss_b = "Kuning.";
+    let raw_hit_b1 = "Hijau.";
+    let raw_hit_b2 = "Putih.";
+
+    let mut card = sample_card("c-mix", 2_000, Some(3_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw_hit_a.to_string(),
+        shared: false,
+    });
+    let mut b2 = sample_block(2, "src/a.rs", Vec::new());
+    b2.quote = Some(Quote {
+        text: raw_miss_a.to_string(),
+        shared: false,
+    });
+    let mut b3 = sample_block(3, "src/b.rs", Vec::new());
+    b3.quote = Some(Quote {
+        text: raw_miss_b.to_string(),
+        shared: false,
+    });
+    let mut b4 = sample_block(4, "src/b.rs", Vec::new());
+    b4.quote = Some(Quote {
+        text: raw_hit_b1.to_string(),
+        shared: false,
+    });
+    let mut b5 = sample_block(5, "src/b.rs", Vec::new());
+    b5.quote = Some(Quote {
+        text: raw_hit_b2.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1, b2, b3, b4, b5];
+
+    let mut model = CardsModel::new();
+    let _ = model.set_target(Some(QuoteLang::En), 1);
+    model.on_cards(
+        1,
+        vec![card],
+        None,
+        vec![
+            QuoteTranslation {
+                quote_key: quote_key(raw_hit_a),
+                from: QuoteLang::Id,
+                text: "Red.".to_string(),
+            },
+            QuoteTranslation {
+                quote_key: quote_key(raw_hit_b1),
+                from: QuoteLang::Id,
+                text: "Green.".to_string(),
+            },
+            QuoteTranslation {
+                quote_key: quote_key(raw_hit_b2),
+                from: QuoteLang::Id,
+                text: "White.".to_string(),
+            },
+        ],
+    );
+
+    let rows = model.rows(UiLang::En);
+    assert_eq!(
+        rows[0].files[0].tooltip,
+        vec![
+            TooltipLine::text("src/a.rs"),
+            TooltipLine::text("Red."),
+            TooltipLine::text("translated from Indonesian"),
+            TooltipLine::text("Biru."),
+        ]
+    );
+    assert_eq!(
+        rows[0].files[1].tooltip,
+        vec![
+            TooltipLine::text("src/b.rs"),
+            TooltipLine::text("Green."),
+            TooltipLine::text("White."),
+            TooltipLine::text("translated from Indonesian"),
+            TooltipLine::text("Kuning."),
+        ]
+    );
+}

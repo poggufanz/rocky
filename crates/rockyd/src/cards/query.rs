@@ -12,8 +12,9 @@ use rocky_proto::pipe::ServerMsg;
 use rocky_proto::translate::QuoteLang;
 
 use crate::cards::detail::{
-    build_block_diff, build_block_diff_with, build_card_detail, build_card_detail_unowned,
-    build_card_detail_with, build_cards_reply, is_card_root_owned, missing_diff,
+    CardsQuote, build_block_diff, build_block_diff_with, build_card_detail,
+    build_card_detail_unowned, build_card_detail_with, build_cards_reply_with_quotes,
+    is_card_root_owned, missing_diff,
 };
 use crate::cards::storage::CardStore;
 use crate::cards::store::ObjectRead;
@@ -61,6 +62,7 @@ struct QueryJob {
 struct QueryDone {
     token: u64,
     reply: ServerMsg,
+    cards_quotes: Vec<CardsQuote>,
 }
 
 struct PendingReply {
@@ -200,14 +202,17 @@ impl CardQueryLoop {
 
     /// Forwards every completed query reply back through its waiting client channel,
     /// running `attach` on `Cards` and `CardDetail` replies whose request asked for translation.
-    pub fn service_with(&mut self, attach: &mut dyn FnMut(&mut ServerMsg, QuoteLang)) {
+    pub fn service_with(
+        &mut self,
+        attach: &mut dyn FnMut(&mut ServerMsg, QuoteLang, &[CardsQuote]),
+    ) {
         while let Ok(done) = self.res_rx.try_recv() {
             if let Some(pending) = self.replies.remove(&done.token) {
                 let mut msg = done.reply;
                 if let Some(to) = pending.translate_to
                     && matches!(msg, ServerMsg::Cards { .. } | ServerMsg::CardDetail { .. })
                 {
-                    attach(&mut msg, to);
+                    attach(&mut msg, to, &done.cards_quotes);
                 }
                 let _ = pending.reply.send(msg);
             }
@@ -216,7 +221,7 @@ impl CardQueryLoop {
 
     /// Forwards every completed query reply back through its waiting client channel.
     pub fn service(&mut self) {
-        self.service_with(&mut |_, _| {});
+        self.service_with(&mut |_, _, _| {});
     }
 
     fn ensure_started(&mut self) {
@@ -292,23 +297,33 @@ fn query_worker_loop(
         let token = job.token;
         let kind = job.kind;
         let req_id = kind.id();
-        let reply = match panic::catch_unwind(AssertUnwindSafe(|| {
+        let (reply, cards_quotes) = match panic::catch_unwind(AssertUnwindSafe(|| {
             run_query(&mut store, &home, kind, object_reader.as_deref())
         })) {
-            Ok(reply) => reply,
+            Ok(res) => res,
             Err(_) => {
                 // Reset the read cache on unwind so a partially refreshed map is never reused.
                 store = CardStore::new(home.clone());
                 panics.fetch_add(1, Ordering::Relaxed);
-                ServerMsg::Ack {
-                    id: req_id,
-                    ok: false,
-                    error: Some("internal".to_string()),
-                    cleanup_errors: 0,
-                }
+                (
+                    ServerMsg::Ack {
+                        id: req_id,
+                        ok: false,
+                        error: Some("internal".to_string()),
+                        cleanup_errors: 0,
+                    },
+                    Vec::new(),
+                )
             }
         };
-        if res_tx.send(QueryDone { token, reply }).is_err() {
+        if res_tx
+            .send(QueryDone {
+                token,
+                reply,
+                cards_quotes,
+            })
+            .is_err()
+        {
             break;
         }
     }
@@ -319,7 +334,7 @@ fn run_query(
     home: &Path,
     kind: QueryKind,
     object_reader: Option<&(dyn Fn(&str) -> ObjectRead + Send + Sync)>,
-) -> ServerMsg {
+) -> (ServerMsg, Vec<CardsQuote>) {
     match kind {
         QueryKind::Cards {
             id,
@@ -328,50 +343,59 @@ fn run_query(
             limit,
         } => {
             let (items, next) = store.page(query.as_deref(), before.as_deref(), limit as usize);
-            build_cards_reply(id, items, next)
+            build_cards_reply_with_quotes(id, items, next)
         }
         QueryKind::CardDetail {
             id,
             card_id,
             owned_roots,
-        } => match store.get(&card_id) {
-            Some(card) => {
-                if is_card_root_owned(&card, &owned_roots) {
-                    match object_reader {
-                        Some(read_obj) => build_card_detail_with(id, &card, |sha| read_obj(sha)),
-                        None => build_card_detail(id, &card, home),
+        } => {
+            let reply = match store.get(&card_id) {
+                Some(card) => {
+                    if is_card_root_owned(&card, &owned_roots) {
+                        match object_reader {
+                            Some(read_obj) => {
+                                build_card_detail_with(id, &card, |sha| read_obj(sha))
+                            }
+                            None => build_card_detail(id, &card, home),
+                        }
+                    } else if card.root.trim().is_empty() && card.blocks.iter().all(|b| !b.recorded)
+                    {
+                        build_card_detail_with(id, &card, |_| ObjectRead::Missing)
+                    } else {
+                        build_card_detail_unowned(id, &card)
                     }
-                } else if card.root.trim().is_empty() && card.blocks.iter().all(|b| !b.recorded) {
-                    build_card_detail_with(id, &card, |_| ObjectRead::Missing)
-                } else {
-                    build_card_detail_unowned(id, &card)
                 }
-            }
-            None => not_found_ack(id),
-        },
+                None => not_found_ack(id),
+            };
+            (reply, Vec::new())
+        }
         QueryKind::BlockDiff {
             id,
             card_id,
             seq,
             page,
             owned_roots,
-        } => match store.get(&card_id) {
-            Some(card) => {
-                if !card.blocks.iter().any(|b| b.seq == seq) {
-                    not_found_ack(id)
-                } else if !is_card_root_owned(&card, &owned_roots) {
-                    missing_diff(id)
-                } else {
-                    match object_reader {
-                        Some(read_obj) => {
-                            build_block_diff_with(id, &card, seq, page, |sha| read_obj(sha))
+        } => {
+            let reply = match store.get(&card_id) {
+                Some(card) => {
+                    if !card.blocks.iter().any(|b| b.seq == seq) {
+                        not_found_ack(id)
+                    } else if !is_card_root_owned(&card, &owned_roots) {
+                        missing_diff(id)
+                    } else {
+                        match object_reader {
+                            Some(read_obj) => {
+                                build_block_diff_with(id, &card, seq, page, |sha| read_obj(sha))
+                            }
+                            None => build_block_diff(id, &card, seq, page, home),
                         }
-                        None => build_block_diff(id, &card, seq, page, home),
                     }
                 }
-            }
-            None => not_found_ack(id),
-        },
+                None => not_found_ack(id),
+            };
+            (reply, Vec::new())
+        }
     }
 }
 

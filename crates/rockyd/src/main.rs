@@ -22,7 +22,8 @@ use rocky_proto::pipe::{
     ServerMsg, SetupAction, SetupHealth, StatusOp, encode,
 };
 use rocky_proto::settings::Settings;
-use rocky_proto::translate::{QuoteLang, TranslateStatus};
+use rocky_proto::translate::{QuoteLang, TranslateStatus, quote_key};
+use rockyd::cards::detail::CardsQuote;
 use rockyd::cards::query::CardQueryLoop;
 use rockyd::cards::storage::CardStore;
 use rockyd::cards::transcript::claude_config_dirs;
@@ -676,8 +677,8 @@ fn service_queries(
     log: &RotatingLog,
 ) {
     let translate_quotes = shared.lock().unwrap().settings.translate_quotes;
-    queries.service_with(&mut |msg, to| {
-        attach_translations(msg, to, translate_quotes, translator);
+    queries.service_with(&mut |msg, to, cards_quotes| {
+        attach_translations(msg, to, cards_quotes, translate_quotes, translator);
     });
     let panics = queries.take_worker_panics();
     if panics > 0 {
@@ -688,6 +689,7 @@ fn service_queries(
 fn attach_translations(
     msg: &mut ServerMsg,
     to: QuoteLang,
+    cards_quotes: &[CardsQuote],
     enabled: bool,
     translator: &mut Translator,
 ) {
@@ -738,13 +740,22 @@ fn attach_translations(
                 translator.push_later(&card_id, overflow);
             }
         }
-        ServerMsg::Cards { items, .. } => {
-            let quotes = distinct_cards_quotes(items);
-            if quotes.is_empty() {
+        ServerMsg::Cards { .. } => {
+            if cards_quotes.is_empty() {
                 return;
             }
-            let hits = translator.cached(enabled, to, &quotes);
-            for item in hits {
+            let mut full_quotes = Vec::with_capacity(cards_quotes.len());
+            let mut shown_key_by_full_key = HashMap::with_capacity(cards_quotes.len());
+            for pair in cards_quotes {
+                full_quotes.push(pair.full.clone());
+                shown_key_by_full_key.insert(quote_key(&pair.full), quote_key(&pair.shown));
+            }
+            let hits = translator.cached(enabled, to, &full_quotes);
+            for mut item in hits {
+                let Some(shown_key) = shown_key_by_full_key.get(&item.quote_key) else {
+                    continue;
+                };
+                item.quote_key = shown_key.clone();
                 let ServerMsg::Cards { translations, .. } = msg else {
                     unreachable!();
                 };
@@ -762,32 +773,15 @@ fn attach_translations(
     }
 }
 
-fn collect_distinct_quotes<'a>(
-    blocks: &'a [rocky_proto::cards::Block],
-    seen: &mut HashSet<&'a str>,
-    quotes: &mut Vec<String>,
-) {
+fn distinct_block_quotes(blocks: &[rocky_proto::cards::Block]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut quotes = Vec::new();
     for block in blocks {
         if let Some(quote) = &block.quote
             && seen.insert(quote.text.as_str())
         {
             quotes.push(quote.text.clone());
         }
-    }
-}
-
-fn distinct_block_quotes(blocks: &[rocky_proto::cards::Block]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut quotes = Vec::new();
-    collect_distinct_quotes(blocks, &mut seen, &mut quotes);
-    quotes
-}
-
-fn distinct_cards_quotes(cards: &[rocky_proto::cards::Card]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut quotes = Vec::new();
-    for card in cards {
-        collect_distinct_quotes(&card.blocks, &mut seen, &mut quotes);
     }
     quotes
 }
@@ -3746,5 +3740,143 @@ mod tests {
         // Dropped hits are never staged for push.
         assert!(translator.service(true).is_empty());
         assert!(translator.service(true).is_empty());
+    }
+
+    #[test]
+    fn cards_reply_hits_full_quote_beyond_200_chars_keyed_by_shown_text() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+        let sha = "d".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+
+        let prefix = "p".repeat(200);
+        let full = format!("{prefix} tambahan melebihi dua ratus karakter.");
+        // Seed both the full quote and a decoy prefix entry to prove lookup uses `full`.
+        seed_cached_translation(
+            &home,
+            &sha,
+            QuoteLang::En,
+            QuoteLang::Id,
+            &full,
+            "Translated full text beyond 200 chars.",
+        );
+        seed_cached_translation(
+            &home,
+            &sha,
+            QuoteLang::En,
+            QuoteLang::Id,
+            &prefix,
+            "Wrong prefix-only translation.",
+        );
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+
+        let mut card = make_test_card(&home, "card-list-long");
+        card.started_ms = 1_000;
+        card.ended_ms = Some(2_000);
+        let mut second_block = card.blocks[0].clone();
+        second_block.seq = 2;
+        second_block.path = "src/other.rs".to_string();
+        card.blocks[0].quote = Some(Quote {
+            text: full.clone(),
+            shared: false,
+        });
+        second_block.quote = Some(Quote {
+            text: full,
+            shared: false,
+        });
+        card.blocks.push(second_block);
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, translator) = request_cards_page(&home, &shared, 4, Some(QuoteLang::En));
+        let ServerMsg::Cards {
+            items,
+            translations,
+            ..
+        } = reply
+        else {
+            panic!("expected Cards, got {reply:?}");
+        };
+        assert_eq!(items[0].blocks[0].quote.as_ref().unwrap().text, prefix);
+        assert_eq!(
+            translations,
+            vec![QuoteTranslation {
+                quote_key: quote_key(&prefix),
+                from: QuoteLang::Id,
+                text: "Translated full text beyond 200 chars.".to_string(),
+            }]
+        );
+        assert_eq!(translator.pending_len(), 0);
+        assert!(!translator.has_job());
+    }
+
+    #[test]
+    fn cards_reply_omits_ambiguous_prefix_quotes() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::QuoteLang;
+
+        let sha = "e".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+
+        let prefix = "q".repeat(200);
+        let full_a = format!("{prefix} alpha.");
+        let full_b = format!("{prefix} beta.");
+        // Only `full_a` is cached; `full_b` is uncached and shares the 200-char prefix.
+        seed_cached_translation(
+            &home,
+            &sha,
+            QuoteLang::En,
+            QuoteLang::Id,
+            &full_a,
+            "Alpha translation.",
+        );
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+
+        let mut card_a = make_test_card(&home, "card-prefix-a");
+        card_a.started_ms = 1_000;
+        card_a.ended_ms = Some(2_000);
+        card_a.blocks[0].quote = Some(Quote {
+            text: full_a,
+            shared: false,
+        });
+
+        let mut card_b = make_test_card(&home, "card-prefix-b");
+        card_b.started_ms = 2_000;
+        card_b.ended_ms = Some(3_000);
+        card_b.blocks[0].quote = Some(Quote {
+            text: full_b,
+            shared: false,
+        });
+
+        {
+            let mut s = shared.lock().unwrap();
+            s.cards.append(&card_a).unwrap();
+            s.cards.append(&card_b).unwrap();
+        }
+
+        let (reply, translator) = request_cards_page(&home, &shared, 5, Some(QuoteLang::En));
+        let ServerMsg::Cards {
+            items,
+            translations,
+            ..
+        } = reply
+        else {
+            panic!("expected Cards, got {reply:?}");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(
+            translations.is_empty(),
+            "expected no translation when two quotes share the 200-char prefix, got {translations:?}"
+        );
+        assert_eq!(translator.pending_len(), 0);
+        assert!(!translator.has_job());
     }
 }
