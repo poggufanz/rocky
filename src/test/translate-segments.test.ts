@@ -401,3 +401,21 @@ test("restore adds space when engine drops punctuation against alnum, unless sou
   assert.equal(touchedLeft.codes[0].alnumBefore, true);
   assert.equal(restoreLine('lihat<x id="0"></x>', touchedLeft), "lihatsrc/**/*.ts");
 });
+
+test("restore spaces adjacent placeholders unless the same codes were joined in source", () => {
+  const leadingMoved = prepareQuote("`a.ts`: cek (`b.ts`).").lines[0]!;
+  assert.equal(restoreLine('See (<x id="1"></x><x id="0"></x>).', leadingMoved), "See (b.ts a.ts).");
+
+  const trailingMoved = prepareQuote("(`a.ts`) cek: `b.ts`").lines[0]!;
+  assert.equal(restoreLine('See <x id="1"></x><x id="0"></x>.', trailingMoved), "See b.ts a.ts.");
+
+  const joinedSource = prepareQuote("lihat `a.ts`src/b.ts").lines[0]!;
+  assert.equal(joinedSource.html, 'lihat <x id="0"></x><x id="1"></x>');
+  assert.equal(joinedSource.codes[1].joinedToPrev, true);
+  assert.equal(restoreLine('see <x id="0"></x><x id="1"></x>', joinedSource), "see a.tssrc/b.ts");
+  assert.equal(restoreLine('see <x id="0"></x> <x id="1"></x>', joinedSource), "see a.tssrc/b.ts");
+  assert.equal(restoreLine('see <x id="1"></x><x id="0"></x>', joinedSource), "see src/b.ts a.ts");
+
+  const punctBetweenDropped = prepareQuote("lihat `a.ts`:`b.ts`").lines[0]!;
+  assert.equal(restoreLine('see <x id="0"></x><x id="1"></x>', punctBetweenDropped), "see a.ts b.ts");
+});

@@ -4,6 +4,7 @@ export interface CodeSpan {
   spaceAfter: boolean;
   alnumBefore?: boolean;
   alnumAfter?: boolean;
+  joinedToPrev?: boolean;
 }
 
 export interface PreparedLine {
@@ -776,6 +777,9 @@ export function prepareQuote(text: string): PreparedQuote {
       if (STARTS_ALNUM_RE.test(prosePieces[i + 1])) {
         span.alnumAfter = true;
       }
+      if (i > 0 && prosePieces[i].length === 0) {
+        span.joinedToPrev = true;
+      }
       return span;
     });
 
@@ -868,15 +872,23 @@ export function restoreLine(out: string, line: PreparedLine): string | undefined
   let pendingSpace = false;
 
   for (let i = 0; i < ids.length; i++) {
-    const code = line.codes[ids[i]];
+    const id = ids[i];
+    const code = line.codes[id];
     const leftNonEmpty = result.length > 0;
     const rightHasMore = i < ids.length - 1 || cleanedParts[i + 1].length > 0;
 
+    // Treat an adjacent placeholder like alnum unless these same two codes were
+    // directly adjacent in the same order in the source.
+    const sameOrderJoin =
+      i > 0 && id === ids[i - 1] + 1 && Boolean(code.joinedToPrev);
+    const touchesLeftAlnum =
+      cleanedParts[i].length > 0
+        ? !code.alnumBefore && ENDS_ALNUM_RE.test(cleanedParts[i])
+        : i > 0 && !sameOrderJoin;
+
     const needSpaceBefore =
       leftNonEmpty &&
-      (pendingSpace ||
-        code.spaceBefore ||
-        (!code.alnumBefore && ENDS_ALNUM_RE.test(cleanedParts[i])));
+      (pendingSpace || code.spaceBefore || touchesLeftAlnum);
 
     if (needSpaceBefore) {
       result += " ";
