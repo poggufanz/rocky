@@ -1424,3 +1424,95 @@ fn tooltip_translations_stay_scoped_per_card_and_drop_on_push() {
         vec![TooltipLine::text("src/a.rs"), TooltipLine::text(&shown)]
     );
 }
+
+#[test]
+fn page_reply_stores_translations_for_pushed_card_at_same_rev_not_newer() {
+    use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+    let raw_b = "Perbarui halaman selesai.";
+    let translated_b = "Updated the done page.";
+    let raw_c = "Simpan versi baru.";
+    let translated_c = "Saved the new version.";
+
+    let mut card_b = sample_card("card-b", 2_000, Some(3_000));
+    card_b.rev = 4;
+    let mut blk_b = sample_block(1, "src/b.rs", Vec::new());
+    blk_b.quote = Some(Quote {
+        text: raw_b.to_string(),
+        shared: false,
+    });
+    card_b.blocks = vec![blk_b];
+
+    let mut card_c_newer = sample_card("card-c", 1_000, Some(2_000));
+    card_c_newer.rev = 5;
+    let mut blk_c_newer = sample_block(1, "src/c.rs", Vec::new());
+    blk_c_newer.quote = Some(Quote {
+        text: raw_c.to_string(),
+        shared: false,
+    });
+    card_c_newer.blocks = vec![blk_c_newer];
+
+    let mut card_c_older = card_c_newer.clone();
+    card_c_older.rev = 4;
+
+    let mut card_a = sample_card("card-a", 3_000, Some(4_000));
+    card_a.rev = 1;
+
+    let mut model = CardsModel::new();
+    let _ = model.set_target(Some(QuoteLang::En), 1);
+    model.on_cards(1, vec![card_a], Some("4000:card-a".to_string()), Vec::new());
+
+    // Push card B at rev 4 and card C at rev 5 before the next page arrives.
+    model.on_push(card_b.clone());
+    model.on_push(card_c_newer);
+
+    let _ = model.request_more(2).expect("load page 2");
+    model.on_cards(
+        2,
+        vec![card_b, card_c_older],
+        None,
+        vec![
+            QuoteTranslation {
+                quote_key: quote_key(raw_b),
+                from: QuoteLang::Id,
+                text: translated_b.to_string(),
+            },
+            QuoteTranslation {
+                quote_key: quote_key(raw_c),
+                from: QuoteLang::Id,
+                text: translated_c.to_string(),
+            },
+        ],
+    );
+
+    let rows = model.rows(UiLang::En);
+    let row_b = rows.iter().find(|r| r.card_id == "card-b").expect("card-b");
+    assert_eq!(
+        row_b.edits[0].tooltip,
+        vec![
+            TooltipLine::text(translated_b),
+            TooltipLine::text("translated from Indonesian"),
+        ]
+    );
+    assert_eq!(
+        row_b.files[0].tooltip,
+        vec![
+            TooltipLine::text("src/b.rs"),
+            TooltipLine::text(translated_b),
+            TooltipLine::text("translated from Indonesian"),
+        ]
+    );
+
+    let row_c = rows.iter().find(|r| r.card_id == "card-c").expect("card-c");
+    assert_eq!(row_c.edits[0].tooltip, vec![TooltipLine::text(raw_c)]);
+    assert_eq!(
+        row_c.files[0].tooltip,
+        vec![TooltipLine::text("src/c.rs"), TooltipLine::text(raw_c)]
+    );
+    assert!(
+        !row_c.edits[0]
+            .tooltip
+            .iter()
+            .any(|l| l.text.starts_with("translated from"))
+    );
+}
