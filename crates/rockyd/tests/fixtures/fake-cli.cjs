@@ -151,6 +151,8 @@ function translate() {
         out({ v: 1, key: req.key, ok: false, reason: "no-prose" });
       } else if (cfg.fail) {
         out({ v: 1, key: req.key, ok: false, reason: "engine" });
+      } else if (cfg.wrong_from) {
+        out({ v: 1, key: req.key, ok: true, from: req.to, text: "T:" + req.text });
       } else {
         const from = req.to === "en" ? "id" : "en";
         out({ v: 1, key: req.key, ok: true, from, text: "T:" + req.text });

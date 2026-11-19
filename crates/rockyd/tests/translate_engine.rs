@@ -30,6 +30,10 @@ impl GuardedTranslator {
         Self(Some(Translator::new(home)))
     }
 
+    fn with_launch_retry(home: PathBuf, launch_retry: Duration) -> Self {
+        Self(Some(Translator::with_launch_retry(home, launch_retry)))
+    }
+
     fn service_off(&mut self) -> Vec<ServerMsg> {
         let mut translator = self.0.take().expect("translator already taken");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -247,6 +251,17 @@ fn quote_translated_items(msgs: &[ServerMsg]) -> Vec<(&str, &QuoteTranslation)> 
         .collect()
 }
 
+fn quote_settled_items(msgs: &[ServerMsg]) -> Vec<(&str, &str)> {
+    msgs.iter()
+        .filter_map(|msg| match msg {
+            ServerMsg::QuoteSettled { card_id, quote_key } => {
+                Some((card_id.as_str(), quote_key.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn off_spawns_nothing_and_attaches_nothing() {
     let home = TempDir::new().expect("temp home");
@@ -255,12 +270,17 @@ fn off_spawns_nothing_and_attaches_nothing() {
     run_install(&mut translator, TranslatePair::IdEn);
     let logged_before = read_logged_argv(home.path()).len();
 
-    let attached = translator.on_detail(false, "c1", QuoteLang::En, &["Merah.".to_string()]);
-    assert!(attached.is_empty());
+    let detail = translator.on_detail(false, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert!(detail.pending.is_empty());
+    assert!(!translator.has_job());
+    assert_eq!(translator.pending_len(), 0);
 
     for _ in 0..20 {
         let msgs = translator.service(false);
         assert!(msgs.is_empty());
+        assert!(!translator.has_job());
+        assert_eq!(translator.pending_len(), 0);
     }
 
     let logged_after = read_logged_argv(home.path());
@@ -281,11 +301,9 @@ fn miss_then_push_then_hit() {
     run_install(&mut translator, TranslatePair::IdEn);
 
     let quotes = vec!["Merah.".to_string()];
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let miss = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(miss.hits.is_empty());
+    assert_eq!(miss.pending, vec![quote_key("Merah.")]);
 
     let msgs = service_until(&mut translator, true, "QuoteTranslated", |msgs| {
         !quote_translated_items(msgs).is_empty()
@@ -316,7 +334,8 @@ fn miss_then_push_then_hit() {
     });
 
     let hit = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
-    assert_eq!(hit, vec![pushed[0].1.clone()]);
+    assert_eq!(hit.hits, vec![pushed[0].1.clone()]);
+    assert!(hit.pending.is_empty());
 }
 
 #[test]
@@ -329,14 +348,13 @@ fn same_language_is_cached_as_original() {
     let runs_before = read_logged_argv(home.path()).len();
 
     let quotes = vec!["Already English.".to_string()];
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let first = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(first.hits.is_empty());
+    assert_eq!(first.pending, vec![quote_key("Already English.")]);
 
+    let mut settled_msgs = Vec::new();
     wait_until("first run log line", || {
-        let _ = translator.service(true);
+        settled_msgs.extend(translator.service(true));
         let logs = translator.drain_log();
         if logs.is_empty() {
             false
@@ -348,16 +366,23 @@ fn same_language_is_cached_as_original() {
             true
         }
     });
+    assert!(quote_translated_items(&settled_msgs).is_empty());
+    assert_eq!(
+        quote_settled_items(&settled_msgs),
+        vec![("c1", quote_key("Already English.").as_str())]
+    );
     assert_eq!(read_logged_argv(home.path()).len(), runs_before + 1);
 
     // Second detail open finds Cached::Original: returns nothing and starts no second run.
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let second = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(second.hits.is_empty());
+    assert!(second.pending.is_empty());
+    assert!(!translator.has_job());
+    assert_eq!(translator.pending_len(), 0);
     for _ in 0..10 {
         assert!(translator.service(true).is_empty());
+        assert!(!translator.has_job());
+        assert_eq!(translator.pending_len(), 0);
     }
     assert_eq!(read_logged_argv(home.path()).len(), runs_before + 1);
     assert!(translator.drain_log().is_empty());
@@ -371,16 +396,12 @@ fn two_cards_waiting_on_one_quote_both_get_it() {
     run_install(&mut translator, TranslatePair::IdEn);
 
     let quotes = vec!["Satu pesan.".to_string()];
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
-    assert!(
-        translator
-            .on_detail(true, "c2", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let d1 = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(d1.hits.is_empty());
+    assert_eq!(d1.pending, vec![quote_key("Satu pesan.")]);
+    let d2 = translator.on_detail(true, "c2", QuoteLang::En, &quotes);
+    assert!(d2.hits.is_empty());
+    assert_eq!(d2.pending, vec![quote_key("Satu pesan.")]);
 
     let msgs = service_until(&mut translator, true, "both cards notified", |msgs| {
         quote_translated_items(msgs).len() >= 2
@@ -418,11 +439,9 @@ fn turning_off_mid_run_kills_it() {
 
     let _ = fs::remove_file(home.path().join("fake-translate.pid"));
     configure(home.path(), &json!({ "hang": true }));
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert_eq!(detail.pending, vec![quote_key("Merah.")]);
 
     let first_msgs = translator.service(true);
     assert!(quote_translated_items(&first_msgs).is_empty());
@@ -453,10 +472,11 @@ fn crash_mid_run_requeues_on_next_detail() {
 
     configure(home.path(), &json!({ "crash_after": 1 }));
     let quotes = vec!["Pertama.".to_string(), "Kedua.".to_string()];
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
+    let first = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(first.hits.is_empty());
+    assert_eq!(
+        first.pending,
+        vec![quote_key("Pertama."), quote_key("Kedua.")]
     );
 
     let start = Instant::now();
@@ -478,20 +498,25 @@ fn crash_mid_run_requeues_on_next_detail() {
     assert_eq!(first_items.len(), 1);
     assert_eq!(first_items[0].1.text, "T:Pertama.");
     assert_eq!(
+        quote_settled_items(&first_msgs),
+        vec![("c1", quote_key("Kedua.").as_str())]
+    );
+    assert_eq!(
         logs,
         vec!["translate run: 1 ok, 0 original, 0 failed, 1 dropped"]
     );
 
     clear_config(home.path());
-    let hits = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    let detail = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
     assert_eq!(
-        hits,
+        detail.hits,
         vec![QuoteTranslation {
             quote_key: quote_key("Pertama."),
             from: QuoteLang::Id,
             text: "T:Pertama.".to_string(),
         }]
     );
+    assert_eq!(detail.pending, vec![quote_key("Kedua.")]);
 
     let second_msgs = service_until(&mut translator, true, "second quote pushed", |msgs| {
         !quote_translated_items(msgs).is_empty()
@@ -524,11 +549,16 @@ fn not_ready_pair_attaches_and_queues_nothing() {
     let logged_before = read_logged_argv(home.path()).len();
 
     // EnId (target QuoteLang::Id) is not installed.
-    let attached = translator.on_detail(true, "c1", QuoteLang::Id, &["Hello.".to_string()]);
-    assert!(attached.is_empty());
+    let detail = translator.on_detail(true, "c1", QuoteLang::Id, &["Hello.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert!(detail.pending.is_empty());
+    assert!(!translator.has_job());
+    assert_eq!(translator.pending_len(), 0);
 
     for _ in 0..20 {
         assert!(translator.service(true).is_empty());
+        assert!(!translator.has_job());
+        assert_eq!(translator.pending_len(), 0);
     }
     assert_eq!(read_logged_argv(home.path()).len(), logged_before);
 }
@@ -598,11 +628,9 @@ fn remove_clears_files_cache_and_status() {
     run_install(&mut translator, TranslatePair::IdEn);
 
     // Populate cache.
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let d1 = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(d1.hits.is_empty());
+    assert_eq!(d1.pending, vec![quote_key("Merah.")]);
     service_until(&mut translator, true, "cache populated", |msgs| {
         !quote_translated_items(msgs).is_empty()
     });
@@ -615,11 +643,9 @@ fn remove_clears_files_cache_and_status() {
     // Busy remove returns Err("busy").
     let _ = fs::remove_file(home.path().join("fake-translate.pid"));
     configure(home.path(), &json!({ "hang": true }));
-    assert!(
-        translator
-            .on_detail(true, "c2", QuoteLang::En, &["Biru.".to_string()])
-            .is_empty()
-    );
+    let d2 = translator.on_detail(true, "c2", QuoteLang::En, &["Biru.".to_string()]);
+    assert!(d2.hits.is_empty());
+    assert_eq!(d2.pending, vec![quote_key("Biru.")]);
     let _ = translator.service(true);
     let _pid = wait_for_pid(home.path());
     assert_eq!(translator.remove(), Err("busy"));
@@ -634,11 +660,9 @@ fn remove_clears_files_cache_and_status() {
 
     // Re-installing does not revive the old cached translation.
     run_install(&mut translator, TranslatePair::IdEn);
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let after = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(after.hits.is_empty());
+    assert_eq!(after.pending, vec![quote_key("Merah.")]);
 }
 
 #[test]
@@ -673,7 +697,7 @@ fn install_checks_disabled_and_busy_and_turning_off_kills_install() {
 }
 
 #[test]
-fn push_later_emits_on_true_and_clears_on_false() {
+fn push_later_emits_on_next_pass_and_clears_on_false() {
     let home = TempDir::new().expect("temp home");
     let mut translator = Translator::new(home.path().to_path_buf());
     let item = QuoteTranslation {
@@ -682,6 +706,7 @@ fn push_later_emits_on_true_and_clears_on_false() {
         text: "One.".to_string(),
     };
     translator.push_later("c1", vec![item.clone()]);
+    assert!(translator.service(true).is_empty());
     let msgs = translator.service(true);
     assert_eq!(
         msgs,
@@ -695,6 +720,7 @@ fn push_later_emits_on_true_and_clears_on_false() {
     let off_msgs = translator.service(false);
     assert!(off_msgs.is_empty());
     assert!(translator.service(true).is_empty());
+    assert!(translator.service(true).is_empty());
 }
 
 #[test]
@@ -706,15 +732,15 @@ fn failed_reply_is_dropped_and_not_cached() {
 
     configure(home.path(), &json!({ "fail": true }));
     let quotes = vec!["Gagal.".to_string()];
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let miss = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(miss.hits.is_empty());
+    assert_eq!(miss.pending, vec![quote_key("Gagal.")]);
 
+    let mut all_msgs = Vec::new();
     wait_until("failed run log line", || {
         let msgs = translator.service(true);
         assert!(quote_translated_items(&msgs).is_empty());
+        all_msgs.extend(msgs);
         let logs = translator.drain_log();
         if logs.is_empty() {
             false
@@ -726,14 +752,16 @@ fn failed_reply_is_dropped_and_not_cached() {
             true
         }
     });
+    assert_eq!(
+        quote_settled_items(&all_msgs),
+        vec![("c1", quote_key("Gagal.").as_str())]
+    );
 
     // Not cached: clearing fail allows the next detail open to queue and translate it.
     clear_config(home.path());
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let retry = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(retry.hits.is_empty());
+    assert_eq!(retry.pending, vec![quote_key("Gagal.")]);
     let msgs = service_until(&mut translator, true, "recovered translation", |msgs| {
         !quote_translated_items(msgs).is_empty()
     });
@@ -804,11 +832,9 @@ fn checksum_failure_survives_temporary_cli_loss() {
 
     // Starting a run does not erase the Checksum failure.
     clear_config(home.path());
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert_eq!(detail.pending, vec![quote_key("Merah.")]);
     service_until(&mut translator, true, "run finishes", |msgs| {
         !quote_translated_items(msgs).is_empty()
     });
@@ -844,15 +870,14 @@ fn checksum_failure_survives_temporary_cli_loss() {
 fn missing_cli_keeps_queue_and_resumes_when_restored() {
     let home = TempDir::new().expect("temp home");
     seed_cli(home.path());
-    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+    let mut translator =
+        GuardedTranslator::with_launch_retry(home.path().to_path_buf(), Duration::from_millis(120));
     run_install(&mut translator, TranslatePair::IdEn);
 
     // Queue a miss while markers are ready, then lose cli.json.
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert_eq!(detail.pending, vec![quote_key("Merah.")]);
     fs::remove_file(cli_record_path(home.path())).expect("remove cli.json");
 
     for _ in 0..5 {
@@ -861,7 +886,8 @@ fn missing_cli_keeps_queue_and_resumes_when_restored() {
     }
     assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
 
-    // Restore cli.json without calling check(); the queued item starts and arrives.
+    // Restore cli.json without calling check(); within the retry window it does not re-read on
+    // every pass, and once the retry window expires the queued item starts and arrives.
     seed_cli(home.path());
     let msgs = service_until(&mut translator, true, "resumed QuoteTranslated", |msgs| {
         !quote_translated_items(msgs).is_empty()
@@ -883,11 +909,9 @@ fn model_update_between_enqueue_and_launch_uses_new_digest() {
     let mut translator = GuardedTranslator::new(home.path().to_path_buf());
 
     // Queue a quote while OLD_SHA is installed, before service(true) launches a run.
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert_eq!(detail.pending, vec![quote_key("Merah.")]);
 
     // Installing IdEn replaces the marker with the fake CLI's digest before the run launches.
     run_install(&mut translator, TranslatePair::IdEn);
@@ -936,11 +960,9 @@ fn model_change_mid_run_drops_reply_without_caching() {
     configure(home.path(), &json!({ "wait_file": release_file }));
 
     let quotes = vec!["Merah.".to_string()];
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let first = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(first.hits.is_empty());
+    assert_eq!(first.pending, vec![quote_key("Merah.")]);
     let _ = translator.service(true);
     let _pid = wait_for_pid(home.path());
 
@@ -948,9 +970,11 @@ fn model_change_mid_run_drops_reply_without_caching() {
     write_ready_pair_with_sha(home.path(), TranslatePair::IdEn, NEW_SHA);
     fs::write(&release_file, b"go").expect("write release file");
 
+    let mut stale_msgs = Vec::new();
     wait_until("stale run finishes and drops reply", || {
         let msgs = translator.service(true);
         assert!(quote_translated_items(&msgs).is_empty());
+        stale_msgs.extend(msgs);
         let logs = translator.drain_log();
         if logs.is_empty() {
             false
@@ -962,6 +986,10 @@ fn model_change_mid_run_drops_reply_without_caching() {
             true
         }
     });
+    assert_eq!(
+        quote_settled_items(&stale_msgs),
+        vec![("c1", quote_key("Merah.").as_str())]
+    );
 
     let mut cache = QuoteCache::new(home.path().to_path_buf());
     assert_eq!(
@@ -975,11 +1003,9 @@ fn model_change_mid_run_drops_reply_without_caching() {
 
     // Next detail open re-queues and caches under NEW_SHA.
     clear_config(home.path());
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &quotes)
-            .is_empty()
-    );
+    let retry = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(retry.hits.is_empty());
+    assert_eq!(retry.pending, vec![quote_key("Merah.")]);
     let msgs = service_until(&mut translator, true, "translated under new sha", |msgs| {
         !quote_translated_items(msgs).is_empty()
     });
@@ -1028,11 +1054,9 @@ fn launch_error_paces_retries_and_recovers_after_backoff() {
         Translator::with_launch_retry(home.path().to_path_buf(), Duration::from_millis(300));
     assert_eq!(translator.status().failed, None);
 
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert_eq!(detail.pending, vec![quote_key("Merah.")]);
 
     let mut launch_logs = Vec::new();
     for _ in 0..20 {
@@ -1088,11 +1112,9 @@ fn launch_error_backoff_clears_early_when_check_sees_changed_cli() {
     write_unlaunchable_cli(home.path());
 
     let mut translator = GuardedTranslator::new(home.path().to_path_buf());
-    assert!(
-        translator
-            .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-            .is_empty()
-    );
+    let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+    assert!(detail.hits.is_empty());
+    assert_eq!(detail.pending, vec![quote_key("Merah.")]);
 
     let mut launch_logs = Vec::new();
     for _ in 0..20 {
@@ -1140,4 +1162,77 @@ fn launch_error_backoff_clears_early_when_check_sees_changed_cli() {
             true
         }
     });
+}
+
+#[test]
+fn turning_off_drops_in_memory_cache_and_reloads_on_reenable() {
+    let home = TempDir::new().expect("temp home");
+    seed_cli(home.path());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+    run_install(&mut translator, TranslatePair::IdEn);
+
+    let quotes = vec!["Merah.".to_string()];
+    let miss = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(miss.hits.is_empty());
+    assert_eq!(miss.pending, vec![quote_key("Merah.")]);
+    service_until(&mut translator, true, "QuoteTranslated", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    assert_eq!(translator.cache_loaded_targets(), 1);
+
+    let _ = translator.service_off();
+    assert_eq!(translator.cache_loaded_targets(), 0);
+
+    // Re-enabling lazily reloads from disk without spawning another run.
+    let hit = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert_eq!(hit.hits.len(), 1);
+    assert!(hit.pending.is_empty());
+    assert_eq!(translator.cache_loaded_targets(), 1);
+    assert!(!translator.has_job());
+    assert_eq!(translator.pending_len(), 0);
+}
+
+#[test]
+fn wrong_from_reply_is_treated_as_failed_and_settles_quote() {
+    let home = TempDir::new().expect("temp home");
+    seed_cli(home.path());
+    let mut translator = GuardedTranslator::new(home.path().to_path_buf());
+    run_install(&mut translator, TranslatePair::IdEn);
+
+    configure(home.path(), &json!({ "wrong_from": true }));
+    let quotes = vec!["Salah arah.".to_string()];
+    let miss = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(miss.hits.is_empty());
+    assert_eq!(miss.pending, vec![quote_key("Salah arah.")]);
+
+    let mut all_msgs = Vec::new();
+    wait_until("wrong_from run log line", || {
+        let msgs = translator.service(true);
+        assert!(quote_translated_items(&msgs).is_empty());
+        all_msgs.extend(msgs);
+        let logs = translator.drain_log();
+        if logs.is_empty() {
+            false
+        } else {
+            assert_eq!(
+                logs,
+                vec!["translate run: 0 ok, 0 original, 1 failed, 0 dropped"]
+            );
+            true
+        }
+    });
+    assert_eq!(
+        quote_settled_items(&all_msgs),
+        vec![("c1", quote_key("Salah arah.").as_str())]
+    );
+
+    // Not cached: clearing wrong_from lets the next detail open queue and translate it.
+    clear_config(home.path());
+    let retry = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+    assert!(retry.hits.is_empty());
+    assert_eq!(retry.pending, vec![quote_key("Salah arah.")]);
+    let msgs = service_until(&mut translator, true, "recovered translation", |msgs| {
+        !quote_translated_items(msgs).is_empty()
+    });
+    assert_eq!(quote_translated_items(&msgs).len(), 1);
 }

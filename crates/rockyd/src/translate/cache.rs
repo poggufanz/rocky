@@ -118,6 +118,11 @@ impl QuoteCache {
         self.id = None;
     }
 
+    #[doc(hidden)]
+    pub fn loaded_targets(&self) -> usize {
+        usize::from(self.en.is_some()) + usize::from(self.id.is_some())
+    }
+
     fn slot_mut(&mut self, to: QuoteLang) -> &mut Option<HashMap<String, Cached>> {
         match to {
             QuoteLang::En => &mut self.en,

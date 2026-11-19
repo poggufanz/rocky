@@ -702,12 +702,12 @@ fn attach_translations(
         return;
     }
     let card_id = card.card_id.clone();
-    let hits = translator.on_detail(enabled, &card_id, to, &quotes);
-    if hits.is_empty() {
+    let detail = translator.on_detail(enabled, &card_id, to, &quotes);
+    if detail.hits.is_empty() && detail.pending.is_empty() {
         return;
     }
     let mut overflow = Vec::new();
-    let mut iter = hits.into_iter();
+    let mut iter = detail.hits.into_iter();
     while let Some(item) = iter.next() {
         let ServerMsg::CardDetail { translations, .. } = msg else {
             unreachable!();
@@ -719,6 +719,19 @@ fn attach_translations(
             };
             overflow.push(translations.pop().expect("just pushed"));
             overflow.extend(iter);
+            break;
+        }
+    }
+    for key in detail.pending {
+        let ServerMsg::CardDetail { pending, .. } = msg else {
+            unreachable!();
+        };
+        pending.push(key);
+        if encode(msg).len() > LINE_CAP {
+            let ServerMsg::CardDetail { pending, .. } = msg else {
+                unreachable!();
+            };
+            pending.pop();
             break;
         }
     }
@@ -3133,7 +3146,12 @@ mod tests {
         shared.lock().unwrap().cards.append(&card).unwrap();
 
         let (reply, _) = request_card_detail(&home, &shared, 1, "card-tr-hit", Some(QuoteLang::En));
-        let ServerMsg::CardDetail { translations, .. } = reply else {
+        let ServerMsg::CardDetail {
+            translations,
+            pending,
+            ..
+        } = reply
+        else {
             panic!("expected CardDetail, got {reply:?}");
         };
         assert_eq!(
@@ -3144,6 +3162,7 @@ mod tests {
                 text: "Red.".to_string(),
             }]
         );
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -3171,10 +3190,16 @@ mod tests {
         shared.lock().unwrap().cards.append(&card).unwrap();
 
         let (reply, _) = request_card_detail(&home, &shared, 2, "card-tr-off", Some(QuoteLang::En));
-        let ServerMsg::CardDetail { translations, .. } = reply else {
+        let ServerMsg::CardDetail {
+            translations,
+            pending,
+            ..
+        } = reply
+        else {
             panic!("expected CardDetail, got {reply:?}");
         };
         assert!(translations.is_empty());
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -3246,12 +3271,97 @@ mod tests {
             translations.len()
         );
 
+        // Overflow emits no earlier than the next loop pass.
+        assert!(translator.service(true).is_empty());
         let pushed = translator.service(true);
         let quote_pushes: Vec<_> = pushed
             .into_iter()
             .filter(|m| matches!(m, ServerMsg::QuoteTranslated { card_id, .. } if card_id == "card-tr-big"))
             .collect();
         assert_eq!(translations.len() + quote_pushes.len(), 10);
+    }
+
+    #[test]
+    fn card_detail_reply_carries_pending_keys_and_respects_line_cap() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::pipe::{LINE_CAP, encode};
+        use rocky_proto::translate::{QuoteLang, quote_key};
+
+        let sha = "e".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+        let mut card = make_test_card(&home, "card-tr-miss");
+        card.root.clear();
+        card.blocks[0].recorded = false;
+        card.blocks[0].before = None;
+        card.blocks[0].after = None;
+        card.blocks[0].quote = Some(Quote {
+            text: "Belum ada di cache.".to_string(),
+            shared: false,
+        });
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, _) =
+            request_card_detail(&home, &shared, 4, "card-tr-miss", Some(QuoteLang::En));
+        let ServerMsg::CardDetail {
+            translations,
+            pending,
+            ..
+        } = reply
+        else {
+            panic!("expected CardDetail, got {reply:?}");
+        };
+        assert!(translations.is_empty());
+        assert_eq!(pending, vec![quote_key("Belum ada di cache.")]);
+
+        // Pending keys that would push the reply past LINE_CAP are dropped cleanly.
+        let mut tight = make_test_card(&home, "card-tr-tight");
+        tight.root.clear();
+        tight.blocks.clear();
+        for i in 0..10u32 {
+            tight.blocks.push(Block {
+                seq: i + 1,
+                path: format!("src/p{i}.rs"),
+                symbol: None,
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec![format!("tu-p-{i}")],
+                bash: None,
+                before: None,
+                after: None,
+                recorded: false,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+                quote: Some(Quote {
+                    text: format!("pending-quote-{i}"),
+                    shared: false,
+                }),
+            });
+        }
+        let base_msg =
+            rockyd::cards::detail::build_card_detail_with(1, &tight, |_| ObjectRead::Missing);
+        let base_len = encode(&base_msg).len();
+        let pad = LINE_CAP.saturating_sub(base_len + 200);
+        tight.prompt = "p".repeat(pad);
+        shared.lock().unwrap().cards.append(&tight).unwrap();
+
+        let (tight_reply, _) =
+            request_card_detail(&home, &shared, 5, "card-tr-tight", Some(QuoteLang::En));
+        assert!(encode(&tight_reply).len() <= LINE_CAP);
+        let ServerMsg::CardDetail { pending, .. } = tight_reply else {
+            panic!("expected CardDetail, got {tight_reply:?}");
+        };
+        assert!(
+            !pending.is_empty() && pending.len() < 10,
+            "expected partial pending keys under LINE_CAP, got {}",
+            pending.len()
+        );
     }
 
     #[test]

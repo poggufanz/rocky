@@ -276,6 +276,7 @@ pub fn build_card_detail_unowned(id: u64, card: &Card) -> ServerMsg {
         card: reply_card,
         snippets: Vec::new(),
         translations: Vec::new(),
+        pending: Vec::new(),
     };
     if shrink_card_msg(&mut msg) {
         msg
@@ -430,6 +431,7 @@ where
         card: reply_card,
         snippets,
         translations: Vec::new(),
+        pending: Vec::new(),
     };
     if shrink_card_msg(&mut msg) {
         msg

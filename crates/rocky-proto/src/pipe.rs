@@ -445,10 +445,16 @@ pub enum ServerMsg {
         snippets: Vec<BlockSnippet>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         translations: Vec<QuoteTranslation>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending: Vec<String>,
     },
     QuoteTranslated {
         card_id: String,
         item: QuoteTranslation,
+    },
+    QuoteSettled {
+        card_id: String,
+        quote_key: String,
     },
     Translate {
         status: TranslateStatus,
@@ -1161,6 +1167,7 @@ mod tests {
                     ],
                 }],
                 translations: Vec::new(),
+                pending: Vec::new(),
             },
             ServerMsg::BlockDiff {
                 id: 13,
@@ -1346,7 +1353,7 @@ mod tests {
             assert_eq!(&decode::<ClientMsg>(wire.trim_end()).unwrap(), msg);
         }
 
-        // Old ServerMsg::CardDetail without translations parses with empty Vec.
+        // Old ServerMsg::CardDetail without translations or pending parses with empty Vecs.
         let card_json = serde_json::to_string(&sample_card).unwrap();
         let old_detail =
             format!(r#"{{"v":4,"type":"card_detail","id":12,"card":{card_json},"snippets":[]}}"#);
@@ -1357,7 +1364,20 @@ mod tests {
                 card: sample_card.clone(),
                 snippets: Vec::new(),
                 translations: Vec::new(),
+                pending: Vec::new(),
             }
+        );
+
+        let encoded_empty_detail = encode(&ServerMsg::CardDetail {
+            id: 12,
+            card: sample_card.clone(),
+            snippets: Vec::new(),
+            translations: Vec::new(),
+            pending: Vec::new(),
+        });
+        assert!(
+            !encoded_empty_detail.contains("\"pending\""),
+            "unexpected pending key: {encoded_empty_detail}"
         );
 
         // Old ServerMsg::Snapshot without translate parses with TranslateStatus::default().
@@ -1388,10 +1408,15 @@ mod tests {
                 card: sample_card,
                 snippets: Vec::new(),
                 translations: vec![qt.clone()],
+                pending: vec!["cafebabe".into()],
             },
             ServerMsg::QuoteTranslated {
                 card_id: "c1".into(),
                 item: qt,
+            },
+            ServerMsg::QuoteSettled {
+                card_id: "c1".into(),
+                quote_key: "cafebabe".into(),
             },
             ServerMsg::Translate {
                 status: status.clone(),

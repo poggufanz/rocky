@@ -76,6 +76,12 @@ enum ActiveJob {
     Install(ActiveInstall),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DetailTranslations {
+    pub hits: Vec<QuoteTranslation>,
+    pub pending: Vec<String>,
+}
+
 pub struct Translator {
     home: PathBuf,
     cache: QuoteCache,
@@ -88,7 +94,8 @@ pub struct Translator {
     next_launch_at: Option<Instant>,
     queue: VecDeque<PendingQuote>,
     in_flight: HashMap<String, InFlightQuote>,
-    pushed_later: Vec<(String, QuoteTranslation)>,
+    staged_later: Vec<ServerMsg>,
+    ready_later: Vec<ServerMsg>,
     job: Option<ActiveJob>,
     log_lines: Vec<String>,
 }
@@ -111,13 +118,29 @@ impl Translator {
             next_launch_at: None,
             queue: VecDeque::new(),
             in_flight: HashMap::new(),
-            pushed_later: Vec::new(),
+            staged_later: Vec::new(),
+            ready_later: Vec::new(),
             job: None,
             log_lines: Vec::new(),
         };
         translator.recheck_from_disk();
         translator.last_emitted_status = translator.status.clone();
         translator
+    }
+
+    #[doc(hidden)]
+    pub fn has_job(&self) -> bool {
+        self.job.is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn pending_len(&self) -> usize {
+        self.queue.len() + self.in_flight.len()
+    }
+
+    #[doc(hidden)]
+    pub fn cache_loaded_targets(&self) -> usize {
+        self.cache.loaded_targets()
     }
 
     pub fn status(&self) -> &TranslateStatus {
@@ -136,17 +159,17 @@ impl Translator {
         card_id: &str,
         to: QuoteLang,
         quotes: &[String],
-    ) -> Vec<QuoteTranslation> {
+    ) -> DetailTranslations {
         if !enabled {
-            return Vec::new();
+            return DetailTranslations::default();
         }
         let pair = TranslatePair::to(to);
         let Some(sha) = marker::model_sha(&self.home, pair) else {
-            return Vec::new();
+            return DetailTranslations::default();
         };
 
         let mut seen = HashSet::with_capacity(quotes.len());
-        let mut hits = Vec::new();
+        let mut detail = DetailTranslations::default();
         for text in quotes {
             if !seen.insert(text.as_str()) {
                 continue;
@@ -157,22 +180,47 @@ impl Translator {
                     from,
                     text: translated,
                 }) => {
-                    hits.push(QuoteTranslation {
+                    detail.hits.push(QuoteTranslation {
                         quote_key: quote_key(text),
                         from,
                         text: translated,
                     });
                 }
                 Some(Cached::Original) => {}
-                None => self.enqueue_miss(card_id, to, &sha, text),
+                None => {
+                    let qkey = quote_key(text);
+                    if let Some(evicted) = self.enqueue_miss(card_id, to, &sha, text, &qkey) {
+                        let removed_from_current = detail
+                            .pending
+                            .iter()
+                            .position(|k| k == &evicted.quote_key)
+                            .map(|idx| {
+                                detail.pending.remove(idx);
+                            })
+                            .is_some();
+                        for waiting_card in evicted.cards {
+                            if removed_from_current && waiting_card == card_id {
+                                continue;
+                            }
+                            self.staged_later.push(ServerMsg::QuoteSettled {
+                                card_id: waiting_card,
+                                quote_key: evicted.quote_key.clone(),
+                            });
+                        }
+                    }
+                    detail.pending.push(qkey);
+                }
             }
         }
-        hits
+        detail
     }
 
     pub fn push_later(&mut self, card_id: &str, items: Vec<QuoteTranslation>) {
         for item in items {
-            self.pushed_later.push((card_id.to_string(), item));
+            self.staged_later.push(ServerMsg::QuoteTranslated {
+                card_id: card_id.to_string(),
+                item,
+            });
         }
     }
 
@@ -217,10 +265,13 @@ impl Translator {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(_) => return Err("remove failed"),
         }
+        // Desk drops all translation state on remove/off, so queued/in-flight quotes clear
+        // without emitting QuoteSettled.
         self.cache.clear();
         self.queue.clear();
         self.in_flight.clear();
-        self.pushed_later.clear();
+        self.staged_later.clear();
+        self.ready_later.clear();
         self.install_failure = None;
         self.next_launch_at = None;
         self.recheck_from_disk();
@@ -234,9 +285,14 @@ impl Translator {
             return out;
         }
         self.emit_status_if_changed(&mut out);
+        self.drain_ready_later(&mut out);
         self.drain_active_job(&mut out);
-        self.drain_pushed_later(&mut out);
         self.maybe_start_run(&mut out);
+        // Promote staged overflow/eviction messages so they emit no earlier than the next loop
+        // pass, giving the relay thread time to flush the CardDetail reply first. Ordering across
+        // separate channels is best-effort, so the desk must accept pushes for a card whose detail
+        // request is in flight.
+        self.ready_later.append(&mut self.staged_later);
         self.emit_status_if_changed(&mut out);
         out
     }
@@ -272,7 +328,14 @@ impl Translator {
         self.refresh_failed();
     }
 
-    fn enqueue_miss(&mut self, card_id: &str, to: QuoteLang, current_sha: &str, text: &str) {
+    fn enqueue_miss(
+        &mut self,
+        card_id: &str,
+        to: QuoteLang,
+        current_sha: &str,
+        text: &str,
+        qkey: &str,
+    ) -> Option<PendingQuote> {
         let in_flight_matches_sha = match &self.job {
             Some(ActiveJob::Run(run)) => run.shas.get(to) == Some(current_sha),
             _ => false,
@@ -281,7 +344,7 @@ impl Translator {
             let key = cache::cache_key(current_sha, to, text);
             if let Some(entry) = self.in_flight.get_mut(&key) {
                 attach_card(&mut entry.cards, card_id);
-                return;
+                return None;
             }
         }
         if let Some(entry) = self
@@ -290,24 +353,29 @@ impl Translator {
             .find(|entry| entry.to == to && entry.text == text)
         {
             attach_card(&mut entry.cards, card_id);
-            return;
+            return None;
         }
-        if self.queue.len() >= MAX_PENDING {
-            self.queue.pop_front();
-        }
+        let evicted = (self.queue.len() >= MAX_PENDING)
+            .then(|| self.queue.pop_front())
+            .flatten();
         self.queue.push_back(PendingQuote {
-            quote_key: quote_key(text),
+            quote_key: qkey.to_string(),
             to,
             text: text.to_string(),
             cards: vec![card_id.to_string()],
         });
+        evicted
     }
 
     fn turn_off(&mut self, out: &mut Vec<ServerMsg>) {
+        // Desk drops all translation state when off, so queued/in-flight quotes are cleared
+        // without emitting QuoteSettled.
         self.job = None;
         self.queue.clear();
         self.in_flight.clear();
-        self.pushed_later.clear();
+        self.staged_later.clear();
+        self.ready_later.clear();
+        self.cache.clear();
         self.status.installing = None;
         self.emit_status_if_changed(out);
     }
@@ -334,7 +402,9 @@ impl Translator {
                 RunEvent::Reply(reply) => self.handle_run_reply(run, reply, out),
                 RunEvent::Done => {
                     let dropped = run.dropped + self.in_flight.len();
-                    self.in_flight.clear();
+                    for (_, entry) in self.in_flight.drain() {
+                        emit_settled(out, entry.cards, &entry.quote_key);
+                    }
                     self.log_lines.push(format!(
                         "translate run: {} ok, {} original, {} failed, {} dropped",
                         run.ok, run.original, run.failed, dropped
@@ -358,8 +428,14 @@ impl Translator {
                 let Some(entry) = self.in_flight.remove(&key) else {
                     return;
                 };
+                if from != entry.to.other() {
+                    run.failed += 1;
+                    emit_settled(out, entry.cards, &entry.quote_key);
+                    return;
+                }
                 let Some(ckey) = self.valid_reply_cache_key(run, entry.to, &entry.text) else {
                     run.dropped += 1;
+                    emit_settled(out, entry.cards, &entry.quote_key);
                     return;
                 };
                 run.ok += 1;
@@ -388,14 +464,17 @@ impl Translator {
                 };
                 let Some(ckey) = self.valid_reply_cache_key(run, entry.to, &entry.text) else {
                     run.dropped += 1;
+                    emit_settled(out, entry.cards, &entry.quote_key);
                     return;
                 };
                 run.original += 1;
                 let _ = self.cache.put(entry.to, &ckey, &Cached::Original);
+                emit_settled(out, entry.cards, &entry.quote_key);
             }
             RunReply::Failed { key } => {
-                if self.in_flight.remove(&key).is_some() {
+                if let Some(entry) = self.in_flight.remove(&key) {
                     run.failed += 1;
+                    emit_settled(out, entry.cards, &entry.quote_key);
                 }
             }
         }
@@ -444,10 +523,8 @@ impl Translator {
         false
     }
 
-    fn drain_pushed_later(&mut self, out: &mut Vec<ServerMsg>) {
-        for (card_id, item) in self.pushed_later.drain(..) {
-            out.push(ServerMsg::QuoteTranslated { card_id, item });
-        }
+    fn drain_ready_later(&mut self, out: &mut Vec<ServerMsg>) {
+        out.append(&mut self.ready_later);
     }
 
     fn maybe_start_run(&mut self, out: &mut Vec<ServerMsg>) {
@@ -465,6 +542,7 @@ impl Translator {
             self.last_cli = None;
             self.engine_failed = true;
             self.refresh_failed();
+            self.next_launch_at = Some(Instant::now() + self.launch_retry);
             return;
         };
         self.last_cli = Some(cli.clone());
@@ -502,6 +580,7 @@ impl Translator {
                 }
             };
             let Some(sha) = sha else {
+                emit_settled(out, item.cards, &item.quote_key);
                 continue;
             };
             let key = cache::cache_key(sha, item.to, &item.text);
@@ -518,7 +597,9 @@ impl Translator {
                         });
                     }
                 }
-                Some(Cached::Original) => {}
+                Some(Cached::Original) => {
+                    emit_settled(out, item.cards, &item.quote_key);
+                }
                 None => {
                     requests.push(RunRequest {
                         key: key.clone(),
@@ -589,6 +670,15 @@ fn read_usable_cli(home: &Path) -> Option<CliRecord> {
         .then_some(cli)
 }
 
+fn emit_settled(out: &mut Vec<ServerMsg>, cards: Vec<String>, quote_key: &str) {
+    for card_id in cards {
+        out.push(ServerMsg::QuoteSettled {
+            card_id,
+            quote_key: quote_key.to_string(),
+        });
+    }
+}
+
 fn attach_card(cards: &mut Vec<String>, card_id: &str) {
     if !cards.iter().any(|existing| existing == card_id) {
         cards.push(card_id.to_string());
@@ -655,12 +745,49 @@ mod tests {
             translator.queue.back().unwrap().text,
             format!("quote-{}", MAX_PENDING + 2)
         );
+        // Evicted quotes settle on the next pass rather than silently vanishing.
+        assert!(translator.service(true).is_empty());
+        let settled = translator.service(true);
+        assert_eq!(
+            settled,
+            vec![
+                ServerMsg::QuoteSettled {
+                    card_id: "c1".to_string(),
+                    quote_key: quote_key("quote-0"),
+                },
+                ServerMsg::QuoteSettled {
+                    card_id: "c1".to_string(),
+                    quote_key: quote_key("quote-1"),
+                },
+                ServerMsg::QuoteSettled {
+                    card_id: "c1".to_string(),
+                    quote_key: quote_key("quote-2"),
+                },
+            ]
+        );
 
         // Attaching another card to an already-pending quote does not evict anything.
         translator.on_detail(true, "c2", QuoteLang::En, &["quote-3".to_string()]);
         assert_eq!(translator.queue.len(), MAX_PENDING);
         assert_eq!(translator.queue.front().unwrap().text, "quote-3");
         assert_eq!(translator.queue.front().unwrap().cards, vec!["c1", "c2"]);
+    }
+
+    #[test]
+    fn single_detail_over_max_pending_drops_evicted_from_pending() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+        let mut translator = Translator::new(home.path().to_path_buf());
+
+        let quotes: Vec<String> = (0..(MAX_PENDING + 2))
+            .map(|i| format!("single-{i}"))
+            .collect();
+        let detail = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+        assert!(detail.hits.is_empty());
+        assert_eq!(detail.pending.len(), MAX_PENDING);
+        assert_eq!(detail.pending[0], quote_key("single-2"));
+        assert!(translator.service(true).is_empty());
+        assert!(translator.service(true).is_empty());
     }
 
     #[test]
@@ -675,11 +802,9 @@ mod tests {
             "other".to_string(),
             "dup".to_string(),
         ];
-        assert!(
-            translator
-                .on_detail(true, "c1", QuoteLang::En, &quotes)
-                .is_empty()
-        );
+        let detail = translator.on_detail(true, "c1", QuoteLang::En, &quotes);
+        assert!(detail.hits.is_empty());
+        assert_eq!(detail.pending, vec![quote_key("dup"), quote_key("other")]);
         assert_eq!(translator.queue.len(), 2);
         assert_eq!(translator.queue[0].text, "dup");
         assert_eq!(translator.queue[0].cards, vec!["c1"]);
@@ -740,18 +865,26 @@ mod tests {
         write_ready_id_en(home.path());
         let mut translator = Translator::new(home.path().to_path_buf());
 
-        assert!(
-            translator
-                .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-                .is_empty()
-        );
+        let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+        assert!(detail.hits.is_empty());
+        assert_eq!(detail.pending, vec![quote_key("Merah.")]);
         let msgs = translator.service(true);
         assert!(msgs.is_empty());
         assert_eq!(translator.queue.len(), 1);
         assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
+        assert!(translator.next_launch_at.is_some());
 
-        // Even when cli.json points to a non-executable file and spawn fails, queue stays intact.
+        // While missing CLI is in cooldown, writing cli.json without check() does not re-read on every pass.
         write_valid_cli(home.path());
+        for _ in 0..10 {
+            assert!(translator.service(true).is_empty());
+        }
+        assert!(translator.drain_log().is_empty());
+        assert_eq!(translator.queue.len(), 1);
+
+        // check() detects the new CLI record, clears cooldown, and lets the next pass try launching.
+        let updated = translator.check().expect("cli appeared");
+        assert_eq!(updated.failed, None);
         let _ = translator.service(true);
         assert_eq!(translator.queue.len(), 1);
         assert_eq!(translator.status().failed, Some(TranslateFailure::Engine));
@@ -779,11 +912,9 @@ mod tests {
         write_valid_cli(home.path());
         let mut translator = Translator::new(home.path().to_path_buf());
 
-        assert!(
-            translator
-                .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-                .is_empty()
-        );
+        let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+        assert!(detail.hits.is_empty());
+        assert_eq!(detail.pending, vec![quote_key("Merah.")]);
 
         for _ in 0..20 {
             let _ = translator.service(true);
@@ -819,11 +950,9 @@ mod tests {
         let mut translator =
             Translator::with_launch_retry(home.path().to_path_buf(), Duration::from_millis(60));
 
-        assert!(
-            translator
-                .on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()])
-                .is_empty()
-        );
+        let detail = translator.on_detail(true, "c1", QuoteLang::En, &["Merah.".to_string()]);
+        assert!(detail.hits.is_empty());
+        assert_eq!(detail.pending, vec![quote_key("Merah.")]);
         let _ = translator.service(true);
         assert_eq!(translator.drain_log().len(), 1);
 

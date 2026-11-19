@@ -542,6 +542,7 @@ fn desk_ignores_card_messages() {
                 }],
             }],
             translations: Vec::new(),
+            pending: Vec::new(),
         })
         .is_empty()
     );
