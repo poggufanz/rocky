@@ -38,16 +38,29 @@ pub fn engine_dir(home: &Path) -> PathBuf {
 }
 
 pub fn model_dir(home: &Path, pair: TranslatePair) -> PathBuf {
-    translate_dir(home).join("models").join(pair.as_str())
+    models_dir(home).join(pair.as_str())
 }
 
 pub fn cache_dir(home: &Path) -> PathBuf {
     translate_dir(home).join("cache")
 }
 
+fn models_dir(home: &Path) -> PathBuf {
+    translate_dir(home).join("models")
+}
+
 pub fn read_marker(dir: &Path) -> Option<Marker> {
+    if !is_real_dir_path(dir) {
+        return None;
+    }
     let bytes = read_marker_bytes(&dir.join(MARKER_FILE))?;
-    let raw: RawMarker = serde_json::from_slice(&bytes).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let obj = value.as_object()?;
+    let files = obj.get("files")?.as_array()?;
+    if files.is_empty() || !files.iter().all(|entry| entry.is_object()) {
+        return None;
+    }
+    let raw: RawMarker = serde_json::from_value(value).ok()?;
     if raw.v != MARKER_VERSION || raw.files.is_empty() {
         return None;
     }
@@ -55,8 +68,8 @@ pub fn read_marker(dir: &Path) -> Option<Marker> {
         if !is_plain_file_name(&file.name) {
             return None;
         }
-        let meta = fs::metadata(dir.join(&file.name)).ok()?;
-        if !meta.is_file() || meta.len() != file.size {
+        let meta = fs::symlink_metadata(dir.join(&file.name)).ok()?;
+        if !is_real_file(&meta) || meta.len() != file.size {
             return None;
         }
     }
@@ -66,7 +79,13 @@ pub fn read_marker(dir: &Path) -> Option<Marker> {
 }
 
 pub fn ready_pairs(home: &Path) -> Vec<TranslatePair> {
+    if !is_real_dir_path(&translate_dir(home)) {
+        return Vec::new();
+    }
     if read_marker(&engine_dir(home)).is_none() {
+        return Vec::new();
+    }
+    if !is_real_dir_path(&models_dir(home)) {
         return Vec::new();
     }
     [TranslatePair::IdEn, TranslatePair::EnId]
@@ -76,7 +95,13 @@ pub fn ready_pairs(home: &Path) -> Vec<TranslatePair> {
 }
 
 pub fn model_sha(home: &Path, pair: TranslatePair) -> Option<String> {
+    if !is_real_dir_path(&translate_dir(home)) {
+        return None;
+    }
     read_marker(&engine_dir(home))?;
+    if !is_real_dir_path(&models_dir(home)) {
+        return None;
+    }
     read_pair_sha(home, pair)
 }
 
@@ -86,15 +111,65 @@ fn read_pair_sha(home: &Path, pair: TranslatePair) -> Option<String> {
 }
 
 fn read_marker_bytes(path: &Path) -> Option<Vec<u8>> {
-    let file = fs::File::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !is_real_file(&meta) {
         return None;
     }
+
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    let file = opts.open(path).ok()?;
+    let opened = file.metadata().ok()?;
+    if !is_real_file(&opened) {
+        return None;
+    }
+
     let mut bytes = Vec::new();
     file.take((MAX_MARKER_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .ok()?;
     (bytes.len() <= MAX_MARKER_BYTES).then_some(bytes)
+}
+
+fn is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_real_dir(meta: &fs::Metadata) -> bool {
+    !is_symlink_or_reparse(meta) && meta.file_type().is_dir()
+}
+
+fn is_real_file(meta: &fs::Metadata) -> bool {
+    !is_symlink_or_reparse(meta) && meta.file_type().is_file()
+}
+
+fn is_real_dir_path(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| is_real_dir(&meta))
+        .unwrap_or(false)
 }
 
 fn is_plain_file_name(name: &str) -> bool {
@@ -293,6 +368,11 @@ mod tests {
             &model_dir(h, TranslatePair::IdEn).join("a").join("b"),
             payload,
         );
+        #[cfg(unix)]
+        {
+            write_file(&engine_dir(h).join(r"a\b"), payload);
+            write_file(&model_dir(h, TranslatePair::IdEn).join(r"a\b"), payload);
+        }
 
         let bad_names = ["../x", "a/b", r"a\b", "..", ".", "", "a\0b"];
         for bad in bad_names {
@@ -385,5 +465,305 @@ mod tests {
         // Pair is not ready if engine marker disappears.
         fs::remove_file(engine_dir(h).join("installed.json")).unwrap();
         assert_eq!(model_sha(h, TranslatePair::IdEn), None);
+    }
+
+    #[test]
+    fn array_shaped_marker_is_not_ready() {
+        let home = TempDir::new().unwrap();
+        let h = home.path();
+        let edir = engine_dir(h);
+        write_file(&edir.join("bergamot.js"), b"console.log(1);");
+        write_file(&edir.join("bergamot.wasm"), b"wasm-bytes");
+        let array_engine = serde_json::json!([
+            1,
+            null,
+            [
+                { "name": "bergamot.js", "size": 15 },
+                { "name": "bergamot.wasm", "size": 10 },
+            ]
+        ]);
+        write_file(
+            &edir.join("installed.json"),
+            array_engine.to_string().as_bytes(),
+        );
+        assert_eq!(read_marker(&edir), None);
+        assert!(ready_pairs(h).is_empty());
+
+        write_engine_marker(h);
+        let mdir = model_dir(h, TranslatePair::IdEn);
+        write_file(&mdir.join("model.bin"), b"model-payload");
+        write_file(&mdir.join("lex.bin"), b"lex");
+        write_file(&mdir.join("vocab.spm"), b"vocab");
+        let array_pair = serde_json::json!([
+            1,
+            SHA_A,
+            [
+                { "name": "model.bin", "size": 13 },
+                { "name": "lex.bin", "size": 3 },
+                { "name": "vocab.spm", "size": 5 },
+            ]
+        ]);
+        write_file(
+            &mdir.join("installed.json"),
+            array_pair.to_string().as_bytes(),
+        );
+        assert_eq!(read_marker(&mdir), None);
+        assert!(ready_pairs(h).is_empty());
+        assert_eq!(model_sha(h, TranslatePair::IdEn), None);
+    }
+
+    #[test]
+    fn array_shaped_file_entry_is_not_ready() {
+        let home = TempDir::new().unwrap();
+        let h = home.path();
+        let edir = engine_dir(h);
+        write_file(&edir.join("bergamot.js"), b"console.log(1);");
+        write_file(&edir.join("bergamot.wasm"), b"wasm-bytes");
+        let engine_with_array_files = serde_json::json!({
+            "v": 1,
+            "files": [
+                ["bergamot.js", 15],
+                ["bergamot.wasm", 10],
+            ]
+        });
+        write_file(
+            &edir.join("installed.json"),
+            engine_with_array_files.to_string().as_bytes(),
+        );
+        assert_eq!(read_marker(&edir), None);
+        assert!(ready_pairs(h).is_empty());
+
+        write_engine_marker(h);
+        let mdir = model_dir(h, TranslatePair::IdEn);
+        write_file(&mdir.join("model.bin"), b"model-payload");
+        write_file(&mdir.join("lex.bin"), b"lex");
+        write_file(&mdir.join("vocab.spm"), b"vocab");
+        let pair_with_array_files = serde_json::json!({
+            "v": 1,
+            "model_sha256": SHA_A,
+            "files": [
+                ["model.bin", 13],
+                ["lex.bin", 3],
+                ["vocab.spm", 5],
+            ]
+        });
+        write_file(
+            &mdir.join("installed.json"),
+            pair_with_array_files.to_string().as_bytes(),
+        );
+        assert_eq!(read_marker(&mdir), None);
+        assert!(ready_pairs(h).is_empty());
+        assert_eq!(model_sha(h, TranslatePair::IdEn), None);
+    }
+
+    fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link)
+        }
+    }
+
+    #[test]
+    fn symlinked_file_or_marker_is_not_ready() {
+        let home = TempDir::new().unwrap();
+        let h = home.path();
+        write_engine_marker(h);
+        write_pair_marker(h, TranslatePair::IdEn, SHA_A);
+        assert_eq!(ready_pairs(h), vec![TranslatePair::IdEn]);
+
+        // Replace listed file with a symlink to a same-size file outside the marker dir.
+        let mdir = model_dir(h, TranslatePair::IdEn);
+        let outside_model = h.join("outside-model.bin");
+        write_file(&outside_model, b"model-payload");
+        fs::remove_file(mdir.join("model.bin")).unwrap();
+        if let Err(err) = create_file_symlink(&outside_model, &mdir.join("model.bin")) {
+            #[cfg(windows)]
+            {
+                eprintln!("skipping file symlink assertion: cannot create symlink: {err}");
+                return;
+            }
+            #[cfg(not(windows))]
+            panic!("failed to create file symlink: {err}");
+        }
+        assert_eq!(read_marker(&mdir), None);
+        assert!(ready_pairs(h).is_empty());
+        assert_eq!(model_sha(h, TranslatePair::IdEn), None);
+
+        // Restore real model.bin and replace installed.json with a symlink to an outside file.
+        fs::remove_file(mdir.join("model.bin")).unwrap();
+        write_pair_marker(h, TranslatePair::IdEn, SHA_A);
+        assert_eq!(ready_pairs(h), vec![TranslatePair::IdEn]);
+
+        let outside_marker = h.join("outside-installed.json");
+        let existing_json = fs::read(mdir.join("installed.json")).unwrap();
+        write_file(&outside_marker, &existing_json);
+        fs::remove_file(mdir.join("installed.json")).unwrap();
+        create_file_symlink(&outside_marker, &mdir.join("installed.json")).unwrap();
+        assert_eq!(read_marker(&mdir), None);
+        assert!(ready_pairs(h).is_empty());
+        assert_eq!(model_sha(h, TranslatePair::IdEn), None);
+    }
+
+    #[test]
+    fn symlinked_directory_chain_is_not_ready() {
+        let outside = TempDir::new().unwrap();
+        write_engine_marker(outside.path());
+        write_pair_marker(outside.path(), TranslatePair::IdEn, SHA_A);
+
+        // 1. <home>/translate is a symlink.
+        let home1 = TempDir::new().unwrap();
+        if let Err(err) =
+            create_dir_symlink(&translate_dir(outside.path()), &translate_dir(home1.path()))
+        {
+            #[cfg(windows)]
+            {
+                eprintln!("skipping dir symlink assertion: cannot create symlink: {err}");
+                return;
+            }
+            #[cfg(not(windows))]
+            panic!("failed to create dir symlink: {err}");
+        }
+        assert!(ready_pairs(home1.path()).is_empty());
+        assert_eq!(model_sha(home1.path(), TranslatePair::IdEn), None);
+
+        // 2. <home>/translate/engine is a symlink.
+        let home2 = TempDir::new().unwrap();
+        fs::create_dir_all(models_dir(home2.path())).unwrap();
+        write_pair_marker(home2.path(), TranslatePair::IdEn, SHA_A);
+        create_dir_symlink(&engine_dir(outside.path()), &engine_dir(home2.path())).unwrap();
+        assert_eq!(read_marker(&engine_dir(home2.path())), None);
+        assert!(ready_pairs(home2.path()).is_empty());
+        assert_eq!(model_sha(home2.path(), TranslatePair::IdEn), None);
+
+        // 3. <home>/translate/models is a symlink.
+        let home3 = TempDir::new().unwrap();
+        write_engine_marker(home3.path());
+        create_dir_symlink(&models_dir(outside.path()), &models_dir(home3.path())).unwrap();
+        assert!(ready_pairs(home3.path()).is_empty());
+        assert_eq!(model_sha(home3.path(), TranslatePair::IdEn), None);
+
+        // 4. <home>/translate/models/id-en is a symlink.
+        let home4 = TempDir::new().unwrap();
+        write_engine_marker(home4.path());
+        fs::create_dir_all(models_dir(home4.path())).unwrap();
+        create_dir_symlink(
+            &model_dir(outside.path(), TranslatePair::IdEn),
+            &model_dir(home4.path(), TranslatePair::IdEn),
+        )
+        .unwrap();
+        assert_eq!(
+            read_marker(&model_dir(home4.path(), TranslatePair::IdEn)),
+            None
+        );
+        assert!(ready_pairs(home4.path()).is_empty());
+        assert_eq!(model_sha(home4.path(), TranslatePair::IdEn), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_directory_chain_is_not_ready() {
+        let outside = TempDir::new().unwrap();
+        write_engine_marker(outside.path());
+        write_pair_marker(outside.path(), TranslatePair::IdEn, SHA_A);
+
+        let make_junction = |target: &Path, link: &Path| -> bool {
+            let output = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .output();
+            match output {
+                Ok(out) if out.status.success() => true,
+                Ok(out) => {
+                    eprintln!(
+                        "skipping junction assertion: mklink /J failed: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    false
+                }
+                Err(err) => {
+                    eprintln!("skipping junction assertion: cmd failed: {err}");
+                    false
+                }
+            }
+        };
+
+        // 1. <home>/translate is a junction.
+        let home1 = TempDir::new().unwrap();
+        if !make_junction(&translate_dir(outside.path()), &translate_dir(home1.path())) {
+            return;
+        }
+        assert!(ready_pairs(home1.path()).is_empty());
+        assert_eq!(model_sha(home1.path(), TranslatePair::IdEn), None);
+
+        // 2. <home>/translate/engine is a junction.
+        let home2 = TempDir::new().unwrap();
+        fs::create_dir_all(models_dir(home2.path())).unwrap();
+        write_pair_marker(home2.path(), TranslatePair::IdEn, SHA_A);
+        assert!(make_junction(
+            &engine_dir(outside.path()),
+            &engine_dir(home2.path())
+        ));
+        assert_eq!(read_marker(&engine_dir(home2.path())), None);
+        assert!(ready_pairs(home2.path()).is_empty());
+        assert_eq!(model_sha(home2.path(), TranslatePair::IdEn), None);
+
+        // 3. <home>/translate/models is a junction.
+        let home3 = TempDir::new().unwrap();
+        write_engine_marker(home3.path());
+        assert!(make_junction(
+            &models_dir(outside.path()),
+            &models_dir(home3.path())
+        ));
+        assert!(ready_pairs(home3.path()).is_empty());
+        assert_eq!(model_sha(home3.path(), TranslatePair::IdEn), None);
+
+        // 4. <home>/translate/models/id-en is a junction.
+        let home4 = TempDir::new().unwrap();
+        write_engine_marker(home4.path());
+        fs::create_dir_all(models_dir(home4.path())).unwrap();
+        assert!(make_junction(
+            &model_dir(outside.path(), TranslatePair::IdEn),
+            &model_dir(home4.path(), TranslatePair::IdEn)
+        ));
+        assert_eq!(
+            read_marker(&model_dir(home4.path(), TranslatePair::IdEn)),
+            None
+        );
+        assert!(ready_pairs(home4.path()).is_empty());
+        assert_eq!(model_sha(home4.path(), TranslatePair::IdEn), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_marker_does_not_hang_and_is_not_ready() {
+        let home = TempDir::new().unwrap();
+        let edir = engine_dir(home.path());
+        fs::create_dir_all(&edir).unwrap();
+        let fifo_path = edir.join("installed.json");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(read_marker(&edir), None);
+        assert!(ready_pairs(home.path()).is_empty());
     }
 }
