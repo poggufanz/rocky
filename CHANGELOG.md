@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+On Windows, the desk's Done list shows a project's change cards again. It had compared the card's stored path (lowercase) with git's spelling of the project path, so no card matched.
+
 `rocky why <file>` no longer says that no record names a file when change cards for it are listed below.
 
 When desk hooks are installed in the same Claude Code settings file, `rocky setup --desk-hooks` and automatic setup remove rocky's `hook agent-event claude-code` entries, because the desk hook already hears Claude Code. Removing desk hooks does not put them back; run `rocky setup --agent-hooks` for that. `rocky setup --status` reports them as retired.

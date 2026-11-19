@@ -1010,6 +1010,21 @@ fn rows_for_keeps_only_cards_of_the_project() {
 }
 
 #[test]
+fn card_matches_project_spelled_differently_by_git() {
+    // Cards store canonical roots; the sidebar's project id is git's spelling.
+    let mut card = sample_card("mine", 1_000, Some(1_100));
+    card.main_root = Some("c:/sharreddata/project/testing-rocky".to_string());
+    let git = "C:\\SharredData\\project\\testing-rocky\\";
+    assert!(super::in_project(&card, git, true));
+    assert!(!super::in_project(&card, git, false));
+    assert!(!super::in_project(
+        &card,
+        "C:/SharredData/project/other",
+        true
+    ));
+}
+
+#[test]
 fn empty_log_for_a_project_says_so_when_other_projects_have_cards() {
     let mut cards = CardsModel::new();
     cards.request_first_page(1);
