@@ -140,6 +140,7 @@ impl CardQueryLoop {
         query: Option<String>,
         before: Option<String>,
         limit: u32,
+        translate_to: Option<QuoteLang>,
         reply: SyncSender<ServerMsg>,
     ) {
         self.submit(
@@ -149,7 +150,7 @@ impl CardQueryLoop {
                 before,
                 limit,
             },
-            None,
+            translate_to,
             reply,
         );
     }
@@ -198,13 +199,13 @@ impl CardQueryLoop {
     }
 
     /// Forwards every completed query reply back through its waiting client channel,
-    /// running `attach` on `CardDetail` replies whose request asked for translation.
+    /// running `attach` on `Cards` and `CardDetail` replies whose request asked for translation.
     pub fn service_with(&mut self, attach: &mut dyn FnMut(&mut ServerMsg, QuoteLang)) {
         while let Ok(done) = self.res_rx.try_recv() {
             if let Some(pending) = self.replies.remove(&done.token) {
                 let mut msg = done.reply;
                 if let Some(to) = pending.translate_to
-                    && matches!(msg, ServerMsg::CardDetail { .. })
+                    && matches!(msg, ServerMsg::Cards { .. } | ServerMsg::CardDetail { .. })
                 {
                     attach(&mut msg, to);
                 }
@@ -484,7 +485,7 @@ mod tests {
         let owned = BTreeSet::from([card.root.clone()]);
 
         let (tx, rx) = mpsc::sync_channel(1);
-        queries.cards(1, None, None, 20, tx);
+        queries.cards(1, None, None, 20, None, tx);
         let ServerMsg::Cards { id: 1, items, .. } = wait_reply(&rx, &mut queries) else {
             panic!("expected ServerMsg::Cards");
         };
@@ -666,7 +667,7 @@ mod tests {
         assert_eq!(queries.worker_panics(), 0);
 
         let (tx4, rx4) = mpsc::sync_channel(1);
-        queries.cards(4, None, None, 20, tx4);
+        queries.cards(4, None, None, 20, None, tx4);
         let ServerMsg::Cards { id: 4, items, .. } = wait_reply(&rx4, &mut queries) else {
             panic!("expected ServerMsg::Cards reply after panics");
         };

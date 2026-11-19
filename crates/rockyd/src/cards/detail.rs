@@ -58,7 +58,12 @@ pub fn build_cards_reply(id: u64, mut items: Vec<Card>, mut next: Option<String>
         prepare_list_card(card);
     }
 
-    let mut msg = ServerMsg::Cards { id, items, next };
+    let mut msg = ServerMsg::Cards {
+        id,
+        items,
+        next,
+        translations: Vec::new(),
+    };
     if encode(&msg).len() <= LINE_CAP {
         return msg;
     }
@@ -155,12 +160,16 @@ fn encode_len_cards(id: u64, items: &[Card], next: Option<&str>) -> usize {
         id,
         items: items.to_vec(),
         next: next.map(str::to_string),
+        translations: Vec::new(),
     };
     encode(&probe).len()
 }
 
 fn shrink_cards_vec_field(msg: &mut ServerMsg, field: CardTrimField) {
-    let ServerMsg::Cards { id, items, next } = msg else {
+    let ServerMsg::Cards {
+        id, items, next, ..
+    } = msg
+    else {
         unreachable!();
     };
     enum Saved {
@@ -970,7 +979,10 @@ mod tests {
             wire.len()
         );
 
-        let ServerMsg::Cards { id, items, next } = reply else {
+        let ServerMsg::Cards {
+            id, items, next, ..
+        } = reply
+        else {
             panic!("expected ServerMsg::Cards");
         };
         assert_eq!(id, 7);
@@ -1014,7 +1026,10 @@ mod tests {
             "reply exceeded LINE_CAP: {}",
             wire.len()
         );
-        let ServerMsg::Cards { id, items, next } = reply else {
+        let ServerMsg::Cards {
+            id, items, next, ..
+        } = reply
+        else {
             panic!("expected ServerMsg::Cards");
         };
         assert_eq!(id, 8);

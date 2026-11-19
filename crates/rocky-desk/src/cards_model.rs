@@ -1,10 +1,11 @@
 //! Pure list view-model for change cards: paging, search, pushes, nesting, and row formatting.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rocky_proto::cards::Card;
 use rocky_proto::paths::canonical_path;
 use rocky_proto::pipe::ClientMsg;
+use rocky_proto::translate::{QuoteLang, QuoteTranslation};
 
 use crate::atlas_model::ProjectId;
 use crate::i18n::{CardMsg, UiLang};
@@ -104,6 +105,8 @@ pub struct CardsModel {
     pending_pushes: Vec<Card>,
     loading: bool,
     requested: bool,
+    target: Option<QuoteLang>,
+    translations: HashMap<String, QuoteTranslation>,
 }
 
 impl CardsModel {
@@ -182,6 +185,17 @@ impl CardsModel {
         self.request_first_page(id)
     }
 
+    /// Updates the translation target language, clearing cached translations and
+    /// requesting page one only when the target changed.
+    pub fn set_target(&mut self, target: Option<QuoteLang>, id: u64) -> Option<ClientMsg> {
+        if self.target == target {
+            return None;
+        }
+        self.target = target;
+        self.translations.clear();
+        Some(self.request_first_page(id))
+    }
+
     /// Clears pending state when a card request fails without discarding existing items or cursors.
     pub fn on_ack(&mut self, id: u64, ok: bool) -> bool {
         if self.pending_id != Some(id) || ok {
@@ -195,7 +209,13 @@ impl CardsModel {
     }
 
     /// Applies a `ServerMsg::Cards` reply if its `id` matches the latest pending request.
-    pub fn on_cards(&mut self, id: u64, items: Vec<Card>, next: Option<String>) {
+    pub fn on_cards(
+        &mut self,
+        id: u64,
+        items: Vec<Card>,
+        next: Option<String>,
+        translations: Vec<QuoteTranslation>,
+    ) {
         if self.pending_id != Some(id) {
             return;
         }
@@ -205,10 +225,20 @@ impl CardsModel {
         let pending_pushes = if self.pending_replace {
             self.pending_replace = false;
             self.items.clear();
+            self.translations.clear();
             std::mem::take(&mut self.pending_pushes)
         } else {
             Vec::new()
         };
+        for item in translations {
+            if Some(item.from.other()) == self.target
+                && !crate::plain_text::plain_quote(&item.text).trim().is_empty()
+            {
+                self.translations
+                    .entry(item.quote_key.clone())
+                    .or_insert(item);
+            }
+        }
         for card in items {
             upsert_by_rev(&mut self.items, card);
         }
@@ -247,6 +277,7 @@ impl CardsModel {
                     &mut visited,
                     &query_lower,
                     lang,
+                    &self.translations,
                     &mut out,
                 );
             }
@@ -262,6 +293,7 @@ impl CardsModel {
                     &mut visited,
                     &query_lower,
                     lang,
+                    &self.translations,
                     &mut out,
                 );
             }
@@ -311,6 +343,7 @@ impl CardsModel {
             query: (!self.query.is_empty()).then(|| self.query.clone()),
             before,
             limit: PAGE_LIMIT,
+            translate_to: self.target,
         }
     }
 }
@@ -333,6 +366,7 @@ fn in_project(card: &Card, project: &str, win32: bool) -> bool {
     canonical_path(root, win32) == canonical_path(project, win32)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_subtree(
     idx: usize,
     indent: bool,
@@ -340,18 +374,34 @@ fn emit_subtree(
     visited: &mut [bool],
     query_lower: &str,
     lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
     out: &mut Vec<CardRow>,
 ) {
     if visited[idx] {
         return;
     }
     visited[idx] = true;
-    out.push(build_card_row(&items[idx], indent, query_lower, lang));
+    out.push(build_card_row(
+        &items[idx],
+        indent,
+        query_lower,
+        lang,
+        translations,
+    ));
 
     let parent_id = items[idx].card_id.as_str();
     for child_idx in 0..items.len() {
         if !visited[child_idx] && items[child_idx].parent_card_id.as_deref() == Some(parent_id) {
-            emit_subtree(child_idx, true, items, visited, query_lower, lang, out);
+            emit_subtree(
+                child_idx,
+                true,
+                items,
+                visited,
+                query_lower,
+                lang,
+                translations,
+                out,
+            );
         }
     }
 }

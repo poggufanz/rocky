@@ -75,6 +75,7 @@ fn first_page_request_shape() {
             query: None,
             before: None,
             limit: 20,
+            translate_to: None,
         }
     );
     assert!(model.loading());
@@ -87,6 +88,7 @@ fn first_page_request_shape() {
             query: Some("auth".to_string()),
             before: None,
             limit: 20,
+            translate_to: None,
         }
     );
     assert_eq!(model.query(), "auth");
@@ -100,6 +102,7 @@ fn first_page_request_shape() {
             query: Some("auth".to_string()),
             before: None,
             limit: 20,
+            translate_to: None,
         }
     );
 }
@@ -116,6 +119,7 @@ fn more_uses_next_cursor_and_stops_at_none() {
         1,
         vec![sample_card("c2", 1_000, Some(2_000))],
         Some("2000:c2".to_string()),
+        Vec::new(),
     );
     assert!(!model.loading());
     assert!(model.has_more());
@@ -128,12 +132,18 @@ fn more_uses_next_cursor_and_stops_at_none() {
             query: None,
             before: Some("2000:c2".to_string()),
             limit: 20,
+            translate_to: None,
         })
     );
     assert!(model.loading());
     assert!(model.request_more(3).is_none());
 
-    model.on_cards(2, vec![sample_card("c1", 500, Some(1_000))], None);
+    model.on_cards(
+        2,
+        vec![sample_card("c1", 500, Some(1_000))],
+        None,
+        Vec::new(),
+    );
     assert!(!model.loading());
     assert!(!model.has_more());
     assert!(model.request_more(3).is_none());
@@ -150,7 +160,12 @@ fn more_uses_next_cursor_and_stops_at_none() {
 fn stale_reply_ignored() {
     let mut model = CardsModel::new();
     // Unsolicited reply with no pending request is ignored.
-    model.on_cards(99, vec![sample_card("ghost", 100, Some(200))], None);
+    model.on_cards(
+        99,
+        vec![sample_card("ghost", 100, Some(200))],
+        None,
+        Vec::new(),
+    );
     assert!(model.rows(UiLang::En).is_empty());
 
     let _ = model.request_first_page(10);
@@ -161,6 +176,7 @@ fn stale_reply_ignored() {
         10,
         vec![sample_card("stale", 100, Some(200))],
         Some("200:stale".to_string()),
+        Vec::new(),
     );
     assert!(model.loading());
     assert!(!model.has_more());
@@ -172,7 +188,7 @@ fn stale_reply_ignored() {
         "src/discount.rs",
         vec![Label::BodyChanged {}],
     ));
-    model.on_cards(11, vec![fresh], None);
+    model.on_cards(11, vec![fresh], None, Vec::new());
     assert!(!model.loading());
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 1);
@@ -190,6 +206,7 @@ fn push_respects_query_and_replaces_revision() {
             sample_card("c1", 500, Some(1_000)),
         ],
         None,
+        Vec::new(),
     );
 
     // Insert new card between c3 (3000) and c1 (1000).
@@ -219,7 +236,7 @@ fn push_respects_query_and_replaces_revision() {
 
     // Active query filtering on push.
     let _ = model.set_query("auth".to_string(), 2);
-    model.on_cards(2, Vec::new(), None);
+    model.on_cards(2, Vec::new(), None, Vec::new());
 
     let mut non_matching = sample_card("no-match", 3_000, Some(4_000));
     non_matching.blocks.push(sample_block(
@@ -282,7 +299,7 @@ fn subagent_nests_under_parent_on_page() {
     child.parent_card_id = Some("parent".to_string());
     child.prompt = "Inspect grammar files".to_string();
 
-    model.on_cards(1, vec![parent, other, child], None);
+    model.on_cards(1, vec![parent, other, child], None, Vec::new());
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 3);
 
@@ -315,7 +332,7 @@ fn subagent_without_parent_shows_type_prefix() {
     no_parent.parent_card_id = None;
     no_parent.prompt = "Check tests".to_string();
 
-    model.on_cards(1, vec![orphan, no_parent], None);
+    model.on_cards(1, vec![orphan, no_parent], None, Vec::new());
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 2);
     assert!(!rows[0].indent);
@@ -352,7 +369,7 @@ fn three_edit_rows_then_more_counts_more_count() {
     }
     card.more_count = 3;
 
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
 
     let id_rows = model.rows(UiLang::Id);
     assert_eq!(id_rows[0].meta, "desk \u{00b7} 8 edit");
@@ -387,7 +404,7 @@ fn format_only_blocks_collapse() {
     ];
     card.more_count = 1;
 
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
 
     let id_rows = model.rows(UiLang::Id);
     assert_eq!(id_rows[0].edits.len(), 3);
@@ -431,7 +448,7 @@ fn bash_group_row_and_uncertain_mark() {
     });
 
     card.blocks = vec![b1, b2, b3];
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
 
     let id_rows = model.rows(UiLang::Id);
     assert_eq!(id_rows[0].edits.len(), 2);
@@ -499,7 +516,7 @@ fn unrecorded_and_outside_repo_chips() {
     abs_outside.after = None;
 
     card.blocks = vec![unrecorded, tilde, abs_outside];
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
 
     let id_rows = model.rows(UiLang::Id);
     assert_eq!(id_rows[0].edits[0].chip, "tidak direkam");
@@ -535,7 +552,7 @@ fn search_marks_matching_rows_only() {
         sample_block(1, "src/billing/tax.rs", vec![Label::BodyChanged {}]),
         sample_block(2, "src/main.rs", vec![Label::BodyChanged {}]),
     ];
-    model.on_cards(1, vec![card.clone()], None);
+    model.on_cards(1, vec![card.clone()], None, Vec::new());
 
     let rows = model.rows(UiLang::En);
     assert!(rows[0].edits[0].matched);
@@ -543,14 +560,14 @@ fn search_marks_matching_rows_only() {
 
     // Query matching only the repo marks no edit row.
     let _ = model.set_query("rocky".to_string(), 2);
-    model.on_cards(2, vec![card.clone()], None);
+    model.on_cards(2, vec![card.clone()], None, Vec::new());
     let rows = model.rows(UiLang::En);
     assert!(!rows[0].edits[0].matched);
     assert!(!rows[0].edits[1].matched);
 
     // Empty query marks no edit row.
     let _ = model.set_query(String::new(), 3);
-    model.on_cards(3, vec![card], None);
+    model.on_cards(3, vec![card], None, Vec::new());
     let rows = model.rows(UiLang::En);
     assert!(!rows[0].edits[0].matched);
     assert!(!rows[0].edits[1].matched);
@@ -577,7 +594,7 @@ fn list_rows_are_single_line() {
     });
     card.blocks.push(blk);
 
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
@@ -644,7 +661,7 @@ fn tooltip_lists_full_labels_quote_and_origin() {
     blk.recorded = false;
 
     card.blocks.push(blk);
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
 
     let id_tip = &model.rows(UiLang::Id)[0].edits[0].tooltip;
     assert_eq!(
@@ -747,7 +764,7 @@ fn symbol_kinds_single_format_only_and_windows_paths() {
     rel_escape.recorded = false;
 
     card.blocks = vec![method_blk, struct_blk, win_outside, rel_escape];
-    model.on_cards(1, vec![card], Some("2000:c1".to_string()));
+    model.on_cards(1, vec![card], Some("2000:c1".to_string()), Vec::new());
 
     let rows = model.rows(UiLang::En);
     assert_eq!(rows[0].meta, "MyApp \u{00b7} 4 edits");
@@ -775,7 +792,7 @@ fn symbol_kinds_single_format_only_and_windows_paths() {
         nth: 0,
     });
     c2.blocks.push(method_only);
-    model.on_cards(2, vec![c2], None);
+    model.on_cards(2, vec![c2], None, Vec::new());
     assert!(!model.loading());
     let refreshed = model.rows(UiLang::En);
     assert_eq!(refreshed.len(), 1);
@@ -822,7 +839,12 @@ fn meta_splits_high_importance_part_cleanly() {
     no_high_blocks.importance = Importance::High;
     no_high_blocks.blocks = vec![sample_block(1, "state.rs", vec![Label::GuardAdded {}])];
 
-    model.on_cards(1, vec![with_high, without_repo, no_high_blocks], None);
+    model.on_cards(
+        1,
+        vec![with_high, without_repo, no_high_blocks],
+        None,
+        Vec::new(),
+    );
 
     let id_rows = model.rows(UiLang::Id);
     assert_eq!(id_rows[0].meta, "web-shop \u{00b7} 3 edit");
@@ -870,6 +892,7 @@ fn row_titles_format_harness_envelopes_and_plain_prompts() {
         1,
         vec![notice, sub_notice, cmd_bare, cmd_args, plain, mid_mention],
         None,
+        Vec::new(),
     );
 
     let en_rows = model.rows(UiLang::En);
@@ -952,7 +975,7 @@ fn file_chips_merge_repeat_edits_and_cap_at_four() {
     ];
     let mut model = CardsModel::new();
     let _ = model.request_first_page(1);
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
     let rows = model.rows(UiLang::En);
     let names: Vec<(&str, u32)> = rows[0]
         .files
@@ -977,7 +1000,7 @@ fn file_chips_with_one_name_keep_their_folder() {
     ];
     let mut model = CardsModel::new();
     let _ = model.request_first_page(1);
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
     let names: Vec<String> = model.rows(UiLang::En)[0]
         .files
         .iter()
@@ -1000,6 +1023,7 @@ fn rows_for_keeps_only_cards_of_the_project() {
         1,
         vec![sample_card("mine", 1_000, Some(1_100)), other],
         None,
+        Vec::new(),
     );
 
     let project = crate::atlas_model::ProjectId("/work/rocky".to_string());
@@ -1028,7 +1052,7 @@ fn card_matches_project_spelled_differently_by_git() {
 fn empty_log_for_a_project_says_so_when_other_projects_have_cards() {
     let mut cards = CardsModel::new();
     cards.request_first_page(1);
-    cards.on_cards(1, Vec::new(), None);
+    cards.on_cards(1, Vec::new(), None, Vec::new());
     let project = crate::atlas_model::ProjectId("/work/rocky".to_string());
     assert_eq!(cards.empty_msg_for(Some(&project)), CardMsg::Empty);
 
@@ -1036,10 +1060,197 @@ fn empty_log_for_a_project_says_so_when_other_projects_have_cards() {
     other.main_root = None;
     other.root = "/work/other".to_string();
     let _ = cards.request_first_page(2);
-    cards.on_cards(2, vec![other], None);
+    cards.on_cards(2, vec![other], None, Vec::new());
     assert_eq!(
         cards.empty_msg_for(Some(&project)),
         CardMsg::EmptyForProject
     );
     assert_eq!(cards.empty_msg_for(None), CardMsg::Empty);
+}
+
+#[test]
+fn set_target_refetches_once() {
+    use rocky_proto::translate::QuoteLang;
+
+    let mut model = CardsModel::new();
+    let first = model.set_target(Some(QuoteLang::En), 1);
+    assert_eq!(
+        first,
+        Some(ClientMsg::Cards {
+            id: 1,
+            query: None,
+            before: None,
+            limit: 20,
+            translate_to: Some(QuoteLang::En),
+        })
+    );
+    assert!(model.set_target(Some(QuoteLang::En), 2).is_none());
+
+    let off = model.set_target(None, 3);
+    assert_eq!(
+        off,
+        Some(ClientMsg::Cards {
+            id: 3,
+            query: None,
+            before: None,
+            limit: 20,
+            translate_to: None,
+        })
+    );
+    assert!(model.set_target(None, 4).is_none());
+}
+
+#[test]
+fn tooltip_shows_cached_translation() {
+    use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+    let raw = "Saya cek parser dulu.";
+    let translated = "I checked the parser first.";
+    let mut card = sample_card("c1", 1_000, Some(2_000));
+    let mut block = sample_block(1, "src/parser.rs", vec![Label::BodyChanged {}]);
+    block.quote = Some(Quote {
+        text: raw.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![block];
+
+    let mut model = CardsModel::new();
+    let _ = model.set_target(Some(QuoteLang::En), 1);
+    model.on_cards(
+        1,
+        vec![card],
+        None,
+        vec![QuoteTranslation {
+            quote_key: quote_key(raw),
+            from: QuoteLang::Id,
+            text: format!("**{translated}**"),
+        }],
+    );
+
+    let rows = model.rows(UiLang::En);
+    let edit_tooltip = &rows[0].edits[0].tooltip;
+    let idx = edit_tooltip
+        .iter()
+        .position(|line| line.text == translated)
+        .expect("translated quote line in edit tooltip");
+    assert_eq!(edit_tooltip[idx + 1].text, "translated from Indonesian");
+
+    let file_tooltip = &rows[0].files[0].tooltip;
+    let f_idx = file_tooltip
+        .iter()
+        .position(|line| line.text == translated)
+        .expect("translated quote line in file tooltip");
+    assert_eq!(file_tooltip[f_idx + 1].text, "translated from Indonesian");
+}
+
+#[test]
+fn tooltip_filters_wrong_language_empty_clean_and_clears_on_retarget() {
+    use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+    let raw_kept = "Merah.";
+    let raw_wrong = "Biru.";
+    let raw_empty = "Hijau.";
+
+    let mut card = sample_card("c1", 2_000, Some(3_000));
+    let mut b1 = sample_block(1, "src/a.rs", Vec::new());
+    b1.quote = Some(Quote {
+        text: raw_kept.to_string(),
+        shared: false,
+    });
+    let mut b2 = sample_block(2, "src/b.rs", Vec::new());
+    b2.quote = Some(Quote {
+        text: raw_wrong.to_string(),
+        shared: false,
+    });
+    let mut b3 = sample_block(3, "src/c.rs", Vec::new());
+    b3.quote = Some(Quote {
+        text: raw_empty.to_string(),
+        shared: false,
+    });
+    card.blocks = vec![b1, b2, b3];
+
+    let mut model = CardsModel::new();
+    let _ = model.set_target(Some(QuoteLang::En), 1);
+    model.on_cards(
+        1,
+        vec![card.clone()],
+        Some("3000:c1".to_string()),
+        vec![
+            QuoteTranslation {
+                quote_key: quote_key(raw_kept),
+                from: QuoteLang::Id,
+                text: "Red.".to_string(),
+            },
+            // Wrong direction (`from.other() == Id != En`): ignored.
+            QuoteTranslation {
+                quote_key: quote_key(raw_wrong),
+                from: QuoteLang::En,
+                text: "Should be ignored.".to_string(),
+            },
+            // Cleans to empty: treated as no translation, falls back to original.
+            QuoteTranslation {
+                quote_key: quote_key(raw_empty),
+                from: QuoteLang::Id,
+                text: "- *".to_string(),
+            },
+        ],
+    );
+
+    let rows = model.rows(UiLang::En);
+    assert_eq!(
+        rows[0].edits[0].tooltip,
+        vec![
+            TooltipLine::text("Red."),
+            TooltipLine::text("translated from Indonesian"),
+        ]
+    );
+    assert_eq!(rows[0].edits[1].tooltip, vec![TooltipLine::text(raw_wrong)]);
+    assert_eq!(rows[0].edits[2].tooltip, vec![TooltipLine::text(raw_empty)]);
+
+    // Load more keeps page 1 translations and adds page 2 translations.
+    let raw_p2 = "Kuning.";
+    let mut p2_card = sample_card("c2", 1_000, Some(2_000));
+    let mut b_p2 = sample_block(1, "src/d.rs", Vec::new());
+    b_p2.quote = Some(Quote {
+        text: raw_p2.to_string(),
+        shared: false,
+    });
+    p2_card.blocks = vec![b_p2];
+    let more = model.request_more(2).unwrap();
+    assert!(matches!(
+        more,
+        ClientMsg::Cards {
+            id: 2,
+            translate_to: Some(QuoteLang::En),
+            ..
+        }
+    ));
+    model.on_cards(
+        2,
+        vec![p2_card],
+        None,
+        vec![QuoteTranslation {
+            quote_key: quote_key(raw_p2),
+            from: QuoteLang::Id,
+            text: "Yellow.".to_string(),
+        }],
+    );
+    let rows = model.rows(UiLang::En);
+    assert_eq!(rows[0].edits[0].tooltip[0].text, "Red.");
+    assert_eq!(rows[1].edits[0].tooltip[0].text, "Yellow.");
+
+    // Switching target off clears existing translations immediately and refetches with None.
+    let off = model.set_target(None, 3).unwrap();
+    assert!(matches!(
+        off,
+        ClientMsg::Cards {
+            id: 3,
+            translate_to: None,
+            ..
+        }
+    ));
+    assert_eq!(
+        model.rows(UiLang::En)[0].edits[0].tooltip,
+        vec![TooltipLine::text(raw_kept)]
+    );
 }

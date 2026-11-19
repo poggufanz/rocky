@@ -348,6 +348,8 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         before: Option<String>,
         limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        translate_to: Option<QuoteLang>,
     },
     CardDetail {
         id: u64,
@@ -435,6 +437,8 @@ pub enum ServerMsg {
         items: Vec<crate::cards::Card>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        translations: Vec<QuoteTranslation>,
     },
     Card {
         item: crate::cards::Card,
@@ -1112,12 +1116,14 @@ mod tests {
                 query: Some("auth".into()),
                 before: Some("2000:c1".into()),
                 limit: 20,
+                translate_to: None,
             },
             ClientMsg::Cards {
                 id: 11,
                 query: None,
                 before: None,
                 limit: 10,
+                translate_to: None,
             },
             ClientMsg::CardDetail {
                 id: 12,
@@ -1143,11 +1149,13 @@ mod tests {
                 id: 10,
                 items: vec![sample_card.clone()],
                 next: Some("2000:c1".into()),
+                translations: Vec::new(),
             },
             ServerMsg::Cards {
                 id: 11,
                 items: Vec::new(),
                 next: None,
+                translations: Vec::new(),
             },
             ServerMsg::Card {
                 item: sample_card.clone(),
@@ -1318,6 +1326,31 @@ mod tests {
             },
         };
 
+        // Old ClientMsg::Cards without translate_to parses with None.
+        let old_cards_req = r#"{"v":5,"type":"cards","id":5,"limit":20}"#;
+        assert_eq!(
+            decode::<ClientMsg>(old_cards_req).unwrap(),
+            ClientMsg::Cards {
+                id: 5,
+                query: None,
+                before: None,
+                limit: 20,
+                translate_to: None,
+            }
+        );
+
+        let encoded_cards_none = encode(&ClientMsg::Cards {
+            id: 5,
+            query: None,
+            before: None,
+            limit: 20,
+            translate_to: None,
+        });
+        assert!(
+            !encoded_cards_none.contains("translate_to"),
+            "unexpected translate_to key: {encoded_cards_none}"
+        );
+
         // Old ClientMsg::CardDetail without translate_to parses with None.
         let old_req = r#"{"v":5,"type":"card_detail","id":1,"card_id":"c1"}"#;
         assert_eq!(
@@ -1342,6 +1375,13 @@ mod tests {
 
         // Round-trip new and updated ClientMsg variants.
         let client_msgs = [
+            ClientMsg::Cards {
+                id: 5,
+                query: None,
+                before: None,
+                limit: 20,
+                translate_to: Some(QuoteLang::En),
+            },
             ClientMsg::CardDetail {
                 id: 2,
                 card_id: "c1".into(),
@@ -1357,6 +1397,29 @@ mod tests {
             let wire = encode(msg);
             assert_eq!(&decode::<ClientMsg>(wire.trim_end()).unwrap(), msg);
         }
+
+        // Old ServerMsg::Cards without translations parses with empty Vec.
+        let old_cards = r#"{"v":5,"type":"cards","id":10,"items":[]}"#;
+        assert_eq!(
+            decode::<ServerMsg>(old_cards).unwrap(),
+            ServerMsg::Cards {
+                id: 10,
+                items: Vec::new(),
+                next: None,
+                translations: Vec::new(),
+            }
+        );
+
+        let encoded_empty_cards = encode(&ServerMsg::Cards {
+            id: 10,
+            items: Vec::new(),
+            next: None,
+            translations: Vec::new(),
+        });
+        assert!(
+            !encoded_empty_cards.contains("\"translations\""),
+            "unexpected translations key: {encoded_empty_cards}"
+        );
 
         // Old ServerMsg::CardDetail without translations or pending parses with empty Vecs.
         let card_json = serde_json::to_string(&sample_card).unwrap();
@@ -1408,6 +1471,12 @@ mod tests {
             failed: Some(TranslateFailure::Checksum),
         };
         let server_msgs = [
+            ServerMsg::Cards {
+                id: 10,
+                items: vec![sample_card.clone()],
+                next: None,
+                translations: vec![qt.clone()],
+            },
             ServerMsg::CardDetail {
                 id: 12,
                 card: sample_card,

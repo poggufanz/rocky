@@ -453,6 +453,10 @@ impl DeskView {
             return false;
         }
         self.last_target = target;
+        let cards_id = self.next_id();
+        if let Some(msg) = self.cards.set_target(target, cards_id) {
+            self.send_card_msg(msg);
+        }
         if self.card_detail.is_some() {
             let id = self.next_id();
             if let Some(msg) = self

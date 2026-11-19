@@ -1,8 +1,11 @@
 //! Single-line row shaping, grouping, tooltip formatting, and repo-root path checks.
 
+use std::collections::HashMap;
+
 use rocky_proto::cards::{
     Block, BlockSymbol, BlockVia, Card, Importance, Label, PromptKind, SymbolKind, classify_prompt,
 };
+use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
 
 use super::{BashRow, CardRow, EditRow, FileChip, TooltipLine};
 use crate::clock::local_hhmm;
@@ -26,6 +29,7 @@ pub(super) fn build_card_row(
     indent: bool,
     query_lower: &str,
     lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
 ) -> CardRow {
     let (display_prompt, _) = prompt_display(&card.prompt, lang);
     let first_line = sanitize_single_line(first_non_empty_line(&display_prompt));
@@ -41,12 +45,12 @@ pub(super) fn build_card_row(
 
     let time = sanitize_single_line(&local_hhmm(card_sort_key(card)));
     let (meta, meta_high) = build_meta(card, lang);
-    let (mut edits, more) = build_edit_rows(card, query_lower, lang);
+    let (mut edits, more) = build_edit_rows(card, query_lower, lang, translations);
     let meta = match hoist_shared_chip(&mut edits) {
         Some(chip) => format!("{meta} \u{00b7} {chip}"),
         None => meta,
     };
-    let (files, files_more) = build_file_chips(card, query_lower, lang);
+    let (files, files_more) = build_file_chips(card, query_lower, lang, translations);
 
     CardRow {
         card_id: card.card_id.clone(),
@@ -64,7 +68,12 @@ pub(super) fn build_card_row(
 
 /// Distinct files of a card in first-edit order, at most [`MAX_FILE_CHIPS`].
 /// Two edits to one file make one chip that says ×2, not two rows.
-fn build_file_chips(card: &Card, query_lower: &str, lang: UiLang) -> (Vec<FileChip>, usize) {
+fn build_file_chips(
+    card: &Card,
+    query_lower: &str,
+    lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
+) -> (Vec<FileChip>, usize) {
     let mut order: Vec<&str> = Vec::new();
     for block in &card.blocks {
         if !order.contains(&block.path.as_str()) {
@@ -93,7 +102,7 @@ fn build_file_chips(card: &Card, query_lower: &str, lang: UiLang) -> (Vec<FileCh
         .map(|path| {
             let group: Vec<&Block> = card.blocks.iter().filter(|b| b.path == *path).collect();
             let mut tooltip = vec![TooltipLine::text(path)];
-            tooltip.extend(build_tooltip(&group, lang));
+            tooltip.extend(build_tooltip(&group, lang, translations));
             FileChip {
                 name: name_of(path),
                 edits: u32::try_from(group.len()).unwrap_or(u32::MAX),
@@ -190,7 +199,12 @@ fn build_meta(card: &Card, lang: UiLang) -> (String, Option<String>) {
     (parts.join(" \u{00b7} "), meta_high)
 }
 
-fn build_edit_rows(card: &Card, query_lower: &str, lang: UiLang) -> (Vec<EditRow>, Option<String>) {
+fn build_edit_rows(
+    card: &Card,
+    query_lower: &str,
+    lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
+) -> (Vec<EditRow>, Option<String>) {
     let mut used = vec![false; card.blocks.len()];
     let mut grouped: Vec<(usize, EditRow)> = Vec::new();
 
@@ -204,7 +218,7 @@ fn build_edit_rows(card: &Card, query_lower: &str, lang: UiLang) -> (Vec<EditRow
             let group = collect_group(&card.blocks, &mut used, i, |b| {
                 is_format_only_collapsible(b, &card.root)
             });
-            let row = build_format_collapse_row(&group, query_lower, lang);
+            let row = build_format_collapse_row(&group, query_lower, lang, translations);
             grouped.push((group.len(), row));
         } else if block.via == BlockVia::Bash
             && let Some(info) = &block.bash
@@ -216,11 +230,18 @@ fn build_edit_rows(card: &Card, query_lower: &str, lang: UiLang) -> (Vec<EditRow
                     && b.bash.as_ref().is_some_and(|other| other.cmd == target_cmd)
                     && block_status(b, &card.root) == target_status
             });
-            let row = build_bash_group_row(&group, target_cmd, target_status, query_lower, lang);
+            let row = build_bash_group_row(
+                &group,
+                target_cmd,
+                target_status,
+                query_lower,
+                lang,
+                translations,
+            );
             grouped.push((group.len(), row));
         } else {
             used[i] = true;
-            let row = build_normal_edit_row(block, &card.root, query_lower, lang);
+            let row = build_normal_edit_row(block, &card.root, query_lower, lang, translations);
             grouped.push((1, row));
         }
     }
@@ -284,6 +305,7 @@ fn build_normal_edit_row(
     card_root: &str,
     query_lower: &str,
     lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
 ) -> EditRow {
     let raw_chip = status_chip(block_status(block, card_root), lang).unwrap_or_else(|| {
         block
@@ -301,11 +323,16 @@ fn build_normal_edit_row(
         high: block.importance == Importance::High,
         matched: block_matches_query(block, query_lower),
         bash: None,
-        tooltip: build_tooltip(std::slice::from_ref(&block), lang),
+        tooltip: build_tooltip(std::slice::from_ref(&block), lang, translations),
     }
 }
 
-fn build_format_collapse_row(group: &[&Block], query_lower: &str, lang: UiLang) -> EditRow {
+fn build_format_collapse_row(
+    group: &[&Block],
+    query_lower: &str,
+    lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
+) -> EditRow {
     EditRow {
         seq: group[0].seq,
         file: String::new(),
@@ -317,7 +344,7 @@ fn build_format_collapse_row(group: &[&Block], query_lower: &str, lang: UiLang) 
         high: group.iter().any(|b| b.importance == Importance::High),
         matched: group.iter().any(|b| block_matches_query(b, query_lower)),
         bash: None,
-        tooltip: build_tooltip(group, lang),
+        tooltip: build_tooltip(group, lang, translations),
     }
 }
 
@@ -327,6 +354,7 @@ fn build_bash_group_row(
     status: BlockStatus,
     query_lower: &str,
     lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
 ) -> EditRow {
     let uncertain = group
         .iter()
@@ -353,11 +381,15 @@ fn build_bash_group_row(
             uncertain: uncertain
                 .then(|| sanitize_single_line(&card_text(lang, &CardMsg::BashUncertain))),
         }),
-        tooltip: build_tooltip(group, lang),
+        tooltip: build_tooltip(group, lang, translations),
     }
 }
 
-fn build_tooltip(blocks: &[&Block], lang: UiLang) -> Vec<TooltipLine> {
+fn build_tooltip(
+    blocks: &[&Block],
+    lang: UiLang,
+    translations: &HashMap<String, QuoteTranslation>,
+) -> Vec<TooltipLine> {
     let mut lines = Vec::new();
     let push_unique = |out: &mut Vec<TooltipLine>, line: TooltipLine| {
         if !out.contains(&line) {
@@ -372,16 +404,36 @@ fn build_tooltip(blocks: &[&Block], lang: UiLang) -> Vec<TooltipLine> {
         }
     }
 
+    let mut translated_from: Option<QuoteLang> = None;
     for block in blocks {
         if let Some(quote) = &block.quote {
-            let clean = sanitize_single_line(&crate::plain_text::plain_quote(&quote.text));
+            let tr = translations.get(&quote_key(&quote.text)).and_then(|tr| {
+                let clean = sanitize_single_line(&crate::plain_text::plain_quote(&tr.text));
+                (!clean.trim().is_empty()).then_some((clean, tr.from))
+            });
+            let (clean, from) = match tr {
+                Some((clean, from)) => (clean, Some(from)),
+                None => (
+                    sanitize_single_line(&crate::plain_text::plain_quote(&quote.text)),
+                    None,
+                ),
+            };
             if !clean.is_empty() {
+                if from.is_some() {
+                    translated_from = from;
+                }
                 push_unique(
                     &mut lines,
                     TooltipLine::text(cut_to_limit(&clean, QUOTE_MAX_CHARS)),
                 );
             }
         }
+    }
+    if let Some(from) = translated_from {
+        push_unique(
+            &mut lines,
+            TooltipLine::text(card_text(lang, &CardMsg::TranslatedFrom { from })),
+        );
     }
 
     for block in blocks {

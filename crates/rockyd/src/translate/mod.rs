@@ -216,6 +216,43 @@ impl Translator {
         detail
     }
 
+    /// Looks up cached translations for `quotes` into `to` without queueing, pending, or spawning.
+    pub fn cached(
+        &mut self,
+        enabled: bool,
+        to: QuoteLang,
+        quotes: &[String],
+    ) -> Vec<QuoteTranslation> {
+        if !enabled {
+            return Vec::new();
+        }
+        let pair = TranslatePair::to(to);
+        let Some(sha) = marker::model_sha(&self.home, pair) else {
+            return Vec::new();
+        };
+
+        let mut seen = HashSet::with_capacity(quotes.len());
+        let mut hits = Vec::new();
+        for text in quotes {
+            if !seen.insert(text.as_str()) {
+                continue;
+            }
+            let ckey = cache::cache_key(&sha, to, text);
+            if let Some(Cached::Translated {
+                from,
+                text: translated,
+            }) = self.cache.get(to, &ckey)
+            {
+                hits.push(QuoteTranslation {
+                    quote_key: quote_key(text),
+                    from,
+                    text: translated,
+                });
+            }
+        }
+        hits
+    }
+
     pub fn push_later(&mut self, card_id: &str, items: Vec<QuoteTranslation>) {
         for item in items {
             self.staged_later.push(ServerMsg::QuoteTranslated {
@@ -1014,5 +1051,79 @@ mod tests {
         let _ = translator.service(true);
         assert_eq!(translator.drain_log().len(), 1);
         assert_eq!(translator.queue.len(), 1);
+    }
+
+    #[test]
+    fn cached_lookup_never_queues() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+        write_valid_cli(home.path());
+
+        let hit_raw = "Merah.";
+        let miss_raw = "Biru.";
+        let mut cache = QuoteCache::new(home.path().to_path_buf());
+        let ckey = cache::cache_key(TEST_SHA, QuoteLang::En, hit_raw);
+        cache
+            .put(
+                QuoteLang::En,
+                &ckey,
+                &Cached::Translated {
+                    from: QuoteLang::Id,
+                    text: "Red.".to_string(),
+                },
+            )
+            .unwrap();
+
+        let mut translator = Translator::new(home.path().to_path_buf());
+        let quotes = vec![hit_raw.to_string(), miss_raw.to_string()];
+        let hits = translator.cached(true, QuoteLang::En, &quotes);
+        assert_eq!(
+            hits,
+            vec![QuoteTranslation {
+                quote_key: quote_key(hit_raw),
+                from: QuoteLang::Id,
+                text: "Red.".to_string(),
+            }]
+        );
+        assert_eq!(translator.queue.len(), 0);
+        assert!(!translator.has_job());
+
+        assert!(translator.service(true).is_empty());
+        assert_eq!(translator.queue.len(), 0);
+        assert!(!translator.has_job());
+    }
+
+    #[test]
+    fn cached_lookup_off_returns_nothing() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+
+        let hit_raw = "Merah.";
+        let mut cache = QuoteCache::new(home.path().to_path_buf());
+        let ckey = cache::cache_key(TEST_SHA, QuoteLang::En, hit_raw);
+        cache
+            .put(
+                QuoteLang::En,
+                &ckey,
+                &Cached::Translated {
+                    from: QuoteLang::Id,
+                    text: "Red.".to_string(),
+                },
+            )
+            .unwrap();
+
+        let mut translator = Translator::new(home.path().to_path_buf());
+        assert!(
+            translator
+                .cached(false, QuoteLang::En, &[hit_raw.to_string()])
+                .is_empty()
+        );
+        // Pair not ready (En -> Id) also returns empty.
+        assert!(
+            translator
+                .cached(true, QuoteLang::Id, &[hit_raw.to_string()])
+                .is_empty()
+        );
+        assert_eq!(translator.queue.len(), 0);
     }
 }

@@ -522,6 +522,7 @@ fn desk_ignores_card_messages() {
             id: 1,
             items: vec![sample_card.clone()],
             next: Some("1000:c1".into()),
+            translations: Vec::new(),
         })
         .is_empty()
     );

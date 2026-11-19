@@ -795,12 +795,14 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         query: None,
         before: None,
         limit: 20,
+        translate_to: None,
     }));
     let Control::Cards {
         id,
         query,
         before,
         limit,
+        translate_to: None,
         reply,
     } = next_control(&control_rx)
     else {
@@ -813,6 +815,7 @@ fn cards_detail_diff_and_broadcast_over_pipe() {
         id: 10,
         items,
         next,
+        translations: _,
     } = cards_msg
     else {
         panic!("expected ServerMsg::Cards");

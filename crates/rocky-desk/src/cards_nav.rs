@@ -55,7 +55,11 @@ pub fn on_reconnect(
     target: Option<QuoteLang>,
     mut next_id: impl FnMut() -> u64,
 ) -> Vec<ClientMsg> {
-    let mut out = vec![cards.request_first_page(next_id())];
+    let cards_id = next_id();
+    let cards_msg = cards
+        .set_target(target, cards_id)
+        .unwrap_or_else(|| cards.request_first_page(cards_id));
+    let mut out = vec![cards_msg];
     if let Some(d) = detail {
         out.push(d.reopen(next_id(), target));
     }
@@ -75,8 +79,13 @@ pub fn route_card_msg(
     lang: UiLang,
 ) -> bool {
     match msg {
-        ServerMsg::Cards { id, items, next } => {
-            cards.on_cards(*id, items.clone(), next.clone());
+        ServerMsg::Cards {
+            id,
+            items,
+            next,
+            translations,
+        } => {
+            cards.on_cards(*id, items.clone(), next.clone(), translations.clone());
             true
         }
         ServerMsg::Card { item } => {
@@ -294,6 +303,7 @@ mod tests {
                 query: Some("auth".to_string()),
                 before: None,
                 limit: PAGE_LIMIT,
+                translate_to: None,
             }]
         );
 
@@ -348,6 +358,7 @@ mod tests {
                     query: Some("auth".to_string()),
                     before: None,
                     limit: PAGE_LIMIT,
+                    translate_to: None,
                 },
                 ClientMsg::CardDetail {
                     id: 17,
@@ -431,6 +442,7 @@ mod tests {
                 id: 1,
                 items: vec![sample_card("c1")],
                 next: None,
+                translations: Vec::new(),
             },
             &mut view,
             &mut cards,
@@ -836,6 +848,7 @@ mod tests {
                 id: 12,
                 items: vec![sample_card("c1")],
                 next: Some("cur1".to_string()),
+                translations: Vec::new(),
             },
             &mut view,
             &mut cards,
@@ -866,6 +879,7 @@ mod tests {
                 query: None,
                 before: Some("cur1".to_string()),
                 limit: PAGE_LIMIT,
+                translate_to: None,
             })
         );
     }
@@ -1199,6 +1213,13 @@ mod tests {
         };
         let emitted = h.reconnect(settings, translate);
 
+        assert!(emitted.iter().any(|m| matches!(
+            m,
+            ClientMsg::Cards {
+                translate_to: Some(QuoteLang::Id),
+                ..
+            }
+        )));
         assert_eq!(h.ui_lang, UiLang::Id);
         let detail_reqs: Vec<_> = emitted
             .into_iter()
@@ -1214,7 +1235,64 @@ mod tests {
         );
         assert_eq!(h.last_target, Some(QuoteLang::Id));
         let id = h.alloc();
+        assert_eq!(h.cards.set_target(h.last_target, id), None);
+        let id = h.alloc();
         assert_eq!(h.detail.as_mut().unwrap().retarget(id, h.last_target), None);
         assert_eq!(h.view, View::CardDetail);
+    }
+
+    #[test]
+    fn route_card_msg_routes_cards_translations() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::{QuoteTranslation, quote_key};
+
+        let mut view = View::Agents;
+        let mut cards = CardsModel::new();
+        let mut detail = None;
+        let mut diff = None;
+
+        let raw = "Merah.";
+        let req = cards.set_target(Some(QuoteLang::En), 1).unwrap();
+        assert!(matches!(
+            req,
+            ClientMsg::Cards {
+                id: 1,
+                translate_to: Some(QuoteLang::En),
+                ..
+            }
+        ));
+
+        let mut card = sample_card("c1");
+        card.blocks[0].quote = Some(Quote {
+            text: raw.to_string(),
+            shared: false,
+        });
+
+        assert!(route_card_msg(
+            &ServerMsg::Cards {
+                id: 1,
+                items: vec![card],
+                next: None,
+                translations: vec![QuoteTranslation {
+                    quote_key: quote_key(raw),
+                    from: QuoteLang::Id,
+                    text: "Red.".to_string(),
+                }],
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+
+        let rows = cards.rows(UiLang::En);
+        assert!(rows[0].edits[0].tooltip.iter().any(|l| l.text == "Red."));
+        assert!(
+            rows[0].edits[0]
+                .tooltip
+                .iter()
+                .any(|l| l.text == "translated from Indonesian")
+        );
     }
 }

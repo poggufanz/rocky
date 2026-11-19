@@ -27,7 +27,7 @@ fn pending_first_page_keeps_newer_pushed_revision() {
     let mut rev1 = sample_card("c1", 1_000, Some(2_000));
     rev1.rev = 1;
     rev1.prompt = "Page rev 1".to_string();
-    model.on_cards(1, vec![rev1], None);
+    model.on_cards(1, vec![rev1], None, Vec::new());
 
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 1);
@@ -44,7 +44,7 @@ fn pending_first_page_keeps_newer_pushed_revision() {
     let mut rev4_page = sample_card("c1", 1_000, Some(2_000));
     rev4_page.rev = 4;
     rev4_page.prompt = "Page rev 4".to_string();
-    model.on_cards(2, vec![rev4_page], None);
+    model.on_cards(2, vec![rev4_page], None, Vec::new());
 
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 1);
@@ -64,7 +64,7 @@ fn pending_first_page_keeps_pushed_card_missing_from_reply() {
     pushed_new.prompt = "Newer pushed card".to_string();
     model.on_push(pushed_new);
 
-    model.on_cards(1, Vec::new(), None);
+    model.on_cards(1, Vec::new(), None, Vec::new());
     let ids: Vec<String> = model
         .rows(UiLang::En)
         .into_iter()
@@ -83,6 +83,7 @@ fn pending_first_page_keeps_pushed_card_missing_from_reply() {
             sample_card("bottom", 500, Some(1_000)),
         ],
         None,
+        Vec::new(),
     );
     let ids: Vec<String> = model
         .rows(UiLang::En)
@@ -109,7 +110,7 @@ fn pending_first_page_keeps_pushed_card_missing_from_reply() {
     ));
     model.on_push(matching);
 
-    model.on_cards(3, Vec::new(), None);
+    model.on_cards(3, Vec::new(), None, Vec::new());
     let ids: Vec<String> = model
         .rows(UiLang::En)
         .into_iter()
@@ -168,7 +169,12 @@ fn bash_group_rows_preserve_unrecorded_and_outside_repo_chips() {
         make_bash(4, "src/d.rs", true),
     ];
 
-    model.on_cards(1, vec![unrec_card, outside_card, mixed_card], None);
+    model.on_cards(
+        1,
+        vec![unrec_card, outside_card, mixed_card],
+        None,
+        Vec::new(),
+    );
 
     let id_rows = model.rows(UiLang::Id);
     assert!(id_rows[0].edits[0].bash.is_some());
@@ -222,7 +228,7 @@ fn subagent_title_bounds_include_prefix() {
     // "Explore › " is 10 chars + 70 chars = 80 chars total (no ellipsis).
     exact.prompt = "a".repeat(70);
 
-    model.on_cards(1, vec![sub, exact], None);
+    model.on_cards(1, vec![sub, exact], None, Vec::new());
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 2);
 
@@ -293,7 +299,7 @@ fn single_line_fields_split_cr_and_replace_control_chars() {
     let mut blank_lead = sample_card("c2", 500, Some(1_000));
     blank_lead.prompt = "\r\n \t \r\n  first\tline\x07here\rsecond".to_string();
 
-    model.on_cards(1, vec![card, blank_lead], None);
+    model.on_cards(1, vec![card, blank_lead], None, Vec::new());
     let rows = model.rows(UiLang::En);
     assert_eq!(rows.len(), 2);
 
@@ -366,7 +372,7 @@ fn long_file_and_symbol_len() -> usize {
         nth: 0,
     });
     card.blocks = vec![blk];
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
     let rendered = &model.rows(UiLang::En)[0].edits[0];
     assert!(rendered.symbol.as_ref().unwrap().chars().count() > 100);
     rendered.file.chars().count()
@@ -379,7 +385,7 @@ fn single_format_only_block_collapses() {
 
     let mut card = sample_card("c1", 1_000, Some(2_000));
     card.blocks = vec![sample_block(1, "src/lib.rs", vec![Label::FormatOnly {}])];
-    model.on_cards(1, vec![card], None);
+    model.on_cards(1, vec![card], None, Vec::new());
 
     let id_rows = model.rows(UiLang::Id);
     assert_eq!(id_rows[0].edits.len(), 1);
@@ -399,14 +405,14 @@ fn not_yet_requested_renders_loading_until_page_reply() {
     assert_eq!(model.empty_msg(), CardMsg::Loading);
 
     // Unsolicited empty page does not exit the initial unrequested state.
-    model.on_cards(99, Vec::new(), None);
+    model.on_cards(99, Vec::new(), None, Vec::new());
     assert_eq!(model.empty_msg(), CardMsg::Loading);
 
     let _ = model.request_first_page(1);
     assert!(model.loading());
     assert_eq!(model.empty_msg(), CardMsg::Loading);
 
-    model.on_cards(1, Vec::new(), None);
+    model.on_cards(1, Vec::new(), None, Vec::new());
     assert!(!model.loading());
     assert_eq!(model.empty_msg(), CardMsg::Empty);
 
@@ -414,7 +420,7 @@ fn not_yet_requested_renders_loading_until_page_reply() {
     assert!(model.loading());
     assert_eq!(model.empty_msg(), CardMsg::Loading);
 
-    model.on_cards(2, Vec::new(), None);
+    model.on_cards(2, Vec::new(), None, Vec::new());
     assert!(!model.loading());
     assert_eq!(model.empty_msg(), CardMsg::Empty);
 }
@@ -444,6 +450,7 @@ fn failed_ack_ends_first_page_loading_and_preserves_items() {
         2,
         vec![sample_card("c1", 1_000, Some(2_000))],
         Some("cursor-1".to_string()),
+        Vec::new(),
     );
 
     let _ = model.request_first_page(3);
@@ -461,7 +468,12 @@ fn failed_ack_ends_first_page_loading_and_preserves_items() {
     assert_eq!(ids, vec!["c2", "c1"]);
 
     // Stale Cards reply for the aborted id 3 must be ignored.
-    model.on_cards(3, vec![sample_card("stale", 100, Some(200))], None);
+    model.on_cards(
+        3,
+        vec![sample_card("stale", 100, Some(200))],
+        None,
+        Vec::new(),
+    );
     let ids: Vec<String> = model
         .rows(UiLang::En)
         .into_iter()
@@ -478,6 +490,7 @@ fn failed_ack_re_enables_load_more_with_same_cursor() {
         1,
         vec![sample_card("c2", 2_000, Some(3_000))],
         Some("3000:c2".to_string()),
+        Vec::new(),
     );
 
     let req = model.request_more(2);
@@ -488,6 +501,7 @@ fn failed_ack_re_enables_load_more_with_same_cursor() {
             query: None,
             before: Some("3000:c2".to_string()),
             limit: PAGE_LIMIT,
+            translate_to: None,
         })
     );
     assert!(model.loading());
@@ -511,11 +525,17 @@ fn failed_ack_re_enables_load_more_with_same_cursor() {
             query: None,
             before: Some("3000:c2".to_string()),
             limit: PAGE_LIMIT,
+            translate_to: None,
         })
     );
     assert!(model.loading());
 
-    model.on_cards(4, vec![sample_card("c1", 1_000, Some(2_000))], None);
+    model.on_cards(
+        4,
+        vec![sample_card("c1", 1_000, Some(2_000))],
+        None,
+        Vec::new(),
+    );
     assert!(!model.loading());
     assert!(!model.has_more());
     let ids: Vec<String> = model
@@ -544,7 +564,12 @@ fn row_titles_format_cross_session_prompts_in_both_languages() {
     let mut mid_mention = sample_card("c-mid-cross", 1_000, Some(2_000));
     mid_mention.prompt = "Explain <cross-session-message from=\"x\"> tag".to_string();
 
-    model.on_cards(1, vec![main_cross, sub_cross, mid_mention], None);
+    model.on_cards(
+        1,
+        vec![main_cross, sub_cross, mid_mention],
+        None,
+        Vec::new(),
+    );
 
     let en_rows = model.rows(UiLang::En);
     assert_eq!(en_rows[0].title, "Message from another session");

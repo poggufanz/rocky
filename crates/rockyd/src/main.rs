@@ -694,61 +694,100 @@ fn attach_translations(
     if !enabled {
         return;
     }
-    let ServerMsg::CardDetail { card, .. } = msg else {
-        return;
-    };
-    let quotes = distinct_block_quotes(&card.blocks);
-    if quotes.is_empty() {
-        return;
-    }
-    let card_id = card.card_id.clone();
-    let detail = translator.on_detail(enabled, &card_id, to, &quotes);
-    if detail.hits.is_empty() && detail.pending.is_empty() {
-        return;
-    }
-    let mut overflow = Vec::new();
-    let mut iter = detail.hits.into_iter();
-    while let Some(item) = iter.next() {
-        let ServerMsg::CardDetail { translations, .. } = msg else {
-            unreachable!();
-        };
-        translations.push(item);
-        if encode(msg).len() > LINE_CAP {
-            let ServerMsg::CardDetail { translations, .. } = msg else {
-                unreachable!();
-            };
-            overflow.push(translations.pop().expect("just pushed"));
-            overflow.extend(iter);
-            break;
+    match msg {
+        ServerMsg::CardDetail { card, .. } => {
+            let quotes = distinct_block_quotes(&card.blocks);
+            if quotes.is_empty() {
+                return;
+            }
+            let card_id = card.card_id.clone();
+            let detail = translator.on_detail(enabled, &card_id, to, &quotes);
+            if detail.hits.is_empty() && detail.pending.is_empty() {
+                return;
+            }
+            let mut overflow = Vec::new();
+            let mut iter = detail.hits.into_iter();
+            while let Some(item) = iter.next() {
+                let ServerMsg::CardDetail { translations, .. } = msg else {
+                    unreachable!();
+                };
+                translations.push(item);
+                if encode(msg).len() > LINE_CAP {
+                    let ServerMsg::CardDetail { translations, .. } = msg else {
+                        unreachable!();
+                    };
+                    overflow.push(translations.pop().expect("just pushed"));
+                    overflow.extend(iter);
+                    break;
+                }
+            }
+            for key in detail.pending {
+                let ServerMsg::CardDetail { pending, .. } = msg else {
+                    unreachable!();
+                };
+                pending.push(key);
+                if encode(msg).len() > LINE_CAP {
+                    let ServerMsg::CardDetail { pending, .. } = msg else {
+                        unreachable!();
+                    };
+                    pending.pop();
+                    break;
+                }
+            }
+            if !overflow.is_empty() {
+                translator.push_later(&card_id, overflow);
+            }
         }
-    }
-    for key in detail.pending {
-        let ServerMsg::CardDetail { pending, .. } = msg else {
-            unreachable!();
-        };
-        pending.push(key);
-        if encode(msg).len() > LINE_CAP {
-            let ServerMsg::CardDetail { pending, .. } = msg else {
-                unreachable!();
-            };
-            pending.pop();
-            break;
+        ServerMsg::Cards { items, .. } => {
+            let quotes = distinct_cards_quotes(items);
+            if quotes.is_empty() {
+                return;
+            }
+            let hits = translator.cached(enabled, to, &quotes);
+            for item in hits {
+                let ServerMsg::Cards { translations, .. } = msg else {
+                    unreachable!();
+                };
+                translations.push(item);
+                if encode(msg).len() > LINE_CAP {
+                    let ServerMsg::Cards { translations, .. } = msg else {
+                        unreachable!();
+                    };
+                    translations.pop();
+                    break;
+                }
+            }
         }
-    }
-    if !overflow.is_empty() {
-        translator.push_later(&card_id, overflow);
+        _ => {}
     }
 }
 
-fn distinct_block_quotes(blocks: &[rocky_proto::cards::Block]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut quotes = Vec::new();
+fn collect_distinct_quotes<'a>(
+    blocks: &'a [rocky_proto::cards::Block],
+    seen: &mut HashSet<&'a str>,
+    quotes: &mut Vec<String>,
+) {
     for block in blocks {
         if let Some(quote) = &block.quote
             && seen.insert(quote.text.as_str())
         {
             quotes.push(quote.text.clone());
         }
+    }
+}
+
+fn distinct_block_quotes(blocks: &[rocky_proto::cards::Block]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut quotes = Vec::new();
+    collect_distinct_quotes(blocks, &mut seen, &mut quotes);
+    quotes
+}
+
+fn distinct_cards_quotes(cards: &[rocky_proto::cards::Card]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut quotes = Vec::new();
+    for card in cards {
+        collect_distinct_quotes(&card.blocks, &mut seen, &mut quotes);
     }
     quotes
 }
@@ -983,9 +1022,10 @@ fn handle_control(
             query,
             before,
             limit,
+            translate_to,
             reply,
         } => {
-            queries.cards(id, query, before, limit, reply);
+            queries.cards(id, query, before, limit, translate_to, reply);
             LoopAction::Continue
         }
         Control::CardDetail {
@@ -1426,6 +1466,7 @@ mod tests {
                     query: None,
                     before: None,
                     limit: 20,
+                    translate_to: None,
                     reply: tx3,
                 },
                 &shared,
@@ -3502,5 +3543,208 @@ mod tests {
             panic!("expected Snapshot, got {snap:?}");
         };
         assert_eq!(translate, expected);
+    }
+
+    fn request_cards_page(
+        home: &Path,
+        shared: &Arc<Mutex<Shared>>,
+        id: u64,
+        translate_to: Option<rocky_proto::translate::QuoteLang>,
+    ) -> (ServerMsg, rockyd::translate::Translator) {
+        use rockyd::translate::Translator;
+        use std::collections::BTreeSet;
+
+        let hub = Hub::new();
+        let log = RotatingLog::new(&log_path(home));
+        let mut cards = Engine::new(home.to_path_buf(), 1).with_user_home(None);
+        let mut queries = CardQueryLoop::new(home.to_path_buf(), cards.worker_count());
+        let mut guards = GuardLoop::new(home.to_path_buf(), &log, now_ms());
+        let mut translator = Translator::new(home.to_path_buf());
+        let owned = BTreeSet::new();
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let _ = handle_control(
+            Control::Cards {
+                id,
+                query: None,
+                before: None,
+                limit: 20,
+                translate_to,
+                reply: tx,
+            },
+            shared,
+            &hub,
+            &log,
+            home,
+            &owned,
+            &mut cards,
+            &mut queries,
+            &mut guards,
+            &mut translator,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let reply = loop {
+            service_queries(&mut queries, shared, &mut translator, &log);
+            if let Ok(msg) = rx.try_recv() {
+                break msg;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for cards");
+            thread::sleep(Duration::from_millis(5));
+        };
+        (reply, translator)
+    }
+
+    #[test]
+    fn cards_reply_carries_cached_translations_and_never_queues() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
+
+        let sha = "a".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+        seed_cached_translation(&home, &sha, QuoteLang::En, QuoteLang::Id, "Merah.", "Red.");
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+
+        let mut hit_card = make_test_card(&home, "card-list-hit");
+        hit_card.started_ms = 1_000;
+        hit_card.ended_ms = Some(2_000);
+        hit_card.blocks[0].quote = Some(Quote {
+            text: "Merah.".to_string(),
+            shared: false,
+        });
+
+        let mut miss_card = make_test_card(&home, "card-list-miss");
+        miss_card.started_ms = 2_000;
+        miss_card.ended_ms = Some(3_000);
+        miss_card.blocks[0].quote = Some(Quote {
+            text: "Biru.".to_string(),
+            shared: false,
+        });
+
+        {
+            let mut s = shared.lock().unwrap();
+            s.cards.append(&hit_card).unwrap();
+            s.cards.append(&miss_card).unwrap();
+        }
+
+        let (reply, mut translator) = request_cards_page(&home, &shared, 1, Some(QuoteLang::En));
+        let ServerMsg::Cards { translations, .. } = reply else {
+            panic!("expected Cards, got {reply:?}");
+        };
+        assert_eq!(
+            translations,
+            vec![QuoteTranslation {
+                quote_key: quote_key("Merah."),
+                from: QuoteLang::Id,
+                text: "Red.".to_string(),
+            }]
+        );
+        assert_eq!(translator.pending_len(), 0);
+        assert!(!translator.has_job());
+        assert!(translator.service(true).is_empty());
+        assert!(!translator.has_job());
+    }
+
+    #[test]
+    fn cards_reply_with_setting_off_attaches_nothing() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::QuoteLang;
+
+        let sha = "b".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+        seed_cached_translation(&home, &sha, QuoteLang::En, QuoteLang::Id, "Merah.", "Red.");
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = false;
+        let mut card = make_test_card(&home, "card-list-off");
+        card.blocks[0].quote = Some(Quote {
+            text: "Merah.".to_string(),
+            shared: false,
+        });
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, translator) = request_cards_page(&home, &shared, 2, Some(QuoteLang::En));
+        let ServerMsg::Cards { translations, .. } = reply else {
+            panic!("expected Cards, got {reply:?}");
+        };
+        assert!(translations.is_empty());
+        assert_eq!(translator.pending_len(), 0);
+        assert!(!translator.has_job());
+    }
+
+    #[test]
+    fn cards_reply_drops_translations_past_line_cap_without_pushing() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::pipe::{LINE_CAP, encode};
+        use rocky_proto::translate::QuoteLang;
+
+        let sha = "c".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        seed_ready_id_en_with_sha(&home, &sha);
+
+        let mut card = make_test_card(&home, "card-list-big");
+        card.root.clear();
+        card.blocks.clear();
+        for i in 0..10u32 {
+            let quote_text = format!("list-quote-{i}");
+            let translated_text = format!("{i}-{}", "x".repeat(498));
+            seed_cached_translation(
+                &home,
+                &sha,
+                QuoteLang::En,
+                QuoteLang::Id,
+                &quote_text,
+                &translated_text,
+            );
+            card.blocks.push(Block {
+                seq: i + 1,
+                path: format!("src/f{i}.rs"),
+                symbol: None,
+                labels: Vec::new(),
+                importance: Importance::Medium,
+                via: BlockVia::Edit,
+                tool_use_ids: vec![format!("tu-{i}")],
+                bash: None,
+                before: None,
+                after: None,
+                recorded: false,
+                line: Some(1),
+                added: Some(1),
+                removed: Some(0),
+                quote: Some(Quote {
+                    text: quote_text,
+                    shared: false,
+                }),
+            });
+        }
+        let base_msg = rockyd::cards::detail::build_cards_reply(1, vec![card.clone()], None);
+        let base_len = encode(&base_msg).len();
+        let pad = LINE_CAP.saturating_sub(base_len + 1200);
+        card.prompt = "p".repeat(pad);
+
+        let shared = make_test_shared(&home);
+        shared.lock().unwrap().settings.translate_quotes = true;
+        shared.lock().unwrap().cards.append(&card).unwrap();
+
+        let (reply, mut translator) = request_cards_page(&home, &shared, 3, Some(QuoteLang::En));
+        assert!(encode(&reply).len() <= LINE_CAP);
+        let ServerMsg::Cards { translations, .. } = reply else {
+            panic!("expected Cards, got {reply:?}");
+        };
+        assert!(
+            !translations.is_empty() && translations.len() < 10,
+            "expected partial translations under LINE_CAP, got {}",
+            translations.len()
+        );
+        // Dropped hits are never staged for push.
+        assert!(translator.service(true).is_empty());
+        assert!(translator.service(true).is_empty());
     }
 }
