@@ -1,6 +1,7 @@
 //! Pure navigation, reconnect refresh, and inbox routing helpers for change card views.
 
 use rocky_proto::pipe::{ClientMsg, ServerMsg};
+use rocky_proto::translate::QuoteLang;
 
 use crate::card_detail_model::{DetailModel, DiffModel};
 use crate::cards_model::CardsModel;
@@ -82,16 +83,37 @@ pub fn route_card_msg(
             true
         }
         ServerMsg::CardDetail {
-            id, card, snippets, ..
+            id,
+            card,
+            snippets,
+            translations,
+            pending,
         } => {
             if let Some(d) = detail.as_mut()
                 && d.pending_id() == Some(*id)
             {
-                d.on_detail(*id, card.clone(), snippets.clone(), lang);
+                d.on_detail(
+                    *id,
+                    card.clone(),
+                    snippets.clone(),
+                    translations.clone(),
+                    pending.clone(),
+                    lang,
+                );
                 return true;
             }
             false
         }
+        ServerMsg::QuoteTranslated { card_id, item } => detail
+            .as_mut()
+            .is_some_and(|d| d.on_translated(card_id, item)),
+        ServerMsg::QuoteSettled {
+            card_id,
+            quote_key,
+            to,
+        } => detail
+            .as_mut()
+            .is_some_and(|d| d.on_settled(card_id, quote_key, *to)),
         ServerMsg::BlockDiff {
             id,
             lines,
@@ -150,9 +172,10 @@ pub fn open_detail(
     diff: &mut Option<DiffModel>,
     card_id: String,
     id: u64,
+    target: Option<QuoteLang>,
 ) -> ClientMsg {
     *diff = None;
-    let (m, msg) = DetailModel::open(card_id, id);
+    let (m, msg) = DetailModel::open(card_id, id, target);
     *detail = Some(m);
     *view = View::CardDetail;
     msg
@@ -274,8 +297,15 @@ mod tests {
         );
 
         // Detail + diff open at page 2: requests page 1 + detail + same seq/page diff.
-        let (mut detail, _) = DetailModel::open("c1".to_string(), alloc());
-        detail.on_detail(13, sample_card("c1"), Vec::new(), UiLang::En);
+        let (mut detail, _) = DetailModel::open("c1".to_string(), alloc(), None);
+        detail.on_detail(
+            13,
+            sample_card("c1"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            UiLang::En,
+        );
         assert!(matches!(detail.state(), DetailState::Ready(_)));
 
         let (mut diff, _) = DiffModel::open("c1".to_string(), 7, alloc());
@@ -419,7 +449,7 @@ mod tests {
         assert_eq!(cards.rows(UiLang::En).len(), 2);
 
         // Open detail (id 2), verify unrelated Ack (999) is ignored, then matching CardDetail updates it.
-        let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 2);
+        let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 2, None);
         let ignored = route_card_msg(
             &ServerMsg::Ack {
                 id: 999,
@@ -523,7 +553,7 @@ mod tests {
         let mut detail = None;
         let mut diff = None;
 
-        let msg = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1);
+        let msg = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1, None);
         assert_eq!(
             msg,
             ClientMsg::CardDetail {
@@ -568,7 +598,7 @@ mod tests {
         let mut detail = None;
         let mut diff = None;
 
-        let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1);
+        let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1, None);
         let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 7, 2);
 
         let mut next = 2_u64;
@@ -605,7 +635,14 @@ mod tests {
         let mut detail = None;
         let mut diff = None;
 
-        let _ = open_detail(&mut view, &mut detail, &mut diff, "missing".to_string(), 1);
+        let _ = open_detail(
+            &mut view,
+            &mut detail,
+            &mut diff,
+            "missing".to_string(),
+            1,
+            None,
+        );
         let changed = route_card_msg(
             &ServerMsg::Ack {
                 id: 1,
@@ -694,7 +731,14 @@ mod tests {
         let mut diff = None;
 
         let _ = cards.request_first_page(10);
-        let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 11);
+        let _ = open_detail(
+            &mut view,
+            &mut detail,
+            &mut diff,
+            "c1".to_string(),
+            11,
+            None,
+        );
 
         // Unrelated Ack leaves cards loading and detail untouched.
         assert!(!route_card_msg(
@@ -768,5 +812,122 @@ mod tests {
                 limit: PAGE_LIMIT,
             })
         );
+    }
+
+    #[test]
+    fn route_card_msg_routes_quote_translations_and_settled() {
+        use rocky_proto::cards::Quote;
+        use rocky_proto::translate::{QuoteTranslation, quote_key};
+
+        let mut view = View::Agents;
+        let mut cards = CardsModel::new();
+        let mut detail = None;
+        let mut diff = None;
+
+        let raw1 = "Pertama";
+        let raw2 = "Kedua";
+        let k1 = quote_key(raw1);
+        let k2 = quote_key(raw2);
+
+        let req = open_detail(
+            &mut view,
+            &mut detail,
+            &mut diff,
+            "c1".to_string(),
+            1,
+            Some(QuoteLang::En),
+        );
+        assert_eq!(
+            req,
+            ClientMsg::CardDetail {
+                id: 1,
+                card_id: "c1".to_string(),
+                translate_to: Some(QuoteLang::En),
+            }
+        );
+
+        // Early push while Loading applies to open detail.
+        assert!(route_card_msg(
+            &ServerMsg::QuoteSettled {
+                card_id: "c1".to_string(),
+                quote_key: k2.clone(),
+                to: QuoteLang::En,
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+        // Push for a different card is ignored.
+        assert!(!route_card_msg(
+            &ServerMsg::QuoteTranslated {
+                card_id: "other".to_string(),
+                item: QuoteTranslation {
+                    quote_key: k1.clone(),
+                    from: QuoteLang::Id,
+                    text: "Ignored".to_string(),
+                },
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+
+        let mut card = sample_card("c1");
+        let mut b1 = card.blocks[0].clone();
+        b1.seq = 1;
+        b1.quote = Some(Quote {
+            text: raw1.to_string(),
+            shared: false,
+        });
+        let mut b2 = card.blocks[0].clone();
+        b2.seq = 2;
+        b2.quote = Some(Quote {
+            text: raw2.to_string(),
+            shared: false,
+        });
+        card.blocks = vec![b1, b2];
+
+        assert!(route_card_msg(
+            &ServerMsg::CardDetail {
+                id: 1,
+                card,
+                snippets: Vec::new(),
+                translations: Vec::new(),
+                pending: vec![k1.clone(), k2.clone()],
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+
+        // Ready state still receives QuoteTranslated.
+        assert!(route_card_msg(
+            &ServerMsg::QuoteTranslated {
+                card_id: "c1".to_string(),
+                item: QuoteTranslation {
+                    quote_key: k1.clone(),
+                    from: QuoteLang::Id,
+                    text: "First".to_string(),
+                },
+            },
+            &mut view,
+            &mut cards,
+            &mut detail,
+            &mut diff,
+            UiLang::En,
+        ));
+
+        let d = detail.as_ref().unwrap();
+        let DetailState::Ready(ready) = d.state() else {
+            panic!("expected Ready state");
+        };
+        assert_eq!(d.quote_display(&ready.groups[0], UiLang::En).text, "First");
+        assert!(!d.quote_display(&ready.groups[1], UiLang::En).translating);
     }
 }

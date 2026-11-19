@@ -16,7 +16,7 @@ fn assert_no_control_chars(label: &str, value: &str) {
 
 #[test]
 fn edit_step_titles_and_single_sided_line_facts() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(2_000));
 
     let mut b1 = sample_block(1, "src/added.rs", vec![Label::FileNew {}]);
@@ -79,7 +79,7 @@ fn edit_step_titles_and_single_sided_line_facts() {
     ];
     card.flow_more = 2;
 
-    model.on_detail(1, card, Vec::new(), UiLang::Id);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -111,7 +111,7 @@ fn edit_step_titles_and_single_sided_line_facts() {
 
 #[test]
 fn single_line_fields_sanitize_controls_while_detail_keeps_prompt_and_quote() {
-    let (mut model, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut model, _) = DetailModel::open("c1".to_string(), 1, None);
     let mut card = sample_card("c1", 1_000, Some(10_000));
     card.main_root = Some("/work/my\nrepo".to_string());
     card.root = "/work/my\nrepo".to_string();
@@ -149,7 +149,7 @@ fn single_line_fields_sanitize_controls_while_detail_keeps_prompt_and_quote() {
         error: None,
     }];
 
-    model.on_detail(1, card, Vec::new(), UiLang::En);
+    model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
     let DetailState::Ready(view) = model.state() else {
         panic!("expected Ready state");
     };
@@ -204,10 +204,12 @@ fn diff_zero_pages_blocks_navigation() {
 
 #[test]
 fn reopen_resets_detail_and_diff_to_loading_until_reply() {
-    let (mut detail, _) = DetailModel::open("c1".to_string(), 1);
+    let (mut detail, _) = DetailModel::open("c1".to_string(), 1, None);
     detail.on_detail(
         1,
         sample_card("c1", 1_000, Some(2_000)),
+        Vec::new(),
+        Vec::new(),
         Vec::new(),
         UiLang::Id,
     );
@@ -231,13 +233,15 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
         1,
         sample_card("c1", 1_000, Some(3_000)),
         Vec::new(),
+        Vec::new(),
+        Vec::new(),
         UiLang::Id,
     );
     assert_eq!(detail.state(), &DetailState::Loading);
 
     let mut refreshed = sample_card("c1", 1_000, Some(4_000));
     refreshed.prompt = "Updated prompt".to_string();
-    detail.on_detail(2, refreshed, Vec::new(), UiLang::Id);
+    detail.on_detail(2, refreshed, Vec::new(), Vec::new(), Vec::new(), UiLang::Id);
     let DetailState::Ready(view) = detail.state() else {
         panic!("expected Ready state after reopen reply");
     };
@@ -335,10 +339,10 @@ fn reopen_resets_detail_and_diff_to_loading_until_reply() {
 #[test]
 fn detail_treats_cross_session_prompt_as_notice_in_both_languages() {
     let open_prompt = |id: &str, prompt: &str, lang: UiLang| -> DetailView {
-        let (mut model, _) = DetailModel::open(id.to_string(), 1);
+        let (mut model, _) = DetailModel::open(id.to_string(), 1, None);
         let mut card = sample_card(id, 1_000, Some(2_000));
         card.prompt = prompt.to_string();
-        model.on_detail(1, card, Vec::new(), lang);
+        model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), lang);
         match model.state() {
             DetailState::Ready(view) => view.clone(),
             other => panic!("expected Ready state, got {other:?}"),

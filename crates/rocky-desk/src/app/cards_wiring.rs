@@ -49,6 +49,7 @@ impl DeskView {
                     &mut self.block_diff,
                     card_id,
                     id,
+                    None,
                 );
                 self.send_card_msg(msg);
                 // The card opens as a modal; focus it so Escape closes it.
