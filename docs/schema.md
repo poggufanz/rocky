@@ -1126,13 +1126,13 @@ Current wire protocol between `rockyd` and `rocky-desk`. Shares v4's newline-del
 - `cards` (Client → Daemon): adds optional `translate_to: QuoteLang?` (`#[serde(default, skip_serializing_if = "Option::is_none")]`).
 - `cards` (Daemon → Client): adds `translations: QuoteTranslation[]` (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`, omitted when empty; carries already-cached translations only and drops entries past `64 KiB` without queueing work).
 - `card_detail` (Client → Daemon): adds optional `translate_to: QuoteLang?` (`#[serde(default, skip_serializing_if = "Option::is_none")]`).
-- `card_detail` (Daemon → Client): adds `translations: QuoteTranslation[]` and `pending: string[]` (quote keys currently queued or running; both use `#[serde(default, skip_serializing_if = "Vec::is_empty")]` and are omitted when empty; translations that do not fit in `64 KiB` are pushed afterward as `quote_translated`).
+- `card_detail` (Daemon → Client): adds `translations: QuoteTranslation[]` and `pending: string[]` (quote keys currently queued or running; both use `#[serde(default, skip_serializing_if = "Vec::is_empty")]` and are omitted when empty; translations that do not fit in `64 KiB` are pushed separately as `quote_translated`). Pushes travel on a different path from replies, so a `quote_translated` or `quote_settled` can arrive before the `card_detail` reply it belongs to; a client treats a card whose detail request is in flight as open and keeps those pushes.
 
 ### New translation messages
 
 Client → Daemon:
 
-- `translate_install`: `{"v":5,"type":"translate_install","id":u64,"pair":TranslatePair}` — downloads and installs the local translation model and engine for `pair`; answered with `ack` (`ok: true` or `ok: false` with `error`), followed by a `translate` broadcast.
+- `translate_install`: `{"v":5,"type":"translate_install","id":u64,"pair":TranslatePair}` — downloads and installs the local translation model and engine for `pair`; answered with `ack` (`ok: true` or `ok: false` with `error`); the daemon also broadcasts `translate`, which may reach a client before or after the `ack`.
 - `translate_remove`: `{"v":5,"type":"translate_remove","id":u64}` — removes downloaded translation files and cache and turns `translate_quotes` off; answered with `ack`.
 
 Daemon → Client:
