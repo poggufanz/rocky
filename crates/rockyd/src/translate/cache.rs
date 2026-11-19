@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use rocky_proto::translate::QuoteLang;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::marker::{cache_dir, translate_dir};
@@ -32,14 +32,6 @@ enum CacheRecordOut<'a> {
         k: &'a str,
         keep: bool,
     },
-}
-
-#[derive(Deserialize)]
-struct CacheRecordIn {
-    k: String,
-    from: Option<QuoteLang>,
-    text: Option<String>,
-    keep: Option<bool>,
 }
 
 /// Computes `sha256(model_sha256 + "\0" + to + "\0" + text)` as 64 lowercase hex characters.
@@ -95,15 +87,14 @@ impl QuoteCache {
 
         let line = serialize_line(key, value)?;
         let path = self.file_path(to);
-        let new_len = append_line(&path, &line)?;
-
-        self.slot_mut(to)
-            .get_or_insert_with(HashMap::new)
-            .insert(key.to_string(), value.clone());
-
-        if new_len > self.cap {
-            self.compact(to)?;
+        if try_append_within_cap(&path, &line, self.cap)? {
+            self.slot_mut(to)
+                .get_or_insert_with(HashMap::new)
+                .insert(key.to_string(), value.clone());
+            return Ok(());
         }
+
+        self.compact_with_new(to, key, &line)?;
         Ok(())
     }
 
@@ -196,51 +187,77 @@ impl QuoteCache {
         Ok(())
     }
 
-    fn compact(&mut self, to: QuoteLang) -> io::Result<()> {
+    fn compact_with_new(
+        &mut self,
+        to: QuoteLang,
+        new_key: &str,
+        new_line: &[u8],
+    ) -> io::Result<()> {
         let path = self.file_path(to);
         let part_path = self.part_path(to);
         let half_cap = self.cap / 2;
 
         let kept = {
-            let mut file = open_real_file_read(&path).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "cache file unavailable")
-            })?;
-            let file_len = file.metadata()?.len();
-            let read_cap = self.cap.saturating_mul(2);
-            if file_len > read_cap {
-                file.seek(SeekFrom::Start(file_len - read_cap))?;
-            }
-
-            let mut reader = BufReader::new(file.take(read_cap));
-            if file_len > read_cap {
-                let mut discard = Vec::new();
-                reader.read_until(b'\n', &mut discard)?;
-            }
-
             let mut deque: VecDeque<(String, Vec<u8>)> = VecDeque::new();
             let mut deque_bytes: u64 = 0;
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) => break,
-                    Err(e) => return Err(e),
-                    Ok(_) => {
-                        let Some((key, cached)) = parse_line(&buf) else {
-                            continue;
-                        };
-                        if let Ok(canonical) = serialize_line(&key, &cached) {
-                            deque_bytes = deque_bytes.saturating_add(canonical.len() as u64);
-                            deque.push_back((key, canonical));
-                            while deque_bytes > self.cap && deque.len() > 1 {
-                                if let Some((_, dropped)) = deque.pop_front() {
-                                    deque_bytes = deque_bytes.saturating_sub(dropped.len() as u64);
+
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if !is_real_file(&meta) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "cache path is not a regular file",
+                    ));
+                }
+                Ok(_) => {
+                    let mut file = open_real_file_read(&path).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "cache file unavailable")
+                    })?;
+                    let file_len = file.metadata()?.len();
+                    let read_cap = self.cap.saturating_mul(2);
+                    if file_len > read_cap {
+                        file.seek(SeekFrom::Start(file_len - read_cap))?;
+                    }
+
+                    let mut reader = BufReader::new(file.take(read_cap));
+                    if file_len > read_cap {
+                        let mut discard = Vec::new();
+                        reader.read_until(b'\n', &mut discard)?;
+                    }
+
+                    let mut buf = Vec::new();
+                    loop {
+                        buf.clear();
+                        match reader.read_until(b'\n', &mut buf) {
+                            Ok(0) => break,
+                            Err(e) => return Err(e),
+                            Ok(_) => {
+                                let Some((key, cached)) = parse_line(&buf) else {
+                                    continue;
+                                };
+                                if let Ok(canonical) = serialize_line(&key, &cached) {
+                                    push_bounded(
+                                        &mut deque,
+                                        &mut deque_bytes,
+                                        key,
+                                        canonical,
+                                        self.cap,
+                                    );
                                 }
                             }
                         }
                     }
                 }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
             }
+
+            push_bounded(
+                &mut deque,
+                &mut deque_bytes,
+                new_key.to_string(),
+                new_line.to_vec(),
+                self.cap,
+            );
 
             let mut selected: Vec<Vec<u8>> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
@@ -268,6 +285,22 @@ impl QuoteCache {
     }
 }
 
+fn push_bounded(
+    deque: &mut VecDeque<(String, Vec<u8>)>,
+    deque_bytes: &mut u64,
+    key: String,
+    line: Vec<u8>,
+    cap: u64,
+) {
+    *deque_bytes = deque_bytes.saturating_add(line.len() as u64);
+    deque.push_back((key, line));
+    while *deque_bytes > cap && deque.len() > 1 {
+        if let Some((_, dropped)) = deque.pop_front() {
+            *deque_bytes = deque_bytes.saturating_sub(dropped.len() as u64);
+        }
+    }
+}
+
 fn serialize_line(key: &str, value: &Cached) -> io::Result<Vec<u8>> {
     let record = match value {
         Cached::Translated { from, text } => CacheRecordOut::Translated {
@@ -288,12 +321,25 @@ fn parse_line(raw: &[u8]) -> Option<(String, Cached)> {
     if trimmed.is_empty() {
         return None;
     }
-    let parsed: CacheRecordIn = serde_json::from_slice(trimmed).ok()?;
-    match (parsed.keep, parsed.from, parsed.text) {
-        (Some(true), None, None) => Some((parsed.k, Cached::Original)),
-        (None, Some(from), Some(text)) => Some((parsed.k, Cached::Translated { from, text })),
-        _ => None,
+    let value: serde_json::Value = serde_json::from_slice(trimmed).ok()?;
+    let obj = value.as_object()?;
+    let key = obj.get("k")?.as_str()?.to_string();
+
+    if obj.len() == 2 && obj.get("keep").and_then(|v| v.as_bool()) == Some(true) {
+        return Some((key, Cached::Original));
     }
+
+    if obj.len() == 3 {
+        let from = match obj.get("from")?.as_str()? {
+            "en" => QuoteLang::En,
+            "id" => QuoteLang::Id,
+            _ => return None,
+        };
+        let text = obj.get("text")?.as_str()?.to_string();
+        return Some((key, Cached::Translated { from, text }));
+    }
+
+    None
 }
 
 fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
@@ -314,16 +360,26 @@ fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-fn append_line(path: &Path, line: &[u8]) -> io::Result<u64> {
-    if fs::symlink_metadata(path).is_ok_and(|meta| !is_real_file(&meta)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "cache path is not a regular file",
-        ));
+fn try_append_within_cap(path: &Path, line: &[u8], cap: u64) -> io::Result<bool> {
+    let line_len = line.len() as u64;
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !is_real_file(&meta) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cache path is not a regular file",
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if line_len > cap {
+                return Ok(false);
+            }
+        }
+        Err(e) => return Err(e),
     }
 
     let mut opts = OpenOptions::new();
-    opts.create(true).append(true);
+    opts.read(true).create(true).append(true);
     apply_no_follow(&mut opts);
 
     let mut file = opts.open(path)?;
@@ -335,9 +391,31 @@ fn append_line(path: &Path, line: &[u8]) -> io::Result<u64> {
         ));
     }
 
-    file.write_all(line)?;
+    let current_len = meta.len();
+    let needs_newline = if current_len > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        last[0] != b'\n'
+    } else {
+        false
+    };
+
+    let added_len = line_len.saturating_add(u64::from(needs_newline));
+    if current_len.saturating_add(added_len) > cap {
+        return Ok(false);
+    }
+
+    if needs_newline {
+        let mut buf = Vec::with_capacity(1 + line.len());
+        buf.push(b'\n');
+        buf.extend_from_slice(line);
+        file.write_all(&buf)?;
+    } else {
+        file.write_all(line)?;
+    }
     file.flush()?;
-    Ok(file.metadata()?.len())
+    Ok(true)
 }
 
 fn write_part_and_replace(
@@ -535,6 +613,11 @@ mod tests {
             "{\"k\":\"k1\",\"from\":\"id\",\"text\":\"first\"}\n",
             "not json at all\n",
             "{\"k\":\"k2\",\"keep\":false}\n",
+            "[\"k_arr_tr\",\"id\",\"from array\",null]\n",
+            "[\"k_arr_keep\",null,null,true]\n",
+            "{\"k\":\"k_null_keep\",\"keep\":true,\"text\":null}\n",
+            "{\"k\":\"k_null_tr\",\"from\":\"id\",\"text\":\"hi\",\"keep\":null}\n",
+            "{\"k\":\"k_null_val\",\"from\":\"id\",\"text\":null}\n",
             "{\"k\":\"k1\",\"from\":\"id\",\"text\":\"second\"}\n",
             "{\"k\":\"k3\",\"keep\":true}\n",
             "{\"k\":\"k4\",\"from\":\"id\",\"text\":\"trun",
@@ -550,8 +633,28 @@ mod tests {
             })
         );
         assert_eq!(cache.get(QuoteLang::En, "k2"), None);
+        assert_eq!(cache.get(QuoteLang::En, "k_arr_tr"), None);
+        assert_eq!(cache.get(QuoteLang::En, "k_arr_keep"), None);
+        assert_eq!(cache.get(QuoteLang::En, "k_null_keep"), None);
+        assert_eq!(cache.get(QuoteLang::En, "k_null_tr"), None);
+        assert_eq!(cache.get(QuoteLang::En, "k_null_val"), None);
         assert_eq!(cache.get(QuoteLang::En, "k3"), Some(Cached::Original));
         assert_eq!(cache.get(QuoteLang::En, "k4"), None);
+
+        let after_truncated = Cached::Translated {
+            from: QuoteLang::Id,
+            text: "after truncated".to_string(),
+        };
+        cache.put(QuoteLang::En, "k5", &after_truncated).unwrap();
+        assert_eq!(
+            cache.get(QuoteLang::En, "k5"),
+            Some(after_truncated.clone())
+        );
+
+        let mut reloaded = QuoteCache::new(home.path().to_path_buf());
+        assert_eq!(reloaded.get(QuoteLang::En, "k5"), Some(after_truncated));
+        assert_eq!(reloaded.get(QuoteLang::En, "k3"), Some(Cached::Original));
+        assert_eq!(reloaded.get(QuoteLang::En, "k4"), None);
     }
 
     #[test]
@@ -598,6 +701,62 @@ mod tests {
                 text: format!("39-{payload}"),
             })
         );
+    }
+
+    #[test]
+    fn failed_compaction_keeps_cache_bounded_on_retry() {
+        let home = TempDir::new().unwrap();
+        let cap = 1024;
+        let mut cache = QuoteCache::with_cap(home.path().to_path_buf(), cap);
+        let payload = "x".repeat(150);
+
+        for i in 0..5 {
+            let key = format!("seed-{i:02}");
+            let value = Cached::Translated {
+                from: QuoteLang::Id,
+                text: format!("{i:02}-{payload}"),
+            };
+            cache.put(QuoteLang::En, &key, &value).unwrap();
+        }
+
+        let dir = cache_dir(home.path());
+        let file_path = dir.join("en.jsonl");
+        let part_path = dir.join("en.jsonl.part");
+        let len_before = fs::metadata(&file_path).unwrap().len();
+        assert!(len_before <= cap);
+
+        fs::create_dir(&part_path).unwrap();
+
+        for i in 0..20 {
+            let key = format!("blocked-{i:02}");
+            let value = Cached::Translated {
+                from: QuoteLang::Id,
+                text: format!("{i:02}-{payload}"),
+            };
+            assert!(
+                cache.put(QuoteLang::En, &key, &value).is_err(),
+                "expected compaction error for {key}"
+            );
+            assert_eq!(cache.get(QuoteLang::En, &key), None);
+        }
+
+        let len_after = fs::metadata(&file_path).unwrap().len();
+        assert!(len_after <= cap, "expected <= {cap}, got {len_after}");
+        assert_eq!(len_after, len_before);
+
+        for i in 0..5 {
+            assert!(cache.get(QuoteLang::En, &format!("seed-{i:02}")).is_some());
+        }
+
+        // Removing the directory blocking `.part` lets a subsequent put compact and succeed.
+        fs::remove_dir(&part_path).unwrap();
+        let recovered = Cached::Translated {
+            from: QuoteLang::Id,
+            text: format!("ok-{payload}"),
+        };
+        cache.put(QuoteLang::En, "recovered", &recovered).unwrap();
+        assert_eq!(cache.get(QuoteLang::En, "recovered"), Some(recovered));
+        assert!(fs::metadata(&file_path).unwrap().len() <= cap);
     }
 
     #[test]
