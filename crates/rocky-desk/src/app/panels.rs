@@ -353,6 +353,10 @@ impl DeskView {
             has_extras = true;
             let err_msg = match err {
                 TranslateError::Busy => SetupMsg::TranslateBusy,
+                TranslateError::Disabled => SetupMsg::TranslateDisabledError,
+                TranslateError::Engine => SetupMsg::TranslateEngineError,
+                TranslateError::RemoveFailed => SetupMsg::TranslateRemoveError,
+                TranslateError::Unknown => SetupMsg::TranslateUnknownError,
                 TranslateError::Other(reason) => SetupMsg::TranslateRequestFailed {
                     reason: reason.clone(),
                 },

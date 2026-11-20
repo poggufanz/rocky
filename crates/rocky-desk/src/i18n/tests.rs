@@ -994,6 +994,27 @@ fn translate_settings_copy_in_both_languages() {
         "Masih menyelesaikan terjemahan. Coba lagi sebentar lagi."
     );
 
+    // Daemon codes never reach the screen raw.
+    for msg in [
+        SetupMsg::TranslateDisabledError,
+        SetupMsg::TranslateEngineError,
+        SetupMsg::TranslateRemoveError,
+        SetupMsg::TranslateUnknownError,
+    ] {
+        for text in [setup_en(&msg), setup_id(&msg)] {
+            assert!(text.ends_with('.'), "{text}");
+            assert!(!text.contains(": "), "{text}");
+        }
+    }
+    assert_eq!(
+        setup_en(&SetupMsg::TranslateUnknownError),
+        "Request failed."
+    );
+    assert_eq!(
+        setup_id(&SetupMsg::TranslateUnknownError),
+        "Permintaan gagal."
+    );
+
     assert_eq!(
         setup_en(&SetupMsg::TranslateRequestFailed {
             reason: "disk full".into()

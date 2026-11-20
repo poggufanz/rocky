@@ -91,8 +91,32 @@ pub enum Outgoing {
 /// Error surfaced from the most recent translation action request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranslateError {
+    /// Daemon `busy`: a translation or install is still running.
     Busy,
+    /// Daemon `disabled`: the setting is off.
+    Disabled,
+    /// Daemon `engine`: the CLI that runs the engine could not start.
+    Engine,
+    /// Daemon `remove failed`: the downloaded files could not be deleted.
+    RemoveFailed,
+    /// A failure with no reason given.
+    Unknown,
+    /// Text that is already readable (expiry, not sent) or an unrecognized code.
     Other(String),
+}
+
+impl TranslateError {
+    /// Maps a daemon error code to the error the desk shows.
+    fn from_code(code: Option<&str>) -> Self {
+        match code.map(str::trim) {
+            Some("busy") => TranslateError::Busy,
+            Some("disabled") => TranslateError::Disabled,
+            Some("engine") => TranslateError::Engine,
+            Some("remove failed") => TranslateError::RemoveFailed,
+            None | Some("") => TranslateError::Unknown,
+            Some(other) => TranslateError::Other(other.to_string()),
+        }
+    }
 }
 
 /// State machine for quote translation enablement, download confirmation, and request errors.
@@ -169,10 +193,7 @@ impl TranslateFlow {
             Outcome::Done { ok: true, .. } => None,
             Outcome::Done {
                 ok: false, error, ..
-            } => match error.as_deref() {
-                Some("busy") => Some(TranslateError::Busy),
-                other => Some(TranslateError::Other(other.unwrap_or_default().to_string())),
-            },
+            } => Some(TranslateError::from_code(error.as_deref())),
             Outcome::Expired => Some(TranslateError::Other(expired.to_string())),
             Outcome::Plan { .. } | Outcome::Repos(_) => None,
         };
@@ -499,7 +520,25 @@ mod tests {
             },
             "expired",
         );
-        assert_eq!(flow.error(), Some(&TranslateError::Other(String::new())));
+        assert_eq!(flow.error(), Some(&TranslateError::Unknown));
+
+        for (code, want) in [
+            ("busy", TranslateError::Busy),
+            ("disabled", TranslateError::Disabled),
+            ("engine", TranslateError::Engine),
+            ("remove failed", TranslateError::RemoveFailed),
+            ("", TranslateError::Unknown),
+        ] {
+            flow.on_result(
+                &Outcome::Done {
+                    ok: false,
+                    error: Some(code.into()),
+                    cleanup_errors: 0,
+                },
+                "expired",
+            );
+            assert_eq!(flow.error(), Some(&want), "code {code:?}");
+        }
 
         flow.on_result(&Outcome::Expired, "timed out");
         assert_eq!(
