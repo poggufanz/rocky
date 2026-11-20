@@ -1357,7 +1357,7 @@ function memoryCoverage(
         typeof complete !== "boolean" ||
         (reason !== undefined && reason !== "file-size-cap" && reason !== "record-cap" && reason !== "read-race") ||
         (window !== undefined && window !== "tail")) return unknownMemoryCoverage();
-    if (window === "tail" && complete === true) return unknownMemoryCoverage();
+    if (window === "tail" && (complete === true || startOffset === undefined)) return unknownMemoryCoverage();
     if (window !== "tail" && (startOffset !== undefined || oldestTs !== undefined)) return unknownMemoryCoverage();
     if (startOffset !== undefined && (!isSafeNonNegativeInteger(startOffset) || startOffset > bytesTotal)) return unknownMemoryCoverage();
     if (oldestTs !== undefined && !isSafeNonNegativeInteger(oldestTs)) return unknownMemoryCoverage();
