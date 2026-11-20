@@ -41,7 +41,7 @@ import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe } from "./fs-safet
 import { FINGERPRINT_ALGORITHM_VERSION } from "./fingerprint.js";
 import {
   MAX_MEMORY_FILE_BYTES,
-  MAX_SUPPORTED_MEMORY_RECORDS,
+  maxSupportedMemoryRecords,
   MEMORY_FORMAT_VERSION,
   loadMemoryChecked,
   parseMemoryRecord,
@@ -612,11 +612,12 @@ export function findByFingerprintOnDisk(
     const stats = lstatSync(path, { bigint: true });
     if (stats.isSymbolicLink() || !stats.isFile()) return fallback();
     if (stats.size > BigInt(MAX_MEMORY_FILE_BYTES)) return fallback();
+    const maxRecords = maxSupportedMemoryRecords();
     const expected = {
       version: MEMORY_FORMAT_VERSION,
       fpVersion: FINGERPRINT_ALGORITHM_VERSION,
       maxBytes: MAX_MEMORY_FILE_BYTES,
-      maxRecords: MAX_SUPPORTED_MEMORY_RECORDS,
+      maxRecords,
     };
     const sidecar = tryLoadSidecarMap(path, stats, expected);
     if (sidecar === undefined) return fallback();
@@ -624,7 +625,7 @@ export function findByFingerprintOnDisk(
       const only = [...candidates][0]!;
       if (isHexFingerprint(only)) return fallback();
     }
-    if (sidecar.header.count > MAX_SUPPORTED_MEMORY_RECORDS) return fallback();
+    if (sidecar.header.count > maxRecords) return fallback();
     const rows: { offset: number; id: string; fp: string }[] = [];
     for (const candidate of candidates) {
       const bucket = sidecar.byFp.get(candidate);

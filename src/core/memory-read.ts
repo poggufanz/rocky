@@ -637,6 +637,21 @@ export const MAX_MEMORY_RECORDS = 50_000;
 export const MAX_SUPPORTED_MEMORY_RECORDS = process.platform === "linux" && process.versions.node.startsWith("22.")
   ? MAX_MEMORY_RECORDS
   : 10_000;
+
+/**
+ * Effective supported record cap. Reads the test seam env on every call so
+ * tests can shrink the cap without building a multi-thousand-record file.
+ */
+export function maxSupportedMemoryRecords(): number {
+  if (process.env.ROCKY_TEST_SEAMS === "1") {
+    const raw = process.env.ROCKY_TEST_MAX_MEMORY_RECORDS;
+    if (raw !== undefined && /^[1-9][0-9]*$/.test(raw)) {
+      const parsed = Number(raw);
+      if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+    }
+  }
+  return MAX_SUPPORTED_MEMORY_RECORDS;
+}
 export const MAX_MEMORY_LINE_BYTES = 1024 * 1024;
 const MEMORY_READ_CHUNK_BYTES = 64 * 1024;
 const MAX_RECORD_ARRAY_ITEMS = 256;
@@ -1432,6 +1447,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
 
     const totalBytes = statBytes(opened.size);
     const readLimit = Math.min(totalBytes, MAX_MEMORY_FILE_BYTES);
+    const recordCap = maxSupportedMemoryRecords();
     const lineChunks: Buffer[] = [];
     let lineBytes = 0;
     let lineOversized = false;
@@ -1480,7 +1496,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         lineStartFileOffset = nextStart;
         return;
       }
-      if (records.length >= MAX_SUPPORTED_MEMORY_RECORDS) {
+      if (records.length >= recordCap) {
         stoppedAtRecordCap = true;
         truncated = Math.max(1, truncated);
         resetLine();

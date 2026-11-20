@@ -38,7 +38,7 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION, sameCwd } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
@@ -946,7 +946,8 @@ export function withMemoryTransaction<T>(
     try {
       if (appendedCount === 0 || allOffsets === undefined) return;
       if (!initial.complete || !complete) return;
-      if (records.length > MAX_SUPPORTED_MEMORY_RECORDS) return;
+      const maxRecords = maxSupportedMemoryRecords();
+      if (records.length > maxRecords) return;
       let post: Stats;
       try {
         post = statSync(paths.memory);
@@ -985,7 +986,7 @@ export function withMemoryTransaction<T>(
         complete: true,
         hasLegacy,
         maxBytes: MAX_MEMORY_FILE_BYTES,
-        maxRecords: MAX_SUPPORTED_MEMORY_RECORDS,
+        maxRecords,
       });
     } catch { /* advisory only; never fails the transaction */ }
   };
@@ -1025,7 +1026,7 @@ export function withMemoryTransaction<T>(
     },
     canAppendComplete(nextRecords) {
       if (!complete || !isCompleteMemoryCoverage(coverage)) return false;
-      if (records.length + nextRecords.length > MAX_SUPPORTED_MEMORY_RECORDS) return false;
+      if (records.length + nextRecords.length > maxSupportedMemoryRecords()) return false;
       const addedBytes = nextRecords.reduce((total, record) => {
         const encoded = Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8");
         return total > Number.MAX_SAFE_INTEGER - encoded ? Number.MAX_SAFE_INTEGER : total + encoded;
