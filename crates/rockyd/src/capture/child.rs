@@ -9,7 +9,7 @@
 //! writer thread owns stdin, so a Node that stalls cannot block the daemon thread that serves
 //! the desk pipe and the guard.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
@@ -19,10 +19,10 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-use rocky_proto::pipe::LINE_CAP;
 use serde_json::json;
 
 use super::{CaptureLine, parse_line};
+use crate::child_lines::read_capped_lines;
 use crate::guard::records::CliRecord;
 
 /// How long [`CaptureChild::stop`] waits for the child to leave after its stdin closes.
@@ -170,63 +170,10 @@ fn write_requests(mut stdin: ChildStdin, requests: &Receiver<String>) {
 /// Splits `stdout` on `\n` and sends each accepted line. Returns at end of input, on a read
 /// error, or when the receiver is gone.
 fn read_lines(stdout: impl Read, sender: &Sender<CaptureLine>) {
-    let mut reader = BufReader::new(stdout);
-    let mut pending = LineBuffer::default();
-    loop {
-        let chunk = match reader.fill_buf() {
-            Ok([]) => return,
-            Ok(chunk) => chunk,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return,
-        };
-        let used = match chunk.iter().position(|byte| *byte == b'\n') {
-            Some(end) => {
-                pending.extend(&chunk[..end]);
-                if let Some(line) = pending.finish()
-                    && sender.send(line).is_err()
-                {
-                    return;
-                }
-                end + 1
-            }
-            None => {
-                pending.extend(chunk);
-                chunk.len()
-            }
-        };
-        reader.consume(used);
-    }
-}
-
-/// One line being assembled. A line over [`LINE_CAP`] is dropped without being kept in memory.
-#[derive(Default)]
-struct LineBuffer {
-    bytes: Vec<u8>,
-    overflowed: bool,
-}
-
-impl LineBuffer {
-    fn extend(&mut self, part: &[u8]) {
-        if self.overflowed {
-            return;
-        }
-        self.bytes.extend_from_slice(part);
-        if self.bytes.len() > LINE_CAP {
-            self.overflowed = true;
-            self.bytes = Vec::new();
-        }
-    }
-
-    /// Ends the line and starts a new one. `None` for an oversized line, bytes that are not
-    /// UTF-8, and anything [`parse_line`] rejects.
-    fn finish(&mut self) -> Option<CaptureLine> {
-        let overflowed = std::mem::take(&mut self.overflowed);
-        let bytes = std::mem::take(&mut self.bytes);
-        if overflowed {
-            return None;
-        }
-        parse_line(std::str::from_utf8(&bytes).ok()?)
-    }
+    read_capped_lines(stdout, |line| match parse_line(line) {
+        Some(line) => sender.send(line).is_ok(),
+        None => true,
+    });
 }
 
 #[cfg(test)]
@@ -240,64 +187,6 @@ mod tests {
     fn roots_line(len: usize) -> String {
         let root = "a".repeat(len - EMPTY_ROOTS_LEN);
         format!(r#"{{"v":1,"kind":"roots","roots":[{{"root":"{root}","owner":true}}]}}"#)
-    }
-
-    fn finish(buffer: &mut LineBuffer, line: &str) -> Option<CaptureLine> {
-        buffer.extend(line.as_bytes());
-        buffer.finish()
-    }
-
-    #[test]
-    fn line_at_the_cap_is_kept() {
-        let mut buffer = LineBuffer::default();
-
-        assert!(finish(&mut buffer, &roots_line(LINE_CAP)).is_some());
-    }
-
-    #[test]
-    fn line_one_byte_over_the_cap_is_dropped() {
-        let mut buffer = LineBuffer::default();
-
-        assert_eq!(finish(&mut buffer, &roots_line(LINE_CAP + 1)), None);
-    }
-
-    #[test]
-    fn dropping_an_oversized_line_does_not_taint_the_next() {
-        let mut buffer = LineBuffer::default();
-        assert_eq!(finish(&mut buffer, &roots_line(LINE_CAP + 1)), None);
-
-        assert!(finish(&mut buffer, &roots_line(EMPTY_ROOTS_LEN + 1)).is_some());
-    }
-
-    #[test]
-    fn oversized_line_is_not_held_in_memory() {
-        let mut buffer = LineBuffer::default();
-
-        buffer.extend(&vec![b'x'; LINE_CAP + 1]);
-        buffer.extend(&vec![b'x'; LINE_CAP]);
-
-        assert!(buffer.bytes.is_empty());
-    }
-
-    #[test]
-    fn line_in_pieces_is_joined() {
-        let line = roots_line(EMPTY_ROOTS_LEN + 3);
-        let (head, tail) = line.as_bytes().split_at(10);
-        let mut buffer = LineBuffer::default();
-
-        buffer.extend(head);
-        buffer.extend(tail);
-
-        assert!(buffer.finish().is_some());
-    }
-
-    #[test]
-    fn bytes_that_are_not_utf8_are_dropped() {
-        let mut buffer = LineBuffer::default();
-
-        buffer.extend(&[0xff, 0xfe, b'{']);
-
-        assert_eq!(buffer.finish(), None);
     }
 
     #[test]
