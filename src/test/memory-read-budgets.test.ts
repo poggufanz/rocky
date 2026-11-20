@@ -20,9 +20,9 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { createToolRegistry } from "../mcp/tools.js";
 
-function failure(id: string, cwd = "/budget"): string {
+function failure(id: string, cwd = "/budget", ts = 1): string {
   return JSON.stringify({
-    kind: "failure", id, ts: 1, cwd, cmd: "false", exitCode: 1,
+    kind: "failure", id, ts, cwd, cmd: "false", exitCode: 1,
     fingerprint: id.padStart(16, "0"), signature: ["false"], excerpt: "false",
   });
 }
@@ -139,7 +139,8 @@ test("incomplete snapshots fail closed for fix, reconciliation, and once-only cl
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   });
-  const records = Array.from({ length: MAX_MEMORY_RECORDS + 1 }, (_, index) => failure(`tail-${index}`));
+  const recentTs = Date.now() - 1_000;
+  const records = Array.from({ length: MAX_MEMORY_RECORDS + 1 }, (_, index) => failure(`tail-${index}`, "/budget", recentTs));
   writeFileSync(join(root, "memory.jsonl"), records.map((value) => `${value}\n`).join(""));
   writeFileSync(join(root, "pending"), "", "utf8");
   const loaded = loadMemoryChecked(join(root, "memory.jsonl"));
@@ -150,7 +151,11 @@ test("incomplete snapshots fail closed for fix, reconciliation, and once-only cl
   assert.ok(first);
   assert.throws(() => recordFix("false", [{ failure: first, basis: "identity", confidence: "confirmed" }]));
   assert.equal(readFileSync(join(root, "memory.jsonl"), "utf8").includes('"kind":"fix"'), false);
-  assert.deepEqual(resolveFixOnSuccess("false", "/budget"), { confirmedResolved: 0, possibleAssociated: 0 });
+  assert.deepEqual(resolveFixOnSuccess("false", "/budget"), {
+    confirmedResolved: 0,
+    possibleAssociated: 0,
+    pausedReason: "coverage",
+  });
   clearPendingIfResolved([], undefined, Date.now());
   assert.equal(existsSync(join(root, "pending")), true);
   assert.throws(() => recordTripleOnce({ agent: "codex", cwd: root, mechanism: { files: [{ path: "src/x.ts", plusMinus: [1, 1], props: [] }], truncatedFiles: 0 } }, "cap-claim"));

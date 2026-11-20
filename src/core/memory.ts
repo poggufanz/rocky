@@ -38,8 +38,8 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, windowCovered } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
@@ -898,8 +898,12 @@ export interface MemoryTransaction {
   readonly coverage: MemoryCoverage;
   append(record: MemoryRecord): void;
   reload(): readonly MemoryRecord[];
+  /** Reload and require `windowCovered(coverage, now, windowMs)` for link/pending reconciliation. */
+  reloadWindow(windowMs: number): readonly MemoryRecord[];
   /** True only when this append can still be reloaded as a complete snapshot. */
   canAppendComplete(records: readonly MemoryRecord[]): boolean;
+  /** True when fix attribution can append under complete or window-covered tail coverage. */
+  canAppendLinked(records: readonly MemoryRecord[], windowMs: number): boolean;
 }
 
 export interface MemoryTransactionOptions {
@@ -990,6 +994,14 @@ export function withMemoryTransaction<T>(
       });
     } catch { /* advisory only; never fails the transaction */ }
   };
+  const applyReloaded = (loaded: MemoryLoadResult): readonly MemoryRecord[] => {
+    records = loaded.records;
+    complete = loaded.complete;
+    coverage = loaded.coverage;
+    const fresh = getMemoryRecordOffsets(loaded.records);
+    allOffsets = fresh === undefined ? (loaded.records.length === 0 ? [] : undefined) : [...fresh];
+    return records;
+  };
   const transaction: MemoryTransaction = {
     paths,
     now,
@@ -1017,12 +1029,14 @@ export function withMemoryTransaction<T>(
     reload() {
       const loaded = loadMemoryChecked(paths.memory, now);
       if (!loaded.complete) throw new Error("Rocky memory reload is incomplete");
-      records = loaded.records;
-      complete = true;
-      coverage = loaded.coverage;
-      const fresh = getMemoryRecordOffsets(loaded.records);
-      allOffsets = fresh === undefined ? (loaded.records.length === 0 ? [] : undefined) : [...fresh];
-      return records;
+      return applyReloaded(loaded);
+    },
+    reloadWindow(windowMs) {
+      const loaded = loadMemoryChecked(paths.memory, now);
+      if (!windowCovered(loaded.coverage, now, windowMs)) {
+        throw new Error("Rocky memory reload does not cover link window");
+      }
+      return applyReloaded(loaded);
     },
     canAppendComplete(nextRecords) {
       if (!complete || !isCompleteMemoryCoverage(coverage)) return false;
@@ -1033,6 +1047,9 @@ export function withMemoryTransaction<T>(
       }, 0);
       return coverage.bytesTotal <= MAX_MEMORY_FILE_BYTES
         && addedBytes <= MAX_MEMORY_FILE_BYTES - coverage.bytesTotal;
+    },
+    canAppendLinked(nextRecords, windowMs) {
+      return transaction.canAppendComplete(nextRecords) || windowCovered(coverage, now, windowMs);
     },
   };
   try {
@@ -1103,11 +1120,12 @@ function appendFixRecordsUnlocked(
   links: readonly UnresolvedLink[],
   cwd: string,
   now: number,
+  windowMs: number,
 ): WrittenFixRecords {
-  // Fix attribution proves absence/resolution from the whole snapshot. A
-  // capped, skipped, or raced read may still accept new failure/note evidence,
-  // but it must never append a FixRecord based on partial knowledge.
-  if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return {};
+  // Fix attribution proves absence/resolution across the link window. A
+  // skipped, raced, or insufficiently deep tail read may still accept new
+  // failure/note evidence, but must not append a FixRecord.
+  if (!windowCovered(transaction.coverage, now, windowMs)) return {};
   // Storage only: `links` were already matched on the raw command by the
   // caller. Redacting on the matching side would make `deploy "ghp_A"` and
   // `deploy "ghp_B"` the same command. Here the record gets the same bounded,
@@ -1154,9 +1172,8 @@ function appendFixRecordsUnlocked(
     ...(fix === undefined ? [] : [fix]),
     ...(association === undefined ? [] : [association]),
   ];
-  // Never append then discover that the reload would be capped. This keeps
-  // read/modify/write fail-closed without disabling append-only new evidence.
-  if (!transaction.canAppendComplete(pending)) return {};
+  // Never append when neither full-snapshot nor covered-window reload holds.
+  if (!transaction.canAppendLinked(pending, windowMs)) return {};
   for (const record of pending) transaction.append(record);
   return {
     ...(fix === undefined ? {} : { fix }),
@@ -1167,7 +1184,7 @@ function appendFixRecordsUnlocked(
 export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord | AssociationRecord {
   return withMemoryTransaction((transaction) => {
     const eligible = links.filter((link) => link.failure.ts <= transaction.now);
-    const written = appendFixRecordsUnlocked(transaction, cmd, eligible, cwd, transaction.now);
+    const written = appendFixRecordsUnlocked(transaction, cmd, eligible, cwd, transaction.now, LINK_WINDOW_MS);
     if (written.fix) return written.fix;
     if (written.association) return written.association;
     throw new Error("Rocky fix attribution requires at least one link");
@@ -1183,14 +1200,18 @@ export interface ResolveFixOptions {
 export interface ResolveFixResult extends WrittenFixRecords {
   confirmedResolved: number;
   possibleAssociated: number;
+  pausedReason?: "coverage";
 }
 
 function hasConfirmedResolutionForCommand(
   records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
   cmd: string,
   cwd: string,
   now: number,
+  windowMs: number,
 ): boolean {
+  if (!windowCovered(coverage, now, windowMs)) return false;
   const currentIdentity = commandIdentity(cmd);
   if (!currentIdentity.reliable) return false;
   const fixesById = new Map<string, FixRecord>();
@@ -1237,34 +1258,35 @@ export function resolveFixOnSuccess(
   return withMemoryTransaction((transaction) => {
     const now = transaction.now;
     const windowMs = options.windowMs ?? LINK_WINDOW_MS;
-    const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
-    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) {
-      // No definitive fix or pending deletion from an incomplete snapshot.
+    if (!windowCovered(transaction.coverage, now, windowMs)) {
+      // No definitive fix or pending deletion without a covered window.
       // New failure/note/triple append paths remain available independently.
-      return { confirmedResolved: 0, possibleAssociated: 0 };
+      return { confirmedResolved: 0, possibleAssociated: 0, pausedReason: "coverage" };
     }
+    const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
     if (links.length === 0) {
       // A prior process may have durably appended its FixRecord and died
       // before pending reconciliation.  Only a loader-confirmed resolution
       // for this command can recover that state; weak associations and an
-      // empty/incomplete snapshot never clear pending.
-      if (transaction.complete && hasConfirmedResolutionForCommand(transaction.records, cmd, cwd, now)) {
-        reconcilePendingUnlocked(transaction.records, transaction.paths, windowMs, now);
+      // uncovered snapshot never clear pending.
+      if (windowCovered(transaction.coverage, now, windowMs) &&
+          hasConfirmedResolutionForCommand(transaction.records, transaction.coverage, cmd, cwd, now, windowMs)) {
+        reconcilePendingUnlocked(transaction.records, transaction.coverage, transaction.paths, windowMs, now);
       }
       return { confirmedResolved: 0, possibleAssociated: 0 };
     }
 
-    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now);
+    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now, windowMs);
     if (written.fix) {
       // The append was preflighted against the bounded snapshot. A hostile
       // external replacement can still race the reload; retain pending and
       // return the durable attribution rather than append-then-throw.
       try {
-        const latest = transaction.reload();
-        reconcilePendingUnlocked(latest, transaction.paths, windowMs, now);
+        const latest = transaction.reloadWindow(windowMs);
+        reconcilePendingUnlocked(latest, transaction.coverage, transaction.paths, windowMs, now);
       } catch {
         // Explicit degraded mode: FixRecord remains evidence, pending remains
-        // present until a complete future read can reconcile it.
+        // present until a covered future read can reconcile it.
       }
     }
     return {
@@ -1330,10 +1352,12 @@ export function hasUnresolvedRecent(
 
 function reconcilePendingUnlocked(
   records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
   paths: RockyPaths,
   windowMs: number,
   now: number,
 ): void {
+  if (!windowCovered(coverage, now, windowMs)) return;
   if (hasUnresolvedRecent(records, windowMs, now)) touchPendingUnlocked(paths);
   else rmSync(paths.pending, { force: true });
 }
@@ -1345,7 +1369,7 @@ export function clearPendingIfResolved(
 ): void {
   const selectedNow = now ?? Date.now();
   withMemoryTransaction((transaction) => {
-    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return;
+    if (!windowCovered(transaction.coverage, selectedNow, windowMs)) return;
     if (hasRecentConfirmedResolution(transaction.records, windowMs, selectedNow) &&
         !hasUnresolvedRecent(transaction.records, windowMs, selectedNow)) {
       rmSync(transaction.paths.pending, { force: true });

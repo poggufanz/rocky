@@ -1,10 +1,25 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
+import {
+  commandIdentity,
+  FINGERPRINT_ALGORITHM_VERSION,
+  fingerprint,
+  signatureLines,
+} from "../core/fingerprint.js";
+import {
+  boundCommand,
+  clearPendingIfResolved,
+  pendingPath,
+  recordTripleOnce,
+  resolveFixOnSuccess,
+  touchPending,
+} from "../core/memory.js";
+import { createMemoryQueries } from "../core/memory-query.js";
 import {
   CLOCK_SKEW_MS,
   isCompleteMemoryCoverage,
@@ -15,6 +30,8 @@ import {
   maxSupportedMemoryRecords,
   tailReadable,
   windowCovered,
+  type FailureRecord,
+  type FixRecord,
 } from "../core/memory-read.js";
 import { failureLine, failureLines, failureLinesPastByteCap, withRecordCap } from "./memory-cap-fixture.js";
 
@@ -576,4 +593,291 @@ test("tail ignores a trailing blank CRLF line", (t) => {
   assert.equal(loaded.coverage.reason, "record-cap");
   assert.equal(loaded.coverage.skipped, 0);
   assert.equal(tailReadable(loaded.coverage), true);
+});
+
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+
+function withRockyHome(t: TestContext, home: string): void {
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  });
+}
+
+function reliableFailureRecord(
+  id: string,
+  cmd: string,
+  cwd: string,
+  ts: number,
+  stderr = "false",
+): FailureRecord {
+  const storedCmd = boundCommand(cmd);
+  const identity = commandIdentity(storedCmd);
+  assert.equal(identity.reliable, true, `expected reliable command identity for ${cmd}`);
+  return {
+    kind: "failure",
+    id,
+    ts,
+    cwd,
+    cmd: storedCmd,
+    exitCode: 1,
+    fingerprint: fingerprint(stderr, storedCmd, 1),
+    fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: signatureLines(stderr),
+    excerpt: stderr,
+    commandIdentity: identity.value,
+    identityV: identity.version,
+    identityReliable: identity.reliable,
+    platform: process.platform,
+  };
+}
+
+function fillerFailureLines(count: number, cwd: string, ts: number): string[] {
+  const template = reliableFailureRecord("filler-template", "cargo check", cwd, ts, "check failed");
+  return Array.from({ length: count }, (_, index) => JSON.stringify({
+    ...template,
+    id: `filler-${index}`,
+  }));
+}
+
+test("unlock: covered tail links the fix and clears pending", (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const targetFailure = reliableFailureRecord(
+    "target-failure",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const lines = [
+    ...fillerFailureLines(10_049, otherCwd, NOW - THREE_DAYS_MS),
+    JSON.stringify(targetFailure),
+  ];
+  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+  touchPending();
+  assert.equal(existsSync(pendingPath()), true);
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 1);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, undefined);
+
+  const lastLine = readFileSync(join(home, "memory.jsonl"), "utf8").trimEnd().split("\n").at(-1);
+  assert.ok(lastLine !== undefined);
+  const lastRecord = JSON.parse(lastLine) as FixRecord;
+  assert.equal(lastRecord.kind, "fix");
+  assert.equal(lastRecord.failureIds.includes(targetFailure.id), true);
+  assert.equal(existsSync(pendingPath()), false);
+
+  const hits = createMemoryQueries().recall({ query: "TypeError token undefined", now: NOW });
+  const match = hits.find((hit) => hit.failure.id === targetFailure.id);
+  assert.ok(match !== undefined, "expected recall to find the failure in the covered tail");
+  assert.ok(match.fix !== undefined);
+  assert.equal(match.fix.failureIds.includes(targetFailure.id), true);
+});
+
+test("lock: tail entirely inside 8h writes no fix and keeps pending", (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const targetFailure = reliableFailureRecord(
+    "target-failure",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const lines = [
+    ...fillerFailureLines(10_049, otherCwd, NOW - 2 * 60 * 60 * 1000),
+    JSON.stringify(targetFailure),
+  ];
+  const memoryFile = join(home, "memory.jsonl");
+  writeFileSync(memoryFile, `${lines.join("\n")}\n`, "utf8");
+  const before = readFileSync(memoryFile, "utf8");
+  touchPending();
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 0);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, "coverage");
+  assert.equal(readFileSync(memoryFile, "utf8"), before);
+  assert.equal(existsSync(pendingPath()), true);
+});
+
+test("skew: oldest record inside the 10-minute margin is refused", (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const targetFailure = reliableFailureRecord(
+    "target-failure",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const lines = [
+    ...fillerFailureLines(10_049, otherCwd, NOW - EIGHT_HOURS_MS - 5 * 60 * 1000),
+    JSON.stringify(targetFailure),
+  ];
+  const memoryFile = join(home, "memory.jsonl");
+  writeFileSync(memoryFile, `${lines.join("\n")}\n`, "utf8");
+  const before = readFileSync(memoryFile, "utf8");
+  touchPending();
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 0);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, "coverage");
+  assert.equal(readFileSync(memoryFile, "utf8"), before);
+  assert.equal(existsSync(pendingPath()), true);
+});
+
+test("corrupt line in the tail pauses linking", (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const targetFailure = reliableFailureRecord(
+    "target-failure",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const lines = [
+    ...fillerFailureLines(10_048, otherCwd, NOW - THREE_DAYS_MS),
+    "{not-json}",
+    JSON.stringify(targetFailure),
+  ];
+  const memoryFile = join(home, "memory.jsonl");
+  writeFileSync(memoryFile, `${lines.join("\n")}\n`, "utf8");
+  const before = readFileSync(memoryFile, "utf8");
+  touchPending();
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 0);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, "coverage");
+  assert.equal(readFileSync(memoryFile, "utf8"), before);
+  assert.equal(existsSync(pendingPath()), true);
+});
+
+test("triple writes stay fail-closed above the cap", (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const targetFailure = reliableFailureRecord(
+    "target-failure",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const lines = [
+    ...fillerFailureLines(10_049, otherCwd, NOW - THREE_DAYS_MS),
+    JSON.stringify(targetFailure),
+  ];
+  const memoryFile = join(home, "memory.jsonl");
+  writeFileSync(memoryFile, `${lines.join("\n")}\n`, "utf8");
+  const before = readFileSync(memoryFile, "utf8");
+
+  assert.throws(
+    () => recordTripleOnce(
+      {
+        agent: "codex",
+        cwd: targetCwd,
+        mechanism: { files: [{ path: "src/app.ts", plusMinus: [1, 0], props: [] }], truncatedFiles: 0 },
+      },
+      "tail-triple-claim",
+    ),
+    /complete memory coverage/u,
+  );
+  assert.equal(readFileSync(memoryFile, "utf8"), before);
+});
+
+test("clearPendingIfResolved clears on a covered tail and keeps on a short one", (t) => {
+  withRecordCap(t, 10_000);
+
+  const coveredHome = tempHome(t);
+  withRockyHome(t, coveredHome);
+  const coveredCwd = join(coveredHome, "repo");
+  const otherCwd = join(coveredHome, "other");
+  const resolvedFailure = reliableFailureRecord(
+    "resolved-failure",
+    "npm test",
+    coveredCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const resolvingFix: FixRecord = {
+    kind: "fix",
+    id: "resolving-fix",
+    ts: NOW - 30 * 60 * 1000,
+    cwd: coveredCwd,
+    cmd: "npm test",
+    failureIds: [resolvedFailure.id],
+    links: [{ id: resolvedFailure.id, basis: "identity", confidence: "confirmed" }],
+  };
+  writeFileSync(
+    join(coveredHome, "memory.jsonl"),
+    [
+      ...fillerFailureLines(10_048, otherCwd, NOW - THREE_DAYS_MS),
+      JSON.stringify(resolvedFailure),
+      JSON.stringify(resolvingFix),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  touchPending();
+  clearPendingIfResolved([], EIGHT_HOURS_MS, NOW);
+  assert.equal(existsSync(pendingPath()), false);
+
+  const shortHome = tempHome(t);
+  withRockyHome(t, shortHome);
+  const shortCwd = join(shortHome, "repo");
+  const truncatedOlderFailure = reliableFailureRecord(
+    "truncated-older-failure",
+    "cargo test",
+    shortCwd,
+    NOW - 5 * 60 * 60 * 1000,
+    "earlier unresolved failure",
+  );
+  const recentFixTemplate: FixRecord = {
+    kind: "fix",
+    id: "recent-fix-template",
+    ts: NOW - 2 * 60 * 60 * 1000,
+    cwd: shortCwd,
+    cmd: "npm test",
+    failureIds: ["resolved-failure"],
+    links: [{ id: "resolved-failure", basis: "identity", confidence: "confirmed" }],
+  };
+  const recentFixes = Array.from({ length: 10_048 }, (_, index) => JSON.stringify({
+    ...recentFixTemplate,
+    id: `recent-fix-${index}`,
+  }));
+  writeFileSync(
+    join(shortHome, "memory.jsonl"),
+    [
+      JSON.stringify(truncatedOlderFailure),
+      ...recentFixes,
+      JSON.stringify(resolvedFailure),
+      JSON.stringify(resolvingFix),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  touchPending();
+  clearPendingIfResolved([], EIGHT_HOURS_MS, NOW);
+  assert.equal(existsSync(pendingPath()), true);
 });
