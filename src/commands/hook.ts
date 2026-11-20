@@ -47,7 +47,7 @@ import {
   type ResolveFixOptions,
   type MemoryRecord,
 } from "../core/memory.js";
-import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
+import { loadMemoryChecked, tailReadable } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
 import {
   atomicWriteBytesIfUnchanged,
@@ -93,10 +93,10 @@ export function hookStaleLine(installed: string): string | undefined {
  * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
  * hook handler must never take the shell down.
  */
-function readMemory(): MemoryRecord[] | undefined {
+function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
-    if (!isCompleteMemoryCoverage(loaded.coverage)) {
+    if (!tailReadable(loaded.coverage)) {
       sayTty("Memory coverage is incomplete, so no prior fix is claimed. Check the details below.");
       const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
       detailTty(!isVerbose() && words !== undefined
@@ -104,7 +104,10 @@ function readMemory(): MemoryRecord[] | undefined {
         : `memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
       return undefined;
     }
-    return loaded.records;
+    return {
+      records: loaded.records,
+      historyMayStartEarlier: loaded.coverage.window === "tail",
+    };
   } catch {
     sayTty("The memory file could not be opened, so nothing is recalled.");
     detailTty(`memory: ${resolveRockyPaths().memory}`);
@@ -133,13 +136,13 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
   const now = Date.now();
   const fp = commandFingerprintCandidates(cmd, exitCode);
-  const previous = findByFingerprint(memory, fp, now);
+  const previous = findByFingerprint(memory.records, fp, now);
 
   if (previous.length === 0) return 0; // first time: the hook stays quiet
 
-  const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
+  const withFix = [...previous].reverse().find((f) => getFix(memory.records, f, now));
   if (withFix) {
-    const fix = getFix(memory, withFix, now)!;
+    const fix = getFix(memory.records, withFix, now)!;
     // The recurrence match above is a coarse, masked fingerprint on `cmd`
     // (no stderr reaches a detached hook handler) — it can pair the current
     // failure with a past one whose literal command differs (a masked

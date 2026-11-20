@@ -5,6 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
+import { checkAmbiguity } from "../agent/ambiguity.js";
+import type { OllamaClient } from "../ai/ollama.js";
+import { hookFail } from "../commands/hook.js";
+import { run } from "../commands/run.js";
+import { stats } from "../commands/stats.js";
+import { watch } from "../commands/watch.js";
+import type { ConfigLoadResult } from "../core/config-read.js";
+import { describeMemoryCoverage } from "../core/coverage.js";
+import type { ExecResult } from "../core/exec.js";
 import {
   commandIdentity,
   FINGERPRINT_ALGORITHM_VERSION,
@@ -35,7 +44,10 @@ import {
   windowCovered,
   type FailureRecord,
   type FixRecord,
+  type MemoryCoverage,
 } from "../core/memory-read.js";
+import { validateOutputLine } from "../ui/phrases.js";
+import { flushHookSpeech } from "../ui/rocky.js";
 import { failureLine, failureLines, failureLinesPastByteCap, withRecordCap } from "./memory-cap-fixture.js";
 
 const NOW = 1_700_000_000_000;
@@ -1086,4 +1098,291 @@ test("append accounts for missing terminal LF in sidecar offsets and byte budget
     { now: NOW },
   );
   assert.equal(fitsWithNewline, true);
+});
+
+async function captureStderr(fn: () => Promise<unknown> | unknown): Promise<string> {
+  const original = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+    return stderr;
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+function captureHookSpeech(fn: () => unknown): string {
+  const scratch = mkdtempSync(join(tmpdir(), "rocky-tail-hook-speech-"));
+  const speechFile = join(scratch, "speech.txt");
+  const previous = process.env.ROCKY_HOOK_SPEECH_FILE;
+  process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
+  try {
+    fn();
+    flushHookSpeech();
+    return existsSync(speechFile) ? readFileSync(speechFile, "utf8") : "";
+  } finally {
+    if (previous === undefined) delete process.env.ROCKY_HOOK_SPEECH_FILE;
+    else process.env.ROCKY_HOOK_SPEECH_FILE = previous;
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+test("rocky run above the cap names the earlier fix again", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const now = Date.now();
+  const cwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const stderrLine = "TypeError: token undefined";
+  const priorCmd = "cargo build --release";
+  const priorFailure: FailureRecord = {
+    ...reliableFailureRecord("tail-fix-failure", priorCmd, cwd, now - 60 * 60 * 1000, stderrLine),
+    resolvedBy: "tail-fix-record",
+  };
+  const priorFix: FixRecord = {
+    kind: "fix",
+    id: "tail-fix-record",
+    ts: now - 30 * 60 * 1000,
+    cwd,
+    cmd: priorCmd,
+    failureIds: [priorFailure.id],
+    links: [{ id: priorFailure.id, basis: "identity", confidence: "confirmed" }],
+  };
+  const lines = [
+    ...fillerFailureLines(10_048, otherCwd, now - THREE_DAYS_MS),
+    JSON.stringify(priorFailure),
+    JSON.stringify(priorFix),
+  ];
+  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const failExec: ExecResult = { started: true, code: 1, stderr: stderrLine, tail: [stderrLine], durationMs: 5 };
+  const stderr = await captureStderr(() => run("npm test", async () => failExec));
+  assert.match(stderr, /Same error as before/);
+  assert.match(stderr, /Last time, you ran:/);
+  assert.doesNotMatch(stderr, /Memory coverage is incomplete/);
+});
+
+test("rocky run above the cap admits a possibly older first sighting", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const now = Date.now();
+  const otherCwd = join(home, "other");
+  const lines = fillerFailureLines(10_050, otherCwd, now - THREE_DAYS_MS);
+  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const failExec: ExecResult = {
+    started: true,
+    code: 1,
+    stderr: "ReferenceError: never seen before",
+    tail: ["ReferenceError: never seen before"],
+    durationMs: 5,
+  };
+  const stderr = await captureStderr(() => run("npm test", async () => failExec));
+  assert.ok(
+    stderr.includes("New error recorded (exit code 1). Only the newest 10000 records were checked."),
+    stderr,
+  );
+  assert.doesNotMatch(stderr, /Memory coverage is incomplete/);
+});
+
+test("rocky run prints the paused-linking line when the tail is short", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const now = Date.now();
+  const otherCwd = join(home, "other");
+  const lines = fillerFailureLines(10_050, otherCwd, now - 2 * 60 * 60 * 1000);
+  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const passExec: ExecResult = { started: true, code: 0, stderr: "", tail: [], durationMs: 5 };
+  const stderr = await captureStderr(() => run("npm test", async () => passExec));
+  assert.ok(
+    stderr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours."),
+    stderr,
+  );
+});
+
+test("rocky stats shows fix links and the tail window", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const tailOldestTs = Date.UTC(2026, 0, 15, 10, 0, 0);
+  const fixTs = Date.UTC(2026, 2, 20, 14, 5, 0);
+  const earlierTs = Date.UTC(2025, 11, 1, 0, 0, 0);
+  const otherCwd = join(home, "other");
+  const memoryFile = join(home, "memory.jsonl");
+
+  const earlierLines = Array.from({ length: 50 }, (_, index) => failureLine(index + 100_000, "check failed", earlierTs));
+  const linesWithFix = [
+    ...earlierLines,
+    ...fillerFailureLines(9_999, otherCwd, tailOldestTs),
+    fixLine(0, fixTs),
+  ];
+  writeFileSync(memoryFile, `${linesWithFix.join("\n")}\n`, "utf8");
+  const withFixStderr = await captureStderr(() => stats());
+  const withFixLines = withFixStderr.split(/\r?\n/u);
+  const fileIndex = withFixLines.findIndex((line) => line.startsWith("rocky: memory file: "));
+  assert.ok(fileIndex >= 0, withFixStderr);
+  assert.equal(withFixLines[fileIndex + 1], "rocky: fix links: last written 2026-03-20 14:05", withFixStderr);
+  assert.equal(withFixLines[fileIndex + 2], "rocky: memory: reading the newest 10000 records (from 2026-01-15)", withFixStderr);
+
+  const linesWithoutFix = [
+    ...earlierLines,
+    ...fillerFailureLines(10_000, otherCwd, tailOldestTs),
+  ];
+  writeFileSync(memoryFile, `${linesWithoutFix.join("\n")}\n`, "utf8");
+  const noFixStderr = await captureStderr(() => stats());
+  const noFixLines = noFixStderr.split(/\r?\n/u);
+  const noFixFileIndex = noFixLines.findIndex((line) => line.startsWith("rocky: memory file: "));
+  assert.ok(noFixFileIndex >= 0, noFixStderr);
+  assert.equal(noFixLines[noFixFileIndex + 1], "rocky: fix links: none in the records read", noFixStderr);
+  assert.equal(noFixLines[noFixFileIndex + 2], "rocky: memory: reading the newest 10000 records (from 2026-01-15)", noFixStderr);
+
+  writeFileSync(memoryFile, `${fillerFailureLines(2, otherCwd, tailOldestTs).join("\n")}\n`, "utf8");
+  const fullStderr = await captureStderr(() => stats());
+  assert.ok(fullStderr.includes("rocky: fix links: none in the records read"), fullStderr);
+  assert.doesNotMatch(fullStderr, /memory: reading the newest/u);
+});
+
+test("describeMemoryCoverage words for tail record and byte caps", () => {
+  const base: MemoryCoverage = {
+    version: 1,
+    scanned: 10_000,
+    skipped: 0,
+    truncated: 1,
+    bytesScanned: 100_000,
+    bytesTotal: 200_000,
+    complete: false,
+    window: "tail",
+  };
+  const tailCap = describeMemoryCoverage({ ...base, reason: "record-cap" }, 10_000, { counts: false });
+  assert.equal(tailCap, "memory coverage incomplete: Only the newest 10000 records were read; earlier lines were not read.");
+  assert.deepEqual(validateOutputLine(tailCap!), []);
+
+  const tailSingular = describeMemoryCoverage({ ...base, scanned: 1, reason: "record-cap" }, 1, { counts: false });
+  assert.equal(tailSingular, "memory coverage incomplete: Only the newest record was read; earlier lines were not read.");
+  assert.deepEqual(validateOutputLine(tailSingular!), []);
+
+  const tailByteCap = describeMemoryCoverage({ ...base, scanned: 812, reason: "file-size-cap" }, 812, { counts: false });
+  assert.equal(tailByteCap, "memory coverage incomplete: The memory file is too large. Only the newest 812 records were read; earlier lines were not read.");
+  assert.deepEqual(validateOutputLine(tailByteCap!), []);
+
+  const tailCounted = describeMemoryCoverage({ ...base, reason: "record-cap" }, 10_000, { counts: true });
+  assert.equal(tailCounted, "memory coverage incomplete: Only the newest 10000 records were read; earlier lines were not read. These counts do not cover all of memory.");
+  assert.deepEqual(validateOutputLine(tailCounted!), []);
+});
+
+test("watch and hookFail speak from the tail above the cap", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const now = Date.now();
+  const cwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const priorCmd = "npm test";
+  const stderrLine = "TypeError: tail watch error";
+  const priorFailure: FailureRecord = {
+    ...reliableFailureRecord("tail-watch-failure", priorCmd, cwd, now - 60 * 60 * 1000, stderrLine),
+    resolvedBy: "tail-watch-fix",
+  };
+  const priorFix: FixRecord = {
+    kind: "fix",
+    id: "tail-watch-fix",
+    ts: now - 30 * 60 * 1000,
+    cwd,
+    cmd: priorCmd,
+    failureIds: [priorFailure.id],
+    links: [{ id: priorFailure.id, basis: "identity", confidence: "confirmed" }],
+  };
+  const hookCmd = "pytest -q";
+  const hookFailure: FailureRecord = {
+    ...reliableFailureRecord("tail-hook-failure", hookCmd, cwd, now - 60 * 60 * 1000, ""),
+    resolvedBy: "tail-hook-fix",
+  };
+  const hookFix: FixRecord = {
+    kind: "fix",
+    id: "tail-hook-fix",
+    ts: now - 30 * 60 * 1000,
+    cwd,
+    cmd: hookCmd,
+    failureIds: [hookFailure.id],
+    links: [{ id: hookFailure.id, basis: "identity", confidence: "confirmed" }],
+  };
+  const lines = [
+    ...fillerFailureLines(10_046, otherCwd, now - THREE_DAYS_MS),
+    JSON.stringify(priorFailure),
+    JSON.stringify(priorFix),
+    JSON.stringify(hookFailure),
+    JSON.stringify(hookFix),
+  ];
+  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const watchErr = await captureStderr(() => watch([priorCmd], {
+    notify: () => {},
+    runProcess: async () => ({ started: true, code: 1, stderr: stderrLine, tail: [stderrLine], durationMs: 5 }),
+  }));
+  assert.match(watchErr, /Same error as before/);
+  assert.doesNotMatch(watchErr, /Memory coverage is incomplete/);
+
+  const hookSpeech = captureHookSpeech(() => hookFail(hookCmd, 1, cwd));
+  assert.match(hookSpeech, /Same error as before/);
+  assert.doesNotMatch(hookSpeech, /Memory coverage is incomplete/);
+});
+
+test("checkAmbiguity reads from a tailReadable window above the cap", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const twoPlaces = [
+    JSON.stringify({
+      kind: "triple",
+      id: "t-a",
+      ts: NOW - 2_000,
+      cwd: "/repo",
+      schemaV: 1,
+      agent: "claude-code",
+      origin: "agent-hook",
+      intent: { text: "make the button bigger" },
+      mechanism: { files: [{ path: "a/button.tsx", plusMinus: [1, 1], props: ["button"] }], truncatedFiles: 0 },
+    }),
+    JSON.stringify({
+      kind: "triple",
+      id: "t-b",
+      ts: NOW - 1_000,
+      cwd: "/repo",
+      schemaV: 1,
+      agent: "claude-code",
+      origin: "agent-hook",
+      intent: { text: "make the button bigger" },
+      mechanism: { files: [{ path: "b/button.tsx", plusMinus: [1, 1], props: ["button"] }], truncatedFiles: 0 },
+    }),
+  ];
+  const lines = [...fillerFailureLines(10_050, "/other", NOW - THREE_DAYS_MS), ...twoPlaces];
+  writeFileSync(paths.memory, `${lines.join("\n")}\n`, "utf8");
+
+  const config: ConfigLoadResult = {
+    status: "valid",
+    path: paths.config,
+    config: { version: 1, ai: { enabled: true, provider: "ollama", model: "ambiguity-test", exposure: "sanitized" } },
+  };
+  const client: OllamaClient = {
+    async listInstalledModels() { return []; },
+    async probeModel() { return { supported: true }; },
+    async generateStructured() { return { ambiguous: true, referent: "button" }; },
+  };
+  const queued: string[] = [];
+  const question = await checkAmbiguity("make the button bigger", {
+    paths,
+    config,
+    client,
+    queueLabel: (line: string) => { queued.push(line); },
+  });
+  assert.equal(question, 'You said "button". It matches 2 places in memory. Which one?');
+  assert.deepEqual(queued, [question]);
 });

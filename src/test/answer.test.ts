@@ -197,7 +197,7 @@ test("executeAnswer holds the answer when the read stopped at the record cap, an
 
   assert.equal(outcome.status, 200);
   assert.ok("text" in outcome.payload);
-  const line = `memory coverage incomplete: Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read.`;
+  const line = `memory coverage incomplete: Only the newest ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; earlier lines were not read.`;
   assert.equal(outcome.payload.decisionTrace.status, "unavailable");
   assert.deepEqual(outcome.payload.evidenceCards, []);
   assert.equal(outcome.payload.coverage?.reason, line);

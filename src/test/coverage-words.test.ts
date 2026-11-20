@@ -156,7 +156,7 @@ test("rocky stats over the record cap says coverage once, in plain words, and wa
   const said = result.stderr.split(/\r?\n/u).filter((line) => line.includes("memory coverage incomplete:"));
   assert.equal(said.length, 1, result.stderr);
   assert.ok(said[0]?.endsWith(COUNTS_WARNING), said[0]);
-  assert.ok(said[0]?.includes(`Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read.`), said[0]);
+  assert.ok(said[0]?.includes(`Only the newest ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; earlier lines were not read.`), said[0]);
   assert.doesNotMatch(result.stderr, /scanned|truncated|version 1/u);
 });
 

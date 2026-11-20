@@ -72,6 +72,21 @@ function statsCycles(): number {
   return 0;
 }
 
+function formatUtcDate(ts: number): string {
+  const d = new Date(ts);
+  const year = String(d.getUTCFullYear()).padStart(4, "0");
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatUtcDateTime(ts: number): string {
+  const d = new Date(ts);
+  const hours = String(d.getUTCHours()).padStart(2, "0");
+  const minutes = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${formatUtcDate(ts)} ${hours}:${minutes}`;
+}
+
 export function memoryAgeDays(timestamps: readonly number[], now: number): number {
   if (timestamps.length === 0) return 0;
   const oldest = timestamps.reduce((min, ts) => Math.min(min, ts), Number.POSITIVE_INFINITY);
@@ -116,6 +131,19 @@ export function stats(argv: readonly string[] = []): number {
   say(`${result.failures} error${result.failures === 1 ? "" : "s"} recorded. ${result.resolved} ${result.resolved === 1 ? "has" : "have"} a fix. ${result.fixEvents} fix event${result.fixEvents === 1 ? "" : "s"} total.`);
   say(`Memory holds ${total} recorded item${total === 1 ? "" : "s"}. ${confirmedFixes} confirmed fix${confirmedFixes === 1 ? "" : "es"}. ${possibleFixes} possible fix${possibleFixes === 1 ? "" : "es"}. ${triples} ${intentWord}${triples === 1 ? "" : "s"}. ${notes} note${notes === 1 ? "" : "s"}.`);
   say(`memory file: ${memoryPath()}`);
+  let latestFixTs: number | undefined;
+  for (const record of records) {
+    if (record.kind === "fix" && Number.isFinite(record.ts)) {
+      if (latestFixTs === undefined || record.ts > latestFixTs) latestFixTs = record.ts;
+    }
+  }
+  say(latestFixTs !== undefined
+    ? `fix links: last written ${formatUtcDateTime(latestFixTs)}`
+    : "fix links: none in the records read");
+  if (coverage.window === "tail") {
+    const fromSuffix = coverage.oldestTs !== undefined ? ` (from ${formatUtcDate(coverage.oldestTs)})` : "";
+    say(`memory: reading the newest ${records.length} records${fromSuffix}`);
+  }
   const byKind = result.byKind ?? {};
   if (isVerbose()) {
     const kindSummary = Object.entries(byKind)
