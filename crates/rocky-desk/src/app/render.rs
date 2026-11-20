@@ -241,11 +241,6 @@ fn scroll_page(id: &'static str, content: gpui::Div) -> AnyElement {
         .flex()
         .flex_col()
         .items_center()
-        .child(
-            content
-                .flex_none()
-                .w_full()
-                .max_w(gpui::px(MAX_CONTENT_W)),
-        )
+        .child(content.flex_none().w_full().max_w(gpui::px(MAX_CONTENT_W)))
         .into_any_element()
 }
