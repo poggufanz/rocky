@@ -658,6 +658,11 @@ fn remove_clears_files_cache_and_status() {
     assert_eq!(translator.remove(), Ok(()));
     assert!(!marker::translate_dir(home.path()).exists());
     assert_eq!(translator.status().ready, Vec::<TranslatePair>::new());
+    // The removal reaches desks once, then check() has nothing new.
+    assert_eq!(
+        translator.check().map(|status| status.ready),
+        Some(Vec::<TranslatePair>::new())
+    );
     assert_eq!(translator.check(), None);
 
     // Re-installing does not revive the old cached translation.

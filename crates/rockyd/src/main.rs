@@ -22,7 +22,7 @@ use rocky_proto::pipe::{
     ServerMsg, SetupAction, SetupHealth, StatusOp, encode,
 };
 use rocky_proto::settings::Settings;
-use rocky_proto::translate::{QuoteLang, TranslateStatus, quote_key};
+use rocky_proto::translate::{QuoteLang, QuoteTranslation, TranslateStatus, quote_key};
 use rockyd::cards::detail::CardsQuote;
 use rockyd::cards::query::CardQueryLoop;
 use rockyd::cards::storage::CardStore;
@@ -393,8 +393,7 @@ fn main() {
             config_dirs = claude_config_dirs(&home);
         }
         if rescan_due && let Some(status) = translator.check() {
-            shared.lock().unwrap().translate = status.clone();
-            hub.broadcast(&ServerMsg::Translate { status });
+            publish_translate(status, &shared, &hub);
         }
 
         let now = Instant::now();
@@ -707,35 +706,19 @@ fn attach_translations(
             if detail.hits.is_empty() && detail.pending.is_empty() {
                 return;
             }
-            let mut overflow = Vec::new();
-            let mut iter = detail.hits.into_iter();
-            while let Some(item) = iter.next() {
-                let ServerMsg::CardDetail { translations, .. } = msg else {
-                    unreachable!();
-                };
-                translations.push(item);
-                if encode(msg).len() > LINE_CAP {
-                    let ServerMsg::CardDetail { translations, .. } = msg else {
-                        unreachable!();
-                    };
-                    overflow.push(translations.pop().expect("just pushed"));
-                    overflow.extend(iter);
-                    break;
-                }
-            }
-            for key in detail.pending {
-                let ServerMsg::CardDetail { pending, .. } = msg else {
-                    unreachable!();
-                };
-                pending.push(key);
-                if encode(msg).len() > LINE_CAP {
-                    let ServerMsg::CardDetail { pending, .. } = msg else {
-                        unreachable!();
-                    };
-                    pending.pop();
-                    break;
-                }
-            }
+            let mut frame_len = encode(msg).len();
+            let ServerMsg::CardDetail {
+                translations,
+                pending,
+                ..
+            } = msg
+            else {
+                unreachable!();
+            };
+            let overflow =
+                fill_under_cap(&mut frame_len, "translations", translations, detail.hits);
+            // Pending keys past the cap are dropped: the desk shows the original for them.
+            fill_under_cap(&mut frame_len, "pending", pending, detail.pending);
             if !overflow.is_empty() {
                 translator.push_later(&card_id, overflow);
             }
@@ -750,27 +733,51 @@ fn attach_translations(
                 full_quotes.push(pair.full.clone());
                 shown_key_by_full_key.insert(quote_key(&pair.full), quote_key(&pair.shown));
             }
-            let hits = translator.cached(enabled, to, &full_quotes);
-            for mut item in hits {
-                let Some(shown_key) = shown_key_by_full_key.get(&item.quote_key) else {
-                    continue;
-                };
-                item.quote_key = shown_key.clone();
-                let ServerMsg::Cards { translations, .. } = msg else {
-                    unreachable!();
-                };
-                translations.push(item);
-                if encode(msg).len() > LINE_CAP {
-                    let ServerMsg::Cards { translations, .. } = msg else {
-                        unreachable!();
-                    };
-                    translations.pop();
-                    break;
-                }
-            }
+            let hits: Vec<QuoteTranslation> = translator
+                .cached(enabled, to, &full_quotes)
+                .into_iter()
+                .filter_map(|mut item| {
+                    item.quote_key = shown_key_by_full_key.get(&item.quote_key)?.clone();
+                    Some(item)
+                })
+                .collect();
+            let mut frame_len = encode(msg).len();
+            let ServerMsg::Cards { translations, .. } = msg else {
+                unreachable!();
+            };
+            // Tooltips past the cap fall back to the original text.
+            fill_under_cap(&mut frame_len, "translations", translations, hits);
         }
         _ => {}
     }
+}
+
+/// Appends `items` to a JSON array inside a frame that is `frame_len` bytes long, stopping at the
+/// first item that would push the frame past [`LINE_CAP`]. Returns that item and the rest.
+///
+/// Each item counts its compact JSON plus one byte for the comma. The list is left out of the
+/// frame while empty, so the first item also counts `,"<field>":[]`. The estimate is exact or one
+/// byte high and the frame never exceeds the cap. One encode per frame instead of one per item.
+fn fill_under_cap<T: serde::Serialize>(
+    frame_len: &mut usize,
+    field: &str,
+    list: &mut Vec<T>,
+    items: Vec<T>,
+) -> Vec<T> {
+    let mut iter = items.into_iter();
+    while let Some(item) = iter.next() {
+        let header = if list.is_empty() { field.len() + 6 } else { 0 };
+        let item_len =
+            serde_json::to_vec(&item).map_or(usize::MAX, |bytes| bytes.len() + 1 + header);
+        if frame_len.saturating_add(item_len) > LINE_CAP {
+            let mut rest = vec![item];
+            rest.extend(iter);
+            return rest;
+        }
+        *frame_len += item_len;
+        list.push(item);
+    }
+    Vec::new()
 }
 
 fn distinct_block_quotes(blocks: &[rocky_proto::cards::Block]) -> Vec<String> {
@@ -784,6 +791,18 @@ fn distinct_block_quotes(blocks: &[rocky_proto::cards::Block]) -> Vec<String> {
         }
     }
     quotes
+}
+
+/// Broadcasts the translate status if desks have not heard it yet.
+fn broadcast_translate_change(translator: &mut Translator, shared: &Arc<Mutex<Shared>>, hub: &Hub) {
+    if let Some(status) = translator.take_status_change() {
+        publish_translate(status, shared, hub);
+    }
+}
+
+fn publish_translate(status: TranslateStatus, shared: &Arc<Mutex<Shared>>, hub: &Hub) {
+    shared.lock().unwrap().translate = status.clone();
+    hub.broadcast(&ServerMsg::Translate { status });
 }
 
 fn service_translate(
@@ -1058,9 +1077,7 @@ fn handle_control(
                 },
             };
             let _ = reply.send(ack);
-            let status = translator.status().clone();
-            shared.lock().unwrap().translate = status.clone();
-            hub.broadcast(&ServerMsg::Translate { status });
+            broadcast_translate_change(translator, shared, hub);
             LoopAction::Continue
         }
         Control::TranslateRemove { id, reply } => {
@@ -1085,6 +1102,7 @@ fn handle_control(
                         error: Some(err.to_string()),
                         cleanup_errors: 0,
                     });
+                    broadcast_translate_change(translator, shared, hub);
                 }
             }
             LoopAction::Continue
@@ -3317,6 +3335,40 @@ mod tests {
     }
 
     #[test]
+    fn fill_under_cap_stops_at_the_last_item_that_fits() {
+        use rocky_proto::pipe::{LINE_CAP, encode};
+
+        let item = |i: usize| QuoteTranslation {
+            quote_key: format!("{i:064}"),
+            from: QuoteLang::Id,
+            text: "t".repeat(300),
+        };
+        let mut msg = ServerMsg::Cards {
+            id: 1,
+            items: Vec::new(),
+            next: None,
+            translations: Vec::new(),
+        };
+        let mut frame_len = encode(&msg).len();
+        let items: Vec<_> = (0..LINE_CAP / 300).map(item).collect();
+        let ServerMsg::Cards { translations, .. } = &mut msg else {
+            unreachable!();
+        };
+        let rest = fill_under_cap(&mut frame_len, "translations", translations, items);
+
+        assert!(!rest.is_empty());
+        // The estimate runs one byte high: the first item has no comma before it.
+        assert_eq!(frame_len, encode(&msg).len() + 1);
+        assert!(encode(&msg).len() <= LINE_CAP);
+        // The first item left out really did not fit.
+        let ServerMsg::Cards { translations, .. } = &mut msg else {
+            unreachable!();
+        };
+        translations.push(rest[0].clone());
+        assert!(encode(&msg).len() > LINE_CAP);
+    }
+
+    #[test]
     fn card_detail_reply_carries_pending_keys_and_respects_line_cap() {
         use rocky_proto::cards::Quote;
         use rocky_proto::pipe::{LINE_CAP, encode};
@@ -3512,9 +3564,11 @@ mod tests {
                 cleanup_errors: 0,
             }
         );
+        // A refused install leaves the status as desks already have it, so nothing is broadcast.
         let msgs = drain_server_msgs(&rx);
         assert!(
-            msgs.iter()
+            !msgs
+                .iter()
                 .any(|m| matches!(m, ServerMsg::Translate { .. }))
         );
     }
