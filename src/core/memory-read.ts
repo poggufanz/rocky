@@ -1504,12 +1504,6 @@ function parseMemoryRange(
       lineStartFileOffset = nextStart;
       return;
     }
-    if (options.recordCap !== undefined && records.length >= options.recordCap) {
-      stoppedAtRecordCap = true;
-      resetLine();
-      lineStartFileOffset = nextStart;
-      return;
-    }
     scanned += 1;
     if (lineOversized || lineBytes > MAX_MEMORY_LINE_BYTES) {
       skipped += 1;
@@ -1529,6 +1523,11 @@ function parseMemoryRange(
       // manual merge. First valid provenance wins; later duplicates are
       // retained only as inert bytes in the file, never in operational state.
       if (record && !seenIds.has(record.id)) {
+        if (options.recordCap !== undefined && records.length >= options.recordCap) {
+          stoppedAtRecordCap = true;
+          lineStartFileOffset = nextStart;
+          return;
+        }
         seenIds.add(record.id);
         records.push(record);
         trackFailureIndex(record, lineStartFileOffset);
@@ -1604,11 +1603,11 @@ function findTailStartOffset(
   recordCap: number,
 ): number | undefined {
   const minReadOffset = Math.max(0, totalBytes - MAX_MEMORY_FILE_BYTES);
-  const targetNewlines = recordCap + 1;
   const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
   let cursor = totalBytes;
   let newlineCount = 0;
   let earliestNewlineOffset: number | undefined;
+  let targetNewlines: number | undefined;
 
   while (cursor > minReadOffset) {
     const requested = Math.min(buffer.byteLength, cursor - minReadOffset);
@@ -1616,6 +1615,11 @@ function findTailStartOffset(
     const count = readSync(descriptor, buffer, 0, requested, readPos);
     if (count !== requested) return undefined;
     const chunk = buffer.subarray(0, count);
+    if (targetNewlines === undefined) {
+      // A trailing LF terminates the final line; without one, the final line
+      // needs one fewer delimiter to bound `recordCap` lines from EOF.
+      targetNewlines = chunk[count - 1] === 0x0a ? recordCap + 1 : recordCap;
+    }
     let searchLimit = count - 1;
     while (searchLimit >= 0) {
       const idx = chunk.lastIndexOf(0x0a, searchLimit);
@@ -1631,7 +1635,7 @@ function findTailStartOffset(
   }
 
   if (minReadOffset === 0) return 0;
-  return earliestNewlineOffset !== undefined ? earliestNewlineOffset + 1 : minReadOffset;
+  return earliestNewlineOffset !== undefined ? earliestNewlineOffset + 1 : totalBytes;
 }
 
 function computeOldestWindowTs(records: readonly MemoryRecord[]): number | undefined {

@@ -415,3 +415,82 @@ test("append during the tail read reports read-race", (t) => {
   assert.equal(output.secondWindow, "tail");
   assert.equal(output.secondTailReadable, true);
 });
+
+test("exact-cap file with a trailing blank CRLF line stays complete", (t) => {
+  withRecordCap(t, 2);
+  const home = tempHome(t);
+  const path = join(home, "exact-cap-blank-crlf.jsonl");
+  writeFileSync(path, `${failureLine(0)}\r\n${failureLine(1)}\r\n\r\n`, "utf8");
+
+  const loaded = loadMemoryChecked(path, NOW);
+  assert.equal(loaded.records.length, 2);
+  assert.equal(loaded.records[0]?.id, "r0");
+  assert.equal(loaded.records[1]?.id, "r1");
+  assert.equal(loaded.complete, true);
+  assert.equal(loaded.coverage.complete, true);
+  assert.equal(loaded.coverage.window, undefined);
+  assert.equal(loaded.coverage.reason, undefined);
+  assert.equal(loaded.coverage.skipped, 0);
+  assert.equal(loaded.coverage.truncated, 0);
+  assert.equal(isCompleteMemoryCoverage(loaded.coverage), true);
+});
+
+test("file over 32 MiB with no LF in the last 32 MiB scans zero lines and zero bytes with zero skips", (t) => {
+  const home = tempHome(t);
+  const path = join(home, "no-lf-tail.jsonl");
+  const prefix = Buffer.from(`${failureLine(0, "false", NOW - 1_000)}\n`, "utf8");
+  const suffix = Buffer.alloc(MAX_MEMORY_FILE_BYTES + 1024, 0x61);
+  writeFileSync(path, Buffer.concat([prefix, suffix]));
+
+  const loaded = loadMemoryChecked(path, NOW);
+  assert.equal(loaded.records.length, 0);
+  assert.equal(loaded.coverage.window, "tail");
+  assert.equal(loaded.coverage.reason, "file-size-cap");
+  assert.equal(loaded.coverage.complete, false);
+  assert.equal(loaded.coverage.truncated, 1);
+  assert.equal(loaded.coverage.scanned, 0);
+  assert.equal(loaded.coverage.bytesScanned, 0);
+  assert.equal(loaded.coverage.skipped, 0);
+  assert.equal(loaded.coverage.startOffset, loaded.coverage.bytesTotal);
+  assert.equal(loaded.coverage.oldestTs, undefined);
+  assert.equal(tailReadable(loaded.coverage), true);
+  assert.equal(windowCovered(loaded.coverage, NOW, EIGHT_HOURS_MS), false);
+});
+
+test("duplicate id straddling an unterminated tail cutoff keeps the newest copy without a skip", (t) => {
+  withRecordCap(t, 2);
+  const home = tempHome(t);
+  const path = join(home, "unterminated-dup.jsonl");
+  const rowA = JSON.stringify({
+    kind: "failure", id: "row-a", ts: NOW - 4_000, cwd: "/cap-fixture", cmd: "false", exitCode: 1,
+    fingerprint: "a".repeat(16), signature: ["false"], excerpt: "a",
+  });
+  const rowBOld = JSON.stringify({
+    kind: "failure", id: "dup-b", ts: NOW - 3_000, cwd: "/cap-fixture", cmd: "false", exitCode: 1,
+    fingerprint: "b".repeat(16), signature: ["false"], excerpt: "old-b",
+  });
+  const rowC = JSON.stringify({
+    kind: "failure", id: "row-c", ts: NOW - 2_000, cwd: "/cap-fixture", cmd: "false", exitCode: 1,
+    fingerprint: "c".repeat(16), signature: ["false"], excerpt: "c",
+  });
+  const rowBNew = JSON.stringify({
+    kind: "failure", id: "dup-b", ts: NOW - 1_000, cwd: "/cap-fixture", cmd: "false", exitCode: 1,
+    fingerprint: "b".repeat(16), signature: ["false"], excerpt: "new-b",
+  });
+  writeFileSync(path, [rowA, rowBOld, rowC, rowBNew].join("\n"), "utf8");
+
+  const loaded = loadMemoryChecked(path, NOW);
+  assert.equal(loaded.records.length, 2);
+  assert.equal(loaded.records[0]?.id, "row-c");
+  assert.equal(loaded.records[1]?.id, "dup-b");
+  assert.equal(loaded.records[1]?.kind, "failure");
+  if (loaded.records[1]?.kind === "failure") {
+    assert.equal(loaded.records[1].excerpt, "new-b");
+    assert.equal(loaded.records[1].ts, NOW - 1_000);
+  }
+  assert.equal(loaded.coverage.window, "tail");
+  assert.equal(loaded.coverage.reason, "record-cap");
+  assert.equal(loaded.coverage.skipped, 0);
+  assert.equal(loaded.coverage.scanned, 2);
+  assert.equal(tailReadable(loaded.coverage), true);
+});
