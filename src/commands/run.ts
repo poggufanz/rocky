@@ -22,7 +22,7 @@ import {
   type FailureRecord,
   type MemoryRecord,
 } from "../core/memory.js";
-import { linkBasisRank, loadMemoryChecked, tailReadable } from "../core/memory-read.js";
+import { CLOCK_SKEW_MS, linkBasisRank, loadMemoryChecked, tailReadable } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix, LINK_WINDOW_MS, possibleFixesForFailure, type PossibleFix } from "../core/memory-query.js";
 import { ago, detail, gapSpan, isVerbose, phrase, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
@@ -96,7 +96,9 @@ export function speakFailureMemory(
 
   if (previous.length > 0) {
     const first = previous[0];
-    say(`Same error as before, first recorded ${ago(first.ts)}.`);
+    say(scope.historyMayStartEarlier
+      ? `Same error as before, first recorded ${ago(first.ts)} (earlier records were not read).`
+      : `Same error as before, first recorded ${ago(first.ts)}.`);
     const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
     if (withFix) {
       const fix = getFix(memory, withFix, now)!;
@@ -148,7 +150,9 @@ export function speakFailureMemory(
     } else {
       const candidate = speakablePossibleFix(memory, previous, now);
       if (candidate) {
-        say("No confirmed fix. After that error, you ran:");
+        say(scope.historyMayStartEarlier
+          ? "No confirmed fix in the records read. After that error, you ran:"
+          : "No confirmed fix. After that error, you ran:");
         detail(`    ${safeTerminalLine(candidate.cmd)}`);
         if (candidate.fromElsewhere) {
           say("But that command comes from a different directory.");
@@ -158,7 +162,9 @@ export function speakFailureMemory(
           ? "Different program. It may or may not be a fix. Check before acting."
           : "It may or may not be a fix. Check before acting.");
       } else {
-        say("No fix recorded yet.");
+        say(scope.historyMayStartEarlier
+          ? "No fix in the records read."
+          : "No fix recorded yet.");
       }
     }
   } else {
@@ -236,19 +242,18 @@ export function linkFixOnSuccess(
   cwd: string,
   quiet = false,
   options: ResolveFixOptions = {},
+  resolveFix: (cmd: string, cwd: string, options: ResolveFixOptions) => ResolveFixResult = resolveFixOnSuccess,
 ): ResolveFixResult {
-  const result = resolveFixOnSuccess(cmd, cwd, options);
+  const result = resolveFix(cmd, cwd, options);
   if (!quiet && result.confirmedResolved > 0) {
     say(phrase("fix-linked"));
   } else if (!quiet && result.pausedReason === "coverage") {
-    try {
-      const loaded = loadMemoryChecked();
-      if (tailReadable(loaded.coverage) && loaded.coverage.window === "tail") {
-        const hours = (options.windowMs ?? LINK_WINDOW_MS) / 3_600_000;
-        say(`fix linking paused: the newest ${loaded.records.length} records do not reach back ${hours} hours.`);
-      }
-    } catch {
-      // Memory bookkeeping must never turn a passing command into an error.
+    if (result.pausedDetail?.shortTail) {
+      const hours = (options.windowMs ?? LINK_WINDOW_MS) / 3_600_000;
+      const minutes = CLOCK_SKEW_MS / 60_000;
+      say(`fix linking paused: the newest ${result.pausedDetail.recordsRead} records do not reach back ${hours} hours and ${minutes} minutes.`);
+    } else {
+      say("fix linking paused: memory coverage is incomplete.");
     }
   }
   return result;

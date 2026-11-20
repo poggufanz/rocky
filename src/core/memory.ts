@@ -38,7 +38,7 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, windowCovered } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, tailReadable, windowCovered } from "./memory-read.js";
 import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
@@ -1246,6 +1246,7 @@ export interface ResolveFixResult extends WrittenFixRecords {
   confirmedResolved: number;
   possibleAssociated: number;
   pausedReason?: "coverage";
+  pausedDetail?: { recordsRead: number; shortTail: boolean };
 }
 
 function hasConfirmedResolutionForCommand(
@@ -1306,7 +1307,17 @@ export function resolveFixOnSuccess(
     if (!windowCovered(transaction.coverage, now, windowMs)) {
       // No definitive fix or pending deletion without a covered window.
       // New failure/note/triple append paths remain available independently.
-      return { confirmedResolved: 0, possibleAssociated: 0, pausedReason: "coverage" };
+      return {
+        confirmedResolved: 0,
+        possibleAssociated: 0,
+        pausedReason: "coverage",
+        pausedDetail: {
+          recordsRead: transaction.records.length,
+          shortTail: tailReadable(transaction.coverage)
+            && transaction.coverage.window === "tail"
+            && transaction.coverage.oldestTs !== undefined,
+        },
+      };
     }
     const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
     if (links.length === 0) {

@@ -155,6 +155,10 @@ test("incomplete snapshots fail closed for fix, reconciliation, and once-only cl
     confirmedResolved: 0,
     possibleAssociated: 0,
     pausedReason: "coverage",
+    pausedDetail: {
+      recordsRead: loaded.records.length,
+      shortTail: true,
+    },
   });
   clearPendingIfResolved([], undefined, Date.now());
   assert.equal(existsSync(join(root, "pending")), true);

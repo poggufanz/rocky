@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { checkAmbiguity } from "../agent/ambiguity.js";
 import type { OllamaClient } from "../ai/ollama.js";
 import { hookFail } from "../commands/hook.js";
-import { run } from "../commands/run.js";
+import { linkFixOnSuccess, run } from "../commands/run.js";
 import { stats } from "../commands/stats.js";
 import { watch } from "../commands/watch.js";
 import type { ConfigLoadResult } from "../core/config-read.js";
@@ -1162,9 +1162,87 @@ test("rocky run above the cap names the earlier fix again", async (t) => {
 
   const failExec: ExecResult = { started: true, code: 1, stderr: stderrLine, tail: [stderrLine], durationMs: 5 };
   const stderr = await captureStderr(() => run("npm test", async () => failExec));
-  assert.match(stderr, /Same error as before/);
+  assert.match(stderr, /Same error as before, first recorded .+ \(earlier records were not read\)\./);
   assert.match(stderr, /Last time, you ran:/);
   assert.doesNotMatch(stderr, /Memory coverage is incomplete/);
+});
+
+test("rocky run and watch qualify recurrence and no-fix when older evidence lies beyond the cap", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const now = Date.now();
+  const cwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const cmd = "npm test";
+  const stderrLine = "RangeError: older fix dropped";
+  const olderFailure: FailureRecord = {
+    ...reliableFailureRecord("older-dropped-failure", cmd, cwd, now - 4 * 24 * 60 * 60 * 1000, stderrLine),
+    resolvedBy: "older-dropped-fix",
+  };
+  const olderFix: FixRecord = {
+    kind: "fix",
+    id: "older-dropped-fix",
+    ts: now - 4 * 24 * 60 * 60 * 1000 + 60_000,
+    cwd,
+    cmd,
+    failureIds: [olderFailure.id],
+    links: [{ id: olderFailure.id, basis: "identity", confidence: "confirmed" }],
+  };
+  const tailFailure = reliableFailureRecord("tail-unresolved-failure", cmd, cwd, now - 60 * 60 * 1000, stderrLine);
+
+  const noFixLines = [
+    JSON.stringify(olderFailure),
+    JSON.stringify(olderFix),
+    ...fillerFailureLines(10_049, otherCwd, now - THREE_DAYS_MS),
+    JSON.stringify(tailFailure),
+  ];
+  writeFileSync(join(home, "memory.jsonl"), `${noFixLines.join("\n")}\n`, "utf8");
+
+  const failExec: ExecResult = { started: true, code: 1, stderr: stderrLine, tail: [stderrLine], durationMs: 5 };
+  const runNoFixErr = await captureStderr(() => run(cmd, async () => failExec));
+  assert.match(runNoFixErr, /Same error as before, first recorded .+ \(earlier records were not read\)\./);
+  assert.match(runNoFixErr, /rocky: No fix in the records read\./);
+  assert.doesNotMatch(runNoFixErr, /No fix recorded yet\./);
+
+  const watchNoFixErr = await captureStderr(() => watch([cmd], {
+    notify: () => {},
+    runProcess: async () => failExec,
+  }));
+  assert.match(watchNoFixErr, /Same error as before, first recorded .+ \(earlier records were not read\)\./);
+  assert.match(watchNoFixErr, /rocky: No fix in the records read\./);
+  assert.doesNotMatch(watchNoFixErr, /No fix recorded yet\./);
+
+  const tailAssoc = {
+    kind: "association",
+    id: "tail-weak-assoc",
+    ts: now - 30 * 60 * 1000,
+    cwd,
+    cmd: "npm run lint",
+    candidateFailureIds: [tailFailure.id],
+    links: [{ id: tailFailure.id, basis: "program", confidence: "possible" }],
+  };
+  const assocLines = [
+    JSON.stringify(olderFailure),
+    JSON.stringify(olderFix),
+    ...fillerFailureLines(10_048, otherCwd, now - THREE_DAYS_MS),
+    JSON.stringify(tailFailure),
+    JSON.stringify(tailAssoc),
+  ];
+  writeFileSync(join(home, "memory.jsonl"), `${assocLines.join("\n")}\n`, "utf8");
+
+  const runAssocErr = await captureStderr(() => run(cmd, async () => failExec));
+  assert.match(runAssocErr, /Same error as before, first recorded .+ \(earlier records were not read\)\./);
+  assert.match(runAssocErr, /rocky: No confirmed fix in the records read\. After that error, you ran:/);
+  assert.doesNotMatch(runAssocErr, /No confirmed fix\. After that error, you ran:/);
+
+  const watchAssocErr = await captureStderr(() => watch([cmd], {
+    notify: () => {},
+    runProcess: async () => failExec,
+  }));
+  assert.match(watchAssocErr, /Same error as before, first recorded .+ \(earlier records were not read\)\./);
+  assert.match(watchAssocErr, /rocky: No confirmed fix in the records read\. After that error, you ran:/);
+  assert.doesNotMatch(watchAssocErr, /No confirmed fix\. After that error, you ran:/);
 });
 
 test("rocky run above the cap admits a possibly older first sighting", async (t) => {
@@ -1203,8 +1281,90 @@ test("rocky run prints the paused-linking line when the tail is short", async (t
   const passExec: ExecResult = { started: true, code: 0, stderr: "", tail: [], durationMs: 5 };
   const stderr = await captureStderr(() => run("npm test", async () => passExec));
   assert.ok(
-    stderr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours."),
+    stderr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours and 10 minutes."),
     stderr,
+  );
+});
+
+test("paused linking discloses skew boundary, incomplete fallback, and uses deciding snapshot", async (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const otherCwd = join(home, "other");
+  const memoryFile = join(home, "memory.jsonl");
+
+  // Skew boundary: oldest record at NOW - 8h - 5min is inside the 10-minute skew margin.
+  const skewLines = fillerFailureLines(10_050, otherCwd, NOW - EIGHT_HOURS_MS - 5 * 60 * 1000);
+  writeFileSync(memoryFile, `${skewLines.join("\n")}\n`, "utf8");
+  let skewResult: ReturnType<typeof linkFixOnSuccess> | undefined;
+  const skewErr = await captureStderr(() => {
+    skewResult = linkFixOnSuccess("npm test", join(home, "repo"), false, { now: NOW });
+  });
+  assert.equal(skewResult?.pausedReason, "coverage");
+  assert.deepEqual(skewResult?.pausedDetail, { recordsRead: 10_000, shortTail: true });
+  assert.ok(
+    skewErr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours and 10 minutes."),
+    skewErr,
+  );
+
+  // Tail with one corrupt line: paused with incomplete-coverage fallback, not shortTail.
+  const corruptLines = [
+    ...fillerFailureLines(10_049, otherCwd, NOW - 2 * 60 * 60 * 1000),
+    "{not-json}",
+  ];
+  writeFileSync(memoryFile, `${corruptLines.join("\n")}\n`, "utf8");
+  let corruptResult: ReturnType<typeof linkFixOnSuccess> | undefined;
+  const corruptErr = await captureStderr(() => {
+    corruptResult = linkFixOnSuccess("npm test", join(home, "repo"), false, { now: NOW });
+  });
+  assert.equal(corruptResult?.pausedReason, "coverage");
+  assert.deepEqual(corruptResult?.pausedDetail, { recordsRead: 9_999, shortTail: false });
+  assert.ok(
+    corruptErr.includes("fix linking paused: memory coverage is incomplete."),
+    corruptErr,
+  );
+  assert.doesNotMatch(corruptErr, /do not reach back/);
+
+  // Changed post-decision snapshot (replaced with 1 complete record after decision) cannot suppress or alter the line.
+  writeFileSync(memoryFile, `${skewLines.join("\n")}\n`, "utf8");
+  const postDecisionErr = await captureStderr(() => {
+    linkFixOnSuccess("npm test", join(home, "repo"), false, { now: NOW }, (cmd, cwd, options) => {
+      const decided = resolveFixOnSuccess(cmd, cwd, options);
+      writeFileSync(memoryFile, `${fillerFailureLines(1, otherCwd, NOW - 1_000).join("\n")}\n`, "utf8");
+      return decided;
+    });
+  });
+  assert.ok(
+    postDecisionErr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours and 10 minutes."),
+    postDecisionErr,
+  );
+
+  // Injected result drives the output directly even when no memory file exists.
+  rmSync(memoryFile, { force: true });
+  const injectedShortErr = await captureStderr(() => {
+    linkFixOnSuccess("npm test", join(home, "repo"), false, {}, () => ({
+      confirmedResolved: 0,
+      possibleAssociated: 0,
+      pausedReason: "coverage",
+      pausedDetail: { recordsRead: 42, shortTail: true },
+    }));
+  });
+  assert.ok(
+    injectedShortErr.includes("fix linking paused: the newest 42 records do not reach back 8 hours and 10 minutes."),
+    injectedShortErr,
+  );
+
+  const injectedIncompleteErr = await captureStderr(() => {
+    linkFixOnSuccess("npm test", join(home, "repo"), false, {}, () => ({
+      confirmedResolved: 0,
+      possibleAssociated: 0,
+      pausedReason: "coverage",
+      pausedDetail: { recordsRead: 42, shortTail: false },
+    }));
+  });
+  assert.ok(
+    injectedIncompleteErr.includes("fix linking paused: memory coverage is incomplete."),
+    injectedIncompleteErr,
   );
 });
 
