@@ -18,8 +18,11 @@ import {
   recordTripleOnce,
   resolveFixOnSuccess,
   touchPending,
+  withMemoryTransaction,
 } from "../core/memory.js";
+import { findByFingerprintOnDisk } from "../core/memory-index.js";
 import { createMemoryQueries } from "../core/memory-query.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   CLOCK_SKEW_MS,
   isCompleteMemoryCoverage,
@@ -880,4 +883,207 @@ test("clearPendingIfResolved clears on a covered tail and keeps on a short one",
   touchPending();
   clearPendingIfResolved([], EIGHT_HOURS_MS, NOW);
   assert.equal(existsSync(pendingPath()), true);
+});
+
+test("exact-cap ledger linking an evicted failure reports the fix truthfully and keeps pending", (t) => {
+  withRecordCap(t, 3);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const targetFailure = reliableFailureRecord(
+    "oldest-target",
+    "npm test",
+    targetCwd,
+    NOW - 2 * 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const fillerB = reliableFailureRecord("recent-b", "cargo check", otherCwd, NOW - 60 * 60 * 1000, "b");
+  const fillerC = reliableFailureRecord("recent-c", "cargo check", otherCwd, NOW - 30 * 60 * 1000, "c");
+  const memoryFile = join(home, "memory.jsonl");
+  writeFileSync(
+    memoryFile,
+    [JSON.stringify(targetFailure), JSON.stringify(fillerB), JSON.stringify(fillerC)].join("\n") + "\n",
+    "utf8",
+  );
+  touchPending();
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 1);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, undefined);
+  assert.ok(result.fix !== undefined);
+
+  const lastLine = readFileSync(memoryFile, "utf8").trimEnd().split("\n").at(-1);
+  assert.ok(lastLine !== undefined);
+  const lastRecord = JSON.parse(lastLine) as FixRecord;
+  assert.equal(lastRecord.kind, "fix");
+  assert.equal(lastRecord.id, result.fix.id);
+  assert.equal(lastRecord.failureIds.includes(targetFailure.id), true);
+  assert.equal(existsSync(pendingPath()), true);
+  assert.equal(windowCovered(loadMemoryChecked(memoryFile, NOW).coverage, NOW, EIGHT_HOURS_MS), false);
+});
+
+test("capped tail whose sole old witness is evicted by linking reports the fix truthfully and keeps pending", (t) => {
+  withRecordCap(t, 3);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const evictedFiller = reliableFailureRecord(
+    "evicted-filler",
+    "cargo check",
+    otherCwd,
+    NOW - THREE_DAYS_MS - 1_000,
+    "older",
+  );
+  const soleWitness = reliableFailureRecord(
+    "sole-witness",
+    "cargo check",
+    otherCwd,
+    NOW - THREE_DAYS_MS,
+    "witness",
+  );
+  const fillerB = reliableFailureRecord("recent-b", "cargo check", otherCwd, NOW - 2 * 60 * 60 * 1000, "b");
+  const targetFailure = reliableFailureRecord(
+    "recent-target",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const memoryFile = join(home, "memory.jsonl");
+  writeFileSync(
+    memoryFile,
+    [
+      JSON.stringify(evictedFiller),
+      JSON.stringify(soleWitness),
+      JSON.stringify(fillerB),
+      JSON.stringify(targetFailure),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  touchPending();
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 1);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, undefined);
+  assert.ok(result.fix !== undefined);
+
+  const lastLine = readFileSync(memoryFile, "utf8").trimEnd().split("\n").at(-1);
+  assert.ok(lastLine !== undefined);
+  const lastRecord = JSON.parse(lastLine) as FixRecord;
+  assert.equal(lastRecord.kind, "fix");
+  assert.equal(lastRecord.id, result.fix.id);
+  assert.equal(lastRecord.failureIds.includes(targetFailure.id), true);
+  assert.equal(existsSync(pendingPath()), true);
+  assert.equal(windowCovered(loadMemoryChecked(memoryFile, NOW).coverage, NOW, EIGHT_HOURS_MS), false);
+});
+
+test("unlock: covered tail omitting terminal newline separates the fix, keeps skipped at 0, and clears pending", (t) => {
+  withRecordCap(t, 10_000);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const otherCwd = join(home, "other");
+  const targetFailure = reliableFailureRecord(
+    "target-failure",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const memoryFile = join(home, "memory.jsonl");
+  const lines = [
+    ...fillerFailureLines(10_049, otherCwd, NOW - THREE_DAYS_MS),
+    JSON.stringify(targetFailure),
+  ];
+  writeFileSync(memoryFile, lines.join("\n"), "utf8");
+  assert.notEqual(readFileSync(memoryFile).at(-1), 0x0a);
+  touchPending();
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 1);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, undefined);
+  assert.ok(result.fix !== undefined);
+
+  const loaded = loadMemoryChecked(memoryFile, NOW);
+  assert.equal(loaded.coverage.window, "tail");
+  assert.equal(loaded.coverage.skipped, 0);
+  assert.equal(tailReadable(loaded.coverage), true);
+
+  const parsedFailure = loaded.records.find(
+    (record): record is FailureRecord => record.kind === "failure" && record.id === targetFailure.id,
+  );
+  assert.ok(parsedFailure !== undefined);
+  assert.equal(parsedFailure.resolvedBy, result.fix.id);
+
+  const parsedFix = loaded.records.at(-1);
+  assert.equal(parsedFix?.kind, "fix");
+  if (parsedFix?.kind === "fix") {
+    assert.equal(parsedFix.id, result.fix.id);
+    assert.equal(parsedFix.failureIds.includes(targetFailure.id), true);
+  }
+  assert.equal(existsSync(pendingPath()), false);
+});
+
+test("append accounts for missing terminal LF in sidecar offsets and byte budgeting", (t) => {
+  const home = tempHome(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: home });
+  const first = reliableFailureRecord("first-unterminated", "npm test", join(home, "repo"), NOW - 2_000, "TypeError: first error");
+  const second = reliableFailureRecord("second-appended", "cargo check", join(home, "repo"), NOW - 1_000, "ReferenceError: second error");
+  writeFileSync(paths.memory, JSON.stringify(first), "utf8");
+  withMemoryTransaction((transaction) => {
+    transaction.append(second);
+  }, paths, { now: NOW });
+
+  const loaded = loadMemoryChecked(paths.memory, NOW);
+  assert.equal(loaded.coverage.skipped, 0);
+  assert.deepEqual(loaded.records.map((record) => record.id), [first.id, second.id]);
+  const sidecarHit = findByFingerprintOnDisk(second.fingerprint, paths.memory);
+  assert.equal(sidecarHit.via, "sidecar");
+  assert.deepEqual(sidecarHit.hits.map((hit) => hit.id), [second.id]);
+
+  const budgetHome = tempHome(t);
+  const budgetPaths = resolveRockyPaths({ ROCKY_HOME: budgetHome });
+  const candidate = reliableFailureRecord("budget-candidate", "npm test", join(budgetHome, "repo"), NOW - 1_000, "err");
+  const candidateBytes = Buffer.byteLength(`${JSON.stringify(candidate)}\n`, "utf8");
+  const targetPrefixBytes = MAX_MEMORY_FILE_BYTES - candidateBytes;
+
+  const chunks: string[] = [];
+  let currentBytes = 0;
+  const bigPad = "x".repeat(900_000);
+  let index = 0;
+  while (targetPrefixBytes - currentBytes > 950_000) {
+    const line = `${failureLine(index++, bigPad, NOW - 10_000)}\n`;
+    chunks.push(line);
+    currentBytes += Buffer.byteLength(line, "utf8");
+  }
+  const remainingNeeded = targetPrefixBytes - currentBytes;
+  const shellLine = failureLine(index, "", NOW - 10_000);
+  const padLength = remainingNeeded - Buffer.byteLength(shellLine, "utf8");
+  assert.ok(padLength > 0);
+  const unterminatedLast = failureLine(index, "y".repeat(padLength), NOW - 10_000);
+  assert.equal(currentBytes + Buffer.byteLength(unterminatedLast, "utf8"), targetPrefixBytes);
+  writeFileSync(budgetPaths.memory, `${chunks.join("")}${unterminatedLast}`, "utf8");
+
+  const overBySeparator = withMemoryTransaction(
+    (transaction) => transaction.canAppendComplete([candidate]),
+    budgetPaths,
+    { now: NOW },
+  );
+  assert.equal(overBySeparator, false);
+
+  const terminatedLast = failureLine(index, "y".repeat(padLength - 1), NOW - 10_000) + "\n";
+  assert.equal(currentBytes + Buffer.byteLength(terminatedLast, "utf8"), targetPrefixBytes);
+  writeFileSync(budgetPaths.memory, `${chunks.join("")}${terminatedLast}`, "utf8");
+
+  const fitsWithNewline = withMemoryTransaction(
+    (transaction) => transaction.canAppendComplete([candidate]),
+    budgetPaths,
+    { now: NOW },
+  );
+  assert.equal(fitsWithNewline, true);
 });

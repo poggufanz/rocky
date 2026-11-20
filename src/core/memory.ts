@@ -85,7 +85,45 @@ function ensureDir(home: string): void {
   }
 }
 
-function appendUnlocked(record: MemoryRecord, paths: RockyPaths): void {
+interface AppendResult {
+  offset: number;
+  bytesWritten: number;
+}
+
+function descriptorNeedsLeadingNewline(fd: number, size: number): boolean {
+  if (size <= 0) return false;
+  const lastByte = Buffer.allocUnsafe(1);
+  const read = readSync(fd, lastByte, 0, 1, size - 1);
+  if (read !== 1) {
+    throw new Error("Rocky memory boundary check could not read trailing byte");
+  }
+  return lastByte[0] !== 0x0a;
+}
+
+function memoryNeedsLeadingNewline(path: string): boolean {
+  let fd = -1;
+  try {
+    const existing = lstatSync(path);
+    if (!existing.isFile() || existing.isSymbolicLink() || existing.size === 0) return false;
+    const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+    fd = openSync(path, constants.O_RDONLY | noFollow);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0) return false;
+    return descriptorNeedsLeadingNewline(fd, opened.size);
+  } catch {
+    return true;
+  } finally {
+    if (fd >= 0) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Best effort descriptor close.
+      }
+    }
+  }
+}
+
+function appendUnlocked(record: MemoryRecord, paths: RockyPaths): AppendResult {
   const line = `${JSON.stringify(record)}\n`;
   const encoded = Buffer.from(line, "utf8");
   if (encoded.byteLength > MAX_MEMORY_LINE_BYTES) {
@@ -103,7 +141,7 @@ function appendUnlocked(record: MemoryRecord, paths: RockyPaths): void {
   }
 
   const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-  const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow;
+  const flags = constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | noFollow;
   let fd = -1;
   try {
     fd = openSync(paths.memory, flags, 0o600);
@@ -120,12 +158,21 @@ function appendUnlocked(record: MemoryRecord, paths: RockyPaths): void {
       throw new Error("Rocky memory must be private");
     }
 
+    const needsSeparator = descriptorNeedsLeadingNewline(fd, opened.size);
+    const separatorBytes = needsSeparator ? 1 : 0;
+    let recordOffset = Number.isSafeInteger(opened.size) && opened.size >= 0 ? opened.size : -1;
+    if (needsSeparator && recordOffset >= 0) recordOffset += 1;
+
+    const payload = separatorBytes === 1
+      ? Buffer.concat([Buffer.from([0x0a]), encoded])
+      : encoded;
     let offset = 0;
-    while (offset < encoded.byteLength) {
-      const written = writeSync(fd, encoded, offset, encoded.byteLength - offset);
+    while (offset < payload.byteLength) {
+      const written = writeSync(fd, payload, offset, payload.byteLength - offset);
       if (written <= 0) throw new Error("Rocky memory write made no progress");
       offset += written;
     }
+    return { offset: recordOffset, bytesWritten: payload.byteLength };
   } finally {
     if (fd >= 0) {
       try {
@@ -929,6 +976,7 @@ export function withMemoryTransaction<T>(
   let records = initial.records;
   let complete = initial.complete;
   let coverage = initial.coverage;
+  let bytesTotal = initial.coverage.bytesTotal;
   // Writer-side sidecar tracking: file offsets parallel to `records`, seeded
   // from the initial pure load. Appends only ever add at the tail under the
   // triple lock, so old offsets stay valid. Undefined means untrackable: skip
@@ -998,6 +1046,7 @@ export function withMemoryTransaction<T>(
     records = loaded.records;
     complete = loaded.complete;
     coverage = loaded.coverage;
+    bytesTotal = loaded.coverage.bytesTotal;
     const fresh = getMemoryRecordOffsets(loaded.records);
     allOffsets = fresh === undefined ? (loaded.records.length === 0 ? [] : undefined) : [...fresh];
     return records;
@@ -1009,22 +1058,13 @@ export function withMemoryTransaction<T>(
     get complete() { return complete; },
     get coverage() { return coverage; },
     append(record) {
-      let offset = -1;
-      try {
-        const before = lstatSync(paths.memory, { bigint: true });
-        if (before.isFile() && !before.isSymbolicLink()) {
-          const size = Number(before.size);
-          offset = Number.isSafeInteger(size) && size >= 0 ? size : -1;
-        } else if (before.isSymbolicLink()) {
-          offset = -1;
-        }
-      } catch (error) {
-        offset = (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : -1;
-      }
-      appendUnlocked(record, paths);
+      const appended = appendUnlocked(record, paths);
       records = [...records, record];
       appendedCount += 1;
-      noteAppendedOffset(offset);
+      bytesTotal = bytesTotal > Number.MAX_SAFE_INTEGER - appended.bytesWritten
+        ? Number.MAX_SAFE_INTEGER
+        : bytesTotal + appended.bytesWritten;
+      noteAppendedOffset(appended.offset);
     },
     reload() {
       const loaded = loadMemoryChecked(paths.memory, now);
@@ -1045,8 +1085,13 @@ export function withMemoryTransaction<T>(
         const encoded = Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8");
         return total > Number.MAX_SAFE_INTEGER - encoded ? Number.MAX_SAFE_INTEGER : total + encoded;
       }, 0);
-      return coverage.bytesTotal <= MAX_MEMORY_FILE_BYTES
-        && addedBytes <= MAX_MEMORY_FILE_BYTES - coverage.bytesTotal;
+      if (bytesTotal > MAX_MEMORY_FILE_BYTES) return false;
+      const remaining = MAX_MEMORY_FILE_BYTES - bytesTotal;
+      if (addedBytes > remaining) return false;
+      if (nextRecords.length > 0 && bytesTotal > 0 && addedBytes === remaining) {
+        return !memoryNeedsLeadingNewline(paths.memory);
+      }
+      return true;
     },
     canAppendLinked(nextRecords, windowMs) {
       return transaction.canAppendComplete(nextRecords) || windowCovered(coverage, now, windowMs);

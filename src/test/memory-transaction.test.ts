@@ -124,7 +124,7 @@ function delayedMemoryReadPreload(path: string): void {
     "const originalRead = fs.readSync.bind(fs);",
     "const memoryFds = new Set();",
     "let delayed = false;",
-    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
+    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); const flags = args[0]; const isReadOnly = typeof flags === 'number' ? (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0 : (flags === undefined || (typeof flags === 'string' && flags.startsWith('r') && !flags.includes('+'))); if (String(path) === process.env.ROCKY_TEST_MEMORY && isReadOnly) memoryFds.add(fd); else memoryFds.delete(fd); return fd; };",
     "fs.readSync = (fd, ...args) => { if (!delayed && process.env.ROCKY_TEST_DELAY_READ === '1' && memoryFds.has(fd)) { delayed = true; if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); const signal = new Int32Array(new SharedArrayBuffer(4)); Atomics.wait(signal, 0, 0, Number(process.env.ROCKY_TEST_READ_DELAY_MS || 15)); } return originalRead(fd, ...args); };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
@@ -140,7 +140,7 @@ function mutationReloadFailurePreload(path: string): void {
     "const memoryFds = new Set();",
     "let reads = 0;",
     "let lists = 0;",
-    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
+    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); const flags = args[0]; const isReadOnly = typeof flags === 'number' ? (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0 : (flags === undefined || (typeof flags === 'string' && flags.startsWith('r') && !flags.includes('+'))); if (String(path) === process.env.ROCKY_TEST_MEMORY && isReadOnly) memoryFds.add(fd); else memoryFds.delete(fd); return fd; };",
     "fs.readSync = (fd, ...args) => { if (process.env.ROCKY_TEST_RELOAD_MODE === 'read' && memoryFds.has(fd) && ++reads === 2) { if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); throw new Error('injected mutation reload failure'); } return originalRead(fd, ...args); };",
     "fs.lstatSync = (path, ...args) => { const stats = originalLstat(path, ...args); if (process.env.ROCKY_TEST_RELOAD_MODE === 'identity' && String(path) === process.env.ROCKY_TEST_MEMORY && ++lists === 3) { if (process.env.ROCKY_TEST_LSTAT_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_LSTAT_MARKER, 'fired'); const replacement = Object.create(Object.getPrototypeOf(stats)); Object.assign(replacement, stats, { ino: Number(stats.ino) + 1 }); return replacement; } return stats; };",
     "syncBuiltinESMExports();",
@@ -155,7 +155,7 @@ function initialMemoryReadFailurePreload(path: string): void {
     "const originalRead = fs.readSync.bind(fs);",
     "const memoryFds = new Set();",
     "let reads = 0;",
-    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) memoryFds.add(fd); return fd; };",
+    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); const flags = args[0]; const isReadOnly = typeof flags === 'number' ? (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0 : (flags === undefined || (typeof flags === 'string' && flags.startsWith('r') && !flags.includes('+'))); if (String(path) === process.env.ROCKY_TEST_MEMORY && isReadOnly) memoryFds.add(fd); else memoryFds.delete(fd); return fd; };",
     "fs.readSync = (fd, ...args) => { if (memoryFds.has(fd) && ++reads === 1) { if (process.env.ROCKY_TEST_READ_MARKER) fs.writeFileSync(process.env.ROCKY_TEST_READ_MARKER, 'fired'); throw new Error('injected initial memory read failure'); } return originalRead(fd, ...args); };",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
@@ -723,55 +723,105 @@ test("a concurrent new failure cannot be lost by pending clear", { timeout: 30_0
   const successCmd = "node resolved.js";
   const newFailureCmd = "cargo new-failure";
   seed(home, [failure("old-failure", successCmd, cwd)]);
+  const lock = join(home, "memory.jsonl.triple.lock");
   const successRead = join(home, "success-read");
   const allowSuccess = join(home, "allow-success");
-  const failurePending = join(home, "failure-pending");
+  const failureLockAttempt = join(home, "failure-lock-attempt");
   const preload = join(home, "pending-race.cjs");
   writeFileSync(preload, [
     "const fs = require('node:fs');",
     "const { syncBuiltinESMExports } = require('node:module');",
     "const originalOpen = fs.openSync.bind(fs);",
-    "const originalRead = fs.readFileSync.bind(fs);",
     "const originalReadSync = fs.readSync.bind(fs);",
     "const originalWrite = fs.writeFileSync.bind(fs);",
-    "const memoryFds = new Set();",
-    "let opens = 0;",
-    "fs.openSync = (path, ...args) => { const fd = originalOpen(path, ...args); if (String(path) === process.env.ROCKY_TEST_MEMORY) { memoryFds.add(fd); if (process.env.ROCKY_RACE_ROLE === 'success' && ++opens === 2) { originalWrite(process.env.ROCKY_SUCCESS_READ, 'open'); const signal = new Int32Array(new SharedArrayBuffer(4)); while (!fs.existsSync(process.env.ROCKY_ALLOW_SUCCESS)) Atomics.wait(signal, 0, 0, 5); } } return fd; };",
-    "fs.readFileSync = (path, ...args) => originalRead(path, ...args);",
-    "fs.readSync = (path, ...args) => originalReadSync(path, ...args);",
-    "fs.writeFileSync = (path, ...args) => { const value = originalWrite(path, ...args); if (process.env.ROCKY_RACE_ROLE === 'failure' && String(path) === process.env.ROCKY_TEST_PENDING) originalWrite(process.env.ROCKY_FAILURE_PENDING, 'pending'); return value; };",
+    "let readOpens = 0;",
+    "let secondReadFd = -1;",
+    "let blockedSecondRead = false;",
+    "let recordedLockAttempt = false;",
+    "function isReadOnlyOpen(flags) {",
+    "  if (typeof flags === 'number') return (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0;",
+    "  return flags === undefined || (typeof flags === 'string' && flags.startsWith('r') && !flags.includes('+'));",
+    "}",
+    "fs.openSync = (path, ...args) => {",
+    "  if (process.env.ROCKY_RACE_ROLE === 'failure' && String(path) === process.env.ROCKY_TEST_LOCK && args[0] === 'wx') {",
+    "    try {",
+    "      return originalOpen(path, ...args);",
+    "    } catch (error) {",
+    "      if (!recordedLockAttempt) {",
+    "        recordedLockAttempt = true;",
+    "        originalWrite(process.env.ROCKY_FAILURE_LOCK_ATTEMPT, 'attempted');",
+    "      }",
+    "      throw error;",
+    "    }",
+    "  }",
+    "  const fd = originalOpen(path, ...args);",
+    "  if (process.env.ROCKY_RACE_ROLE === 'success' && String(path) === process.env.ROCKY_TEST_MEMORY && isReadOnlyOpen(args[0])) {",
+    "    if (++readOpens === 2) secondReadFd = fd;",
+    "  }",
+    "  return fd;",
+    "};",
+    "fs.readSync = (fd, ...args) => {",
+    "  if (process.env.ROCKY_RACE_ROLE === 'success' && fd === secondReadFd && !blockedSecondRead) {",
+    "    blockedSecondRead = true;",
+    "    originalWrite(process.env.ROCKY_SUCCESS_READ, 'read');",
+    "    const signal = new Int32Array(new SharedArrayBuffer(4));",
+    "    while (!fs.existsSync(process.env.ROCKY_ALLOW_SUCCESS)) Atomics.wait(signal, 0, 0, 5);",
+    "  }",
+    "  return originalReadSync(fd, ...args);",
+    "};",
     "syncBuiltinESMExports();",
   ].join("\n"), "utf8");
   const common = {
     ...process.env,
     ROCKY_HOME: home,
     ROCKY_TEST_MEMORY: join(home, "memory.jsonl"),
-    ROCKY_TEST_PENDING: join(home, "pending"),
+    ROCKY_TEST_LOCK: lock,
     ROCKY_SUCCESS_READ: successRead,
     ROCKY_ALLOW_SUCCESS: allowSuccess,
-    ROCKY_FAILURE_PENDING: failurePending,
+    ROCKY_FAILURE_LOCK_ATTEMPT: failureLockAttempt,
     NODE_OPTIONS: `--require=${preload}`,
   };
   const success = spawn(process.execPath, [cli, "_hooksuccess", successCmd, cwd], {
-    env: { ...common, ROCKY_RACE_ROLE: "success" }, stdio: "ignore", windowsHide: true,
+    env: { ...common, ROCKY_RACE_ROLE: "success" }, stdio: ["ignore", "ignore", "pipe"], windowsHide: true,
   });
-  t.after(() => { try { success.kill(); } catch { /* already gone */ } });
-  const successDone = completion(success);
-  await waitFor(() => existsSync(successRead), 10_000, "success transaction second read");
+  const nextFailureChildren: ChildProcess[] = [success];
+  t.after(() => {
+    try { writeFileSync(allowSuccess, "cleanup", "utf8"); } catch { /* best effort */ }
+    for (const child of nextFailureChildren) {
+      try { child.kill(); } catch { /* already gone */ }
+    }
+  });
+  const successDone = completionWithStderr(success);
+  let successSettled: WorkerOutcome | undefined;
+  void successDone.then((outcome) => { successSettled = outcome; });
+  await waitFor(() => {
+    if (existsSync(successRead)) return true;
+    if (successSettled !== undefined) {
+      throw new Error(`success worker exited before second read: ${JSON.stringify(successSettled)}`);
+    }
+    return false;
+  }, 10_000, "success transaction second read");
 
   const nextFailure = spawn(process.execPath, [cli, "_hookfail", newFailureCmd, "1", cwd], {
-    env: { ...common, ROCKY_RACE_ROLE: "failure" }, stdio: "ignore", windowsHide: true,
+    env: { ...common, ROCKY_RACE_ROLE: "failure" }, stdio: ["ignore", "ignore", "pipe"], windowsHide: true,
   });
-  t.after(() => { try { nextFailure.kill(); } catch { /* already gone */ } });
-  const failureDone = completion(nextFailure);
-  await Promise.race([
-    waitFor(() => existsSync(failurePending), 2_000, "concurrent failure pending write").catch(() => undefined),
-    new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-  ]);
+  nextFailureChildren.push(nextFailure);
+  const failureDone = completionWithStderr(nextFailure);
+  let failureSettled: WorkerOutcome | undefined;
+  void failureDone.then((outcome) => { failureSettled = outcome; });
+  await waitFor(() => {
+    if (existsSync(failureLockAttempt)) return true;
+    if (failureSettled !== undefined) {
+      throw new Error(`failure worker exited before attempting lock: ${JSON.stringify(failureSettled)}`);
+    }
+    return false;
+  }, 10_000, "competing writer lock attempt");
   writeFileSync(allowSuccess, "allow", "utf8");
 
-  assert.equal(await successDone, 0);
-  assert.equal(await failureDone, 0);
+  const successOutcome = await successDone;
+  assert.equal(successOutcome.code, 0, JSON.stringify(successOutcome));
+  const failureOutcome = await failureDone;
+  assert.equal(failureOutcome.code, 0, JSON.stringify(failureOutcome));
   const records = memory.loadMemory(join(home, "memory.jsonl"));
   const oldFailure = records.find((record): record is FailureRecord => record.kind === "failure" && record.id === "old-failure");
   const latestFailure = records.find((record): record is FailureRecord => record.kind === "failure" && record.cmd === newFailureCmd);
