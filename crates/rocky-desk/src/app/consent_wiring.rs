@@ -2,33 +2,17 @@
 
 use gpui::Context;
 
-use super::{DeskView, now_ms};
+use super::DeskView;
 use crate::autostart;
 use crate::i18n::{Msg, SetupMsg, tr};
-use crate::requests::{Outcome as RequestOutcome, RequestKind, client_msg};
+use crate::requests::{Outcome as RequestOutcome, RequestKind};
 use crate::settings_view::{View, set_autostart_asked};
 
 impl DeskView {
     /// Start a request and send it. Nothing is sent while disconnected or
     /// while an equal request is already in flight.
     pub(super) fn start_request(&mut self, kind: RequestKind) -> bool {
-        if self.ctl.outbox.is_none() {
-            return false;
-        }
-        let id = self.next_id();
-        if !self.requests.start(kind.clone(), id, now_ms()) {
-            return false;
-        }
-        let sent = self
-            .ctl
-            .outbox
-            .as_ref()
-            .is_some_and(|outbox| outbox.send(client_msg(&kind, id)).is_ok());
-        if !sent {
-            // Nothing reached the daemon, so no reply will come: do not wait for the timeout.
-            self.requests.cancel(id);
-        }
-        sent
+        self.ctl.start_request(&mut self.requests, kind)
     }
 
     /// Route one request outcome to the screen that owns its kind.
