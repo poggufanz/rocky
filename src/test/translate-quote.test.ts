@@ -76,7 +76,7 @@ test("only prose lines reach the engine, and lines keep their shape", async () =
   const result = await translateQuote(text, "en", fake.load);
 
   assert.deepEqual(fake.pairs, ["id-en"]);
-  assert.deepEqual(fake.calls, [["Baris satu.", 'Dua: <x id="0"></x>']]);
+  assert.deepEqual(fake.calls, [["Baris satu.", "Dua: V1"]]);
   for (const line of fake.calls[0]) {
     assert.equal(line.includes("a.ts"), false);
     assert.equal(line.includes("code"), false);
@@ -99,8 +99,8 @@ test("only prose lines reach the engine, and lines keep their shape", async () =
 
 test("translated prose is assembled with restored code placeholders", async () => {
   const fake = makeFakeLoad((lines) => {
-    assert.deepEqual(lines, ['Ubah <x id="0"></x> sekarang.']);
-    return ['Change <x id="0"></x> now.'];
+    assert.deepEqual(lines, ["Ubah V1 sekarang."]);
+    return ["Change V1 now."];
   });
   const result = await translateQuote("Ubah `src/a.ts` sekarang.", "en", fake.load);
   assert.deepEqual(result, {
@@ -112,10 +112,11 @@ test("translated prose is assembled with restored code placeholders", async () =
 
 test("engine drift fails the whole quote", async () => {
   const stripFake = makeFakeLoad((lines) =>
-    lines.map((line) => line.replace(/<x id="\d+"><\/x>/g, "")),
+    lines.map((line) => line.replace(/<x id="\d+"><\/x>|V\d+/g, "")),
   );
   const stripped = await translateQuote("Baris satu.\nUbah `a.ts` dulu.", "en", stripFake.load);
   assert.deepEqual(stripped, { ok: false, reason: "placeholder-mismatch" });
+  assert.equal(stripFake.calls.length, 2);
 
   const repeatedFake = makeFakeLoad((lines) => [
     lines[0],
@@ -150,6 +151,45 @@ test("engine drift fails the whole quote", async () => {
   const embeddedCrFake = makeFakeLoad((lines) => [lines[0], `${lines[1]}\rExtra`]);
   const embeddedCr = await translateQuote("Baris satu.\nBaris dua.", "en", embeddedCrFake.load);
   assert.deepEqual(embeddedCr, { ok: false, reason: "placeholder-mismatch" });
+});
+
+test("code reaches the engine as V tokens so the sentence stays whole", async () => {
+  const fake = makeFakeLoad(() => ["In V1:"]);
+  const result = await translateQuote("Di `C:/proj/app`:", "en", fake.load);
+  assert.deepEqual(fake.calls, [["Di V1:"]]);
+  assert.deepEqual(result, { ok: true, from: "id", text: "In C:/proj/app:" });
+});
+
+test("a line whose tokens drift is retried once with tag placeholders", async () => {
+  const fake = makeFakeLoad((lines) =>
+    lines.map((line) =>
+      line === "Ubah V1 dulu." ? "Change V 1 first." : line.replace("Ubah", "Change"),
+    ),
+  );
+  const result = await translateQuote("Baris satu.\nUbah `a.ts` dulu.", "en", fake.load);
+  assert.deepEqual(fake.calls, [
+    ["Baris satu.", "Ubah V1 dulu."],
+    ['Ubah <x id="0"></x> dulu.'],
+  ]);
+  assert.deepEqual(result, {
+    ok: true,
+    from: "id",
+    text: "Baris satu.\nChange a.ts dulu.",
+  });
+});
+
+test("tag placeholders are kept when prose already looks like a token", async () => {
+  const fake = makeFakeLoad();
+  await translateQuote("Spec V2 pakai `a.ts` sekarang.", "en", fake.load);
+  assert.deepEqual(fake.calls, [['Spec V2 pakai <x id="0"></x> sekarang.']]);
+
+  const lowerFake = makeFakeLoad();
+  await translateQuote("Spec v2 pakai `a.ts` sekarang.", "en", lowerFake.load);
+  assert.deepEqual(lowerFake.calls, [["Spec v2 pakai V1 sekarang."]]);
+
+  const digitFake = makeFakeLoad();
+  await translateQuote("Ubah `a`2 sekarang.", "en", digitFake.load);
+  assert.deepEqual(digitFake.calls, [['Ubah <x id="0"></x>2 sekarang.']]);
 });
 
 test("load failure and engine throw are reported", async () => {
