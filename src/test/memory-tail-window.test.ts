@@ -494,3 +494,86 @@ test("duplicate id straddling an unterminated tail cutoff keeps the newest copy 
   assert.equal(loaded.coverage.scanned, 2);
   assert.equal(tailReadable(loaded.coverage), true);
 });
+
+function namedFailureLine(id: string, ts = NOW): string {
+  return JSON.stringify({
+    kind: "failure",
+    id,
+    ts,
+    cwd: "/cap-fixture",
+    cmd: "false",
+    exitCode: 1,
+    fingerprint: id.toLowerCase().repeat(16),
+    signature: ["false"],
+    excerpt: id,
+  });
+}
+
+test("tail ignores an unterminated whitespace-only suffix", (t) => {
+  withRecordCap(t, 2);
+  const home = tempHome(t);
+  const rowA = namedFailureLine("A", NOW - 3_000);
+  const rowB = namedFailureLine("B", NOW - 2_000);
+  const rowC = namedFailureLine("C", NOW - 1_000);
+
+  const spacePath = join(home, "suffix-space.jsonl");
+  writeFileSync(spacePath, `${rowA}\n${rowB}\n${rowC}\n `, "utf8");
+  const spaceLoaded = loadMemoryChecked(spacePath, NOW);
+  assert.deepEqual(spaceLoaded.records.map((record) => record.id), ["B", "C"]);
+  assert.equal(spaceLoaded.coverage.window, "tail");
+  assert.equal(spaceLoaded.coverage.reason, "record-cap");
+  assert.equal(spaceLoaded.coverage.skipped, 0);
+  assert.equal(tailReadable(spaceLoaded.coverage), true);
+
+  const tabChunkPath = join(home, "suffix-tab-chunk.jsonl");
+  writeFileSync(tabChunkPath, `${rowA}\n${rowB}\n${rowC}\n\t${" ".repeat(65_600)}`, "utf8");
+  const tabChunkLoaded = loadMemoryChecked(tabChunkPath, NOW);
+  assert.deepEqual(tabChunkLoaded.records.map((record) => record.id), ["B", "C"]);
+  assert.equal(tabChunkLoaded.coverage.window, "tail");
+  assert.equal(tabChunkLoaded.coverage.reason, "record-cap");
+  assert.equal(tabChunkLoaded.coverage.skipped, 0);
+  assert.equal(tailReadable(tabChunkLoaded.coverage), true);
+});
+
+test("tail ignores a trailing blank LF line", (t) => {
+  withRecordCap(t, 2);
+  const home = tempHome(t);
+  const rowA = namedFailureLine("A", NOW - 3_000);
+  const rowB = namedFailureLine("B", NOW - 2_000);
+  const rowC = namedFailureLine("C", NOW - 1_000);
+
+  const path = join(home, "trailing-blank-lf.jsonl");
+  writeFileSync(path, `${rowA}\n${rowB}\n${rowC}\n\n`, "utf8");
+  const loaded = loadMemoryChecked(path, NOW);
+  assert.deepEqual(loaded.records.map((record) => record.id), ["B", "C"]);
+  assert.equal(loaded.coverage.window, "tail");
+  assert.equal(loaded.coverage.reason, "record-cap");
+  assert.equal(loaded.coverage.skipped, 0);
+  assert.equal(tailReadable(loaded.coverage), true);
+
+  const interiorPath = join(home, "interior-blank-lf.jsonl");
+  writeFileSync(interiorPath, `${rowA}\n${rowB}\n \t \n${rowC}\n`, "utf8");
+  const interiorLoaded = loadMemoryChecked(interiorPath, NOW);
+  assert.deepEqual(interiorLoaded.records.map((record) => record.id), ["B", "C"]);
+  assert.equal(interiorLoaded.coverage.window, "tail");
+  assert.equal(interiorLoaded.coverage.reason, "record-cap");
+  assert.equal(interiorLoaded.coverage.skipped, 0);
+  assert.equal(tailReadable(interiorLoaded.coverage), true);
+});
+
+test("tail ignores a trailing blank CRLF line", (t) => {
+  withRecordCap(t, 2);
+  const home = tempHome(t);
+  const rowA = namedFailureLine("A", NOW - 3_000);
+  const rowB = namedFailureLine("B", NOW - 2_000);
+  const rowC = namedFailureLine("C", NOW - 1_000);
+
+  const path = join(home, "trailing-blank-crlf.jsonl");
+  writeFileSync(path, `${rowA}\r\n${rowB}\r\n${rowC}\r\n\r\n`, "utf8");
+  const loaded = loadMemoryChecked(path, NOW);
+  assert.deepEqual(loaded.records.map((record) => record.id), ["B", "C"]);
+  assert.equal(loaded.coverage.window, "tail");
+  assert.equal(loaded.coverage.reason, "record-cap");
+  assert.equal(loaded.coverage.skipped, 0);
+  assert.equal(tailReadable(loaded.coverage), true);
+});

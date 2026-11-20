@@ -1593,9 +1593,13 @@ function parseMemoryRange(
   };
 }
 
+function isNonWhitespaceByte(byte: number): boolean {
+  return byte !== 0x20 && byte !== 0x09 && byte !== 0x0d && byte !== 0x0b && byte !== 0x0c;
+}
+
 /**
  * Scan backward from EOF in 64 KiB byte chunks without decoding UTF-8, stopping
- * after `recordCap + 1` newlines or `MAX_MEMORY_FILE_BYTES` bytes.
+ * after `recordCap` non-whitespace lines or `MAX_MEMORY_FILE_BYTES` bytes.
  */
 function findTailStartOffset(
   descriptor: number,
@@ -1605,9 +1609,9 @@ function findTailStartOffset(
   const minReadOffset = Math.max(0, totalBytes - MAX_MEMORY_FILE_BYTES);
   const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
   let cursor = totalBytes;
-  let newlineCount = 0;
+  let nonBlankLines = 0;
+  let hasNonWhitespace = false;
   let earliestNewlineOffset: number | undefined;
-  let targetNewlines: number | undefined;
 
   while (cursor > minReadOffset) {
     const requested = Math.min(buffer.byteLength, cursor - minReadOffset);
@@ -1615,20 +1619,26 @@ function findTailStartOffset(
     const count = readSync(descriptor, buffer, 0, requested, readPos);
     if (count !== requested) return undefined;
     const chunk = buffer.subarray(0, count);
-    if (targetNewlines === undefined) {
-      // A trailing LF terminates the final line; without one, the final line
-      // needs one fewer delimiter to bound `recordCap` lines from EOF.
-      targetNewlines = chunk[count - 1] === 0x0a ? recordCap + 1 : recordCap;
-    }
     let searchLimit = count - 1;
     while (searchLimit >= 0) {
       const idx = chunk.lastIndexOf(0x0a, searchLimit);
-      if (idx < 0) break;
-      newlineCount += 1;
-      earliestNewlineOffset = readPos + idx;
-      if (newlineCount === targetNewlines) {
-        return earliestNewlineOffset + 1;
+      if (!hasNonWhitespace) {
+        for (let i = searchLimit; i > idx; i -= 1) {
+          if (isNonWhitespaceByte(chunk[i]!)) {
+            hasNonWhitespace = true;
+            break;
+          }
+        }
       }
+      if (idx < 0) break;
+      if (hasNonWhitespace) {
+        nonBlankLines += 1;
+        if (nonBlankLines === recordCap) {
+          return readPos + idx + 1;
+        }
+        hasNonWhitespace = false;
+      }
+      earliestNewlineOffset = readPos + idx;
       searchLimit = idx - 1;
     }
     cursor = readPos;
