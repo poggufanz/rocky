@@ -664,6 +664,8 @@ const MAX_RECORD_ARRAY_BYTES = 64 * 1024;
  * fail-closed `[]` behavior; mutation transactions use this bit to avoid
  * deleting pending state from an incomplete snapshot.
  */
+export const CLOCK_SKEW_MS = 600_000;
+
 export interface MemoryCoverage {
   version: typeof MEMORY_FORMAT_VERSION;
   scanned: number;
@@ -673,6 +675,9 @@ export interface MemoryCoverage {
   bytesTotal: number;
   complete: boolean;
   reason?: "file-size-cap" | "record-cap" | "read-race";
+  window?: "tail";
+  startOffset?: number;
+  oldestTs?: number;
 }
 
 export interface MemoryLoadResult {
@@ -689,6 +694,28 @@ export interface MemoryLoadResult {
  */
 export function isCompleteMemoryCoverage(coverage: MemoryCoverage): boolean {
   return coverage.complete && coverage.skipped === 0 && coverage.truncated === 0 && coverage.reason === undefined;
+}
+
+/**
+ * True when the snapshot covers either all of memory or a clean tail window
+ * truncated only by the record or byte cap.
+ */
+export function tailReadable(coverage: MemoryCoverage): boolean {
+  if (isCompleteMemoryCoverage(coverage)) return true;
+  return coverage.window === "tail"
+    && coverage.skipped === 0
+    && (coverage.reason === "record-cap" || coverage.reason === "file-size-cap");
+}
+
+/**
+ * True when the snapshot covers the full file or a clean tail window whose
+ * oldest Rocky-timestamped record precedes `now - windowMs - CLOCK_SKEW_MS`.
+ */
+export function windowCovered(coverage: MemoryCoverage, now: number, windowMs: number): boolean {
+  if (isCompleteMemoryCoverage(coverage)) return true;
+  return tailReadable(coverage)
+    && coverage.oldestTs !== undefined
+    && coverage.oldestTs < now - windowMs - CLOCK_SKEW_MS;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
@@ -1406,6 +1433,216 @@ function resolveMemoryRecords(records: MemoryRecord[], now: number): void {
   }
 }
 
+interface ParsedMemoryRange {
+  records: MemoryRecord[];
+  scanned: number;
+  skipped: number;
+  bytesScanned: number;
+  stoppedAtRecordCap: boolean;
+  fpByRaw: Map<string, number[]>;
+  fpOffsetsByRaw: Map<string, number[]>;
+  fpRepresentative: Map<string, number>;
+  recordOffsets: number[];
+  fpHasLegacy: boolean;
+}
+
+function parseMemoryRange(
+  descriptor: number,
+  startOffset: number,
+  endOffset: number,
+  options: {
+    recordCap?: number;
+    consumeTrailingPartialLine: boolean;
+    contentHash?: ReturnType<typeof createHash>;
+    buildIndex: boolean;
+  },
+): ParsedMemoryRange | undefined {
+  const lineChunks: Buffer[] = [];
+  let lineBytes = 0;
+  let lineOversized = false;
+  let stoppedAtRecordCap = false;
+  let scanned = 0;
+  let skipped = 0;
+  let offset = startOffset;
+  const records: MemoryRecord[] = [];
+  const seenIds = new Set<string>();
+  // Lazy exact index, built in this same byte pass (never a second scan):
+  // raw fingerprint -> record indices + file offsets, plus the newest
+  // record index per fingerprint as the dedup representative. For modern
+  // v2-only files raw == canonical, so the representative is exact; legacy
+  // families are resolved later via the migration index in the query layer.
+  const fpByRaw = new Map<string, number[]>();
+  const fpOffsetsByRaw = new Map<string, number[]>();
+  const fpRepresentative = new Map<string, number>();
+  const recordOffsets: number[] = [];
+  let fpHasLegacy = false;
+  let lineStartFileOffset = startOffset;
+
+  const resetLine = (): void => {
+    lineChunks.length = 0;
+    lineBytes = 0;
+    lineOversized = false;
+  };
+  const trackFailureIndex = (record: MemoryRecord, fileOffset: number): void => {
+    if (!options.buildIndex) return;
+    const index = records.length - 1;
+    recordOffsets.push(fileOffset);
+    if (record.kind !== "failure") return;
+    const fp = record.fingerprint;
+    const bucket = fpByRaw.get(fp);
+    if (bucket === undefined) fpByRaw.set(fp, [index]);
+    else bucket.push(index);
+    const offsets = fpOffsetsByRaw.get(fp);
+    if (offsets === undefined) fpOffsetsByRaw.set(fp, [fileOffset]);
+    else offsets.push(fileOffset);
+    fpRepresentative.set(fp, index);
+    if (record.fingerprintV !== 2 || !/^[0-9a-f]{16}$/u.test(fp)) fpHasLegacy = true;
+  };
+  const consumeLine = (nextStart: number): void => {
+    if (lineBytes === 0 && !lineOversized) {
+      resetLine();
+      lineStartFileOffset = nextStart;
+      return;
+    }
+    if (options.recordCap !== undefined && records.length >= options.recordCap) {
+      stoppedAtRecordCap = true;
+      resetLine();
+      lineStartFileOffset = nextStart;
+      return;
+    }
+    scanned += 1;
+    if (lineOversized || lineBytes > MAX_MEMORY_LINE_BYTES) {
+      skipped += 1;
+      resetLine();
+      lineStartFileOffset = nextStart;
+      return;
+    }
+    const line = Buffer.concat(lineChunks, lineBytes).toString("utf8").trim();
+    resetLine();
+    if (!line) {
+      lineStartFileOffset = nextStart;
+      return;
+    }
+    try {
+      const record = parseMemoryRecord(JSON.parse(line));
+      // Append-only history can contain a repeated id after a crash or a
+      // manual merge. First valid provenance wins; later duplicates are
+      // retained only as inert bytes in the file, never in operational state.
+      if (record && !seenIds.has(record.id)) {
+        seenIds.add(record.id);
+        records.push(record);
+        trackFailureIndex(record, lineStartFileOffset);
+      } else {
+        skipped += 1;
+      }
+    } catch {
+      // A corrupt line never kills the memory; the skipped count discloses it.
+      skipped += 1;
+    }
+    lineStartFileOffset = nextStart;
+  };
+  const consumeBytes = (chunk: Buffer, chunkStart: number): void => {
+    let remaining = chunk;
+    let remainingStart = chunkStart;
+    while (remaining.length > 0 && !stoppedAtRecordCap) {
+      const newline = remaining.indexOf(0x0a);
+      const part = newline < 0 ? remaining : remaining.subarray(0, newline);
+      if (!lineOversized) {
+        lineBytes += part.byteLength;
+        if (lineBytes > MAX_MEMORY_LINE_BYTES) {
+          lineOversized = true;
+          lineChunks.length = 0;
+        } else if (part.byteLength > 0) {
+          // The read buffer is reused on the next syscall; retain carried
+          // bytes as an immutable copy before that overwrite.
+          lineChunks.push(Buffer.from(part));
+        }
+      }
+      if (newline < 0) break;
+      const lineEnd = remainingStart + newline;
+      consumeLine(lineEnd + 1);
+      remaining = remaining.subarray(newline + 1);
+      remainingStart = lineEnd + 1;
+    }
+  };
+
+  const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
+  while (offset < endOffset && !stoppedAtRecordCap) {
+    const requested = Math.min(buffer.byteLength, endOffset - offset);
+    const count = readSync(descriptor, buffer, 0, requested, offset);
+    if (count <= 0) return undefined;
+    const chunkStart = offset;
+    offset += count;
+    const bytes = buffer.subarray(0, count);
+    options.contentHash?.update(bytes);
+    consumeBytes(bytes, chunkStart);
+  }
+  if (!stoppedAtRecordCap && options.consumeTrailingPartialLine) {
+    consumeLine(offset);
+  }
+  return {
+    records,
+    scanned,
+    skipped,
+    bytesScanned: offset - startOffset,
+    stoppedAtRecordCap,
+    fpByRaw,
+    fpOffsetsByRaw,
+    fpRepresentative,
+    recordOffsets,
+    fpHasLegacy,
+  };
+}
+
+/**
+ * Scan backward from EOF in 64 KiB byte chunks without decoding UTF-8, stopping
+ * after `recordCap + 1` newlines or `MAX_MEMORY_FILE_BYTES` bytes.
+ */
+function findTailStartOffset(
+  descriptor: number,
+  totalBytes: number,
+  recordCap: number,
+): number | undefined {
+  const minReadOffset = Math.max(0, totalBytes - MAX_MEMORY_FILE_BYTES);
+  const targetNewlines = recordCap + 1;
+  const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
+  let cursor = totalBytes;
+  let newlineCount = 0;
+  let earliestNewlineOffset: number | undefined;
+
+  while (cursor > minReadOffset) {
+    const requested = Math.min(buffer.byteLength, cursor - minReadOffset);
+    const readPos = cursor - requested;
+    const count = readSync(descriptor, buffer, 0, requested, readPos);
+    if (count !== requested) return undefined;
+    const chunk = buffer.subarray(0, count);
+    let searchLimit = count - 1;
+    while (searchLimit >= 0) {
+      const idx = chunk.lastIndexOf(0x0a, searchLimit);
+      if (idx < 0) break;
+      newlineCount += 1;
+      earliestNewlineOffset = readPos + idx;
+      if (newlineCount === targetNewlines) {
+        return earliestNewlineOffset + 1;
+      }
+      searchLimit = idx - 1;
+    }
+    cursor = readPos;
+  }
+
+  if (minReadOffset === 0) return 0;
+  return earliestNewlineOffset !== undefined ? earliestNewlineOffset + 1 : minReadOffset;
+}
+
+function computeOldestWindowTs(records: readonly MemoryRecord[]): number | undefined {
+  let oldest: number | undefined;
+  for (const record of records) {
+    if (record.kind !== "failure" && record.kind !== "fix" && record.kind !== "association") continue;
+    if (oldest === undefined || record.ts < oldest) oldest = record.ts;
+  }
+  return oldest;
+}
+
 export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.now()): MemoryLoadResult {
   let descriptor: number | undefined;
   let listed: BigIntStats | undefined;
@@ -1446,139 +1683,50 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     }
 
     const totalBytes = statBytes(opened.size);
-    const readLimit = Math.min(totalBytes, MAX_MEMORY_FILE_BYTES);
     const recordCap = maxSupportedMemoryRecords();
-    const lineChunks: Buffer[] = [];
-    let lineBytes = 0;
-    let lineOversized = false;
-    let stoppedAtRecordCap = false;
-    let scanned = 0;
-    let skipped = 0;
-    let bytesScanned = 0;
-    let truncated = opened.size > BigInt(MAX_MEMORY_FILE_BYTES) ? 1 : 0;
-    const contentHash = opened.size <= BigInt(MAX_MEMORY_FILE_BYTES) ? createHash("sha256") : undefined;
-    const records: MemoryRecord[] = [];
-    const seenIds = new Set<string>();
-    // Lazy exact index, built in this same byte pass (never a second scan):
-    // raw fingerprint -> record indices + file offsets, plus the newest
-    // record index per fingerprint as the dedup representative. For modern
-    // v2-only files raw == canonical, so the representative is exact; legacy
-    // families are resolved later via the migration index in the query layer.
-    const fpByRaw = new Map<string, number[]>();
-    const fpOffsetsByRaw = new Map<string, number[]>();
-    const fpRepresentative = new Map<string, number>();
-    const recordOffsets: number[] = [];
-    let fpHasLegacy = false;
-    let lineStartFileOffset = 0;
+    const overByteCap = opened.size > BigInt(MAX_MEMORY_FILE_BYTES);
 
-    const resetLine = (): void => {
-      lineChunks.length = 0;
-      lineBytes = 0;
-      lineOversized = false;
-    };
-    const trackFailureIndex = (record: MemoryRecord, fileOffset: number): void => {
-      const index = records.length - 1;
-      recordOffsets.push(fileOffset);
-      if (record.kind !== "failure") return;
-      const fp = record.fingerprint;
-      const bucket = fpByRaw.get(fp);
-      if (bucket === undefined) fpByRaw.set(fp, [index]);
-      else bucket.push(index);
-      const offsets = fpOffsetsByRaw.get(fp);
-      if (offsets === undefined) fpOffsetsByRaw.set(fp, [fileOffset]);
-      else offsets.push(fileOffset);
-      fpRepresentative.set(fp, index);
-      if (record.fingerprintV !== 2 || !/^[0-9a-f]{16}$/u.test(fp)) fpHasLegacy = true;
-    };
-    const consumeLine = (nextStart: number): void => {
-      if (lineBytes === 0 && !lineOversized) {
-        resetLine();
-        lineStartFileOffset = nextStart;
-        return;
-      }
-      if (records.length >= recordCap) {
-        stoppedAtRecordCap = true;
-        truncated = Math.max(1, truncated);
-        resetLine();
-        lineStartFileOffset = nextStart;
-        return;
-      }
-      scanned += 1;
-      if (lineOversized || lineBytes > MAX_MEMORY_LINE_BYTES) {
-        skipped += 1;
-        resetLine();
-        lineStartFileOffset = nextStart;
-        return;
-      }
-      const line = Buffer.concat(lineChunks, lineBytes).toString("utf8").trim();
-      resetLine();
-      if (!line) {
-        lineStartFileOffset = nextStart;
-        return;
-      }
-      try {
-        const record = parseMemoryRecord(JSON.parse(line));
-        // Append-only history can contain a repeated id after a crash or a
-        // manual merge. First valid provenance wins; later duplicates are
-        // retained only as inert bytes in the file, never in operational state.
-        if (record && !seenIds.has(record.id)) {
-          seenIds.add(record.id);
-          records.push(record);
-          trackFailureIndex(record, lineStartFileOffset);
-        } else {
-          skipped += 1;
-        }
-      } catch {
-        // A corrupt line never kills the memory; the skipped count discloses it.
-        skipped += 1;
-      }
-      lineStartFileOffset = nextStart;
-    };
-    const consumeBytes = (chunk: Buffer, chunkStart: number): void => {
-      let remaining = chunk;
-      let remainingStart = chunkStart;
-      while (remaining.length > 0 && !stoppedAtRecordCap) {
-        const newline = remaining.indexOf(0x0a);
-        const part = newline < 0 ? remaining : remaining.subarray(0, newline);
-        if (!lineOversized) {
-          lineBytes += part.byteLength;
-          if (lineBytes > MAX_MEMORY_LINE_BYTES) {
-            lineOversized = true;
-            lineChunks.length = 0;
-          } else if (part.byteLength > 0) {
-            // The read buffer is reused on the next syscall; retain carried
-            // bytes as an immutable copy before that overwrite.
-            lineChunks.push(Buffer.from(part));
-          }
-        }
-        if (newline < 0) break;
-        const lineEnd = remainingStart + newline;
-        consumeLine(lineEnd + 1);
-        remaining = remaining.subarray(newline + 1);
-        remainingStart = lineEnd + 1;
-      }
-    };
+    let isTailMode = overByteCap;
+    let startOffset = 0;
+    let parsed: ParsedMemoryRange | undefined;
+    let witnessHash: ReturnType<typeof createHash> | undefined;
 
-    const buffer = Buffer.alloc(MEMORY_READ_CHUNK_BYTES);
-    while (bytesScanned < readLimit) {
-      const requested = Math.min(buffer.byteLength, readLimit - bytesScanned);
-      const count = readSync(descriptor, buffer, 0, requested, bytesScanned);
-      if (count <= 0) {
+    if (!overByteCap) {
+      witnessHash = createHash("sha256");
+      parsed = parseMemoryRange(descriptor, 0, totalBytes, {
+        recordCap,
+        consumeTrailingPartialLine: true,
+        contentHash: witnessHash,
+        buildIndex: true,
+      });
+      if (!parsed) {
         // A regular file advertised bytes still remaining but returned no
         // bytes. Do not parse/cache this partial snapshot as complete.
         memoryCache = undefined;
         return emptyLoad(false, totalBytes, "read-race");
       }
-      const chunkStart = bytesScanned;
-      bytesScanned += count;
-      const bytes = buffer.subarray(0, count);
-      contentHash?.update(bytes);
-      if (!stoppedAtRecordCap) consumeBytes(bytes, chunkStart);
+      if (parsed.stoppedAtRecordCap) {
+        isTailMode = true;
+      }
     }
-    // A partial final line is valid input when the file ends normally. A
-    // file-size-capped partial line is deliberately left undisclosed as a
-    // record; `truncated: 1` says that evidence exists beyond the boundary.
-    if (!stoppedAtRecordCap && opened.size <= BigInt(MAX_MEMORY_FILE_BYTES)) consumeLine(bytesScanned);
+
+    if (isTailMode) {
+      witnessHash = undefined;
+      const tailStart = findTailStartOffset(descriptor, totalBytes, recordCap);
+      if (tailStart === undefined) {
+        memoryCache = undefined;
+        return emptyLoad(false, totalBytes, "read-race");
+      }
+      startOffset = tailStart;
+      parsed = parseMemoryRange(descriptor, startOffset, totalBytes, {
+        consumeTrailingPartialLine: true,
+        buildIndex: false,
+      });
+      if (!parsed) {
+        memoryCache = undefined;
+        return emptyLoad(false, totalBytes, "read-race");
+      }
+    }
 
     const after = fstatSync(descriptor, { bigint: true });
     const afterKey = memorySnapshotKey(path, after);
@@ -1589,10 +1737,19 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
       memoryCache = undefined;
       return emptyLoad(false, totalBytes, "read-race");
     }
-    const complete = truncated === 0 && !stoppedAtRecordCap && skipped === 0;
-    const truncationReason: MemoryCoverage["reason"] = stoppedAtRecordCap
-      ? "record-cap"
-      : opened.size > BigInt(MAX_MEMORY_FILE_BYTES) ? "file-size-cap" : "record-cap";
+
+    const records = isTailMode && parsed!.records.length > recordCap
+      ? parsed!.records.slice(-recordCap)
+      : parsed!.records;
+    const scanned = parsed!.scanned;
+    const skipped = parsed!.skipped;
+    const bytesScanned = isTailMode ? totalBytes - startOffset : parsed!.bytesScanned;
+    const truncated = isTailMode ? 1 : 0;
+    const complete = !isTailMode && skipped === 0;
+    const reason: MemoryCoverage["reason"] = isTailMode
+      ? (overByteCap ? "file-size-cap" : "record-cap")
+      : undefined;
+    const oldestTs = isTailMode ? computeOldestWindowTs(records) : undefined;
     const coverage: MemoryCoverage = Object.freeze({
       version: MEMORY_FORMAT_VERSION,
       scanned,
@@ -1601,19 +1758,16 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
       bytesScanned,
       bytesTotal: totalBytes,
       complete,
-      ...(truncated > 0
-        ? { reason: truncationReason }
-        : {}),
+      ...(reason === undefined ? {} : { reason }),
+      ...(isTailMode ? { window: "tail" as const, startOffset } : {}),
+      ...(oldestTs === undefined ? {} : { oldestTs }),
     });
     const frozenRecords = Object.freeze(records.map(freezeMemoryRecord));
     memoryParseCount += 1;
     // A complete or skipped snapshot within the byte envelope is stable
-    // bounded evidence and may be reused with explicit metadata. Over-cap
-    // snapshots are intentionally not cached: their bounded parse remains
-    // safe, while avoiding a checksum pass that cannot authorize a full-file
-    // answer. The in-envelope witness covers every affecting byte and is not
-    // a probabilistic sample.
-    const witness = contentHash?.digest("hex");
+    // bounded evidence and may be reused with explicit metadata. Tail
+    // snapshots are intentionally not cached and publish no sidecar index.
+    const witness = !isTailMode ? witnessHash?.digest("hex") : undefined;
     if (witness !== undefined) {
       memoryCache = {
         path,
@@ -1622,14 +1776,14 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
         records: frozenRecords,
         complete,
         coverage,
-        fpByRaw,
-        fpOffsets: [...recordOffsets],
-        fpOffsetsByRaw,
-        fpRepresentative,
-        fpHasLegacy,
+        fpByRaw: parsed!.fpByRaw,
+        fpOffsets: [...parsed!.recordOffsets],
+        fpOffsetsByRaw: parsed!.fpOffsetsByRaw,
+        fpRepresentative: parsed!.fpRepresentative,
+        fpHasLegacy: parsed!.fpHasLegacy,
       };
-      publishFingerprintIndex(frozenRecords as MemoryRecord[], fpByRaw, fpHasLegacy);
-      publishRecordOffsets(frozenRecords as MemoryRecord[], [...recordOffsets]);
+      publishFingerprintIndex(frozenRecords as MemoryRecord[], parsed!.fpByRaw, parsed!.fpHasLegacy);
+      publishRecordOffsets(frozenRecords as MemoryRecord[], [...parsed!.recordOffsets]);
     } else {
       memoryCache = undefined;
     }
@@ -1639,8 +1793,10 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
     const materialized = materializeMemoryRecords(frozenRecords);
     resolveMemoryRecords(materialized, now);
     const frozenMaterialized = freezeMaterializedRecords(materialized);
-    publishFingerprintIndex(frozenMaterialized, fpByRaw, fpHasLegacy);
-    publishRecordOffsets(frozenMaterialized, [...recordOffsets]);
+    if (witness !== undefined) {
+      publishFingerprintIndex(frozenMaterialized, parsed!.fpByRaw, parsed!.fpHasLegacy);
+      publishRecordOffsets(frozenMaterialized, [...parsed!.recordOffsets]);
+    }
     return { records: frozenMaterialized, complete, coverage };
   } catch {
     // Missing memory is a complete empty state; every other read failure is

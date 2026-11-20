@@ -108,8 +108,9 @@ test("record-cap diagnostics are explicit", (t) => {
   assert.equal(result.complete, false);
   assert.ok(measured.truncated > 0);
   assert.equal(result.records.length, MAX_SUPPORTED_MEMORY_RECORDS);
-  // The first records are kept; the lines written last are the ones left unheard.
-  assert.equal(result.records.at(-1)?.id, `r${MAX_SUPPORTED_MEMORY_RECORDS - 1}`);
+  // The newest records are kept; the oldest line is the one left unheard.
+  assert.equal(result.records[0]?.id, "r1");
+  assert.equal(result.records.at(-1)?.id, `r${MAX_SUPPORTED_MEMORY_RECORDS}`);
 });
 
 test("once-only triple refuses an exactly full complete record snapshot", (t) => {
