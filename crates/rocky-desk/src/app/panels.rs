@@ -215,20 +215,13 @@ impl DeskView {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let setup = |m: SetupMsg| tr(lang, &Msg::Setup(m));
         let status = self.ctl.model.translate_status();
         let sl = status_line(enabled, status, lang);
-        let status_msg = match sl {
-            StatusLine::Off => SetupMsg::TranslateOff,
-            StatusLine::NeedsDownload => SetupMsg::TranslateNeedsDownload,
-            StatusLine::Downloading(percent) => SetupMsg::TranslateDownloading { percent },
-            StatusLine::Ready => SetupMsg::TranslateReady,
-            StatusLine::Failed(failure) => SetupMsg::TranslateFailed { failure },
-        };
+        let can_remove = !status.ready.is_empty() || status.failed.is_some();
         let toggle = kit::toggle_row(
             SharedString::from("setting:translate_quotes"),
-            setup(SetupMsg::TranslateQuotesToggle),
-            Some(setup(status_msg)),
+            setup_text(lang, SetupMsg::TranslateQuotesToggle),
+            Some(setup_text(lang, status_msg(sl))),
             enabled,
             editable,
             cx.listener(|this, _, _, cx| {
@@ -240,134 +233,169 @@ impl DeskView {
         let pair = TranslatePair::to(quote_lang(lang));
         let install_busy = self.requests.pending(&RequestKind::TranslateInstall(pair));
         let remove_busy = self.requests.pending(&RequestKind::TranslateRemove);
-        let asked_pair = self.translate.asking();
-        let asking = asked_pair.is_some();
-        let can_remove = !status.ready.is_empty() || status.failed.is_some();
+        let asked = self.translate.asking();
 
-        let mut buttons = div().flex().flex_wrap().items_center().gap(px(6.0));
-        let mut has_buttons = false;
-        if !asking {
-            if sl == StatusLine::NeedsDownload {
-                has_buttons = true;
-                let label = if install_busy {
-                    SetupMsg::SwitchWorking
-                } else {
-                    SetupMsg::TranslateDownload
-                };
-                buttons = buttons.child(kit::button(
-                    SharedString::from("translate:download"),
-                    setup(label),
-                    kit::Weight::Normal,
-                    editable && !install_busy,
-                    cx.listener(|this, _, _, cx| {
-                        this.translate_act(TranslateAction::Download);
-                        cx.notify();
-                    }),
-                ));
-            } else if matches!(sl, StatusLine::Failed(_)) {
-                has_buttons = true;
-                let label = if install_busy {
-                    SetupMsg::SwitchWorking
-                } else {
-                    SetupMsg::TranslateRetry
-                };
-                buttons = buttons.child(kit::button(
-                    SharedString::from("translate:retry"),
-                    setup(label),
-                    kit::Weight::Normal,
-                    editable && !install_busy,
-                    cx.listener(|this, _, _, cx| {
-                        this.translate_act(TranslateAction::Retry);
-                        cx.notify();
-                    }),
-                ));
-            }
+        let mut buttons: Vec<AnyElement> = Vec::new();
+        let install = match sl {
+            _ if asked.is_some() => None,
+            StatusLine::NeedsDownload => Some((
+                "translate:download",
+                SetupMsg::TranslateDownload,
+                TranslateAction::Download,
+            )),
+            StatusLine::Failed(_) => Some((
+                "translate:retry",
+                SetupMsg::TranslateRetry,
+                TranslateAction::Retry,
+            )),
+            _ => None,
+        };
+        if let Some((id, label, action)) = install {
+            buttons.push(translate_button(
+                lang,
+                id,
+                busy_label(install_busy, label),
+                kit::Weight::Normal,
+                editable && !install_busy,
+                action,
+                cx,
+            ));
         }
         if can_remove {
-            has_buttons = true;
-            let label = if remove_busy {
-                SetupMsg::SwitchWorking
-            } else {
-                SetupMsg::TranslateRemove
-            };
-            buttons = buttons.child(kit::button(
-                SharedString::from("translate:remove"),
-                setup(label),
+            buttons.push(translate_button(
+                lang,
+                "translate:remove",
+                busy_label(remove_busy, SetupMsg::TranslateRemove),
                 kit::Weight::QuietDanger,
                 editable && !remove_busy,
-                cx.listener(|this, _, _, cx| {
-                    this.translate_act(TranslateAction::Remove);
-                    cx.notify();
-                }),
+                TranslateAction::Remove,
+                cx,
             ));
         }
 
-        let mut extras = div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .px(px(14.0))
-            .pb(px(10.0));
-        let mut has_extras = false;
-        if has_buttons {
-            has_extras = true;
-            extras = extras.child(buttons);
+        let mut extras: Vec<AnyElement> = Vec::new();
+        if !buttons.is_empty() {
+            extras.push(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(buttons)
+                    .into_any_element(),
+            );
         }
-        if let Some(asked) = asked_pair {
-            has_extras = true;
+        if let Some(asked) = asked {
             let confirm_busy = self.requests.pending(&RequestKind::TranslateInstall(asked));
-            let confirm_label = if confirm_busy {
-                SetupMsg::SwitchWorking
-            } else {
-                SetupMsg::TranslateDownload
-            };
-            let ask = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(8.0))
-                .child(kit::note_line(setup(SetupMsg::TranslateConsentAsk)))
-                .child(kit::button(
-                    SharedString::from("translate:confirm"),
-                    setup(confirm_label),
-                    kit::Weight::Normal,
-                    editable && !confirm_busy,
-                    cx.listener(|this, _, _, cx| {
-                        this.translate_act(TranslateAction::Confirm);
-                        cx.notify();
-                    }),
-                ))
-                .child(kit::button(
-                    SharedString::from("translate:cancel"),
-                    setup(SetupMsg::TranslateCancel),
-                    kit::Weight::Quiet,
-                    editable,
-                    cx.listener(|this, _, _, cx| {
-                        this.translate_act(TranslateAction::Cancel);
-                        cx.notify();
-                    }),
-                ));
-            extras = extras.child(ask);
+            extras.push(translate_ask(lang, editable, confirm_busy, cx));
         }
         if let Some(err) = self.translate.error() {
-            has_extras = true;
-            let err_msg = match err {
-                TranslateError::Busy => SetupMsg::TranslateBusy,
-                TranslateError::Disabled => SetupMsg::TranslateDisabledError,
-                TranslateError::Engine => SetupMsg::TranslateEngineError,
-                TranslateError::RemoveFailed => SetupMsg::TranslateRemoveError,
-                TranslateError::Unknown => SetupMsg::TranslateUnknownError,
-                TranslateError::Other(reason) => SetupMsg::TranslateRequestFailed {
-                    reason: reason.clone(),
-                },
-            };
-            extras = extras.child(kit::error_text(setup(err_msg)));
+            extras.push(kit::error_text(setup_text(lang, error_msg(err))).into_any_element());
         }
 
         let mut block = div().flex().flex_col().child(toggle);
-        if has_extras {
-            block = block.child(extras);
+        if !extras.is_empty() {
+            block = block.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .px(px(14.0))
+                    .pb(px(10.0))
+                    .children(extras),
+            );
         }
         block.into_any_element()
     }
+}
+
+fn setup_text(lang: UiLang, msg: SetupMsg) -> String {
+    tr(lang, &Msg::Setup(msg))
+}
+
+/// `Working…` while the request is in flight, `idle` otherwise.
+fn busy_label(busy: bool, idle: SetupMsg) -> SetupMsg {
+    if busy { SetupMsg::SwitchWorking } else { idle }
+}
+
+fn status_msg(sl: StatusLine) -> SetupMsg {
+    match sl {
+        StatusLine::Off => SetupMsg::TranslateOff,
+        StatusLine::NeedsDownload => SetupMsg::TranslateNeedsDownload,
+        StatusLine::Downloading(percent) => SetupMsg::TranslateDownloading { percent },
+        StatusLine::Ready => SetupMsg::TranslateReady,
+        StatusLine::Failed(failure) => SetupMsg::TranslateFailed { failure },
+    }
+}
+
+fn error_msg(err: &TranslateError) -> SetupMsg {
+    match err {
+        TranslateError::Busy => SetupMsg::TranslateBusy,
+        TranslateError::Disabled => SetupMsg::TranslateDisabledError,
+        TranslateError::Engine => SetupMsg::TranslateEngineError,
+        TranslateError::RemoveFailed => SetupMsg::TranslateRemoveError,
+        TranslateError::Unknown => SetupMsg::TranslateUnknownError,
+        TranslateError::Other(reason) => SetupMsg::TranslateRequestFailed {
+            reason: reason.clone(),
+        },
+    }
+}
+
+fn translate_button(
+    lang: UiLang,
+    id: &'static str,
+    label: SetupMsg,
+    weight: kit::Weight,
+    enabled: bool,
+    action: TranslateAction,
+    cx: &mut Context<DeskView>,
+) -> AnyElement {
+    kit::button(
+        SharedString::from(id),
+        setup_text(lang, label),
+        weight,
+        enabled,
+        cx.listener(move |this, _, _, cx| {
+            this.translate_act(action);
+            cx.notify();
+        }),
+    )
+    .into_any_element()
+}
+
+/// The inline download question with Download and Cancel.
+fn translate_ask(
+    lang: UiLang,
+    editable: bool,
+    confirm_busy: bool,
+    cx: &mut Context<DeskView>,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(8.0))
+        .child(kit::note_line(setup_text(
+            lang,
+            SetupMsg::TranslateConsentAsk,
+        )))
+        .child(translate_button(
+            lang,
+            "translate:confirm",
+            busy_label(confirm_busy, SetupMsg::TranslateDownload),
+            kit::Weight::Normal,
+            editable && !confirm_busy,
+            TranslateAction::Confirm,
+            cx,
+        ))
+        .child(translate_button(
+            lang,
+            "translate:cancel",
+            SetupMsg::TranslateCancel,
+            kit::Weight::Quiet,
+            editable,
+            TranslateAction::Cancel,
+            cx,
+        ))
+        .into_any_element()
 }
