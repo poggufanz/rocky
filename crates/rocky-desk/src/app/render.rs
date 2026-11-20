@@ -227,12 +227,25 @@ impl DeskView {
 const MAX_CONTENT_W: f32 = 880.0;
 
 /// A scrolling page whose content column stays centered and capped.
+///
+/// The page is a flex column, not a block. In a block page with a capped
+/// child, gpui's layout handed the uncapped page width down to block
+/// containers inside the column, so a maximized window laid Settings rows out
+/// wider than their card and the card clipped the switches.
 fn scroll_page(id: &'static str, content: gpui::Div) -> AnyElement {
     div()
         .id(SharedString::from(id))
         .size_full()
         .overflow_y_scroll()
         .p_3()
-        .child(content.max_w(gpui::px(MAX_CONTENT_W)).mx_auto())
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(
+            content
+                .flex_none()
+                .w_full()
+                .max_w(gpui::px(MAX_CONTENT_W)),
+        )
         .into_any_element()
 }

@@ -8,6 +8,8 @@ Desk Settings adds a **Translate agent words to the display language** switch th
 
 Quote translation sends paths and commands to the engine as word-like tokens (`V1`, `V2`, …) instead of empty tags, which the engine dropped before translating. That left sentences such as `Di <path>:` broken, so output repeated words (`In In <path>:`) and capitalized the word after a path. A line whose tokens do not come back intact is translated once more with the old tags. Translations cached before this change stay until **Remove downloaded files** clears the cache.
 
+On Windows, a maximized desk window shows the switches and the language choice in Settings again. Rows were laid out at the full window width while their card stayed at the 880 px column, so the card clipped everything on the right.
+
 On Windows, the desk's Done list shows a project's change cards again. It had compared the card's stored path (lowercase) with git's spelling of the project path, so no card matched.
 
 In the desk's change card detail, diff lines show their code again instead of "…", and the agent's words under "Agent said" read as plain text: no markdown bold, backticks, headings, list markers, code fences, or link syntax. Paths, slashes, and an `*` used as an operator stay as written.
