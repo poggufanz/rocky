@@ -1348,11 +1348,19 @@ function memoryCoverage(
     const bytesTotal = value.bytesTotal;
     const complete = value.complete;
     const reason = value.reason;
+    const window = value.window;
+    const startOffset = value.startOffset;
+    const oldestTs = value.oldestTs;
     if (version !== 1 || !isSafeNonNegativeInteger(scanned) ||
         !isSafeNonNegativeInteger(skipped) || !isSafeNonNegativeInteger(truncated) ||
         !isSafeNonNegativeInteger(bytesScanned) || !isSafeNonNegativeInteger(bytesTotal) ||
         typeof complete !== "boolean" ||
-        (reason !== undefined && reason !== "file-size-cap" && reason !== "record-cap" && reason !== "read-race")) return unknownMemoryCoverage();
+        (reason !== undefined && reason !== "file-size-cap" && reason !== "record-cap" && reason !== "read-race") ||
+        (window !== undefined && window !== "tail")) return unknownMemoryCoverage();
+    if (window === "tail" && complete === true) return unknownMemoryCoverage();
+    if (window !== "tail" && (startOffset !== undefined || oldestTs !== undefined)) return unknownMemoryCoverage();
+    if (startOffset !== undefined && (!isSafeNonNegativeInteger(startOffset) || startOffset > bytesTotal)) return unknownMemoryCoverage();
+    if (oldestTs !== undefined && !isSafeNonNegativeInteger(oldestTs)) return unknownMemoryCoverage();
     // `scanned` and `skipped` are independent evidence counters: a provider
     // may count only valid records as scanned while reporting corrupt lines
     // separately. Do not reject a legitimate 0-valid/10-skipped snapshot.
@@ -1365,6 +1373,9 @@ function memoryCoverage(
       version: 1 as const,
       scanned, skipped, truncated, bytesScanned, bytesTotal, complete,
       ...(reason === undefined ? {} : { reason }),
+      ...(window === undefined ? {} : { window }),
+      ...(startOffset === undefined ? {} : { startOffset }),
+      ...(oldestTs === undefined ? {} : { oldestTs }),
     });
   } catch {
     return unknownMemoryCoverage();

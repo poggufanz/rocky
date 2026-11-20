@@ -7,6 +7,7 @@ import test, { type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { checkAmbiguity } from "../agent/ambiguity.js";
 import type { OllamaClient } from "../ai/ollama.js";
+import { disabledRecallWithAi } from "../ai/port.js";
 import { hookFail } from "../commands/hook.js";
 import { linkFixOnSuccess, run } from "../commands/run.js";
 import { stats } from "../commands/stats.js";
@@ -14,6 +15,7 @@ import { watch } from "../commands/watch.js";
 import type { ConfigLoadResult } from "../core/config-read.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import type { ExecResult } from "../core/exec.js";
+import { createToolRegistry } from "../mcp/tools.js";
 import {
   commandIdentity,
   FINGERPRINT_ALGORITHM_VERSION,
@@ -1545,4 +1547,151 @@ test("checkAmbiguity reads from a tailReadable window above the cap", async (t) 
   });
   assert.equal(question, 'You said "button". It matches 2 places in memory. Which one?');
   assert.deepEqual(queued, [question]);
+});
+
+test("MCP coverage keeps tail fields under the seam cap", async (t) => {
+  withRecordCap(t, 50);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  writeFileSync(join(home, "memory.jsonl"), failureLines(60), "utf8");
+
+  const registry = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(),
+    recallWithAi: disabledRecallWithAi,
+  });
+  const result = await registry.call("recall", { query: "false" }, new AbortController().signal);
+  const coverage = result.structuredContent.coverage as MemoryCoverage;
+  assert.equal(coverage.complete, false);
+  assert.equal(coverage.reason, "record-cap");
+  assert.equal(coverage.window, "tail");
+  assert.equal(coverage.scanned, 50);
+  assert.equal(coverage.truncated, 1);
+  assert.ok(typeof coverage.startOffset === "number" && coverage.startOffset > 0);
+  assert.ok(coverage.startOffset <= coverage.bytesTotal);
+  assert.equal(coverage.oldestTs, 1);
+  assert.deepEqual(result.structuredContent.memoryCoverage, coverage);
+  assert.equal(result.structuredContent.memoryCoverageIncomplete, true);
+});
+
+test("MCP coverage rejects malformed tail fields", async (t) => {
+  withRecordCap(t, 50);
+  const callRecallWithCoverage = async (coverage: unknown): Promise<MemoryCoverage> => {
+    const registry = createToolRegistry({
+      exposure: "sanitized",
+      memory: {
+        ...createMemoryQueries(() => []),
+        coverage: () => coverage as never,
+      },
+      recallWithAi: disabledRecallWithAi,
+    });
+    const result = await registry.call("recall", { query: "false" }, new AbortController().signal);
+    return result.structuredContent.coverage as MemoryCoverage;
+  };
+
+  const unknownCoverage: MemoryCoverage = {
+    version: 1,
+    scanned: 0,
+    skipped: 0,
+    truncated: 1,
+    bytesScanned: 0,
+    bytesTotal: 0,
+    complete: false,
+    reason: "read-race",
+  };
+
+  const validTailBase = {
+    version: 1 as const,
+    scanned: 50,
+    skipped: 0,
+    truncated: 1,
+    bytesScanned: 100,
+    bytesTotal: 200,
+    complete: false,
+    reason: "record-cap" as const,
+    window: "tail" as const,
+    startOffset: 100,
+  };
+
+  const withoutOldestTs = await callRecallWithCoverage(validTailBase);
+  assert.deepEqual(withoutOldestTs, validTailBase);
+  assert.equal(Object.hasOwn(withoutOldestTs, "oldestTs"), false);
+  assert.equal(Object.isFrozen(withoutOldestTs), true);
+
+  const fileSizeTail = {
+    version: 1 as const,
+    scanned: 10,
+    skipped: 0,
+    truncated: 1,
+    bytesScanned: 100,
+    bytesTotal: MAX_MEMORY_FILE_BYTES + 1,
+    complete: false,
+    reason: "file-size-cap" as const,
+    window: "tail" as const,
+    startOffset: MAX_MEMORY_FILE_BYTES - 99,
+    oldestTs: 1_000,
+  };
+  assert.deepEqual(await callRecallWithCoverage(fileSizeTail), fileSizeTail);
+
+  const atBoundary = await callRecallWithCoverage({ ...validTailBase, startOffset: 200, oldestTs: 0 });
+  assert.deepEqual(atBoundary, { ...validTailBase, startOffset: 200, oldestTs: 0 });
+
+  const nonTail = {
+    version: 1 as const,
+    scanned: 1,
+    skipped: 0,
+    truncated: 0,
+    bytesScanned: 10,
+    bytesTotal: 10,
+    complete: true,
+  };
+  const nonTailResult = await callRecallWithCoverage(nonTail);
+  assert.deepEqual(nonTailResult, nonTail);
+  assert.equal(Object.hasOwn(nonTailResult, "window"), false);
+  assert.equal(Object.hasOwn(nonTailResult, "startOffset"), false);
+  assert.equal(Object.hasOwn(nonTailResult, "oldestTs"), false);
+
+  const malformedCases: readonly unknown[] = [
+    { ...validTailBase, window: "head" },
+    { ...validTailBase, startOffset: 201 },
+    { ...validTailBase, startOffset: 12.5 },
+    { ...validTailBase, oldestTs: -1 },
+    { ...validTailBase, oldestTs: 12.5 },
+    {
+      version: 1,
+      scanned: 50,
+      skipped: 0,
+      truncated: 0,
+      bytesScanned: 200,
+      bytesTotal: 200,
+      complete: true,
+      window: "tail",
+      startOffset: 0,
+    },
+    {
+      version: 1,
+      scanned: 50,
+      skipped: 0,
+      truncated: 1,
+      bytesScanned: 100,
+      bytesTotal: 200,
+      complete: false,
+      reason: "record-cap",
+      startOffset: 100,
+    },
+    {
+      version: 1,
+      scanned: 50,
+      skipped: 0,
+      truncated: 1,
+      bytesScanned: 100,
+      bytesTotal: 200,
+      complete: false,
+      reason: "record-cap",
+      oldestTs: 1_000,
+    },
+  ];
+  for (const malformed of malformedCases) {
+    assert.deepEqual(await callRecallWithCoverage(malformed), unknownCoverage);
+  }
 });
