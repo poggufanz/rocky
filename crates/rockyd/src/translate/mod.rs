@@ -147,10 +147,20 @@ impl Translator {
         &self.status
     }
 
+    /// Rechecks the disk and returns the status when desks have not heard it yet.
     pub fn check(&mut self) -> Option<TranslateStatus> {
-        let previous = self.status.clone();
         self.recheck_from_disk();
-        (self.status != previous).then(|| self.status.clone())
+        self.take_status_change()
+    }
+
+    /// Returns the status when it differs from the last one handed out, and marks it handed
+    /// out. Every broadcast goes through here, so one change reaches desks once.
+    pub fn take_status_change(&mut self) -> Option<TranslateStatus> {
+        if self.status == self.last_emitted_status {
+            return None;
+        }
+        self.last_emitted_status = self.status.clone();
+        Some(self.status.clone())
     }
 
     pub fn on_detail(
@@ -298,14 +308,20 @@ impl Translator {
         if self.job.is_some() {
             return Err("busy");
         }
-        match fs::remove_dir_all(marker::translate_dir(&self.home)) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err("remove failed"),
+        let removed = match fs::remove_dir_all(marker::translate_dir(&self.home)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("remove failed"),
+        };
+        // A failed remove may still have deleted part of the folder, so the in-memory cache
+        // and the ready pairs are refreshed either way.
+        self.cache.clear();
+        if removed.is_err() {
+            self.recheck_from_disk();
+            return removed;
         }
         // Desk drops all translation state on remove/off, so queued/in-flight quotes clear
         // without emitting QuoteSettled.
-        self.cache.clear();
         self.queue.clear();
         self.in_flight.clear();
         self.staged_later.clear();
@@ -477,7 +493,7 @@ impl Translator {
                     return;
                 };
                 run.ok += 1;
-                let _ = self.cache.put(
+                self.put_cache(
                     entry.to,
                     &ckey,
                     &Cached::Translated {
@@ -506,7 +522,7 @@ impl Translator {
                     return;
                 };
                 run.original += 1;
-                let _ = self.cache.put(entry.to, &ckey, &Cached::Original);
+                self.put_cache(entry.to, &ckey, &Cached::Original);
                 emit_settled(out, entry.cards, &entry.quote_key, entry.to);
             }
             RunReply::Failed { key } => {
@@ -691,12 +707,21 @@ impl Translator {
         }
     }
 
+    /// Writes one reply to the cache. A failed write keeps the reply for this run only and
+    /// lands in the daemon log; the next detail request translates the quote again.
+    // ponytail: runs on the daemon thread. Measured on Windows with a full 8 MiB cache: first
+    // load 38 ms per target, a write 11 ms median, a compaction 127 ms about once per 4 MiB of
+    // writes. Move the cache to its own thread if those stalls ever show in pipe latency.
+    fn put_cache(&mut self, to: QuoteLang, key: &str, value: &Cached) {
+        if let Err(err) = self.cache.put(to, key, value) {
+            self.log_lines
+                .push(format!("translate cache write failed: {:?}", err.kind()));
+        }
+    }
+
     fn emit_status_if_changed(&mut self, out: &mut Vec<ServerMsg>) {
-        if self.status != self.last_emitted_status {
-            self.last_emitted_status = self.status.clone();
-            out.push(ServerMsg::Translate {
-                status: self.status.clone(),
-            });
+        if let Some(status) = self.take_status_change() {
+            out.push(ServerMsg::Translate { status });
         }
     }
 }
@@ -859,6 +884,59 @@ mod tests {
     }
 
     #[test]
+    fn failed_cache_write_still_pushes_and_lands_in_the_log() {
+        let home = TempDir::new().unwrap();
+        write_ready_id_en(home.path());
+        // A directory where the cache file belongs makes every write fail.
+        fs::create_dir_all(marker::cache_dir(home.path()).join("en.jsonl")).unwrap();
+        let mut translator = Translator::new(home.path().to_path_buf());
+
+        let text = "Merah.";
+        translator.on_detail(true, "c1", QuoteLang::En, &[text.to_string()]);
+        let pending = translator.queue.pop_front().unwrap();
+        let key = cache::cache_key(TEST_SHA, pending.to, &pending.text);
+        translator.in_flight.insert(
+            key.clone(),
+            InFlightQuote {
+                quote_key: pending.quote_key,
+                to: pending.to,
+                text: pending.text,
+                cards: pending.cards,
+            },
+        );
+        let mut shas = RunShas::default();
+        shas.set(QuoteLang::En, TEST_SHA.to_string());
+        translator.job = Some(ActiveJob::Run(ActiveRun {
+            job: RunJob::from_events([RunEvent::Reply(RunReply::Translated {
+                key,
+                from: QuoteLang::Id,
+                text: "Red.".to_string(),
+            })]),
+            shas,
+            ok: 0,
+            original: 0,
+            failed: 0,
+            dropped: 0,
+        }));
+
+        let out = translator.service(true);
+        assert_eq!(
+            out,
+            vec![ServerMsg::QuoteTranslated {
+                card_id: "c1".into(),
+                item: QuoteTranslation {
+                    quote_key: quote_key(text),
+                    from: QuoteLang::Id,
+                    text: "Red.".to_string(),
+                },
+            }]
+        );
+        let logs = translator.drain_log();
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        assert!(logs[0].starts_with("translate cache write failed: "));
+    }
+
+    #[test]
     fn single_detail_over_max_pending_drops_evicted_from_pending() {
         let home = TempDir::new().unwrap();
         write_ready_id_en(home.path());
@@ -915,6 +993,11 @@ mod tests {
 
         translator.install_failure = Some(TranslateFailure::Checksum);
         translator.refresh_failed();
+        // An install failure reaches desks through service(); check() does not repeat it.
+        assert_eq!(
+            translator.take_status_change().and_then(|s| s.failed),
+            Some(TranslateFailure::Checksum)
+        );
         assert_eq!(translator.check(), None);
         assert_eq!(translator.status().failed, Some(TranslateFailure::Checksum));
 

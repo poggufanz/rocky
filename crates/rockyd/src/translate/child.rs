@@ -5,7 +5,7 @@
 //! job deadline, and kills/reaps on timeout or `Drop`.
 
 use std::collections::HashSet;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-use rocky_proto::pipe::LINE_CAP;
 use rocky_proto::translate::{QuoteLang, TranslateFailure, TranslatePair};
 use serde::{Deserialize, Serialize};
 
+use crate::child_lines::read_capped_lines;
 use crate::guard::records::CliRecord;
 
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -618,116 +618,21 @@ fn read_lines<L>(
     sender: &Sender<SupervisorMsg<L>>,
     parse: fn(&str) -> Option<L>,
 ) {
-    let mut reader = BufReader::new(stdout);
-    let mut pending = LineBuffer::default();
-    loop {
-        let chunk = match reader.fill_buf() {
-            Ok([]) => {
-                let _ = sender.send(SupervisorMsg::StdoutClosed);
-                return;
-            }
-            Ok(chunk) => chunk,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => {
-                let _ = sender.send(SupervisorMsg::StdoutClosed);
-                return;
-            }
-        };
-        let used = match chunk.iter().position(|byte| *byte == b'\n') {
-            Some(end) => {
-                pending.extend(&chunk[..end]);
-                if let Some(line) = pending.finish(parse)
-                    && sender
-                        .send(SupervisorMsg::Line {
-                            line,
-                            received_at: Instant::now(),
-                        })
-                        .is_err()
-                {
-                    return;
-                }
-                end + 1
-            }
-            None => {
-                pending.extend(chunk);
-                chunk.len()
-            }
-        };
-        reader.consume(used);
-    }
-}
-
-/// One line being assembled. A line over [`LINE_CAP`] is dropped without being kept in memory.
-#[derive(Default)]
-struct LineBuffer {
-    bytes: Vec<u8>,
-    overflowed: bool,
-}
-
-impl LineBuffer {
-    fn extend(&mut self, part: &[u8]) {
-        if self.overflowed {
-            return;
-        }
-        self.bytes.extend_from_slice(part);
-        if self.bytes.len() > LINE_CAP {
-            self.overflowed = true;
-            self.bytes = Vec::new();
-        }
-    }
-
-    fn finish<L>(&mut self, parse: fn(&str) -> Option<L>) -> Option<L> {
-        let overflowed = std::mem::take(&mut self.overflowed);
-        let bytes = std::mem::take(&mut self.bytes);
-        if overflowed {
-            return None;
-        }
-        parse(std::str::from_utf8(&bytes).ok()?)
-    }
+    read_capped_lines(stdout, |line| match parse(line) {
+        Some(line) => sender
+            .send(SupervisorMsg::Line {
+                line,
+                received_at: Instant::now(),
+            })
+            .is_ok(),
+        None => true,
+    });
+    let _ = sender.send(SupervisorMsg::StdoutClosed);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const EMPTY_REPLY_LEN: usize = r#"{"v":1,"key":"k","ok":true,"from":"id","text":""}"#.len();
-
-    fn reply_line(len: usize) -> String {
-        let text = "a".repeat(len - EMPTY_REPLY_LEN);
-        format!(r#"{{"v":1,"key":"k","ok":true,"from":"id","text":"{text}"}}"#)
-    }
-
-    fn finish_run(buffer: &mut LineBuffer, line: &str) -> Option<RunReply> {
-        buffer.extend(line.as_bytes());
-        buffer.finish(parse_run_line)
-    }
-
-    #[test]
-    fn line_at_the_cap_is_kept() {
-        let mut buffer = LineBuffer::default();
-        assert!(finish_run(&mut buffer, &reply_line(LINE_CAP)).is_some());
-    }
-
-    #[test]
-    fn line_one_byte_over_the_cap_is_dropped() {
-        let mut buffer = LineBuffer::default();
-        assert_eq!(finish_run(&mut buffer, &reply_line(LINE_CAP + 1)), None);
-    }
-
-    #[test]
-    fn dropping_oversized_line_does_not_taint_next() {
-        let mut buffer = LineBuffer::default();
-        assert_eq!(finish_run(&mut buffer, &reply_line(LINE_CAP + 1)), None);
-        assert!(finish_run(&mut buffer, &reply_line(EMPTY_REPLY_LEN + 2)).is_some());
-    }
-
-    #[test]
-    fn oversized_line_is_not_held_in_memory() {
-        let mut buffer = LineBuffer::default();
-        buffer.extend(&vec![b'x'; LINE_CAP + 1]);
-        buffer.extend(&vec![b'x'; LINE_CAP]);
-        assert!(buffer.bytes.is_empty());
-    }
 
     #[test]
     fn parse_run_line_maps_all_variants() {
@@ -812,7 +717,7 @@ mod tests {
 
     #[test]
     fn reader_drops_final_line_without_newline_and_signals_close() {
-        let valid = reply_line(EMPTY_REPLY_LEN + 1);
+        let valid = r#"{"v":1,"key":"k","ok":true,"from":"id","text":"a"}"#;
         let input = format!("{valid}\n{valid}");
         let (sender, receiver) = mpsc::channel();
 
