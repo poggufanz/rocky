@@ -17,8 +17,8 @@ function tempHome(t: TestContext): string {
 }
 
 test("record cap seam applies only under ROCKY_TEST_SEAMS=1", (t) => {
-  process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = "50";
-  t.after(() => { delete process.env.ROCKY_TEST_MAX_MEMORY_RECORDS; delete process.env.ROCKY_TEST_SEAMS; });
+  withRecordCap(t, 50);
+  delete process.env.ROCKY_TEST_SEAMS;
   assert.equal(maxSupportedMemoryRecords(), MAX_SUPPORTED_MEMORY_RECORDS);
   process.env.ROCKY_TEST_SEAMS = "1";
   assert.equal(maxSupportedMemoryRecords(), 50);
