@@ -187,6 +187,10 @@ pub enum SetupMsg {
     TranslateCancel,
     TranslateConsentAsk,
     TranslateBusy,
+    TranslateDisabledError,
+    TranslateEngineError,
+    TranslateRemoveError,
+    TranslateUnknownError,
     TranslateRequestFailed {
         reason: String,
     },
@@ -369,6 +373,10 @@ pub(super) fn setup_samples() -> Vec<SetupMsg> {
         SetupMsg::TranslateCancel,
         SetupMsg::TranslateConsentAsk,
         SetupMsg::TranslateBusy,
+        SetupMsg::TranslateDisabledError,
+        SetupMsg::TranslateEngineError,
+        SetupMsg::TranslateRemoveError,
+        SetupMsg::TranslateUnknownError,
         SetupMsg::TranslateRequestFailed {
             reason: "disk full".into(),
         },
@@ -561,6 +569,18 @@ pub fn setup_en(m: &SetupMsg) -> String {
         SetupMsg::TranslateBusy => {
             "Busy finishing a translation. Try again in a moment.".to_string()
         }
+        SetupMsg::TranslateDisabledError => {
+            "Translation is off. Turn it on and try again.".to_string()
+        }
+        SetupMsg::TranslateEngineError => {
+            "Could not start the rocky CLI that runs translation. Check that rocky is installed."
+                .to_string()
+        }
+        SetupMsg::TranslateRemoveError => {
+            "Could not delete the downloaded files. Close anything using them and try again."
+                .to_string()
+        }
+        SetupMsg::TranslateUnknownError => "Request failed.".to_string(),
         SetupMsg::TranslateRequestFailed { reason } => format!("Request failed: {reason}"),
     }
 }
@@ -752,6 +772,17 @@ pub fn setup_id(m: &SetupMsg) -> String {
         SetupMsg::TranslateBusy => {
             "Masih menyelesaikan terjemahan. Coba lagi sebentar lagi.".to_string()
         }
+        SetupMsg::TranslateDisabledError => {
+            "Terjemahan sedang mati. Nyalakan lalu coba lagi.".to_string()
+        }
+        SetupMsg::TranslateEngineError => {
+            "CLI rocky untuk terjemahan tidak bisa dijalankan. Pastikan rocky terpasang.".to_string()
+        }
+        SetupMsg::TranslateRemoveError => {
+            "File unduhan tidak bisa dihapus. Tutup program yang memakainya lalu coba lagi."
+                .to_string()
+        }
+        SetupMsg::TranslateUnknownError => "Permintaan gagal.".to_string(),
         SetupMsg::TranslateRequestFailed { reason } => format!("Permintaan gagal: {reason}"),
     }
 }

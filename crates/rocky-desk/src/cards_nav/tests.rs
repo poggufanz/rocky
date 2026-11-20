@@ -1,0 +1,656 @@
+use rocky_proto::cards::{Block, BlockVia, Card, CardStatus, Coverage, CoverageState, Importance};
+use rocky_proto::pipe::{BlockSnippet, DiffLine, DiffLineKind, SnippetLine};
+
+use super::*;
+use crate::card_detail_model::{DetailState, DiffState};
+use crate::cards_model::PAGE_LIMIT;
+
+pub(super) fn sample_card(id: &str) -> Card {
+    Card {
+        v: 1,
+        card_id: id.to_string(),
+        rev: 1,
+        repo_id: "r1".to_string(),
+        root: "C:/repo".to_string(),
+        main_root: None,
+        branch: Some("main".to_string()),
+        session_id: "s1".to_string(),
+        agent_id: "a1".to_string(),
+        agent_type: "claude".to_string(),
+        parent_card_id: None,
+        started_ms: 1_000,
+        ended_ms: Some(2_000),
+        status: CardStatus::Done,
+        prompt: "fix parser".to_string(),
+        prompt_truncated: false,
+        importance: Importance::Medium,
+        blocks: vec![Block {
+            seq: 7,
+            path: "src/lib.rs".to_string(),
+            symbol: None,
+            labels: Vec::new(),
+            importance: Importance::Medium,
+            via: BlockVia::Edit,
+            tool_use_ids: Vec::new(),
+            bash: None,
+            before: Some("a".to_string()),
+            after: Some("b".to_string()),
+            recorded: true,
+            line: Some(10),
+            added: Some(1),
+            removed: Some(1),
+            quote: None,
+        }],
+        more_count: 0,
+        flow: Vec::new(),
+        flow_more: 0,
+        outside_count: 0,
+        reads: Vec::new(),
+        reads_more: 0,
+        sequence: None,
+        coverage: Coverage {
+            state: CoverageState::Full,
+            reasons: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn reconnect_refreshes_open_views() {
+    let mut cards = CardsModel::new();
+    let mut next = 10_u64;
+    let mut alloc = || {
+        next += 1;
+        next
+    };
+    let _ = cards.set_query("auth".to_string(), alloc());
+
+    // List only: requests page 1 keeping query "auth".
+    let msgs = on_reconnect(&mut cards, None, None, None, &mut alloc);
+    assert_eq!(
+        msgs,
+        vec![ClientMsg::Cards {
+            id: 12,
+            query: Some("auth".to_string()),
+            before: None,
+            limit: PAGE_LIMIT,
+            translate_to: None,
+        }]
+    );
+
+    // Detail + diff open at page 2: requests page 1 + detail + same seq/page diff.
+    let (mut detail, _) = DetailModel::open("c1".to_string(), alloc(), None);
+    detail.on_detail(
+        13,
+        sample_card("c1"),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        UiLang::En,
+    );
+    assert!(matches!(detail.state(), DetailState::Ready(_)));
+
+    let (mut diff, _) = DiffModel::open("c1".to_string(), 7, alloc());
+    diff.on_diff(
+        14,
+        vec![DiffLine {
+            kind: DiffLineKind::Added,
+            text: "+ok".to_string(),
+        }],
+        0,
+        3,
+        false,
+    );
+    let _ = diff.go(2, alloc());
+    diff.on_diff(
+        15,
+        vec![DiffLine {
+            kind: DiffLineKind::Added,
+            text: "+p2".to_string(),
+        }],
+        2,
+        3,
+        false,
+    );
+    assert!(matches!(diff.state(), DiffState::Page { page: 2, .. }));
+
+    let msgs = on_reconnect(
+        &mut cards,
+        Some(&mut detail),
+        Some(&mut diff),
+        None,
+        &mut alloc,
+    );
+    assert_eq!(
+        msgs,
+        vec![
+            ClientMsg::Cards {
+                id: 16,
+                query: Some("auth".to_string()),
+                before: None,
+                limit: PAGE_LIMIT,
+                translate_to: None,
+            },
+            ClientMsg::CardDetail {
+                id: 17,
+                card_id: "c1".to_string(),
+                translate_to: None,
+            },
+            ClientMsg::BlockDiff {
+                id: 18,
+                card_id: "c1".to_string(),
+                seq: 7,
+                page: 2,
+            },
+        ]
+    );
+    assert_eq!(detail.pending_id(), Some(17));
+    assert_eq!(diff.pending_id(), Some(18));
+    assert_eq!(detail.state(), &DetailState::Loading);
+    assert_eq!(diff.state(), &DiffState::Loading);
+
+    let mut view = View::BlockDiff;
+    let mut opt_detail = Some(detail);
+    let mut opt_diff = Some(diff);
+    assert!(route_card_msg(
+        &ServerMsg::CardDetail {
+            id: 17,
+            card: sample_card("c1"),
+            snippets: Vec::new(),
+            translations: Vec::new(),
+            pending: Vec::new(),
+        },
+        &mut view,
+        &mut cards,
+        &mut opt_detail,
+        &mut opt_diff,
+        UiLang::En,
+    ));
+    assert!(matches!(
+        opt_detail.as_ref().unwrap().state(),
+        DetailState::Ready(_)
+    ));
+    assert!(route_card_msg(
+        &ServerMsg::BlockDiff {
+            id: 18,
+            lines: vec![DiffLine {
+                kind: DiffLineKind::Added,
+                text: "+refreshed".to_string(),
+            }],
+            page: 2,
+            pages: 3,
+            missing: false,
+        },
+        &mut view,
+        &mut cards,
+        &mut opt_detail,
+        &mut opt_diff,
+        UiLang::En,
+    ));
+    assert!(matches!(
+        opt_diff.as_ref().unwrap().state(),
+        DiffState::Page {
+            page: 2,
+            pages: 3,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn inbox_routes_card_messages() {
+    let mut view = View::Agents;
+    let mut cards = CardsModel::new();
+    let mut detail = None;
+    let mut diff = None;
+
+    let req = cards.request_first_page(1);
+    assert!(matches!(req, ClientMsg::Cards { id: 1, .. }));
+
+    // Cards reply populates the list model.
+    let changed = route_card_msg(
+        &ServerMsg::Cards {
+            id: 1,
+            items: vec![sample_card("c1")],
+            next: None,
+            translations: Vec::new(),
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert_eq!(cards.rows(UiLang::En).len(), 1);
+
+    // Card push updates/inserts into CardsModel.
+    let mut updated = sample_card("c2");
+    updated.started_ms = 2_000;
+    let changed = route_card_msg(
+        &ServerMsg::Card { item: updated },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert_eq!(cards.rows(UiLang::En).len(), 2);
+
+    // Open detail (id 2), verify unrelated Ack (999) is ignored, then matching CardDetail updates it.
+    let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 2, None);
+    let ignored = route_card_msg(
+        &ServerMsg::Ack {
+            id: 999,
+            ok: false,
+            error: Some("not_found".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(!ignored);
+    assert_eq!(view, View::CardDetail);
+    assert_eq!(detail.as_ref().unwrap().state(), &DetailState::Loading);
+
+    let changed = route_card_msg(
+        &ServerMsg::CardDetail {
+            id: 2,
+            card: sample_card("c1"),
+            snippets: vec![BlockSnippet {
+                seq: 7,
+                lines: vec![SnippetLine::Added {
+                    text: "+x".to_string(),
+                }],
+            }],
+            translations: Vec::new(),
+            pending: Vec::new(),
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert!(matches!(
+        detail.as_ref().unwrap().state(),
+        DetailState::Ready(_)
+    ));
+
+    // Open diff (id 3), verify matching BlockDiff updates it.
+    let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 7, 3);
+    let changed = route_card_msg(
+        &ServerMsg::BlockDiff {
+            id: 3,
+            lines: vec![DiffLine {
+                kind: DiffLineKind::Added,
+                text: "+line".to_string(),
+            }],
+            page: 0,
+            pages: 1,
+            missing: false,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert!(matches!(
+        diff.as_ref().unwrap().state(),
+        DiffState::Page { .. }
+    ));
+
+    // Reconnect re-opens diff (id 5) and ends NotFound -> clears both diff and detail, returns to list.
+    let mut seq_id = 3_u64;
+    let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), None, || {
+        seq_id += 1;
+        seq_id
+    });
+    assert_eq!(detail.as_ref().unwrap().pending_id(), Some(5));
+    assert_eq!(diff.as_ref().unwrap().pending_id(), Some(6));
+    assert_eq!(detail.as_ref().unwrap().state(), &DetailState::Loading);
+    assert_eq!(diff.as_ref().unwrap().state(), &DiffState::Loading);
+
+    let changed = route_card_msg(
+        &ServerMsg::Ack {
+            id: 6,
+            ok: false,
+            error: Some("not_found".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert_eq!(view, View::Agents);
+    assert!(detail.is_none());
+    assert!(diff.is_none());
+}
+
+#[test]
+fn view_navigation_back_and_forth() {
+    let mut view = View::Agents;
+    let mut detail = None;
+    let mut diff = None;
+
+    let msg = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1, None);
+    assert_eq!(
+        msg,
+        ClientMsg::CardDetail {
+            id: 1,
+            card_id: "c1".to_string(),
+            translate_to: None,
+        }
+    );
+    assert_eq!(view, View::CardDetail);
+    assert!(detail.is_some());
+    assert!(diff.is_none());
+
+    let msg = open_diff(&mut view, detail.as_ref(), &mut diff, 9, 2);
+    assert_eq!(
+        msg,
+        Some(ClientMsg::BlockDiff {
+            id: 2,
+            card_id: "c1".to_string(),
+            seq: 9,
+            page: 0,
+        })
+    );
+    assert_eq!(view, View::BlockDiff);
+    assert!(detail.is_some());
+    assert!(diff.is_some());
+
+    back_from_diff(&mut view, &mut diff);
+    assert_eq!(view, View::CardDetail);
+    assert!(detail.is_some());
+    assert!(diff.is_none());
+
+    back_from_detail(&mut view, &mut detail, &mut diff);
+    assert_eq!(view, View::Agents);
+    assert!(detail.is_none());
+    assert!(diff.is_none());
+}
+
+#[test]
+fn reopened_detail_not_found_returns_to_list() {
+    let mut cards = CardsModel::new();
+    let mut view = View::Agents;
+    let mut detail = None;
+    let mut diff = None;
+
+    let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1, None);
+    let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 7, 2);
+
+    let mut next = 2_u64;
+    let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), None, || {
+        next += 1;
+        next
+    });
+    assert_eq!(detail.as_ref().unwrap().pending_id(), Some(4));
+
+    // Even while viewing diff, reopened detail NotFound closes both diff and detail.
+    let changed = route_card_msg(
+        &ServerMsg::Ack {
+            id: 4,
+            ok: false,
+            error: Some("not_found".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert_eq!(view, View::Agents);
+    assert!(detail.is_none());
+    assert!(diff.is_none());
+}
+
+#[test]
+fn reopened_detail_retargeted_not_found_returns_to_list() {
+    let mut cards = CardsModel::new();
+    let mut view = View::Agents;
+    let mut detail = None;
+    let mut diff = None;
+
+    let _ = open_detail(&mut view, &mut detail, &mut diff, "c1".to_string(), 1, None);
+    let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 7, 2);
+
+    let mut next = 2_u64;
+    let _ = on_reconnect(&mut cards, detail.as_mut(), diff.as_mut(), None, || {
+        next += 1;
+        next
+    });
+    assert_eq!(detail.as_ref().unwrap().pending_id(), Some(4));
+
+    // Retargeting while the reopen is still in-flight replaces the request id
+    // without clearing the reconnect flag until the replacement request resolves.
+    let req = detail.as_mut().unwrap().retarget(5, Some(QuoteLang::En));
+    assert_eq!(
+        req,
+        Some(ClientMsg::CardDetail {
+            id: 5,
+            card_id: "c1".to_string(),
+            translate_to: Some(QuoteLang::En),
+        })
+    );
+    assert_eq!(detail.as_ref().unwrap().pending_id(), Some(5));
+
+    let changed = route_card_msg(
+        &ServerMsg::Ack {
+            id: 5,
+            ok: false,
+            error: Some("not_found".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert_eq!(view, View::Agents);
+    assert!(detail.is_none());
+    assert!(diff.is_none());
+}
+
+#[test]
+fn direct_not_found_stays_on_view() {
+    let mut cards = CardsModel::new();
+    let mut view = View::Agents;
+    let mut detail = None;
+    let mut diff = None;
+
+    let _ = open_detail(
+        &mut view,
+        &mut detail,
+        &mut diff,
+        "missing".to_string(),
+        1,
+        None,
+    );
+    let changed = route_card_msg(
+        &ServerMsg::Ack {
+            id: 1,
+            ok: false,
+            error: Some("not_found".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert_eq!(view, View::CardDetail);
+    assert_eq!(detail.as_ref().unwrap().state(), &DetailState::NotFound);
+
+    let _ = open_diff(&mut view, detail.as_ref(), &mut diff, 3, 2);
+    let changed = route_card_msg(
+        &ServerMsg::Ack {
+            id: 2,
+            ok: false,
+            error: Some("not_found".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    );
+    assert!(changed);
+    assert_eq!(view, View::BlockDiff);
+    assert_eq!(diff.as_ref().unwrap().state(), &DiffState::NotFound);
+}
+
+#[test]
+fn search_key_mapping() {
+    let s = SearchInput::default();
+    assert_eq!(
+        map_search_key(&s, "a", Some("a"), false, false),
+        SearchKeyAction::Updated(SearchInput {
+            text: "a".to_string()
+        })
+    );
+    let s = SearchInput {
+        text: "foo".to_string(),
+    };
+    assert_eq!(
+        map_search_key(&s, "space", None, false, false),
+        SearchKeyAction::Updated(SearchInput {
+            text: "foo ".to_string()
+        })
+    );
+    assert_eq!(
+        map_search_key(&s, "backspace", None, false, false),
+        SearchKeyAction::Updated(SearchInput {
+            text: "fo".to_string()
+        })
+    );
+    assert_eq!(
+        map_search_key(&s, "escape", None, false, false),
+        SearchKeyAction::Updated(SearchInput {
+            text: String::new()
+        })
+    );
+    assert_eq!(
+        map_search_key(&s, "v", None, true, false),
+        SearchKeyAction::RequestPaste
+    );
+    assert_eq!(
+        map_search_key(&s, "c", None, true, false),
+        SearchKeyAction::Ignored
+    );
+    assert_eq!(
+        map_search_key(&s, "enter", None, false, false),
+        SearchKeyAction::Ignored
+    );
+}
+
+#[test]
+fn route_card_msg_handles_failed_cards_ack_first() {
+    let mut view = View::Agents;
+    let mut cards = CardsModel::new();
+    let mut detail = None;
+    let mut diff = None;
+
+    let _ = cards.request_first_page(10);
+    let _ = open_detail(
+        &mut view,
+        &mut detail,
+        &mut diff,
+        "c1".to_string(),
+        11,
+        None,
+    );
+
+    // Unrelated Ack leaves cards loading and detail untouched.
+    assert!(!route_card_msg(
+        &ServerMsg::Ack {
+            id: 999,
+            ok: false,
+            error: Some("internal".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    ));
+    assert!(cards.loading());
+
+    // Failed Ack for pending cards id clears loading without touching detail.
+    assert!(route_card_msg(
+        &ServerMsg::Ack {
+            id: 10,
+            ok: false,
+            error: Some("too_large".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    ));
+    assert!(!cards.loading());
+    assert_eq!(detail.as_ref().unwrap().state(), &DetailState::Loading);
+
+    // Populate page 1 with cursor, fail load-more via route_card_msg, then retry.
+    let _ = cards.request_first_page(12);
+    assert!(route_card_msg(
+        &ServerMsg::Cards {
+            id: 12,
+            items: vec![sample_card("c1")],
+            next: Some("cur1".to_string()),
+            translations: Vec::new(),
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    ));
+    assert!(cards.request_more(13).is_some());
+    assert!(cards.loading());
+    assert!(route_card_msg(
+        &ServerMsg::Ack {
+            id: 13,
+            ok: false,
+            error: Some("internal".to_string()),
+            cleanup_errors: 0,
+        },
+        &mut view,
+        &mut cards,
+        &mut detail,
+        &mut diff,
+        UiLang::En,
+    ));
+    assert!(!cards.loading());
+    assert_eq!(
+        cards.request_more(14),
+        Some(ClientMsg::Cards {
+            id: 14,
+            query: None,
+            before: Some("cur1".to_string()),
+            limit: PAGE_LIMIT,
+            translate_to: None,
+        })
+    );
+}

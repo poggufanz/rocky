@@ -1,7 +1,9 @@
 use rocky_proto::pipe::{AgentStatus, Health, Outcome, RepoInfo, TimelineEntry, TimelineKind};
 use rocky_proto::settings::Settings;
+use rocky_proto::translate::{TranslatePair, TranslateStatus};
 
 use super::*;
+use crate::requests::RequestKind;
 
 fn test_controller() -> (Controller, Receiver<ClientMsg>) {
     let (out_tx, out_rx) = mpsc::channel();
@@ -525,4 +527,140 @@ fn atlas_show_turn_without_steps_shows_no_detail_and_keys_do_nothing() {
     atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::StepBy(true));
     atlas_wiring::apply_atlas_action(&mut state, &model, &AtlasAction::StepBy(false));
     assert_eq!(state.step, None);
+}
+
+fn translate_snapshot(on: bool, ready: Vec<TranslatePair>) -> ServerMsg {
+    ServerMsg::Snapshot {
+        agents: Vec::new(),
+        aggregate: Status::Idle,
+        health: Health::default(),
+        settings: Settings {
+            translate_quotes: on,
+            ..Settings::default()
+        },
+        repo_pending: Vec::new(),
+        translate: TranslateStatus {
+            ready,
+            ..TranslateStatus::default()
+        },
+    }
+}
+
+fn connected_with(msg: ServerMsg) -> (Controller, Receiver<ClientMsg>) {
+    let (mut ctl, rx) = test_controller();
+    ctl.set_conn(Conn::Connected);
+    ctl.model.apply(msg);
+    (ctl, rx)
+}
+
+fn drain(rx: &Receiver<ClientMsg>) -> Vec<ClientMsg> {
+    rx.try_iter().collect()
+}
+
+#[test]
+fn translate_toggle_on_with_model_ready_sends_only_the_setting() {
+    let (mut ctl, rx) = connected_with(translate_snapshot(false, vec![TranslatePair::IdEn]));
+    let mut flow = TranslateFlow::default();
+    let mut requests = Requests::default();
+
+    ctl.translate_act(&mut flow, &mut requests, TranslateAction::Toggle, "offline");
+
+    let sent = drain(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(matches!(&sent[0], ClientMsg::Set { name, value, .. }
+        if name == "translate_quotes" && value == &serde_json::json!(true)));
+    assert_eq!(flow.asking(), None);
+}
+
+#[test]
+fn translate_confirm_turns_on_and_installs_the_pair() {
+    let (mut ctl, rx) = connected_with(translate_snapshot(false, Vec::new()));
+    let mut flow = TranslateFlow::default();
+    let mut requests = Requests::default();
+
+    ctl.translate_act(&mut flow, &mut requests, TranslateAction::Toggle, "offline");
+    assert!(drain(&rx).is_empty(), "asking sends nothing");
+    assert_eq!(flow.asking(), Some(TranslatePair::IdEn));
+
+    ctl.translate_act(
+        &mut flow,
+        &mut requests,
+        TranslateAction::Confirm,
+        "offline",
+    );
+    let sent = drain(&rx);
+    assert!(matches!(&sent[0], ClientMsg::Set { name, .. } if name == "translate_quotes"));
+    assert!(matches!(
+        &sent[1],
+        ClientMsg::TranslateInstall {
+            pair: TranslatePair::IdEn,
+            ..
+        }
+    ));
+    assert!(requests.pending(&RequestKind::TranslateInstall(TranslatePair::IdEn)));
+
+    // A second remove while the first is in flight sends nothing and shows no error.
+    ctl.translate_act(&mut flow, &mut requests, TranslateAction::Remove, "offline");
+    ctl.translate_act(&mut flow, &mut requests, TranslateAction::Remove, "offline");
+    let removes = drain(&rx)
+        .into_iter()
+        .filter(|m| matches!(m, ClientMsg::TranslateRemove { .. }))
+        .count();
+    assert_eq!(removes, 1);
+    assert_eq!(flow.error(), None);
+}
+
+#[test]
+fn translate_request_while_disconnected_shows_the_reason() {
+    let (mut ctl, _rx) = connected_with(translate_snapshot(true, vec![TranslatePair::IdEn]));
+    ctl.outbox = None;
+    let mut flow = TranslateFlow::default();
+    let mut requests = Requests::default();
+
+    ctl.translate_act(&mut flow, &mut requests, TranslateAction::Remove, "offline");
+    assert_eq!(
+        flow.error(),
+        Some(&crate::translate_model::TranslateError::Other(
+            "offline".into()
+        ))
+    );
+}
+
+#[test]
+fn translate_act_does_nothing_until_settings_are_editable() {
+    let (mut ctl, rx) = test_controller();
+    let mut flow = TranslateFlow::default();
+    let mut requests = Requests::default();
+
+    ctl.translate_act(&mut flow, &mut requests, TranslateAction::Toggle, "offline");
+    assert!(drain(&rx).is_empty());
+    assert_eq!(flow.asking(), None);
+}
+
+#[test]
+fn translate_target_change_refetches_cards_and_the_open_card_once() {
+    let (mut ctl, rx) = connected_with(translate_snapshot(true, vec![TranslatePair::IdEn]));
+    let mut last = None;
+    let mut cards = CardsModel::new();
+    let (mut detail, _) = DetailModel::open("card-1".into(), 1, None);
+
+    assert!(ctl.sync_translate_target(&mut last, &mut cards, Some(&mut detail)));
+    assert_eq!(last, Some(QuoteLang::En));
+    let sent = drain(&rx);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(matches!(
+        &sent[1],
+        ClientMsg::CardDetail { card_id, translate_to: Some(QuoteLang::En), .. } if card_id == "card-1"
+    ));
+
+    // Same target again: nothing is sent.
+    assert!(!ctl.sync_translate_target(&mut last, &mut cards, Some(&mut detail)));
+    assert!(drain(&rx).is_empty());
+
+    // Turning translation off drops the target and refetches without it.
+    ctl.model
+        .apply(translate_snapshot(false, vec![TranslatePair::IdEn]));
+    assert!(ctl.sync_translate_target(&mut last, &mut cards, None));
+    assert_eq!(last, None);
+    assert_eq!(drain(&rx).len(), 1);
 }
