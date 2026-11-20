@@ -30,12 +30,12 @@ use crate::notified::NotifiedStore;
 use crate::notify::Notifier;
 use crate::now_model::TimelineFetch;
 use crate::os_notice::OsNotices;
-use crate::requests::{RequestKind, Requests};
+use crate::requests::Requests;
 use crate::search_input::{Debounce, SearchInput};
-use crate::settings_view::{SettingId, View, set_bool, set_lang, set_translate_quotes};
+use crate::settings_view::{SettingId, View, set_bool, set_lang};
 use crate::setup_settings::SetupSettings;
 use crate::spawn::daemon_exe_name;
-use crate::translate_model::{Outgoing, TranslateAction, TranslateFlow};
+use crate::translate_model::{TranslateAction, TranslateFlow};
 use crate::ui::cards_view::CardAction;
 use crate::ui::flow_view::FlowHover;
 use crate::ui::title_bar::Tab;
@@ -50,6 +50,7 @@ mod notifications;
 mod panels;
 mod render;
 mod setup_wiring;
+mod translate_wiring;
 mod tray;
 mod window;
 
@@ -264,18 +265,12 @@ struct DeskView {
 
 impl DeskView {
     fn next_id(&mut self) -> u64 {
-        self.ctl.cmd_id += 1;
-        self.ctl.cmd_id
+        self.ctl.next_id()
     }
 
     /// Send a `set` and remember its id so a failed ack can be attributed.
     fn send_set(&mut self, id: u64, msg: ClientMsg) {
-        let Some(outbox) = self.ctl.outbox.as_ref() else {
-            return;
-        };
-        if outbox.send(msg).is_ok() {
-            self.ctl.model.set_sent(id);
-        }
+        self.ctl.send_set(id, msg);
     }
 
     /// Toggle one daemon setting; the UI moves only on the next broadcast.
@@ -299,39 +294,15 @@ impl DeskView {
         self.send_set(id, set_lang(id, lang));
     }
 
-    fn start_translate_request(&mut self, kind: RequestKind) {
-        if !self.start_request(kind.clone()) && !self.requests.pending(&kind) {
-            let reason = self.not_connected_text();
-            self.translate.on_not_sent(&reason);
-        }
-    }
-
     /// Apply a quote translation settings action and emit any outgoing commands.
     fn translate_act(&mut self, action: TranslateAction) {
-        if !self.ctl.model.editable() {
-            return;
-        }
-        let Some(enabled) = self.ctl.model.settings().map(|s| s.translate_quotes) else {
-            return;
-        };
-        let status = self.ctl.model.translate_status().clone();
-        let outgoing = self
-            .translate
-            .act(action, enabled, &status, self.ctl.ui_lang);
-        for cmd in outgoing {
-            match cmd {
-                Outgoing::SetEnabled(on) => {
-                    let id = self.next_id();
-                    self.send_set(id, set_translate_quotes(id, on));
-                }
-                Outgoing::Install(pair) => {
-                    self.start_translate_request(RequestKind::TranslateInstall(pair));
-                }
-                Outgoing::Remove => {
-                    self.start_translate_request(RequestKind::TranslateRemove);
-                }
-            }
-        }
+        let not_connected = self.not_connected_text();
+        self.ctl.translate_act(
+            &mut self.translate,
+            &mut self.requests,
+            action,
+            &not_connected,
+        );
     }
 
     fn toggle_view(&mut self, cx: &mut Context<Self>) {
@@ -439,35 +410,16 @@ impl DeskView {
 
     /// Current quote translation target language, or `None` when disabled or not ready.
     fn translate_target(&self) -> Option<QuoteLang> {
-        crate::translate_model::translate_target(
-            self.ctl.model.settings(),
-            self.ctl.model.translate_status(),
-            self.ctl.ui_lang,
-        )
+        self.ctl.translate_target()
     }
 
     /// Re-requests open views if the active translation target language changed.
     fn sync_translate_target(&mut self) -> bool {
-        let target = self.translate_target();
-        if target == self.last_target {
-            return false;
-        }
-        self.last_target = target;
-        let cards_id = self.next_id();
-        if let Some(msg) = self.cards.set_target(target, cards_id) {
-            self.send_card_msg(msg);
-        }
-        if self.card_detail.is_some() {
-            let id = self.next_id();
-            if let Some(msg) = self
-                .card_detail
-                .as_mut()
-                .and_then(|detail| detail.retarget(id, target))
-            {
-                self.send_card_msg(msg);
-            }
-        }
-        true
+        self.ctl.sync_translate_target(
+            &mut self.last_target,
+            &mut self.cards,
+            self.card_detail.as_mut(),
+        )
     }
 
     fn on_toggle_notices(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
