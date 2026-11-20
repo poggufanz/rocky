@@ -170,6 +170,9 @@ const READS: readonly { name: string; coverage: MemoryCoverage; disclosed: boole
   { name: "the file size cap", coverage: coverage({ truncated: 1, complete: false, reason: "file-size-cap" }), disclosed: true, hold: true },
   { name: "a read race", coverage: coverage({ scanned: 0, truncated: 1, complete: false, reason: "read-race" }), disclosed: true, hold: true },
   { name: "skipped lines plus the record cap", coverage: coverage({ skipped: 2, truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: true },
+  { name: "a clean tail at the record cap", coverage: coverage({ window: "tail", startOffset: 60, truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: false },
+  { name: "a clean tail at the file size cap", coverage: coverage({ window: "tail", startOffset: 60, truncated: 1, complete: false, reason: "file-size-cap" }), disclosed: true, hold: false },
+  { name: "a tail with a skipped line", coverage: coverage({ window: "tail", startOffset: 60, skipped: 1, truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: true },
   { name: "incomplete with no reason and nothing skipped", coverage: coverage({ complete: false }), disclosed: true, hold: true },
   { name: "truncated with no reason and nothing skipped", coverage: coverage({ truncated: 2, complete: false }), disclosed: true, hold: true },
 ];
@@ -185,19 +188,45 @@ for (const read of READS) {
   });
 }
 
-test("executeAnswer holds the answer when the read stopped at the record cap, and says so in words", async () => {
+test("executeAnswer answers from a clean tail window and keeps the tail disclosure", async () => {
   const { home, root } = hermetic();
-  const lines = Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS + 1 }, (_, index) => JSON.stringify({
-    kind: "failure", id: `r${index}`, ts: 1, cwd: "/words", cmd: "false", exitCode: 1,
-    fingerprint: `r${index}`.padStart(16, "0"), signature: ["false"], excerpt: "false",
+  const filler = Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS }, (_, index) => JSON.stringify({
+    kind: "failure", id: `r${index}`, ts: 1, cwd: "/words", cmd: "echo ok", exitCode: 1,
+    fingerprint: `r${index}`.padStart(16, "0"), signature: ["echo ok"], excerpt: "echo ok",
   }));
-  writeFileSync(join(home, "memory.jsonl"), lines.map((line) => `${line}\n`).join(""));
+  const matching = JSON.stringify({
+    kind: "failure", id: "target-false", ts: 2, cwd: "/words", cmd: "false", exitCode: 1,
+    fingerprint: "f".repeat(16), signature: ["false"], excerpt: "false",
+  });
+  writeFileSync(join(home, "memory.jsonl"), [...filler, matching].map((line) => `${line}\n`).join(""));
 
   const outcome = await executeAnswer({ mode: "chat", message: "false", root });
 
   assert.equal(outcome.status, 200);
   assert.ok("text" in outcome.payload);
   const line = `memory coverage incomplete: Only the newest ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; earlier lines were not read.`;
+  assert.equal(outcome.payload.decisionTrace.status, "used");
+  assert.equal(outcome.payload.evidenceCards.length, 1);
+  assert.equal(outcome.payload.evidenceCards[0]?.ref, "target-false");
+  assert.equal(outcome.payload.coverage?.reason, line);
+  assert.ok(outcome.payload.trace.includes(line), outcome.payload.trace.join("\n"));
+  assert.notEqual(outcome.payload.text, "The memory read was incomplete, so the answer is held back.");
+  assert.deepEqual(validateOutputLine(outcome.payload.text), []);
+});
+
+test("executeAnswer holds the answer when a tail window has a skipped line", async () => {
+  const { home, root } = hermetic();
+  const filler = Array.from({ length: MAX_SUPPORTED_MEMORY_RECORDS + 1 }, (_, index) => JSON.stringify({
+    kind: "failure", id: `r${index}`, ts: 1, cwd: "/words", cmd: "echo ok", exitCode: 1,
+    fingerprint: `r${index}`.padStart(16, "0"), signature: ["echo ok"], excerpt: "echo ok",
+  }));
+  writeFileSync(join(home, "memory.jsonl"), [...filler, "{not-json}"].map((line) => `${line}\n`).join(""));
+
+  const outcome = await executeAnswer({ mode: "chat", message: "echo ok", root });
+
+  assert.equal(outcome.status, 200);
+  assert.ok("text" in outcome.payload);
+  const line = `memory coverage incomplete: 1 line could not be used. Only the newest ${MAX_SUPPORTED_MEMORY_RECORDS - 1} records were read; earlier lines were not read.`;
   assert.equal(outcome.payload.decisionTrace.status, "unavailable");
   assert.deepEqual(outcome.payload.evidenceCards, []);
   assert.equal(outcome.payload.coverage?.reason, line);

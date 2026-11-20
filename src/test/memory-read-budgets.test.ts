@@ -158,6 +158,8 @@ test("incomplete snapshots fail closed for fix, reconciliation, and once-only cl
     pausedDetail: {
       recordsRead: loaded.records.length,
       shortTail: true,
+      tail: true,
+      pendingWaiting: true,
     },
   });
   clearPendingIfResolved([], undefined, Date.now());

@@ -450,6 +450,74 @@ test("append during the tail read reports read-race", (t) => {
   assert.equal(output.secondTailReadable, true);
 });
 
+test("backward tail scan loops over short positional reads", (t) => {
+  const root = tempHome(t);
+  const path = join(root, "memory.jsonl");
+  const lines = Array.from({ length: 400 }, (_, index) => failureLine(index, "x".repeat(300), NOW));
+  writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+  const preload = join(root, "short-read.cjs");
+  writeFileSync(preload, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const originalOpen = fs.openSync.bind(fs);",
+    "const originalRead = fs.readSync.bind(fs);",
+    "const fds = new Set();",
+    "let shorted = false;",
+    "fs.openSync = (value, ...args) => { const fd = originalOpen(value, ...args); if (String(value) === process.env.ROCKY_TEST_MEMORY) fds.add(fd); return fd; };",
+    "fs.readSync = (fd, buffer, offset, length, position) => {",
+    "  if (fds.has(fd) && !shorted && typeof position === 'number' && position > 0 && length > 1024) {",
+    "    shorted = true;",
+    "    return originalRead(fd, buffer, offset, 1024, position);",
+    "  }",
+    "  return originalRead(fd, buffer, offset, length, position);",
+    "};",
+    "syncBuiltinESMExports();",
+  ].join("\n"), "utf8");
+
+  const modulePath = join(process.cwd(), "dist", "core", "memory-read.js");
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", [
+    `const { loadMemoryChecked, tailReadable } = await import(${JSON.stringify(pathToFileURL(modulePath).href)});`,
+    `const loaded = loadMemoryChecked(${JSON.stringify(path)}, ${NOW});`,
+    "process.stdout.write(JSON.stringify({",
+    "  count: loaded.records.length,",
+    "  firstId: loaded.records[0]?.id,",
+    "  lastId: loaded.records.at(-1)?.id,",
+    "  window: loaded.coverage.window,",
+    "  reason: loaded.coverage.reason,",
+    "  skipped: loaded.coverage.skipped,",
+    "  tailReadable: tailReadable(loaded.coverage),",
+    "}));",
+  ].join("\n")], {
+    env: {
+      ...process.env,
+      NODE_OPTIONS: `--require=${preload}`,
+      ROCKY_TEST_SEAMS: "1",
+      ROCKY_TEST_MAX_MEMORY_RECORDS: "50",
+      ROCKY_TEST_MEMORY: path,
+    },
+    encoding: "utf8",
+    timeout: 20_000,
+    windowsHide: true,
+  });
+  assert.equal(child.status, 0, child.stderr);
+  const output = JSON.parse(child.stdout) as {
+    count: number;
+    firstId?: string;
+    lastId?: string;
+    window?: string;
+    reason?: string;
+    skipped: number;
+    tailReadable: boolean;
+  };
+  assert.equal(output.count, 50);
+  assert.equal(output.firstId, "r350");
+  assert.equal(output.lastId, "r399");
+  assert.equal(output.window, "tail");
+  assert.equal(output.reason, "record-cap");
+  assert.equal(output.skipped, 0);
+  assert.equal(output.tailReadable, true);
+});
+
 test("exact-cap file with a trailing blank CRLF line stays complete", (t) => {
   withRecordCap(t, 2);
   const home = tempHome(t);
@@ -614,13 +682,19 @@ test("tail ignores a trailing blank CRLF line", (t) => {
 
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 
+const rockyHomeContexts = new WeakSet<TestContext>();
+
 function withRockyHome(t: TestContext, home: string): void {
+  const captureOriginal = !rockyHomeContexts.has(t);
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
-  t.after(() => {
-    if (previous === undefined) delete process.env.ROCKY_HOME;
-    else process.env.ROCKY_HOME = previous;
-  });
+  if (captureOriginal) {
+    rockyHomeContexts.add(t);
+    t.after(() => {
+      if (previous === undefined) delete process.env.ROCKY_HOME;
+      else process.env.ROCKY_HOME = previous;
+    });
+  }
 }
 
 function reliableFailureRecord(
@@ -1271,21 +1345,50 @@ test("rocky run above the cap admits a possibly older first sighting", async (t)
   assert.doesNotMatch(stderr, /Memory coverage is incomplete/);
 });
 
-test("rocky run prints the paused-linking line when the tail is short", async (t) => {
+test("rocky run prints the paused-linking line only for tail windows with pending", async (t) => {
   withRecordCap(t, 10_000);
   const home = tempHome(t);
   withRockyHome(t, home);
   const now = Date.now();
   const otherCwd = join(home, "other");
-  const lines = fillerFailureLines(10_050, otherCwd, now - 2 * 60 * 60 * 1000);
-  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
-
+  const memoryFile = join(home, "memory.jsonl");
   const passExec: ExecResult = { started: true, code: 0, stderr: "", tail: [], durationMs: 5 };
-  const stderr = await captureStderr(() => run("npm test", async () => passExec));
+
+  // Sub-cap file with one corrupt line: success stays silent even if pending exists.
+  writeFileSync(memoryFile, `${fillerFailureLines(5, otherCwd, now - 2 * 60 * 60 * 1000).join("\n")}\n{not-json}\n`, "utf8");
+  touchPending();
+  const subCapErr = await captureStderr(() => run("npm test", async () => passExec));
+  assert.doesNotMatch(subCapErr, /fix linking paused:/);
+  rmSync(pendingPath(), { force: true });
+
+  // Short tail with no pending: silent.
+  const shortTailLines = fillerFailureLines(10_050, otherCwd, now - 2 * 60 * 60 * 1000);
+  writeFileSync(memoryFile, `${shortTailLines.join("\n")}\n`, "utf8");
+  const noPendingErr = await captureStderr(() => run("npm test", async () => passExec));
+  assert.doesNotMatch(noPendingErr, /fix linking paused:/);
+
+  // Short tail with pending present: prints the short-tail copy.
+  touchPending();
+  const shortTailErr = await captureStderr(() => run("npm test", async () => passExec));
   assert.ok(
-    stderr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours and 10 minutes."),
-    stderr,
+    shortTailErr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours and 10 minutes."),
+    shortTailErr,
   );
+  rmSync(pendingPath(), { force: true });
+
+  // Tail with a corrupt line and pending present: prints the incomplete fallback copy.
+  const corruptTailLines = [
+    ...fillerFailureLines(10_049, otherCwd, now - 2 * 60 * 60 * 1000),
+    "{not-json}",
+  ];
+  writeFileSync(memoryFile, `${corruptTailLines.join("\n")}\n`, "utf8");
+  touchPending();
+  const corruptTailErr = await captureStderr(() => run("npm test", async () => passExec));
+  assert.ok(
+    corruptTailErr.includes("fix linking paused: memory coverage is incomplete."),
+    corruptTailErr,
+  );
+  assert.doesNotMatch(corruptTailErr, /do not reach back/);
 });
 
 test("paused linking discloses skew boundary, incomplete fallback, and uses deciding snapshot", async (t) => {
@@ -1298,12 +1401,13 @@ test("paused linking discloses skew boundary, incomplete fallback, and uses deci
   // Skew boundary: oldest record at NOW - 8h - 5min is inside the 10-minute skew margin.
   const skewLines = fillerFailureLines(10_050, otherCwd, NOW - EIGHT_HOURS_MS - 5 * 60 * 1000);
   writeFileSync(memoryFile, `${skewLines.join("\n")}\n`, "utf8");
+  touchPending();
   let skewResult: ReturnType<typeof linkFixOnSuccess> | undefined;
   const skewErr = await captureStderr(() => {
     skewResult = linkFixOnSuccess("npm test", join(home, "repo"), false, { now: NOW });
   });
   assert.equal(skewResult?.pausedReason, "coverage");
-  assert.deepEqual(skewResult?.pausedDetail, { recordsRead: 10_000, shortTail: true });
+  assert.deepEqual(skewResult?.pausedDetail, { recordsRead: 10_000, shortTail: true, tail: true, pendingWaiting: true });
   assert.ok(
     skewErr.includes("fix linking paused: the newest 10000 records do not reach back 8 hours and 10 minutes."),
     skewErr,
@@ -1315,12 +1419,13 @@ test("paused linking discloses skew boundary, incomplete fallback, and uses deci
     "{not-json}",
   ];
   writeFileSync(memoryFile, `${corruptLines.join("\n")}\n`, "utf8");
+  touchPending();
   let corruptResult: ReturnType<typeof linkFixOnSuccess> | undefined;
   const corruptErr = await captureStderr(() => {
     corruptResult = linkFixOnSuccess("npm test", join(home, "repo"), false, { now: NOW });
   });
   assert.equal(corruptResult?.pausedReason, "coverage");
-  assert.deepEqual(corruptResult?.pausedDetail, { recordsRead: 9_999, shortTail: false });
+  assert.deepEqual(corruptResult?.pausedDetail, { recordsRead: 9_999, shortTail: false, tail: true, pendingWaiting: true });
   assert.ok(
     corruptErr.includes("fix linking paused: memory coverage is incomplete."),
     corruptErr,
@@ -1329,10 +1434,12 @@ test("paused linking discloses skew boundary, incomplete fallback, and uses deci
 
   // Changed post-decision snapshot (replaced with 1 complete record after decision) cannot suppress or alter the line.
   writeFileSync(memoryFile, `${skewLines.join("\n")}\n`, "utf8");
+  touchPending();
   const postDecisionErr = await captureStderr(() => {
     linkFixOnSuccess("npm test", join(home, "repo"), false, { now: NOW }, (cmd, cwd, options) => {
       const decided = resolveFixOnSuccess(cmd, cwd, options);
       writeFileSync(memoryFile, `${fillerFailureLines(1, otherCwd, NOW - 1_000).join("\n")}\n`, "utf8");
+      rmSync(pendingPath(), { force: true });
       return decided;
     });
   });
@@ -1348,7 +1455,7 @@ test("paused linking discloses skew boundary, incomplete fallback, and uses deci
       confirmedResolved: 0,
       possibleAssociated: 0,
       pausedReason: "coverage",
-      pausedDetail: { recordsRead: 42, shortTail: true },
+      pausedDetail: { recordsRead: 42, shortTail: true, tail: true, pendingWaiting: true },
     }));
   });
   assert.ok(
@@ -1361,13 +1468,73 @@ test("paused linking discloses skew boundary, incomplete fallback, and uses deci
       confirmedResolved: 0,
       possibleAssociated: 0,
       pausedReason: "coverage",
-      pausedDetail: { recordsRead: 42, shortTail: false },
+      pausedDetail: { recordsRead: 42, shortTail: false, tail: true, pendingWaiting: true },
     }));
   });
   assert.ok(
     injectedIncompleteErr.includes("fix linking paused: memory coverage is incomplete."),
     injectedIncompleteErr,
   );
+
+  const injectedSubCapErr = await captureStderr(() => {
+    linkFixOnSuccess("npm test", join(home, "repo"), false, {}, () => ({
+      confirmedResolved: 0,
+      possibleAssociated: 0,
+      pausedReason: "coverage",
+      pausedDetail: { recordsRead: 42, shortTail: false, tail: false, pendingWaiting: true },
+    }));
+  });
+  assert.equal(injectedSubCapErr, "");
+
+  const injectedNoPendingErr = await captureStderr(() => {
+    linkFixOnSuccess("npm test", join(home, "repo"), false, {}, () => ({
+      confirmedResolved: 0,
+      possibleAssociated: 0,
+      pausedReason: "coverage",
+      pausedDetail: { recordsRead: 42, shortTail: true, tail: true, pendingWaiting: false },
+    }));
+  });
+  assert.equal(injectedNoPendingErr, "");
+});
+
+test("singular wording when tail window holds 1 record", async (t) => {
+  withRecordCap(t, 1);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const now = Date.now();
+  const otherCwd = join(home, "other");
+  const memoryFile = join(home, "memory.jsonl");
+  const twoRecent = fillerFailureLines(2, otherCwd, now - 60_000);
+  writeFileSync(memoryFile, `${twoRecent.join("\n")}\n`, "utf8");
+
+  const failExec: ExecResult = {
+    started: true,
+    code: 1,
+    stderr: "TypeError: single record tail failure",
+    tail: ["TypeError: single record tail failure"],
+    durationMs: 5,
+  };
+  const failErr = await captureStderr(() => run("npm test", async () => failExec));
+  assert.ok(
+    failErr.includes("New error recorded (exit code 1). Only the newest record was checked."),
+    failErr,
+  );
+  assert.doesNotMatch(failErr, /1 records/);
+
+  // Re-write two records (previous run appended one) and test paused-linking with 1 record read.
+  writeFileSync(memoryFile, `${twoRecent.join("\n")}\n`, "utf8");
+  touchPending();
+  const passExec: ExecResult = { started: true, code: 0, stderr: "", tail: [], durationMs: 5 };
+  const passErr = await captureStderr(() => run("npm test", async () => passExec));
+  assert.ok(
+    passErr.includes("fix linking paused: the newest record does not reach back 8 hours and 10 minutes."),
+    passErr,
+  );
+  assert.doesNotMatch(passErr, /1 records/);
+
+  const statsErr = await captureStderr(() => stats());
+  assert.match(statsErr, /rocky: memory: reading the newest record \(from /u);
+  assert.doesNotMatch(statsErr, /1 records/);
 });
 
 test("rocky stats shows fix links and the tail window", async (t) => {
@@ -1410,6 +1577,42 @@ test("rocky stats shows fix links and the tail window", async (t) => {
   const fullStderr = await captureStderr(() => stats());
   assert.ok(fullStderr.includes("rocky: fix links: none in the records read"), fullStderr);
   assert.doesNotMatch(fullStderr, /memory: reading the newest/u);
+});
+
+test("rocky stats reports span in tail mode and age in full mode", async (t) => {
+  withRecordCap(t, 5);
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const now = Date.now();
+  const memoryFile = join(home, "memory.jsonl");
+  const DAY_MS = 86_400_000;
+
+  // Tail mode: 10 unique records, older 5 are 30 days old, newest 5 span 3 days (oldest in tail is 3 days ago).
+  const tailLines = [
+    ...Array.from({ length: 5 }, (_, index) => failureLine(index, "check failed", now - 30 * DAY_MS)),
+    failureLine(5, "check failed", now - 3 * DAY_MS - 1_000),
+    ...Array.from({ length: 4 }, (_, index) => failureLine(index + 6, "check failed", now - 1_000)),
+  ];
+  writeFileSync(memoryFile, `${tailLines.join("\n")}\n`, "utf8");
+  const tailStderr = await captureStderr(() => stats());
+  assert.match(tailStderr, /rocky: The records read span 3 days\. 0 brief runs\. 0 journal notes\./u);
+  assert.doesNotMatch(tailStderr, /Memory is \d+ day/u);
+
+  // Tail mode singular: 1 day span.
+  const oneDayTail = [
+    ...Array.from({ length: 5 }, (_, index) => failureLine(index, "check failed", now - 30 * DAY_MS)),
+    failureLine(5, "check failed", now - DAY_MS - 1_000),
+    ...Array.from({ length: 4 }, (_, index) => failureLine(index + 6, "check failed", now - 1_000)),
+  ];
+  writeFileSync(memoryFile, `${oneDayTail.join("\n")}\n`, "utf8");
+  const oneDayTailStderr = await captureStderr(() => stats());
+  assert.match(oneDayTailStderr, /rocky: The records read span 1 day\. 0 brief runs\. 0 journal notes\./u);
+
+  // Full mode: unchanged byte-for-byte ("Memory is N days old.").
+  writeFileSync(memoryFile, `${Array.from({ length: 2 }, (_, index) => failureLine(index, "check failed", now - 4 * DAY_MS - 1_000)).join("\n")}\n`, "utf8");
+  const fullStderr = await captureStderr(() => stats());
+  assert.match(fullStderr, /rocky: Memory is 4 days old\. 0 brief runs\. 0 journal notes\./u);
+  assert.doesNotMatch(fullStderr, /The records read span/u);
 });
 
 test("describeMemoryCoverage words for tail record and byte caps", () => {
@@ -1713,6 +1916,31 @@ test("MCP coverage rejects malformed tail fields", async (t) => {
       reason: "record-cap",
       oldestTs: 1_000,
     },
+    {
+      version: 1,
+      scanned: 50,
+      skipped: 0,
+      truncated: 1,
+      bytesScanned: 100,
+      bytesTotal: 200,
+      complete: false,
+      window: "tail",
+      startOffset: 100,
+    },
+    {
+      version: 1,
+      scanned: 50,
+      skipped: 0,
+      truncated: 1,
+      bytesScanned: 100,
+      bytesTotal: 200,
+      complete: false,
+      reason: "read-race",
+      window: "tail",
+      startOffset: 100,
+    },
+    { ...validTailBase, truncated: 0 },
+    { ...validTailBase, truncated: 2 },
   ];
   for (const malformed of malformedCases) {
     assert.deepEqual(await callRecallWithCoverage(malformed), unknownCoverage);

@@ -168,8 +168,11 @@ export function speakFailureMemory(
       }
     }
   } else {
+    const checked = memory.length === 1
+      ? "Only the newest record was checked."
+      : `Only the newest ${memory.length} records were checked.`;
     say(scope.historyMayStartEarlier
-      ? `New error recorded (exit code ${exitCode}). Only the newest ${memory.length} records were checked.`
+      ? `New error recorded (exit code ${exitCode}). ${checked}`
       : `New error recorded (exit code ${exitCode}).`);
   }
 }
@@ -247,11 +250,18 @@ export function linkFixOnSuccess(
   const result = resolveFix(cmd, cwd, options);
   if (!quiet && result.confirmedResolved > 0) {
     say(phrase("fix-linked"));
-  } else if (!quiet && result.pausedReason === "coverage") {
-    if (result.pausedDetail?.shortTail) {
+  } else if (
+    !quiet &&
+    result.pausedReason === "coverage" &&
+    result.pausedDetail?.tail &&
+    result.pausedDetail.pendingWaiting
+  ) {
+    if (result.pausedDetail.shortTail) {
       const hours = (options.windowMs ?? LINK_WINDOW_MS) / 3_600_000;
       const minutes = CLOCK_SKEW_MS / 60_000;
-      say(`fix linking paused: the newest ${result.pausedDetail.recordsRead} records do not reach back ${hours} hours and ${minutes} minutes.`);
+      const count = result.pausedDetail.recordsRead;
+      const subject = count === 1 ? "the newest record does" : `the newest ${count} records do`;
+      say(`fix linking paused: ${subject} not reach back ${hours} hours and ${minutes} minutes.`);
     } else {
       say("fix linking paused: memory coverage is incomplete.");
     }

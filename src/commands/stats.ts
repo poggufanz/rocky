@@ -142,7 +142,8 @@ export function stats(argv: readonly string[] = []): number {
     : "fix links: none in the records read");
   if (coverage.window === "tail") {
     const fromSuffix = coverage.oldestTs !== undefined ? ` (from ${formatUtcDate(coverage.oldestTs)})` : "";
-    say(`memory: reading the newest ${records.length} records${fromSuffix}`);
+    const countLabel = records.length === 1 ? "the newest record" : `the newest ${records.length} records`;
+    say(`memory: reading ${countLabel}${fromSuffix}`);
   }
   const byKind = result.byKind ?? {};
   if (isVerbose()) {
@@ -155,7 +156,10 @@ export function stats(argv: readonly string[] = []): number {
   const ageDays = memoryAgeDays(records.map((record) => record.ts), Date.now());
   const journalCount = readJournal().records.length;
   const briefRuns = byKind["brief_run"] ?? 0;
-  say(`Memory is ${ageDays} day${ageDays === 1 ? "" : "s"} old. ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
+  const ageSentence = coverage.window === "tail"
+    ? `The records read span ${ageDays} day${ageDays === 1 ? "" : "s"}.`
+    : `Memory is ${ageDays} day${ageDays === 1 ? "" : "s"} old.`;
+  say(`${ageSentence} ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
   // Gate denials are never counted here: that state is ephemeral (never
   // written to memory), and counting it would imply a durability rocky
   // does not have.

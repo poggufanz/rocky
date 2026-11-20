@@ -1616,10 +1616,14 @@ function findTailStartOffset(
   while (cursor > minReadOffset) {
     const requested = Math.min(buffer.byteLength, cursor - minReadOffset);
     const readPos = cursor - requested;
-    const count = readSync(descriptor, buffer, 0, requested, readPos);
-    if (count !== requested) return undefined;
-    const chunk = buffer.subarray(0, count);
-    let searchLimit = count - 1;
+    let filled = 0;
+    while (filled < requested) {
+      const count = readSync(descriptor, buffer, filled, requested - filled, readPos + filled);
+      if (count <= 0) return undefined;
+      filled += count;
+    }
+    const chunk = buffer.subarray(0, requested);
+    let searchLimit = requested - 1;
     while (searchLimit >= 0) {
       const idx = chunk.lastIndexOf(0x0a, searchLimit);
       if (!hasNonWhitespace) {
@@ -1726,6 +1730,7 @@ export function loadMemoryChecked(path = resolveRockyPaths().memory, now = Date.
 
     if (isTailMode) {
       witnessHash = undefined;
+      parsed = undefined;
       const tailStart = findTailStartOffset(descriptor, totalBytes, recordCap);
       if (tailStart === undefined) {
         memoryCache = undefined;

@@ -4,6 +4,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   fstatSync,
   lstatSync,
@@ -1246,7 +1247,7 @@ export interface ResolveFixResult extends WrittenFixRecords {
   confirmedResolved: number;
   possibleAssociated: number;
   pausedReason?: "coverage";
-  pausedDetail?: { recordsRead: number; shortTail: boolean };
+  pausedDetail?: { recordsRead: number; shortTail: boolean; tail: boolean; pendingWaiting: boolean };
 }
 
 function hasConfirmedResolutionForCommand(
@@ -1316,6 +1317,8 @@ export function resolveFixOnSuccess(
           shortTail: tailReadable(transaction.coverage)
             && transaction.coverage.window === "tail"
             && transaction.coverage.oldestTs !== undefined,
+          tail: transaction.coverage.window === "tail",
+          pendingWaiting: existsSync(transaction.paths.pending),
         },
       };
     }
