@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import type { Exposure } from "../core/config-read.js";
-import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, queryRecall, queryStats, whyFilePathRelation } from "../core/memory-query.js";
+import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, loadDurableMemorySnapshotOrThrow, queryRecall, queryStats, whyFilePathRelation } from "../core/memory-query.js";
 import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import { rationalesForFile } from "../core/dictionary.js";
@@ -34,6 +34,7 @@ import {
   projectTriple,
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
+  type ProjectedRecallHit,
   type ProjectedWhyCard,
   type Truncation,
 } from "./privacy.js";
@@ -113,6 +114,7 @@ export interface CreateToolRegistryOptions {
   memory: MemoryQueries;
   recallWithAi: RecallWithAiPort;
   cards?: (path: string, limit: number) => CardsForFile;
+  buildProblems?: typeof buildProblems;
 }
 
 const ANNOTATIONS = {
@@ -1426,6 +1428,45 @@ function safeProjection<T>(operation: () => T, fallback: T): T {
   try { return operation(); } catch { return fallback; }
 }
 
+function summarizeRecallItems(
+  items: readonly ProjectedRecallHit[],
+  hits: readonly RecallHit[],
+  records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
+  now: number,
+  buildProblemsFn: typeof buildProblems,
+): ProjectedRecallHit[] {
+  const set = buildProblemsFn(records, coverage, { now });
+  const entryByFailureId = new Map<string, ProblemEntry>();
+  for (const entry of set.entries) {
+    for (const attempt of entry.attempts) {
+      entryByFailureId.set(attempt.failureId, entry);
+    }
+  }
+  const nextItems: ProjectedRecallHit[] = [];
+  for (const item of items) {
+    const hitIndex = Number(item.candidateId.slice(1)) - 1;
+    const hit = Number.isInteger(hitIndex) ? hits[hitIndex] : undefined;
+    const entry = hit === undefined ? undefined : entryByFailureId.get(hit.failure.id);
+    if (entry !== undefined && entry.counts.attempts >= 2) {
+      nextItems.push({
+        ...item,
+        attemptsSummary: {
+          attempts: entry.counts.attempts,
+          passed: entry.counts.passed,
+          sameFailure: entry.counts.same_failure,
+          differentFailure: entry.counts.different_failure,
+          possiblePass: entry.counts.possible_pass,
+          latestOutcome: entry.latestOutcome,
+        },
+      });
+    } else {
+      nextItems.push(item);
+    }
+  }
+  return nextItems;
+}
+
 function saturatedAdd(...values: readonly number[]): number {
   let total = 0;
   for (const value of values) {
@@ -1917,53 +1958,53 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
           case "recall": {
             const input = parseRecallArgs(args, options.exposure);
             if (hasDurableMemoryQueries(options.memory)) {
-              const now = Date.now();
-              const snapshot = loadDurableMemorySnapshot(options.memory, now);
+              const readState: SafeMemoryReadState = { failed: false };
+              const snapshot = safeReadMemory<DurableMemorySnapshot | undefined>(
+                () => loadDurableMemorySnapshotOrThrow(options.memory, input.now),
+                undefined,
+                canonicalMemory,
+                readState,
+              );
               if (snapshot === undefined) {
-                const coverage = unknownMemoryCoverage();
+                const coverage = memoryCoverage(options.memory, true, coverageReader);
                 pairedCoverage = coverage;
                 return safeProjection(
                   () => cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
                   cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
                 );
               }
-              const coverage = snapshot.coverage;
+              const queryNow = input.now ?? Date.now();
+              const hits = safeReadMemory(
+                () => queryRecall(snapshot.records, { ...input, now: queryNow }),
+                [],
+                canonicalMemory,
+                readState,
+              );
+              const coverage = readState.failed
+                ? memoryCoverage(options.memory, true, coverageReader)
+                : snapshot.coverage;
               pairedCoverage = coverage;
-              const hits = queryRecall(snapshot.records, { ...input, now });
               const projected = safeProjection(
-                () => projectRecallHits(hits, options.exposure, now),
+                () => projectRecallHits(hits, options.exposure, queryNow),
                 { exposure: options.exposure, items: [], truncated: true },
               );
-              if (projected.items.length > 0) {
-                safeProjection(() => {
-                  const set = buildProblems(snapshot.records, coverage, { now });
-                  const entryByFailureId = new Map<string, ProblemEntry>();
-                  for (const entry of set.entries) {
-                    for (const attempt of entry.attempts) {
-                      entryByFailureId.set(attempt.failureId, entry);
-                    }
-                  }
-                  for (const item of projected.items) {
-                    const hitIndex = Number(item.candidateId.slice(1)) - 1;
-                    const hit = Number.isInteger(hitIndex) ? hits[hitIndex] : undefined;
-                    if (hit === undefined) continue;
-                    const entry = entryByFailureId.get(hit.failure.id);
-                    if (entry !== undefined && entry.counts.attempts >= 2) {
-                      item.attemptsSummary = {
-                        attempts: entry.counts.attempts,
-                        passed: entry.counts.passed,
-                        sameFailure: entry.counts.same_failure,
-                        differentFailure: entry.counts.different_failure,
-                        possiblePass: entry.counts.possible_pass,
-                        latestOutcome: entry.latestOutcome,
-                      };
-                    }
-                  }
-                }, undefined);
+              let finalProjected = projected;
+              if (!readState.failed && projected.items.length > 0) {
+                const summarizeProblems = options.buildProblems ?? buildProblems;
+                const summarized = safeProjection<readonly ProjectedRecallHit[] | undefined>(
+                  () => summarizeRecallItems(projected.items, hits, snapshot.records, snapshot.coverage, queryNow, summarizeProblems),
+                  undefined,
+                );
+                if (summarized === undefined) {
+                  finalProjected = { ...projected, truncated: true };
+                } else {
+                  finalProjected = { ...projected, items: summarized };
+                }
               }
               const enriched = {
-                ...projected,
+                ...finalProjected,
                 ...memoryCoveragePayload(coverage),
+                ...(readState.failed ? { truncated: true } : {}),
               };
               return safeProjection(
                 () => cappedResult(enriched),

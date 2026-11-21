@@ -136,13 +136,21 @@ export function hasDurableMemoryQueries(value: unknown): boolean {
   catch { return false; }
 }
 
+/** Load one paired durable snapshot, propagating operational read errors to the caller. */
+export function loadDurableMemorySnapshotOrThrow(
+  value: MemoryQueries,
+  requestedNow = Date.now(),
+): DurableMemorySnapshot | undefined {
+  if (!hasDurableMemoryQueries(value)) return undefined;
+  return durableMemorySnapshotLoaders.get(value)?.(requestedNow);
+}
+
 /** Load one paired durable snapshot for multiple pure per-cwd queries. */
 export function loadDurableMemorySnapshot(
   value: MemoryQueries,
   requestedNow = Date.now(),
 ): DurableMemorySnapshot | undefined {
-  if (!hasDurableMemoryQueries(value)) return undefined;
-  try { return durableMemorySnapshotLoaders.get(value)?.(requestedNow); }
+  try { return loadDurableMemorySnapshotOrThrow(value, requestedNow); }
   catch { return undefined; }
 }
 

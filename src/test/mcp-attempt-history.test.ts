@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { disabledRecallWithAi } from "../ai/port.js";
+import { buildProblems } from "../core/attempts.js";
 import { commandIdentity } from "../core/fingerprint.js";
 import {
   createMemoryQueries,
   loadDurableMemorySnapshot,
+  loadDurableMemorySnapshotOrThrow,
   queryRecall,
   type MemoryQueries,
 } from "../core/memory-query.js";
@@ -1286,4 +1288,223 @@ test("custom memory host recall has no summary and unchanged bytes", async () =>
   const items = (result.structuredContent as { items: Record<string, unknown>[] }).items;
   assert.equal(items.length, 1);
   assert.equal("attemptsSummary" in items[0]!, false);
+});
+
+async function withDateNowSequence<T>(sequence: readonly number[], run: () => Promise<T> | T): Promise<T> {
+  const originalNow = Date.now;
+  let index = 0;
+  Date.now = () => {
+    const value = sequence[Math.min(index, sequence.length - 1)]!;
+    index += 1;
+    return value;
+  };
+  try {
+    return await run();
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
+test("recall output stays byte-identical across the load-to-query clock boundary", async () => {
+  const failureTs = 1_700_000_000_000;
+  const here = process.cwd();
+  const f1 = makeFailure({
+    id: "fixture-failure-resolved",
+    ts: failureTs,
+    cwd: here,
+    cmd: "npm test",
+    fingerprint: "fixture-missing-module",
+    fingerprintV: undefined,
+    signature: ["Error: missing module from /private/rocky/project"],
+    excerpt: "Error: missing module",
+  });
+
+  await withDurableMemory([f1], async (memory) => {
+    const signal = new AbortController().signal;
+    for (const exposure of ["sanitized", "raw"] as const) {
+      const oldJson = await withDateNowSequence(
+        [failureTs - 1, failureTs],
+        () => freezeOldRecallEnvelope(memory, { query: "missing module", limit: 5 }, exposure),
+      );
+      const reg = createToolRegistry({
+        exposure,
+        memory,
+        recallWithAi: disabledRecallWithAi,
+      });
+      const result = await withDateNowSequence(
+        [failureTs - 1, failureTs],
+        () => reg.call("recall", { query: "missing module", limit: 5 }, signal),
+      );
+      assert.equal(JSON.stringify(result), oldJson);
+      const body = result.structuredContent as { items: Record<string, unknown>[]; truncated: boolean };
+      assert.equal(body.truncated, false);
+      assert.equal(body.items.length, 1);
+      assert.equal(body.items[0]!.fingerprint, "fixture-missing-module");
+      assert.equal("attemptsSummary" in body.items[0]!, false);
+    }
+  });
+});
+
+test("durable recall preserves operational read errors while loadDurableMemorySnapshot still swallows", async () => {
+  const cwdError = Object.assign(new Error("ENOENT: no such file or directory, uv_cwd"), { code: "ENOENT" });
+  const durableMemory = createMemoryQueries();
+  const legacyCanonicalMemory = createMemoryQueries(() => { throw cwdError; });
+  const signal = new AbortController().signal;
+
+  const originalCwd = process.cwd;
+  process.cwd = () => { throw cwdError; };
+  try {
+    assert.throws(
+      () => loadDurableMemorySnapshotOrThrow(durableMemory),
+      (error: unknown) => error === cwdError,
+    );
+    assert.equal(loadDurableMemorySnapshot(durableMemory), undefined);
+
+    const durableReg = createToolRegistry({
+      exposure: "sanitized",
+      memory: durableMemory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const legacyReg = createToolRegistry({
+      exposure: "sanitized",
+      memory: legacyCanonicalMemory,
+      recallWithAi: disabledRecallWithAi,
+    });
+
+    const durableResult = await durableReg.call("recall", { query: "missing" }, signal);
+    const legacyResult = await legacyReg.call("recall", { query: "missing" }, signal);
+
+    assert.equal(durableResult.isError, true);
+    assert.deepEqual(durableResult.structuredContent.error, {
+      code: "memory_unavailable",
+      message: "memory unavailable",
+    });
+    assert.equal(durableResult.structuredContent.memoryCoverageIncomplete, true);
+    assert.equal(JSON.stringify(durableResult), JSON.stringify(legacyResult));
+
+    const attemptHistoryResult = await durableReg.call("attempt_history", { query: "missing" }, signal);
+    assert.equal(attemptHistoryResult.isError, undefined);
+    assert.deepEqual(attemptHistoryResult.structuredContent.entries, []);
+    assert.equal(attemptHistoryResult.structuredContent.memoryCoverageIncomplete, true);
+  } finally {
+    process.cwd = originalCwd;
+  }
+});
+
+test("recall summary failure signals truncation without partial attemptsSummary", async () => {
+  const now = Date.now();
+  const here = process.cwd();
+  const fpA = "aa00112233445566";
+  const fpB = "bb00112233445566";
+
+  const records: MemoryRecord[] = [
+    makeFailure({
+      id: "sf-a1",
+      ts: now - 40 * MINUTE,
+      cwd: here,
+      cmd: "npm test summary-fail-a",
+      fingerprint: fpA,
+      signature: ["Error: summaryFail alpha"],
+    }),
+    makeFailure({
+      id: "sf-a2",
+      ts: now - 35 * MINUTE,
+      cwd: here,
+      cmd: "npm test summary-fail-a",
+      fingerprint: fpA,
+      signature: ["Error: summaryFail alpha"],
+    }),
+    makeFix({
+      id: "sf-fix-a",
+      ts: now - 30 * MINUTE,
+      cwd: here,
+      cmd: "npm test summary-fail-a",
+      failureIds: ["sf-a2"],
+    }),
+    makeFailure({
+      id: "sf-b1",
+      ts: now - 25 * MINUTE,
+      cwd: here,
+      cmd: "npm test summary-fail-b",
+      fingerprint: fpB,
+      signature: ["Error: summaryFail beta"],
+    }),
+    makeFailure({
+      id: "sf-b2",
+      ts: now - 20 * MINUTE,
+      cwd: here,
+      cmd: "npm test summary-fail-b",
+      fingerprint: fpB,
+      signature: ["Error: summaryFail beta"],
+    }),
+    makeFix({
+      id: "sf-fix-b",
+      ts: now - 15 * MINUTE,
+      cwd: here,
+      cmd: "npm test summary-fail-b",
+      failureIds: ["sf-b2"],
+    }),
+  ];
+
+  await withDurableMemory(records, async (memory) => {
+    const signal = new AbortController().signal;
+
+    const baselineReg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const baseline = await baselineReg.call("recall", { query: "summaryFail", limit: 10 }, signal);
+    const baselineBody = baseline.structuredContent as { items: Record<string, unknown>[]; truncated: boolean };
+    assert.equal(baselineBody.truncated, false);
+    assert.equal(baselineBody.items.length, 2);
+    for (const item of baselineBody.items) {
+      assert.ok("attemptsSummary" in item);
+    }
+
+    const throwingReg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+      buildProblems: () => { throw new Error("summary grouping boom"); },
+    });
+    const thrownResult = await throwingReg.call("recall", { query: "summaryFail", limit: 10 }, signal);
+    const thrownBody = thrownResult.structuredContent as { items: Record<string, unknown>[]; truncated: boolean };
+    assert.equal(thrownResult.isError, undefined);
+    assert.equal(thrownBody.truncated, true);
+    assert.equal(thrownBody.items.length, 2);
+    for (const item of thrownBody.items) {
+      assert.equal("attemptsSummary" in item, false);
+    }
+
+    const secondHitFp = baselineBody.items[1]!.fingerprint as string;
+    const partialThrowReg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+      buildProblems: (recs, cov, opts) => {
+        const real = buildProblems(recs, cov, opts);
+        return {
+          ...real,
+          entries: real.entries.map((entry) => {
+            if (entry.fingerprint !== secondHitFp) return entry;
+            return {
+              ...entry,
+              get counts(): typeof entry.counts {
+                throw new Error("mid-loop attachment boom");
+              },
+            };
+          }),
+        };
+      },
+    });
+    const partialResult = await partialThrowReg.call("recall", { query: "summaryFail", limit: 10 }, signal);
+    const partialBody = partialResult.structuredContent as { items: Record<string, unknown>[]; truncated: boolean };
+    assert.equal(partialResult.isError, undefined);
+    assert.equal(partialBody.truncated, true);
+    assert.equal(partialBody.items.length, 2);
+    for (const item of partialBody.items) {
+      assert.equal("attemptsSummary" in item, false);
+    }
+  });
 });
