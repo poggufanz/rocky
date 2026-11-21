@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildProblems, type AttemptOutcome } from "../core/attempts.js";
-import { commandFingerprint, commandIdentity, legacyFingerprint } from "../core/fingerprint.js";
+import { buildProblems, selectProblemEntries, type AttemptOutcome } from "../core/attempts.js";
+import { commandFingerprint, commandIdentity, fingerprint, legacyFingerprint } from "../core/fingerprint.js";
 import {
   MEMORY_FORMAT_VERSION,
   type AgentStamp,
@@ -461,5 +461,215 @@ test("fingerprint filtering preserves ungroupedLegacy count even when filtered o
   });
   assert.equal(matchNone.entries.length, 0);
   assert.equal(matchNone.ungroupedLegacy, 1);
+});
+
+test("selectProblemEntries default listing matches the CLI rule", () => {
+  const DAY = 86_400_000;
+  const THIRTY_DAYS_MS = 30 * DAY;
+
+  // Kept: 2 recent non-passed attempts in /app (ranks first)
+  const a1 = makeFailure({ id: "a1", ts: NOW - 4 * HOUR, fingerprint: "aaaa000000000001", cwd: "/app" });
+  const a2 = makeFailure({ id: "a2", ts: NOW - 3 * HOUR, fingerprint: "aaaa000000000001", cwd: "/app" });
+
+  // Kept: 2 recent attempts in /app, one passed -> 1 recent non-passed (ranks second even though newer)
+  const bFix = makeFix({ id: "bx", ts: NOW - 30 * 60_000, cwd: "/app", failureIds: ["b2"] });
+  const b1 = makeFailure({ id: "b1", ts: NOW - 2 * HOUR, fingerprint: "bbbb000000000002", cwd: "/app" });
+  const b2 = makeFailure({ id: "b2", ts: NOW - HOUR, fingerprint: "bbbb000000000002", cwd: "/app", resolvedBy: bFix.id });
+
+  // Dropped: only 1 attempt in /app
+  const c1 = makeFailure({ id: "c1", ts: NOW - 20 * 60_000, fingerprint: "cccc000000000003", cwd: "/app" });
+
+  // Dropped: 2 attempts in /app, but one is older than 30 days (only 1 recent)
+  const d1 = makeFailure({ id: "d1", ts: NOW - THIRTY_DAYS_MS - 1_000, fingerprint: "dddd000000000004", cwd: "/app" });
+  const d2 = makeFailure({ id: "d2", ts: NOW - 10 * 60_000, fingerprint: "dddd000000000004", cwd: "/app" });
+
+  // Other cwd: 2 recent non-passed attempts, newest overall -> dropped unless allDirs
+  const e1 = makeFailure({ id: "e1", ts: NOW - 15 * 60_000, fingerprint: "eeee000000000005", cwd: "/other" });
+  const e2 = makeFailure({ id: "e2", ts: NOW - 5 * 60_000, fingerprint: "eeee000000000005", cwd: "/other" });
+
+  const records: MemoryRecord[] = [d1, a1, a2, b1, b2, bFix, c1, e1, d2, e2];
+  const coverage = completeCoverage(records.length);
+
+  const here = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: undefined,
+    allDirs: false,
+    limit: 10,
+  });
+  assert.equal(here.cutoffTs, NOW - THIRTY_DAYS_MS);
+  assert.equal(here.set.coverage, coverage);
+  assert.equal(here.set.entries.length, 5);
+  assert.deepEqual(
+    here.entries.map((entry) => entry.fingerprint),
+    ["aaaa000000000001", "bbbb000000000002"],
+  );
+
+  const all = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: undefined,
+    allDirs: true,
+    limit: 10,
+  });
+  assert.equal(all.cutoffTs, NOW - THIRTY_DAYS_MS);
+  assert.deepEqual(
+    all.entries.map((entry) => entry.fingerprint),
+    ["eeee000000000005", "aaaa000000000001", "bbbb000000000002"],
+  );
+
+  const limited = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: undefined,
+    allDirs: true,
+    limit: 2,
+  });
+  assert.deepEqual(
+    limited.entries.map((entry) => entry.fingerprint),
+    ["eeee000000000005", "aaaa000000000001"],
+  );
+});
+
+test("selectProblemEntries fingerprint and query modes", () => {
+  const legacySig = ["error: redis socket hung up"];
+  const legacyFp = legacyFingerprint("Error: redis socket hung up", "npm test", 1);
+  const canonicalFp = fingerprint("Error: redis socket hung up", "npm test", 1);
+  assert.notEqual(legacyFp, canonicalFp);
+
+  const fLegacy: FailureRecord = {
+    ...makeFailure({
+      id: "f-legacy",
+      ts: NOW - 4 * HOUR,
+      cwd: "/app",
+      cmd: "npm test",
+      fingerprint: legacyFp,
+      signature: legacySig,
+      excerpt: "Error: redis socket hung up",
+    }),
+    fingerprintV: undefined,
+  };
+  const fV2 = makeFailure({
+    id: "f-v2",
+    ts: NOW - 3 * HOUR,
+    cwd: "/app",
+    cmd: "npm test",
+    fingerprint: canonicalFp,
+    signature: legacySig,
+    excerpt: "Error: redis socket hung up",
+  });
+  const fOtherDirSameFp = makeFailure({
+    id: "f-other-dir",
+    ts: NOW - 2 * HOUR,
+    cwd: "/other",
+    cmd: "npm test",
+    fingerprint: canonicalFp,
+    signature: legacySig,
+    excerpt: "Error: redis socket hung up",
+  });
+  const fSecond = makeFailure({
+    id: "f-second",
+    ts: NOW - HOUR,
+    cwd: "/app",
+    cmd: "npm run lint",
+    fingerprint: "3333cccc4444dddd",
+    signature: ["error: redis timeout on lint"],
+    excerpt: "Error: redis timeout on lint",
+  });
+
+  const records: MemoryRecord[] = [fLegacy, fV2, fOtherDirSameFp, fSecond];
+  const coverage = completeCoverage(records.length);
+
+  // 16-hex canonical fingerprint mode respects cwdScope unless allDirs
+  const byFpHere = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: canonicalFp,
+    allDirs: false,
+    limit: 10,
+  });
+  assert.equal(byFpHere.cutoffTs, undefined);
+  assert.equal(byFpHere.entries.length, 1);
+  assert.equal(byFpHere.entries[0]!.fingerprint, canonicalFp);
+  assert.equal(byFpHere.entries[0]!.cwd, "/app");
+
+  // 16-hex family member (legacy fingerprint) matches migrated entry
+  const byFamily = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: legacyFp,
+    allDirs: false,
+    limit: 10,
+  });
+  assert.equal(byFamily.cutoffTs, undefined);
+  assert.equal(byFamily.entries.length, 1);
+  assert.equal(byFamily.entries[0]!.problemId, byFpHere.entries[0]!.problemId);
+
+  // 16-hex problemId matches entry
+  const targetProblemId = byFpHere.entries[0]!.problemId;
+  const byProblemId = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: targetProblemId,
+    allDirs: false,
+    limit: 10,
+  });
+  assert.equal(byProblemId.cutoffTs, undefined);
+  assert.equal(byProblemId.entries.length, 1);
+  assert.equal(byProblemId.entries[0]!.problemId, targetProblemId);
+
+  // 16-hex with allDirs returns both cwds and honors limit
+  const byFpAll = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: canonicalFp,
+    allDirs: true,
+    limit: 10,
+  });
+  assert.equal(byFpAll.entries.length, 2);
+
+  const byFpLimited = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: canonicalFp,
+    allDirs: true,
+    limit: 1,
+  });
+  assert.equal(byFpLimited.entries.length, 1);
+
+  // Text query picks via recall hit family, filters cwd, and honors limit
+  const byTextAllHere = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: "redis",
+    allDirs: false,
+    limit: 10,
+  });
+  assert.equal(byTextAllHere.cutoffTs, undefined);
+  assert.equal(byTextAllHere.entries.length, 2);
+  assert.deepEqual(
+    new Set(byTextAllHere.entries.map((entry) => entry.fingerprint)),
+    new Set([canonicalFp, "3333cccc4444dddd"]),
+  );
+
+  const byTextLimited = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: "redis",
+    allDirs: false,
+    limit: 1,
+  });
+  assert.equal(byTextLimited.cutoffTs, undefined);
+  assert.equal(byTextLimited.entries.length, 1);
+
+  // Text query with allDirs includes other directory entry too
+  const byTextAllDirs = selectProblemEntries(records, coverage, {
+    now: NOW,
+    cwd: "/app",
+    query: "redis",
+    allDirs: true,
+    limit: 10,
+  });
+  assert.equal(byTextAllDirs.entries.length, 3);
 });
 

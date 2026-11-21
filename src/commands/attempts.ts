@@ -1,5 +1,5 @@
 import {
-  buildProblems,
+  selectProblemEntries,
   type Attempt,
   type AttemptOutcome,
   type ProblemEntry,
@@ -9,7 +9,6 @@ import { describeMemoryCoverage } from "../core/coverage.js";
 import {
   createMemoryQueries,
   loadDurableMemorySnapshot,
-  queryRecall,
   type MemoryQueries,
 } from "../core/memory-query.js";
 import { isCompleteMemoryCoverage, tailReadable } from "../core/memory-read.js";
@@ -21,10 +20,8 @@ import { formatUtcDate, formatUtcDateTime } from "./stats.js";
 const DEFAULT_LIMIT = 10;
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 50;
-const THIRTY_DAYS_MS = 30 * 86_400_000;
 const MAX_CMD_DISPLAY_WIDTH = 24;
 const OUTCOME_COLUMN_WIDTH = 18;
-const FINGERPRINT_HEX_RE = /^[0-9a-f]{16}$/u;
 const FOOTER_TEXT = "Rocky records order, not cause.";
 
 export interface ParsedAttemptsArgs {
@@ -442,63 +439,13 @@ export async function attempts(
     return 1;
   }
 
-  let baseSet: ProblemSet;
-  let entries: ProblemEntry[];
-  let cutoffTs: number | undefined;
-
-  if (parsed.query === undefined) {
-    cutoffTs = now - THIRTY_DAYS_MS;
-    baseSet = buildProblems(snapshot.records, snapshot.coverage, { now, cwd });
-    const recentCount = (entry: ProblemEntry): number => {
-      let count = 0;
-      for (const attempt of entry.attempts) {
-        if (attempt.ts >= cutoffTs!) count += 1;
-      }
-      return count;
-    };
-    const recentNonPassed = (entry: ProblemEntry): number => {
-      let count = 0;
-      for (const attempt of entry.attempts) {
-        if (attempt.ts >= cutoffTs! && attempt.outcome !== "passed") count += 1;
-      }
-      return count;
-    };
-    entries = baseSet.entries
-      .filter((entry) => (parsed.allDirs || entry.cwdScope === "here") && recentCount(entry) >= 2)
-      .sort((a, b) =>
-        recentNonPassed(b) - recentNonPassed(a) ||
-        b.lastSeenTs - a.lastSeenTs ||
-        (a.problemId < b.problemId ? -1 : a.problemId > b.problemId ? 1 : 0),
-      )
-      .slice(0, parsed.limit);
-  } else if (FINGERPRINT_HEX_RE.test(parsed.query)) {
-    baseSet = buildProblems(snapshot.records, snapshot.coverage, {
-      now,
-      fingerprint: parsed.query,
-      cwd,
-    });
-    entries = baseSet.entries
-      .filter((entry) => parsed.allDirs || entry.cwdScope === "here")
-      .slice(0, parsed.limit);
-  } else {
-    baseSet = buildProblems(snapshot.records, snapshot.coverage, { now, cwd });
-    const hits = queryRecall(snapshot.records, { query: parsed.query, limit: 50, now });
-    const eligible = baseSet.entries.filter((entry) => parsed.allDirs || entry.cwdScope === "here");
-    const seenProblemIds = new Set<string>();
-    const matched: ProblemEntry[] = [];
-    for (const hit of hits) {
-      for (const entry of eligible) {
-        if (seenProblemIds.has(entry.problemId)) continue;
-        if (entry.family.includes(hit.failure.fingerprint)) {
-          seenProblemIds.add(entry.problemId);
-          matched.push(entry);
-          if (matched.length >= parsed.limit) break;
-        }
-      }
-      if (matched.length >= parsed.limit) break;
-    }
-    entries = matched;
-  }
+  const { set: baseSet, entries, cutoffTs } = selectProblemEntries(snapshot.records, snapshot.coverage, {
+    now,
+    cwd,
+    query: parsed.query,
+    allDirs: parsed.allDirs,
+    limit: parsed.limit,
+  });
 
   const sanitizedEntries = entries.map(sanitizeProblemEntry);
 
