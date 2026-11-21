@@ -1973,9 +1973,8 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                   cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
                 );
               }
-              const queryNow = input.now ?? Date.now();
               const hits = safeReadMemory(
-                () => queryRecall(snapshot.records, { ...input, now: queryNow }),
+                () => queryRecall(snapshot.records, input),
                 [],
                 canonicalMemory,
                 readState,
@@ -1985,14 +1984,14 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 : snapshot.coverage;
               pairedCoverage = coverage;
               const projected = safeProjection(
-                () => projectRecallHits(hits, options.exposure, queryNow),
+                () => projectRecallHits(hits, options.exposure),
                 { exposure: options.exposure, items: [], truncated: true },
               );
               let finalProjected = projected;
               if (!readState.failed && projected.items.length > 0) {
                 const summarizeProblems = options.buildProblems ?? buildProblems;
                 const summarized = safeProjection<readonly ProjectedRecallHit[] | undefined>(
-                  () => summarizeRecallItems(projected.items, hits, snapshot.records, snapshot.coverage, queryNow, summarizeProblems),
+                  () => summarizeRecallItems(projected.items, hits, snapshot.records, snapshot.coverage, input.now ?? Date.now(), summarizeProblems),
                   undefined,
                 );
                 if (summarized === undefined) {

@@ -1305,7 +1305,33 @@ async function withDateNowSequence<T>(sequence: readonly number[], run: () => Pr
   }
 }
 
-test("recall output stays byte-identical across the load-to-query clock boundary", async () => {
+async function withClockAdvanceOnSetAdd<T>(
+  targetValue: string,
+  initialNow: number,
+  advancedNow: number,
+  run: () => Promise<T> | T,
+): Promise<{ result: T; triggered: boolean }> {
+  const originalNow = Date.now;
+  const originalSetAdd = Set.prototype.add;
+  let currentNow = initialNow;
+  let triggered = false;
+  Date.now = () => currentNow;
+  Set.prototype.add = function addWithClockAdvance<V>(this: Set<V>, value: V): Set<V> {
+    if (!triggered && (value as unknown) === targetValue) {
+      triggered = true;
+      currentNow = advancedNow;
+    }
+    return originalSetAdd.call(this, value);
+  };
+  try {
+    return { result: await run(), triggered };
+  } finally {
+    Set.prototype.add = originalSetAdd;
+    Date.now = originalNow;
+  }
+}
+
+test("recall output stays byte-identical when clock advances across load and uniqueRecords", async () => {
   const failureTs = 1_700_000_000_000;
   const here = process.cwd();
   const f1 = makeFailure({
@@ -1322,25 +1348,87 @@ test("recall output stays byte-identical across the load-to-query clock boundary
   await withDurableMemory([f1], async (memory) => {
     const signal = new AbortController().signal;
     for (const exposure of ["sanitized", "raw"] as const) {
-      const oldJson = await withDateNowSequence(
-        [failureTs - 1, failureTs],
-        () => freezeOldRecallEnvelope(memory, { query: "missing module", limit: 5 }, exposure),
-      );
       const reg = createToolRegistry({
         exposure,
         memory,
         recallWithAi: disabledRecallWithAi,
       });
-      const result = await withDateNowSequence(
+
+      const oldLoadBoundaryJson = await withDateNowSequence(
+        [failureTs - 1, failureTs],
+        () => freezeOldRecallEnvelope(memory, { query: "missing module", limit: 5 }, exposure),
+      );
+      const loadBoundaryResult = await withDateNowSequence(
         [failureTs - 1, failureTs],
         () => reg.call("recall", { query: "missing module", limit: 5 }, signal),
       );
-      assert.equal(JSON.stringify(result), oldJson);
-      const body = result.structuredContent as { items: Record<string, unknown>[]; truncated: boolean };
-      assert.equal(body.truncated, false);
-      assert.equal(body.items.length, 1);
-      assert.equal(body.items[0]!.fingerprint, "fixture-missing-module");
-      assert.equal("attemptsSummary" in body.items[0]!, false);
+      assert.equal(JSON.stringify(loadBoundaryResult), oldLoadBoundaryJson);
+
+      const oldDedupRun = await withClockAdvanceOnSetAdd(
+        f1.id,
+        failureTs - 1,
+        failureTs,
+        () => freezeOldRecallEnvelope(memory, { query: "missing module", limit: 5 }, exposure),
+      );
+      const durableDedupRun = await withClockAdvanceOnSetAdd(
+        f1.id,
+        failureTs - 1,
+        failureTs,
+        () => reg.call("recall", { query: "missing module", limit: 5 }, signal),
+      );
+      assert.equal(oldDedupRun.triggered, true);
+      assert.equal(durableDedupRun.triggered, true);
+      assert.equal(JSON.stringify(durableDedupRun.result), oldDedupRun.result);
+      const dedupBody = durableDedupRun.result.structuredContent as {
+        items: Record<string, unknown>[];
+        truncated: boolean;
+      };
+      assert.equal(dedupBody.truncated, false);
+      assert.equal(dedupBody.items.length, 1);
+      assert.equal(dedupBody.items[0]!.fingerprint, "fixture-missing-module");
+      assert.equal("attemptsSummary" in dedupBody.items[0]!, false);
+    }
+  });
+});
+
+test("recall output stays byte-identical when clock steps back between query and projection", async () => {
+  const failureTs = 1_700_000_000_000;
+  const here = process.cwd();
+  const f1 = makeFailure({
+    id: "fixture-failure-resolved",
+    ts: failureTs,
+    cwd: here,
+    cmd: "npm test",
+    fingerprint: "fixture-missing-module",
+    fingerprintV: undefined,
+    signature: ["Error: missing module from /private/rocky/project"],
+    excerpt: "Error: missing module",
+  });
+
+  await withDurableMemory([f1], async (memory) => {
+    const signal = new AbortController().signal;
+    for (const exposure of ["sanitized", "raw"] as const) {
+      const reg = createToolRegistry({
+        exposure,
+        memory,
+        recallWithAi: disabledRecallWithAi,
+      });
+
+      const oldProjectionStepBackJson = await withDateNowSequence(
+        [failureTs, failureTs, failureTs - 1],
+        () => freezeOldRecallEnvelope(memory, { query: "missing module", limit: 5 }, exposure),
+      );
+      const projectionStepBackResult = await withDateNowSequence(
+        [failureTs, failureTs, failureTs - 1],
+        () => reg.call("recall", { query: "missing module", limit: 5 }, signal),
+      );
+      assert.equal(JSON.stringify(projectionStepBackResult), oldProjectionStepBackJson);
+      const projectionBody = projectionStepBackResult.structuredContent as {
+        items: Record<string, unknown>[];
+        truncated: boolean;
+      };
+      assert.equal(projectionBody.truncated, true);
+      assert.equal(projectionBody.items.length, 0);
     }
   });
 });
