@@ -595,17 +595,25 @@ mod tests {
 
     #[test]
     fn old_v1_card_json_round_trips_byte_identical() {
+        // Serialized v1 card from rocky-desk card_detail_model::tests::timeline_steps_with_subs_and_facts
+        // with legacy cmd and edit flow steps (no start_ms, end_ms, cwd, tool_use_id, or desc keys).
         let old_line = concat!(
-            r#"{"v":1,"card_id":"c-legacy-1","rev":1,"repo_id":"0123456789abcdef0123456789abcdef","#,
-            r#""root":"/repo","main_root":null,"branch":"main","session_id":"s-1","agent_id":"","#,
-            r#""agent_type":"","parent_card_id":null,"started_ms":1000,"ended_ms":5000,"#,
-            r#""status":"done","prompt":"fix tests","prompt_truncated":false,"importance":"low","#,
-            r#""blocks":[],"more_count":0,"flow":["#,
-            r#"{"kind":"cmd","text":"npm test","ok":false,"dur_ms":300,"seqs":[],"exit_code":1,"error":"Error: fail"},"#,
-            r#"{"kind":"edit","text":"src/a.ts","ok":true,"dur_ms":200,"seqs":[1]}"#,
-            r#"],"flow_more":0,"outside_count":0,"coverage":{"state":"full","reasons":[]}}"#
+            r#"{"v":1,"card_id":"c1","rev":1,"repo_id":"repo-1","root":"/work/rocky","#,
+            r#""main_root":"/work/rocky","branch":"feat/cards","session_id":"sess-1","agent_id":"","#,
+            r#""agent_type":"","parent_card_id":null,"started_ms":1000,"ended_ms":90000,"#,
+            r#""status":"done","prompt":"Fix discount calculation","prompt_truncated":false,"#,
+            r#""importance":"medium","blocks":["#,
+            r#"{"seq":1,"path":"src/auth.rs","symbol":{"kind":"function","name":"login","container":null,"exported":false},"labels":[{"id":"guard_added","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-1"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":42,"added":3,"removed":1,"quote":null},"#,
+            r#"{"seq":2,"path":"src/auth.rs","symbol":null,"labels":[{"id":"return_changed","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-2"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":null,"added":3,"removed":1,"quote":null},"#,
+            r#"{"seq":3,"path":"src/auth.rs","symbol":null,"labels":[{"id":"body_changed","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-3"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":null,"added":null,"removed":null,"quote":null},"#,
+            r#"{"seq":4,"path":"src/auth.rs","symbol":null,"labels":[{"id":"loop_added","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-4"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":99,"added":3,"removed":1,"quote":null}"#,
+            r#"],"more_count":0,"flow":["#,
+            r#"{"kind":"cmd","text":"cargo test\n-p rocky-desk","ok":true,"dur_ms":8000,"seqs":[]},"#,
+            r#"{"kind":"edit","text":"src/auth.rs › login","ok":false,"dur_ms":65000,"seqs":[1,999,2,3,4]}"#,
+            r#"],"flow_more":0,"outside_count":0,"coverage":{"state":"full","reasons":[]}}"#,
         );
         let card: Card = serde_json::from_str(old_line).expect("deserialize old v1 card line");
+        assert_eq!(card.blocks.len(), 4);
         assert_eq!(card.flow.len(), 2);
         for step in &card.flow {
             assert_eq!(step.start_ms, None);

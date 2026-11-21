@@ -1092,52 +1092,41 @@ fn flow_step_from_window(
     user_home_abs: Option<&AbsPath>,
     cwd: Option<&str>,
 ) -> FlowStep {
-    let dur_ms = win
-        .post_ms
-        .map(|post| post.saturating_sub(win.pre_ms))
-        .unwrap_or(0);
     let ok = win.ok.unwrap_or(false);
-    let start_ms = Some(win.pre_ms);
-    let end_ms = win.post_ms;
-    let tool_use_id = (!win.tool_use_id.is_empty()).then(|| win.tool_use_id.clone());
-    let step_cwd = win
-        .cwd
-        .as_deref()
-        .filter(|c| root_canon.is_none_or(|r| canonical_path(c, cfg!(windows)) != r))
-        .map(str::to_owned);
-    match win.kind {
-        ToolKind::Bash => FlowStep {
-            kind: FlowKind::Cmd,
-            text: win.command.clone().unwrap_or_default(),
-            ok,
-            dur_ms,
-            seqs: Vec::new(),
-            exit_code: if ok { None } else { win.exit_code },
-            error: if ok { None } else { win.error_head.clone() },
-            start_ms,
-            end_ms,
-            cwd: step_cwd,
-            tool_use_id,
-            desc: win.description.clone(),
-        },
+    let (kind, text, seqs, exit_code, error, desc) = match win.kind {
+        ToolKind::Bash => (
+            FlowKind::Cmd,
+            win.command.clone().unwrap_or_default(),
+            Vec::new(),
+            if ok { None } else { win.exit_code },
+            if ok { None } else { win.error_head.clone() },
+            win.description.clone(),
+        ),
         ToolKind::Edit => {
             let (text, seqs) = edit_flow_label(win, blocks, session_root_abs, user_home_abs, cwd);
-            FlowStep {
-                kind: FlowKind::Edit,
-                text,
-                ok,
-                dur_ms,
-                seqs,
-                exit_code: None,
-                error: None,
-                start_ms,
-                end_ms,
-                cwd: step_cwd,
-                tool_use_id,
-                desc: None,
-            }
+            (FlowKind::Edit, text, seqs, None, None, None)
         }
         ToolKind::Other => unreachable!(),
+    };
+    FlowStep {
+        kind,
+        text,
+        ok,
+        dur_ms: win
+            .post_ms
+            .map_or(0, |post| post.saturating_sub(win.pre_ms)),
+        seqs,
+        exit_code,
+        error,
+        start_ms: Some(win.pre_ms),
+        end_ms: win.post_ms,
+        cwd: win
+            .cwd
+            .as_deref()
+            .filter(|c| root_canon.is_none_or(|r| canonical_path(c, cfg!(windows)) != r))
+            .map(str::to_owned),
+        tool_use_id: (!win.tool_use_id.is_empty()).then(|| win.tool_use_id.clone()),
+        desc,
     }
 }
 
@@ -3252,6 +3241,43 @@ mod tests {
         assert_eq!(step.desc.as_deref(), Some("Run tests"));
     }
 
+    fn bash_hook_payloads(subdir: &str) -> [(u64, serde_json::Value); 4] {
+        let input = serde_json::json!({ "command": "npm test", "description": "Run tests" });
+        let root = test_root();
+        [
+            (
+                1_000,
+                serde_json::json!({
+                    "hook_event_name": "UserPromptSubmit", "session_id": "sess-1",
+                    "cwd": root, "prompt": "run tests"
+                }),
+            ),
+            (
+                1_100,
+                serde_json::json!({
+                    "hook_event_name": "PreToolUse", "session_id": "sess-1",
+                    "cwd": subdir, "tool_name": "Bash", "tool_use_id": "b-off",
+                    "tool_input": input
+                }),
+            ),
+            (
+                1_400,
+                serde_json::json!({
+                    "hook_event_name": "PostToolUseFailure", "session_id": "sess-1",
+                    "cwd": subdir, "tool_name": "Bash", "tool_use_id": "b-off",
+                    "tool_input": input, "error": "Exit code 1\nError: secret",
+                    "is_interrupt": false
+                }),
+            ),
+            (
+                2_000,
+                serde_json::json!({
+                    "hook_event_name": "Stop", "session_id": "sess-1", "cwd": root
+                }),
+            ),
+        ]
+    }
+
     #[test]
     fn flow_step_tool_text_off_omits_desc_and_clears_text() {
         let capture = rocky_proto::hook::Capture {
@@ -3266,56 +3292,11 @@ mod tests {
             branch: Some("main".to_string()),
         };
         let mut tracker = crate::cards::windows::Tracker::new();
-
-        let submit_raw = serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "UserPromptSubmit",
-            "session_id": "sess-1",
-            "cwd": test_root(),
-            "prompt": "run tests"
-        }))
-        .unwrap();
-        let pre_raw = serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "session_id": "sess-1",
-            "cwd": subdir,
-            "tool_name": "Bash",
-            "tool_use_id": "b-off",
-            "tool_input": {
-                "command": "npm test",
-                "description": "Run tests"
-            }
-        }))
-        .unwrap();
-        let post_raw = serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "PostToolUseFailure",
-            "session_id": "sess-1",
-            "cwd": subdir,
-            "tool_name": "Bash",
-            "tool_use_id": "b-off",
-            "tool_input": {
-                "command": "npm test",
-                "description": "Run tests"
-            },
-            "error": "Exit code 1\nError: secret",
-            "is_interrupt": false
-        }))
-        .unwrap();
-        let stop_raw = serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "Stop",
-            "session_id": "sess-1",
-            "cwd": test_root()
-        }))
-        .unwrap();
-
-        let submit = rocky_proto::hook::parse_hook_payload(&submit_raw, capture).unwrap();
-        let pre = rocky_proto::hook::parse_hook_payload(&pre_raw, capture).unwrap();
-        let post = rocky_proto::hook::parse_hook_payload(&post_raw, capture).unwrap();
-        let stop = rocky_proto::hook::parse_hook_payload(&stop_raw, capture).unwrap();
-
-        tracker.on_event(&submit, 1_000, &r);
-        tracker.on_event(&pre, 1_100, &r);
-        tracker.on_event(&post, 1_400, &r);
-        tracker.on_event(&stop, 2_000, &r);
+        for (ts, payload) in bash_hook_payloads(&subdir) {
+            let raw = serde_json::to_vec(&payload).unwrap();
+            let ev = rocky_proto::hook::parse_hook_payload(&raw, capture).unwrap();
+            tracker.on_event(&ev, ts, &r);
+        }
 
         let turn = tracker
             .closed_turn(&main_agent("sess-1"))

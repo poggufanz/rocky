@@ -1874,51 +1874,54 @@ mod tests {
         assert!(card.flow[0].ok);
     }
 
+    fn run_bash_pair(
+        tracker: &mut Tracker,
+        r: &RepoInfo,
+        id: &str,
+        pre: (u64, &str, Option<&str>, Option<&str>),
+        post: (u64, &str, Option<&str>, Option<&str>),
+    ) {
+        let mut a = tool_ev("PreToolUse", "S1", None, "Bash", id, None, Some(pre.1));
+        a.cwd = pre.2.map(str::to_owned);
+        a.description = pre.3.map(str::to_owned);
+        tracker.on_event(&a, pre.0, r);
+        let mut b = tool_ev(post.1, "S1", None, "Bash", id, None, None);
+        b.cwd = post.2.map(str::to_owned);
+        b.description = post.3.map(str::to_owned);
+        tracker.on_event(&b, post.0, r);
+    }
+
     #[test]
     fn tool_window_tracks_pre_cwd_and_backfills_description_only() {
-        let mut tracker = Tracker::new();
-        let r = repo(Some("C:/repo"));
+        let (mut tracker, r) = (Tracker::new(), repo(Some("C:/repo")));
         tracker.on_event(&ev("UserPromptSubmit", "S1", None), 1_000, &r);
 
-        // PreToolUse sets cwd and omits description; PostToolUseFailure backfills description
-        // without changing cwd.
-        let mut pre_1 = tool_ev(
-            "PreToolUse",
-            "S1",
-            None,
-            "Bash",
+        // b-1: Pre sets cwd, omits desc; PostFailure backfills desc without changing cwd.
+        run_bash_pair(
+            &mut tracker,
+            &r,
             "b-1",
-            None,
-            Some("npm test"),
+            (1_100, "npm test", Some("C:/repo/sub"), None),
+            (
+                1_400,
+                "PostToolUseFailure",
+                Some("C:/repo/other"),
+                Some("Run tests"),
+            ),
         );
-        pre_1.cwd = Some("C:/repo/sub".into());
-        pre_1.description = None;
-        tracker.on_event(&pre_1, 1_100, &r);
-
-        let mut post_1 = tool_ev("PostToolUseFailure", "S1", None, "Bash", "b-1", None, None);
-        post_1.cwd = Some("C:/repo/other".into());
-        post_1.description = Some("Run tests".into());
-        tracker.on_event(&post_1, 1_400, &r);
-
-        // PreToolUse omits cwd and sets description; PostToolUse does NOT fill cwd and
-        // does NOT overwrite description.
-        let mut pre_2 = tool_ev(
-            "PreToolUse",
-            "S1",
-            None,
-            "Bash",
+        // b-2: Pre omits cwd, sets desc; Post neither fills cwd nor overwrites desc.
+        run_bash_pair(
+            &mut tracker,
+            &r,
             "b-2",
-            None,
-            Some("cargo test"),
+            (1_500, "cargo test", None, Some("Original desc")),
+            (
+                1_800,
+                "PostToolUse",
+                Some("C:/repo/post-only"),
+                Some("Later desc"),
+            ),
         );
-        pre_2.cwd = None;
-        pre_2.description = Some("Original desc".into());
-        tracker.on_event(&pre_2, 1_500, &r);
-
-        let mut post_2 = tool_ev("PostToolUse", "S1", None, "Bash", "b-2", None, None);
-        post_2.cwd = Some("C:/repo/post-only".into());
-        post_2.description = Some("Later desc".into());
-        tracker.on_event(&post_2, 1_800, &r);
 
         let turn = tracker.open_turn(&key("S1", "")).expect("open turn");
         assert_eq!(turn.windows.len(), 2);

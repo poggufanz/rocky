@@ -157,6 +157,39 @@ describe("scrubRepoCards", () => {
     assert.deepEqual(parsed.flow, [keptStep]);
   });
 
+  it("drops flow steps whose cwd or desc names the root and keeps a control step", () => {
+    const cwdStep = {
+      kind: "cmd",
+      text: "npm test",
+      ok: false,
+      dur_ms: 5,
+      seqs: [],
+      cwd: "/work/app/packages/api",
+    };
+    const descStep = {
+      kind: "cmd",
+      text: "npm run lint",
+      ok: true,
+      dur_ms: 5,
+      seqs: [],
+      desc: "Run lint in /work/app",
+    };
+    const controlStep = {
+      kind: "cmd",
+      text: "npm run build",
+      ok: true,
+      dur_ms: 5,
+      seqs: [],
+      cwd: "/work/other/packages/ui",
+      desc: "Build ui package",
+    };
+    const line = card("c1", [block(0, "/work/app/a.ts"), block(1, "/work/other/b.ts")], [cwdStep, descStep, controlStep]);
+    const path = write("x.jsonl", `${line}\n`);
+    scrubRepoCards(["/work/app"], { rockyHome: home.dir(), platform: "linux" });
+    const parsed = JSON.parse(readFileSync(path, "utf8").trim());
+    assert.deepEqual(parsed.flow, [controlStep]);
+  });
+
   it("drops the whole line when every block matches", () => {
     const keep = card("keep", [block(0, "/work/other/x.ts")], []);
     const gone = card("gone", [block(0, "/work/app/a.ts"), block(1, "/work/app/b.ts")], [step("edit", [0, 1])]);
