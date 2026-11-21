@@ -1112,6 +1112,7 @@ export function withMemoryTransaction<T>(
 }
 
 export function recordFailure(rawCmd: string, exitCode: number, stderr: string): FailureRecord {
+  if (!Number.isSafeInteger(exitCode)) throw new RangeError("exitCode must be a safe integer");
   const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
@@ -1129,6 +1130,7 @@ export function recordFailure(rawCmd: string, exitCode: number, stderr: string):
 }
 
 export function recordWatchFailure(rawCmd: string, exitCode: number, stderr: string, cwd = process.cwd()): FailureRecord {
+  if (!Number.isSafeInteger(exitCode)) throw new RangeError("exitCode must be a safe integer");
   const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();
@@ -1437,6 +1439,7 @@ export function clearPendingIfResolved(
 }
 
 export function recordHookFailure(rawCmd: string, exitCode: number, cwd: string): FailureRecord {
+  if (!Number.isSafeInteger(exitCode)) throw new RangeError("exitCode must be a safe integer");
   const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
   const ts = Date.now();

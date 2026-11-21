@@ -117,6 +117,7 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
 
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
 export function hookFail(cmd: string, exitCode: number, cwd: string): number {
+  if (!Number.isSafeInteger(exitCode) || !isAbsolute(cwd)) return 0;
   if (CANCEL_CODES.has(exitCode)) return 0;
   try {
     drainGuardPending();
@@ -224,6 +225,7 @@ export function isTypoSymptom(cmd: string, exitCode: number): boolean {
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
 export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): number {
+  if (!isAbsolute(cwd)) return 0;
   try {
     drainGuardPending();
   } catch {
