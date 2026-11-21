@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import test, { type TestContext } from "node:test";
 import {
   attempts,
@@ -473,39 +473,61 @@ test("hostile cmd, signature, and changes render safe in both stderr and JSON wi
   );
 });
 
-test("--json handles stdout EPIPE quietly while preserving other write errors", async (t) => {
+test("--json handles stdout EPIPE quietly while preserving other write errors in any event order", async (t) => {
   const home = freshHome(t);
   seedDefaultListingMemory(home);
 
   const origDescriptor = Object.getOwnPropertyDescriptor(process, "stdout");
-  const installFakeStdout = (errorCode: string) => {
-    const output = new EventEmitter() as EventEmitter & {
-      write: (chunk: string, callback?: (error?: Error) => void) => boolean;
-    };
-    output.write = (_chunk: string, callback?: (error?: Error) => void) => {
-      setImmediate(() => {
+  const installWritableStdout = (
+    errorCode: string,
+    mode: "callback-then-error" | "sync-callback-then-error" | "error-then-callback" | "destroy-then-callback",
+  ): Writable => {
+    const stream = new Writable({
+      write(_chunk, _encoding, callback) {
         const err = Object.assign(new Error(`write ${errorCode}`), { code: errorCode });
-        output.emit("error", err);
-        callback?.(err);
-      });
-      return true;
-    };
-    Object.defineProperty(process, "stdout", { value: output, configurable: true, enumerable: true });
-    return output;
+        if (mode === "sync-callback-then-error") {
+          callback(err);
+          return;
+        }
+        setImmediate(() => {
+          if (mode === "callback-then-error") {
+            callback(err);
+          } else if (mode === "error-then-callback") {
+            stream.emit("error", err);
+            callback(err);
+          } else {
+            stream.destroy(err);
+            callback(err);
+          }
+        });
+      },
+    });
+    Object.defineProperty(process, "stdout", { value: stream, configurable: true, enumerable: true });
+    return stream;
   };
 
   try {
-    const epipeOut = installFakeStdout("EPIPE");
-    const epipeCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
-    assert.equal(epipeCode, 0);
-    assert.equal(epipeOut.listenerCount("error"), 0);
+    for (const mode of [
+      "callback-then-error",
+      "sync-callback-then-error",
+      "error-then-callback",
+      "destroy-then-callback",
+    ] as const) {
+      const epipeOut = installWritableStdout("EPIPE", mode);
+      const epipeCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+      assert.equal(epipeCode, 0, mode);
+      assert.equal(epipeOut.listenerCount("error"), 0, `${mode} EPIPE error listeners`);
+      assert.equal(epipeOut.listenerCount("close"), 0, `${mode} EPIPE close listeners`);
 
-    const eioOut = installFakeStdout("EIO");
-    await assert.rejects(
-      () => attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
-      (error: NodeJS.ErrnoException) => error.code === "EIO",
-    );
-    assert.equal(eioOut.listenerCount("error"), 0);
+      const eioOut = installWritableStdout("EIO", mode);
+      await assert.rejects(
+        () => attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+        (error: NodeJS.ErrnoException) => error.code === "EIO",
+        mode,
+      );
+      assert.equal(eioOut.listenerCount("error"), 0, `${mode} EIO error listeners`);
+      assert.equal(eioOut.listenerCount("close"), 0, `${mode} EIO close listeners`);
+    }
   } finally {
     if (origDescriptor) Object.defineProperty(process, "stdout", origDescriptor);
   }

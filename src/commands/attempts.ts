@@ -254,7 +254,11 @@ function isEpipeError(error: unknown): boolean {
 }
 
 async function writeStdoutQuietEpipe(payload: string): Promise<void> {
-  const stdout = process.stdout as NodeJS.WriteStream;
+  const stdout = process.stdout as NodeJS.WriteStream & {
+    destroyed?: boolean;
+    errored?: unknown;
+    destroy?: (error?: Error) => unknown;
+  };
   const hasEvents = typeof stdout.on === "function" && typeof stdout.off === "function";
 
   if (stdout.write.length < 2) {
@@ -277,53 +281,74 @@ async function writeStdoutQuietEpipe(payload: string): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    let sawErrorEvent = false;
+    let firstError: unknown;
+    let hasError = false;
+    let cbDone = false;
+    let closed = false;
+    let finishScheduled = false;
+
     const cleanup = (): void => {
       if (!hasEvents) return;
       stdout.off("error", onError);
       stdout.off("close", onClose);
     };
-    const settleOk = (): void => {
+
+    const finish = (): void => {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve();
-    };
-    const settleErr = (error: unknown, fromCallback: boolean): void => {
-      if (settled) return;
-      settled = true;
-      if (isEpipeError(error)) {
-        if (fromCallback && !sawErrorEvent && hasEvents) {
-          setImmediate(() => {
-            cleanup();
-            resolve();
-          });
-          return;
-        }
-        cleanup();
-        resolve();
+      if (hasError) {
+        if (isEpipeError(firstError)) resolve();
+        else reject(firstError);
         return;
       }
-      cleanup();
-      reject(error);
+      resolve();
     };
+
+    const scheduleFinish = (): void => {
+      if (settled || finishScheduled) return;
+      finishScheduled = true;
+      setImmediate(finish);
+    };
+
+    const recordError = (error: unknown): void => {
+      if (!hasError) {
+        hasError = true;
+        firstError = error;
+      }
+      if (!hasEvents || cbDone || closed || Boolean(stdout.destroyed) || typeof stdout.destroy !== "function") {
+        scheduleFinish();
+      }
+    };
+
     const onError = (error: unknown): void => {
-      sawErrorEvent = true;
-      settleErr(error, false);
+      recordError(error);
     };
-    const onClose = (): void => settleOk();
+
+    const onClose = (): void => {
+      closed = true;
+      scheduleFinish();
+    };
 
     if (hasEvents) {
       stdout.on("error", onError);
       stdout.on("close", onClose);
     }
+
     try {
       stdout.write(payload, (error) => {
-        if (error) settleErr(error, true);
-        else settleOk();
+        cbDone = true;
+        if (error) {
+          recordError(error);
+        } else if (hasError || Boolean(stdout.destroyed) || stdout.errored != null || closed) {
+          scheduleFinish();
+        } else {
+          finish();
+        }
       });
     } catch (error) {
-      settleErr(error, false);
+      cbDone = true;
+      recordError(error);
     }
   });
 }
