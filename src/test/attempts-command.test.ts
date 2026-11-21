@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import test, { type TestContext } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   attempts,
   formatAttemptChanges,
@@ -495,16 +497,17 @@ test("--json keeps a single persistent stdout error listener and handles EPIPE/E
   const waitTicks = (ms = 25): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, ms));
 
-  const installWritableStdout = (
-    errorCode: string,
-    mode:
-      | "ok"
-      | "callback-then-error"
-      | "sync-callback-then-error"
-      | "error-then-callback"
-      | "destroy-then-callback"
-      | "delayed-destroy",
-  ): Writable => {
+  type WritableMode =
+    | "ok"
+    | "callback-then-error"
+    | "sync-callback-then-error"
+    | "error-then-callback"
+    | "error-then-delayed-callback"
+    | "destroy-then-callback"
+    | "sync-destroy-after-success"
+    | "delayed-destroy";
+
+  const installWritableStdout = (errorCode: string, mode: WritableMode): Writable => {
     let stream!: Writable;
     stream = new Writable({
       write(_chunk, _encoding, callback) {
@@ -517,9 +520,14 @@ test("--json keeps a single persistent stdout error listener and handles EPIPE/E
           callback(err);
           return;
         }
-        if (mode === "delayed-destroy") {
+        if (mode === "sync-destroy-after-success" || mode === "delayed-destroy") {
           callback();
           stream.destroy(err);
+          return;
+        }
+        if (mode === "error-then-delayed-callback") {
+          stream.destroy(err);
+          setTimeout(() => callback(err), 15);
           return;
         }
         setImmediate(() => {
@@ -547,74 +555,161 @@ test("--json keeps a single persistent stdout error listener and handles EPIPE/E
   };
 
   try {
-    // (a) callback-then-error EIO & (b) error-then-callback EIO & (c) EPIPE across all orderings
+    // Callback-first EIO (write callback rejects first, then stream emits 'error'):
+    // listener reports exactly one stderr line and invokes exit(1).
+    // EPIPE in the same orderings is silent and never calls exit.
     for (const mode of [
       "callback-then-error",
       "sync-callback-then-error",
-      "error-then-callback",
       "destroy-then-callback",
     ] as const) {
       stderr = "";
       process.exitCode = undefined;
+      const epipeExitCalls: number[] = [];
       const epipeOut = installWritableStdout("EPIPE", mode);
-      const epipeCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+      const epipeCode = await attempts(["--json"], {
+        memory: createMemoryQueries(),
+        now: NOW,
+        cwd: CWD,
+        exit: (code) => epipeExitCalls.push(code),
+      });
       await waitTicks();
       assert.equal(epipeCode, 0, mode);
       assert.equal(process.exitCode, undefined, `${mode} EPIPE exitCode`);
       assert.equal(stderr, "", `${mode} EPIPE stderr`);
+      assert.deepEqual(epipeExitCalls, [], `${mode} EPIPE exitCalls`);
       assert.equal(epipeOut.listenerCount("error"), 1, `${mode} EPIPE error listeners`);
       assert.deepEqual(uncaught, [], `${mode} EPIPE uncaught`);
 
       stderr = "";
       process.exitCode = undefined;
+      const eioExitCalls: number[] = [];
       const eioOut = installWritableStdout("EIO", mode);
       await assert.rejects(
-        () => attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+        () =>
+          attempts(["--json"], {
+            memory: createMemoryQueries(),
+            now: NOW,
+            cwd: CWD,
+            exit: (code) => eioExitCalls.push(code),
+          }),
         (error: NodeJS.ErrnoException) => error.code === "EIO",
         mode,
       );
       await waitTicks();
-      assert.equal(process.exitCode, 1, `${mode} EIO exitCode`);
       assert.equal(stderr, "rocky: Cannot write attempts output.\n", `${mode} EIO stderr`);
+      assert.deepEqual(eioExitCalls, [1], `${mode} EIO exitCalls`);
       assert.equal(eioOut.listenerCount("error"), 1, `${mode} EIO error listeners`);
       assert.deepEqual(uncaught, [], `${mode} EIO uncaught`);
     }
 
-    // (d) delayed destroy (error emitted asynchronously after write callback) for both EPIPE and EIO
-    stderr = "";
-    process.exitCode = undefined;
-    const delayedEpipeOut = installWritableStdout("EPIPE", "delayed-destroy");
-    const delayedEpipeCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
-    assert.equal(delayedEpipeCode, 0);
-    await waitTicks(40);
-    assert.equal(process.exitCode, undefined);
-    assert.equal(stderr, "");
-    assert.equal(delayedEpipeOut.listenerCount("error"), 1);
-    assert.deepEqual(uncaught, []);
+    // Error-first EIO ('error' arrives before write promise settles):
+    // promise rejects, listener prints zero lines and does not call exit.
+    // EPIPE in the same orderings resolves 0 silently without calling exit.
+    for (const mode of ["error-then-callback", "error-then-delayed-callback"] as const) {
+      stderr = "";
+      process.exitCode = undefined;
+      const epipeExitCalls: number[] = [];
+      const epipeOut = installWritableStdout("EPIPE", mode);
+      const epipeCode = await attempts(["--json"], {
+        memory: createMemoryQueries(),
+        now: NOW,
+        cwd: CWD,
+        exit: (code) => epipeExitCalls.push(code),
+      });
+      await waitTicks(40);
+      assert.equal(epipeCode, 0, mode);
+      assert.equal(process.exitCode, undefined, `${mode} EPIPE exitCode`);
+      assert.equal(stderr, "", `${mode} EPIPE stderr`);
+      assert.deepEqual(epipeExitCalls, [], `${mode} EPIPE exitCalls`);
+      assert.equal(epipeOut.listenerCount("error"), 1, `${mode} EPIPE error listeners`);
+      assert.deepEqual(uncaught, [], `${mode} EPIPE uncaught`);
 
-    stderr = "";
-    process.exitCode = undefined;
-    const delayedEioOut = installWritableStdout("EIO", "delayed-destroy");
-    const delayedEioCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
-    assert.equal(delayedEioCode, 0);
-    await waitTicks(40);
-    assert.equal(process.exitCode, 1);
-    assert.equal(stderr, "rocky: Cannot write attempts output.\n");
-    assert.equal(delayedEioOut.listenerCount("error"), 1);
-    assert.deepEqual(uncaught, []);
+      stderr = "";
+      process.exitCode = undefined;
+      const eioExitCalls: number[] = [];
+      const eioOut = installWritableStdout("EIO", mode);
+      await assert.rejects(
+        () =>
+          attempts(["--json"], {
+            memory: createMemoryQueries(),
+            now: NOW,
+            cwd: CWD,
+            exit: (code) => eioExitCalls.push(code),
+          }),
+        (error: NodeJS.ErrnoException) => error.code === "EIO",
+        mode,
+      );
+      await waitTicks(40);
+      assert.equal(stderr, "", `${mode} EIO stderr`);
+      assert.deepEqual(eioExitCalls, [], `${mode} EIO exitCalls`);
+      assert.equal(eioOut.listenerCount("error"), 1, `${mode} EIO error listeners`);
+      assert.deepEqual(uncaught, [], `${mode} EIO uncaught`);
+    }
+
+    // Post-success destroy (both immediate nextTick destroy and delayed 15ms destroy):
+    // EPIPE is silent with exit 0 and no exit() call; EIO prints one line and calls exit(1).
+    for (const mode of ["sync-destroy-after-success", "delayed-destroy"] as const) {
+      stderr = "";
+      process.exitCode = undefined;
+      const epipeExitCalls: number[] = [];
+      const delayedEpipeOut = installWritableStdout("EPIPE", mode);
+      const delayedEpipeCode = await attempts(["--json"], {
+        memory: createMemoryQueries(),
+        now: NOW,
+        cwd: CWD,
+        exit: (code) => epipeExitCalls.push(code),
+      });
+      assert.equal(delayedEpipeCode, 0, mode);
+      await waitTicks(40);
+      assert.equal(process.exitCode, undefined, `${mode} EPIPE exitCode`);
+      assert.equal(stderr, "", `${mode} EPIPE stderr`);
+      assert.deepEqual(epipeExitCalls, [], `${mode} EPIPE exitCalls`);
+      assert.equal(delayedEpipeOut.listenerCount("error"), 1, `${mode} EPIPE listeners`);
+      assert.deepEqual(uncaught, [], `${mode} EPIPE uncaught`);
+
+      stderr = "";
+      process.exitCode = undefined;
+      const eioExitCalls: number[] = [];
+      const delayedEioOut = installWritableStdout("EIO", mode);
+      const delayedEioCode = await attempts(["--json"], {
+        memory: createMemoryQueries(),
+        now: NOW,
+        cwd: CWD,
+        exit: (code) => eioExitCalls.push(code),
+      });
+      assert.equal(delayedEioCode, 0, mode);
+      await waitTicks(40);
+      assert.equal(stderr, "rocky: Cannot write attempts output.\n", `${mode} EIO stderr`);
+      assert.deepEqual(eioExitCalls, [1], `${mode} EIO exitCalls`);
+      assert.equal(delayedEioOut.listenerCount("error"), 1, `${mode} EIO listeners`);
+      assert.deepEqual(uncaught, [], `${mode} EIO uncaught`);
+    }
 
     // Repeated calls on the same stream do not add a second error listener
     stderr = "";
     process.exitCode = undefined;
+    const reusableExitCalls: number[] = [];
     const reusableOut = installWritableStdout("EIO", "ok");
-    const firstCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+    const firstCode = await attempts(["--json"], {
+      memory: createMemoryQueries(),
+      now: NOW,
+      cwd: CWD,
+      exit: (code) => reusableExitCalls.push(code),
+    });
     assert.equal(firstCode, 0);
     assert.equal(reusableOut.listenerCount("error"), 1);
-    const secondCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+    const secondCode = await attempts(["--json"], {
+      memory: createMemoryQueries(),
+      now: NOW,
+      cwd: CWD,
+      exit: (code) => reusableExitCalls.push(code),
+    });
     assert.equal(secondCode, 0);
     assert.equal(reusableOut.listenerCount("error"), 1);
     assert.equal(process.exitCode, undefined);
     assert.equal(stderr, "");
+    assert.deepEqual(reusableExitCalls, []);
     assert.deepEqual(uncaught, []);
   } finally {
     process.off("uncaughtException", onUncaught);
@@ -622,6 +717,90 @@ test("--json keeps a single persistent stdout error listener and handles EPIPE/E
     process.exitCode = origExitCode;
     if (origDescriptor) Object.defineProperty(process, "stdout", origDescriptor);
   }
+});
+
+test("--json through real CLI dispatcher exits 1 with one stderr line on EIO and 0 silently on EPIPE", (t) => {
+  const home = freshHome(t);
+  seedDefaultListingMemory(home);
+
+  const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const entry = join(packageRoot, "dist", "index.js");
+  const entryUrl = pathToFileURL(entry).href;
+
+  const runnerScript = `
+    import { Writable } from "node:stream";
+    const entryUrl = process.argv[1];
+    const entryPath = process.argv[2];
+    const mode = process.argv[3];
+    const errorCode = process.argv[4];
+    let stream;
+    stream = new Writable({
+      write(_chunk, _encoding, callback) {
+        const err = Object.assign(new Error("write " + errorCode), { code: errorCode });
+        if (mode === "sync-destroy-after-success" || mode === "delayed-destroy") {
+          callback();
+          stream.destroy(err);
+          return;
+        }
+        setImmediate(() => {
+          if (mode === "callback-then-error") {
+            callback(err);
+          } else {
+            stream.emit("error", err);
+            callback(err);
+          }
+        });
+      },
+      destroy(error, callback) {
+        if (mode === "delayed-destroy") {
+          setTimeout(() => callback(error), 15);
+          return;
+        }
+        callback(error);
+      },
+    });
+    Object.defineProperty(process, "stdout", { value: stream, configurable: true, enumerable: true });
+    process.argv = [process.execPath, entryPath, "attempts", "--json"];
+    await import(entryUrl);
+  `;
+
+  const runDispatch = (mode: string, errorCode: string) => {
+    const env: NodeJS.ProcessEnv = { ...process.env, ROCKY_HOME: home };
+    delete env.NODE_OPTIONS;
+    delete env.NODE_TEST_CONTEXT;
+    return spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", runnerScript, entryUrl, entry, mode, errorCode],
+      {
+        cwd: packageRoot,
+        env,
+        encoding: "utf8",
+        timeout: 30_000,
+        windowsHide: true,
+      },
+    );
+  };
+
+  // Post-success EIO (both before and after index.ts assigns return code) exits 1 with one stderr line.
+  for (const mode of ["sync-destroy-after-success", "delayed-destroy"]) {
+    const eio = runDispatch(mode, "EIO");
+    assert.equal(eio.status, 1, `${mode} EIO stderr=${eio.stderr}`);
+    assert.equal(eio.stderr, "rocky: Cannot write attempts output.\n", mode);
+
+    const epipe = runDispatch(mode, "EPIPE");
+    assert.equal(epipe.status, 0, `${mode} EPIPE stderr=${epipe.stderr}`);
+    assert.equal(epipe.stderr, "", mode);
+  }
+
+  // Callback-first EIO exits 1 with exactly one stderr line (never double-printed by index.ts:634).
+  const cbFirst = runDispatch("callback-then-error", "EIO");
+  assert.equal(cbFirst.status, 1, `callback-then-error stderr=${cbFirst.stderr}`);
+  assert.equal(cbFirst.stderr, "rocky: Cannot write attempts output.\n");
+
+  // Error-first EIO rejects cleanly; only index.ts:634 prints one line.
+  const errFirst = runDispatch("error-then-callback", "EIO");
+  assert.equal(errFirst.status, 1, `error-then-callback stderr=${errFirst.stderr}`);
+  assert.equal(errFirst.stderr, "rocky: Unexpected internal error: Error: write EIO\n");
 });
 
 test("no causal words in any rendered string", () => {

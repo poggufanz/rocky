@@ -249,51 +249,85 @@ export function renderProblemsText(
   };
 }
 
-const persistentStdoutErrorStreams = new WeakSet<object>();
-const activeStdoutErrorHandlers = new WeakMap<object, Set<(error: unknown) => void>>();
+type ExitFn = (code: number) => void;
+
+interface PersistentStdoutErrorState {
+  reported: boolean;
+  exit: ExitFn;
+  activeHandlers: Set<(error: unknown) => void>;
+  suppressedFollowupError: unknown;
+  hasSuppressedFollowupError: boolean;
+}
+
+const persistentStdoutErrorStates = new WeakMap<object, PersistentStdoutErrorState>();
+
+function defaultProcessExit(code: number): void {
+  process.exit(code);
+}
 
 function isEpipeError(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "EPIPE";
 }
 
-function ensurePersistentStdoutErrorListener(stdout: {
-  on: (event: "error", listener: (error: unknown) => void) => unknown;
-}): void {
-  if (persistentStdoutErrorStreams.has(stdout)) return;
-  persistentStdoutErrorStreams.add(stdout);
-  let reported = false;
+function ensurePersistentStdoutErrorListener(
+  stdout: {
+    on: (event: "error", listener: (error: unknown) => void) => unknown;
+  },
+  exit: ExitFn = defaultProcessExit,
+): PersistentStdoutErrorState {
+  let state = persistentStdoutErrorStates.get(stdout);
+  if (state !== undefined) {
+    state.exit = exit;
+    return state;
+  }
+  state = {
+    reported: false,
+    exit,
+    activeHandlers: new Set(),
+    suppressedFollowupError: undefined,
+    hasSuppressedFollowupError: false,
+  };
+  persistentStdoutErrorStates.set(stdout, state);
   stdout.on("error", (error: unknown) => {
-    const handlers = activeStdoutErrorHandlers.get(stdout);
-    if (handlers !== undefined && handlers.size > 0) {
-      const pending = [...handlers];
-      handlers.clear();
+    if (state.activeHandlers.size > 0) {
+      state.hasSuppressedFollowupError = true;
+      state.suppressedFollowupError = error;
+      const pending = [...state.activeHandlers];
+      state.activeHandlers.clear();
       for (const handler of pending) handler(error);
+      return;
+    }
+    if (state.hasSuppressedFollowupError && state.suppressedFollowupError === error) {
+      state.hasSuppressedFollowupError = false;
+      state.suppressedFollowupError = undefined;
+      return;
     }
     if (isEpipeError(error)) return;
-    process.exitCode = 1;
-    if (!reported) {
-      reported = true;
+    if (!state.reported) {
+      state.reported = true;
       say("Cannot write attempts output.");
     }
+    state.exit(1);
   });
+  return state;
 }
 
 function registerActiveStdoutErrorHandler(
-  stdout: object,
+  state: PersistentStdoutErrorState,
   handler: (error: unknown) => void,
 ): () => void {
-  let handlers = activeStdoutErrorHandlers.get(stdout);
-  if (handlers === undefined) {
-    handlers = new Set();
-    activeStdoutErrorHandlers.set(stdout, handlers);
-  }
-  handlers.add(handler);
+  state.hasSuppressedFollowupError = false;
+  state.suppressedFollowupError = undefined;
+  state.activeHandlers.add(handler);
   return () => {
-    handlers.delete(handler);
+    state.activeHandlers.delete(handler);
   };
 }
 
-async function writeStdoutQuietEpipe(payload: string): Promise<void> {
+export async function writeStdoutQuietEpipe(
+  payload: string,
+  exit: ExitFn = defaultProcessExit,
+): Promise<void> {
   const stdout = process.stdout as NodeJS.WriteStream;
   const hasOn = typeof stdout === "object" && stdout !== null && typeof stdout.on === "function";
 
@@ -302,8 +336,8 @@ async function writeStdoutQuietEpipe(payload: string): Promise<void> {
     let hasCaptured = false;
     let unregister: (() => void) | undefined;
     if (hasOn) {
-      ensurePersistentStdoutErrorListener(stdout);
-      unregister = registerActiveStdoutErrorHandler(stdout, (error) => {
+      const state = ensurePersistentStdoutErrorListener(stdout, exit);
+      unregister = registerActiveStdoutErrorHandler(state, (error) => {
         if (!hasCaptured) {
           hasCaptured = true;
           capturedError = error;
@@ -342,8 +376,8 @@ async function writeStdoutQuietEpipe(payload: string): Promise<void> {
     };
 
     if (hasOn) {
-      ensurePersistentStdoutErrorListener(stdout);
-      unregister = registerActiveStdoutErrorHandler(stdout, settleError);
+      const state = ensurePersistentStdoutErrorListener(stdout, exit);
+      unregister = registerActiveStdoutErrorHandler(state, settleError);
     }
 
     try {
@@ -359,7 +393,7 @@ async function writeStdoutQuietEpipe(payload: string): Promise<void> {
 
 export async function attempts(
   argv: readonly string[],
-  deps?: { memory?: MemoryQueries; now?: number; cwd?: string },
+  deps?: { memory?: MemoryQueries; now?: number; cwd?: string; exit?: (code: number) => void },
 ): Promise<number> {
   let parsed: ParsedAttemptsArgs;
   try {
@@ -447,6 +481,7 @@ export async function attempts(
         ungroupedLegacy: baseSet.ungroupedLegacy,
         entries: sanitizedEntries,
       })}\n`,
+      deps?.exit,
     );
     return 0;
   }
