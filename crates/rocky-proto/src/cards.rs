@@ -220,6 +220,18 @@ pub struct FlowStep {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
+    /// PreToolUse cwd, omitted when it equals the card root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// Bounded tool `description`; absent under `desk/tool-text-off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
 }
 
 /// Detected behavioral pattern across a card's execution flow.
@@ -579,6 +591,82 @@ mod tests {
             !serialized.contains("error"),
             "unexpected error key: {serialized}"
         );
+    }
+
+    #[test]
+    fn old_v1_card_json_round_trips_byte_identical() {
+        let old_line = concat!(
+            r#"{"v":1,"card_id":"c-legacy-1","rev":1,"repo_id":"0123456789abcdef0123456789abcdef","#,
+            r#""root":"/repo","main_root":null,"branch":"main","session_id":"s-1","agent_id":"","#,
+            r#""agent_type":"","parent_card_id":null,"started_ms":1000,"ended_ms":5000,"#,
+            r#""status":"done","prompt":"fix tests","prompt_truncated":false,"importance":"low","#,
+            r#""blocks":[],"more_count":0,"flow":["#,
+            r#"{"kind":"cmd","text":"npm test","ok":false,"dur_ms":300,"seqs":[],"exit_code":1,"error":"Error: fail"},"#,
+            r#"{"kind":"edit","text":"src/a.ts","ok":true,"dur_ms":200,"seqs":[1]}"#,
+            r#"],"flow_more":0,"outside_count":0,"coverage":{"state":"full","reasons":[]}}"#
+        );
+        let card: Card = serde_json::from_str(old_line).expect("deserialize old v1 card line");
+        assert_eq!(card.flow.len(), 2);
+        for step in &card.flow {
+            assert_eq!(step.start_ms, None);
+            assert_eq!(step.end_ms, None);
+            assert_eq!(step.cwd, None);
+            assert_eq!(step.tool_use_id, None);
+            assert_eq!(step.desc, None);
+        }
+        let reserialized = serde_json::to_string(&card).expect("reserialize old v1 card");
+        assert_eq!(reserialized, old_line);
+    }
+
+    #[test]
+    fn flow_step_with_all_five_new_fields_round_trips() {
+        let step = FlowStep {
+            kind: FlowKind::Cmd,
+            text: "npm test".to_string(),
+            ok: false,
+            dur_ms: 300,
+            seqs: Vec::new(),
+            exit_code: Some(1),
+            error: Some("Error: boom".to_string()),
+            start_ms: Some(1_100),
+            end_ms: Some(1_400),
+            cwd: Some("/repo/packages/api".to_string()),
+            tool_use_id: Some("toolu_01abc".to_string()),
+            desc: Some("Run tests".to_string()),
+        };
+        let encoded = serde_json::to_string(&step).expect("serialize FlowStep");
+        let decoded: FlowStep = serde_json::from_str(&encoded).expect("deserialize FlowStep");
+        assert_eq!(decoded, step);
+    }
+
+    #[test]
+    fn flow_step_with_only_tool_use_id_omits_other_optional_keys() {
+        let step = FlowStep {
+            kind: FlowKind::Edit,
+            text: "src/a.ts".to_string(),
+            ok: true,
+            dur_ms: 50,
+            seqs: vec![1],
+            exit_code: None,
+            error: None,
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: Some("toolu_only".to_string()),
+            desc: None,
+        };
+        let val = serde_json::to_value(&step).expect("serialize FlowStep to Value");
+        let obj = val.as_object().expect("FlowStep serializes as JSON object");
+        assert_eq!(
+            obj.get("tool_use_id").and_then(|v| v.as_str()),
+            Some("toolu_only")
+        );
+        for omitted in ["start_ms", "end_ms", "cwd", "desc"] {
+            assert!(
+                !obj.contains_key(omitted),
+                "expected {omitted:?} to be omitted, got: {val}"
+            );
+        }
     }
 
     #[test]

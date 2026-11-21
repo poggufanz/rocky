@@ -518,6 +518,11 @@ fn timeline_steps_with_subs_and_facts() {
             seqs: Vec::new(),
             exit_code: None,
             error: None,
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: None,
+            desc: None,
         },
         FlowStep {
             kind: FlowKind::Edit,
@@ -527,6 +532,11 @@ fn timeline_steps_with_subs_and_facts() {
             seqs: vec![1, 999, 2, 3, 4],
             exit_code: None,
             error: None,
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: None,
+            desc: None,
         },
     ];
 
@@ -606,6 +616,11 @@ fn timeline_facts_for(blocks: Vec<Block>) -> Vec<String> {
             seqs: chunk.to_vec(),
             exit_code: None,
             error: None,
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: None,
+            desc: None,
         })
         .collect();
 
@@ -705,6 +720,11 @@ fn timeline_caps_12_and_counts_flow_more() {
         seqs: Vec::new(),
         exit_code: None,
         error: None,
+        start_ms: None,
+        end_ms: None,
+        cwd: None,
+        tool_use_id: None,
+        desc: None,
     };
 
     // Exactly 12 with flow_more == 0 -> no overflow line.
@@ -1067,6 +1087,11 @@ fn failed_step_shows_exit_and_error() {
         seqs: Vec::new(),
         exit_code: Some(1),
         error: Some("Error: x\u{7}".into()),
+        start_ms: None,
+        end_ms: None,
+        cwd: None,
+        tool_use_id: None,
+        desc: None,
     }];
 
     model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
@@ -1090,6 +1115,11 @@ fn ok_step_has_neither() {
         seqs: Vec::new(),
         exit_code: None,
         error: None,
+        start_ms: None,
+        end_ms: None,
+        cwd: None,
+        tool_use_id: None,
+        desc: None,
     }];
 
     model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);
@@ -1113,6 +1143,11 @@ fn old_flow_step_renders_unchanged() {
         seqs: Vec::new(),
         exit_code: None,
         error: None,
+        start_ms: None,
+        end_ms: None,
+        cwd: None,
+        tool_use_id: None,
+        desc: None,
     }];
 
     model.on_detail(1, card, Vec::new(), Vec::new(), Vec::new(), UiLang::En);

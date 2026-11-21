@@ -374,6 +374,7 @@ pub fn build_card(
     let (flow, flow_more) = build_flow(
         &input.turn.windows,
         &card_blocks,
+        session_root_raw,
         session_root_abs.as_ref(),
         user_home_abs.as_ref(),
         cwd,
@@ -1052,6 +1053,7 @@ fn to_fact_side(side: SideData<'_>) -> Side<'_> {
 fn build_flow(
     windows: &[ToolWindow],
     blocks: &[Block],
+    root: Option<&str>,
     session_root_abs: Option<&AbsPath>,
     user_home_abs: Option<&AbsPath>,
     cwd: Option<&str>,
@@ -1063,69 +1065,118 @@ fn build_flow(
         .collect();
     indexed.sort_by_key(|(idx, w)| (w.pre_ms, *idx));
     let flow_more = u32::try_from(indexed.len().saturating_sub(MAX_FLOW_STEPS)).unwrap_or(u32::MAX);
+    let root_canon = root.map(|r| canonical_path(r, cfg!(windows)));
 
     let flow = indexed
         .into_iter()
         .take(MAX_FLOW_STEPS)
         .map(|(_, win)| {
-            let dur_ms = win
-                .post_ms
-                .map(|post| post.saturating_sub(win.pre_ms))
-                .unwrap_or(0);
-            let ok = win.ok.unwrap_or(false);
-            match win.kind {
-                ToolKind::Bash => FlowStep {
-                    kind: FlowKind::Cmd,
-                    text: win.command.clone().unwrap_or_default(),
-                    ok,
-                    dur_ms,
-                    seqs: Vec::new(),
-                    exit_code: if ok { None } else { win.exit_code },
-                    error: if ok { None } else { win.error_head.clone() },
-                },
-                ToolKind::Edit => {
-                    let matching: Vec<&Block> = blocks
-                        .iter()
-                        .filter(|b| b.tool_use_ids.iter().any(|id| id == &win.tool_use_id))
-                        .collect();
-                    let seqs: Vec<u32> = matching.iter().map(|b| b.seq).collect();
-                    let (_, _, fallback_path) = classify_target_path(
-                        win.target_path.as_deref(),
-                        &win.tool,
-                        session_root_abs,
-                        user_home_abs,
-                        cwd,
-                    );
-                    let display_path = matching
-                        .first()
-                        .map(|b| b.path.as_str())
-                        .unwrap_or(fallback_path.as_str());
-                    let sym_name = matching
-                        .iter()
-                        .find_map(|b| b.symbol.as_ref())
-                        .map(|s| match s.container.as_deref() {
-                            Some(c) if !c.is_empty() => format!("{c}.{}", s.name),
-                            _ => s.name.clone(),
-                        });
-                    let text = match sym_name {
-                        Some(sym) => format!("{display_path} \u{203a} {sym}"),
-                        None => display_path.to_string(),
-                    };
-                    FlowStep {
-                        kind: FlowKind::Edit,
-                        text,
-                        ok,
-                        dur_ms,
-                        seqs,
-                        exit_code: None,
-                        error: None,
-                    }
-                }
-                ToolKind::Other => unreachable!(),
-            }
+            flow_step_from_window(
+                win,
+                blocks,
+                root_canon.as_deref(),
+                session_root_abs,
+                user_home_abs,
+                cwd,
+            )
         })
         .collect();
     (flow, flow_more)
+}
+
+fn flow_step_from_window(
+    win: &ToolWindow,
+    blocks: &[Block],
+    root_canon: Option<&str>,
+    session_root_abs: Option<&AbsPath>,
+    user_home_abs: Option<&AbsPath>,
+    cwd: Option<&str>,
+) -> FlowStep {
+    let dur_ms = win
+        .post_ms
+        .map(|post| post.saturating_sub(win.pre_ms))
+        .unwrap_or(0);
+    let ok = win.ok.unwrap_or(false);
+    let start_ms = Some(win.pre_ms);
+    let end_ms = win.post_ms;
+    let tool_use_id = (!win.tool_use_id.is_empty()).then(|| win.tool_use_id.clone());
+    let step_cwd = win
+        .cwd
+        .as_deref()
+        .filter(|c| root_canon.is_none_or(|r| canonical_path(c, cfg!(windows)) != r))
+        .map(str::to_owned);
+    match win.kind {
+        ToolKind::Bash => FlowStep {
+            kind: FlowKind::Cmd,
+            text: win.command.clone().unwrap_or_default(),
+            ok,
+            dur_ms,
+            seqs: Vec::new(),
+            exit_code: if ok { None } else { win.exit_code },
+            error: if ok { None } else { win.error_head.clone() },
+            start_ms,
+            end_ms,
+            cwd: step_cwd,
+            tool_use_id,
+            desc: win.description.clone(),
+        },
+        ToolKind::Edit => {
+            let (text, seqs) = edit_flow_label(win, blocks, session_root_abs, user_home_abs, cwd);
+            FlowStep {
+                kind: FlowKind::Edit,
+                text,
+                ok,
+                dur_ms,
+                seqs,
+                exit_code: None,
+                error: None,
+                start_ms,
+                end_ms,
+                cwd: step_cwd,
+                tool_use_id,
+                desc: None,
+            }
+        }
+        ToolKind::Other => unreachable!(),
+    }
+}
+
+fn edit_flow_label(
+    win: &ToolWindow,
+    blocks: &[Block],
+    session_root_abs: Option<&AbsPath>,
+    user_home_abs: Option<&AbsPath>,
+    cwd: Option<&str>,
+) -> (String, Vec<u32>) {
+    let matching: Vec<&Block> = blocks
+        .iter()
+        .filter(|b| b.tool_use_ids.iter().any(|id| id == &win.tool_use_id))
+        .collect();
+    let seqs: Vec<u32> = matching.iter().map(|b| b.seq).collect();
+    let (_, _, fallback_path) = classify_target_path(
+        win.target_path.as_deref(),
+        &win.tool,
+        session_root_abs,
+        user_home_abs,
+        cwd,
+    );
+    let display_path = matching
+        .first()
+        .map(|b| b.path.as_str())
+        .unwrap_or(fallback_path.as_str());
+    let sym_name =
+        matching
+            .iter()
+            .find_map(|b| b.symbol.as_ref())
+            .map(|s| match s.container.as_deref() {
+                Some(c) if !c.is_empty() => format!("{c}.{}", s.name),
+                _ => s.name.clone(),
+            });
+    let text = match sym_name {
+        Some(sym) => format!("{display_path} \u{203a} {sym}"),
+        None => display_path.to_string(),
+    };
+    (text, seqs)
 }
 
 fn build_coverage(input: &BuildInput, blocks: &[Block], saw_capture_late: bool) -> Coverage {
@@ -1447,6 +1498,8 @@ mod tests {
             tool: "Edit".to_string(),
             target_path: Some(target_path),
             command: None,
+            cwd: None,
+            description: None,
             pre_ms,
             post_ms,
             ok,
@@ -1470,6 +1523,8 @@ mod tests {
             tool: "Bash".to_string(),
             target_path: None,
             command: Some(cmd.to_string()),
+            cwd: None,
+            description: None,
             pre_ms,
             post_ms,
             ok,
@@ -2161,6 +2216,8 @@ mod tests {
             tool: "Read".to_string(),
             target_path: Some(path),
             command: None,
+            cwd: None,
+            description: None,
             pre_ms,
             post_ms: Some(pre_ms + 10),
             ok,
@@ -2215,6 +2272,8 @@ mod tests {
             tool: "Read".to_string(),
             target_path: Some(repo_join("src/cart.ts")),
             command: None,
+            cwd: None,
+            description: None,
             pre_ms: 1_500,
             post_ms: Some(1_600),
             ok: Some(true),
@@ -2437,10 +2496,19 @@ mod tests {
         assert_eq!(sym.len(), 4);
 
         let step = obj["flow"][0].as_object().expect("flow step is object");
-        for key in ["kind", "text", "ok", "dur_ms", "seqs"] {
+        for key in [
+            "kind",
+            "text",
+            "ok",
+            "dur_ms",
+            "seqs",
+            "start_ms",
+            "end_ms",
+            "tool_use_id",
+        ] {
             assert!(step.contains_key(key), "missing flow key {key}");
         }
-        assert_eq!(step.len(), 5);
+        assert_eq!(step.len(), 8);
 
         let cov = obj["coverage"].as_object().expect("coverage is object");
         assert!(cov.contains_key("state"));
@@ -3085,5 +3153,232 @@ mod tests {
         assert!(!card.flow[0].ok);
         assert_eq!(card.flow[0].exit_code, None);
         assert_eq!(card.flow[0].error, None);
+    }
+
+    #[test]
+    fn flow_step_bash_subdir_and_description_on_failure() {
+        let mut tracker = crate::cards::windows::Tracker::new();
+        let r = RepoInfo {
+            root: Some(test_root().to_string()),
+            main_root: Some(test_root().to_string()),
+            name: "repo".to_string(),
+            branch: Some("main".to_string()),
+        };
+        let subdir = repo_join("packages/api");
+        let base = |name: &str| rocky_proto::hook::HookEvent {
+            hook_event_name: name.to_string(),
+            session_id: "sess-1".to_string(),
+            cwd: Some(test_root().to_string()),
+            ..Default::default()
+        };
+        tracker.on_event(&base("UserPromptSubmit"), 1_000, &r);
+
+        let mut pre = base("PreToolUse");
+        pre.cwd = Some(subdir.clone());
+        pre.tool_name = Some("Bash".to_string());
+        pre.tool_use_id = Some("b-sub".to_string());
+        pre.command = Some("npm test".to_string());
+        pre.description = Some("Run tests".to_string());
+        tracker.on_event(&pre, 1_100, &r);
+
+        let mut post = base("PostToolUseFailure");
+        post.tool_name = Some("Bash".to_string());
+        post.tool_use_id = Some("b-sub".to_string());
+        post.exit_code = Some(1);
+        post.error_head = Some("Error: fail".to_string());
+        tracker.on_event(&post, 1_450, &r);
+
+        tracker.on_event(&base("Stop"), 2_000, &r);
+
+        let turn = tracker
+            .closed_turn(&main_agent("sess-1"))
+            .expect("closed turn")
+            .clone();
+        let card = build_card(&base_input(turn), &no_read, &no_stat);
+        assert_eq!(card.flow.len(), 1);
+        let step = &card.flow[0];
+        assert_eq!(step.kind, FlowKind::Cmd);
+        assert!(!step.ok);
+        assert_eq!(step.start_ms, Some(1_100));
+        assert_eq!(step.end_ms, Some(1_450));
+        assert_eq!(step.cwd.as_deref(), Some(subdir.as_str()));
+        assert_eq!(step.tool_use_id.as_deref(), Some("b-sub"));
+        assert_eq!(step.desc.as_deref(), Some("Run tests"));
+    }
+
+    #[test]
+    fn flow_step_bash_at_card_root_omits_cwd() {
+        let mut tracker = crate::cards::windows::Tracker::new();
+        let r = RepoInfo {
+            root: Some(test_root().to_string()),
+            main_root: Some(test_root().to_string()),
+            name: "repo".to_string(),
+            branch: Some("main".to_string()),
+        };
+        let base = |name: &str| rocky_proto::hook::HookEvent {
+            hook_event_name: name.to_string(),
+            session_id: "sess-1".to_string(),
+            cwd: Some(test_root().to_string()),
+            ..Default::default()
+        };
+        tracker.on_event(&base("UserPromptSubmit"), 1_000, &r);
+
+        let mut pre = base("PreToolUse");
+        pre.tool_name = Some("Bash".to_string());
+        pre.tool_use_id = Some("b-root".to_string());
+        pre.command = Some("npm test".to_string());
+        pre.description = Some("Run tests".to_string());
+        tracker.on_event(&pre, 1_100, &r);
+
+        let mut post = base("PostToolUseFailure");
+        post.tool_name = Some("Bash".to_string());
+        post.tool_use_id = Some("b-root".to_string());
+        post.exit_code = Some(1);
+        tracker.on_event(&post, 1_450, &r);
+
+        tracker.on_event(&base("Stop"), 2_000, &r);
+
+        let turn = tracker
+            .closed_turn(&main_agent("sess-1"))
+            .expect("closed turn")
+            .clone();
+        let card = build_card(&base_input(turn), &no_read, &no_stat);
+        assert_eq!(card.flow.len(), 1);
+        let step = &card.flow[0];
+        assert_eq!(step.start_ms, Some(1_100));
+        assert_eq!(step.end_ms, Some(1_450));
+        assert_eq!(step.cwd, None);
+        assert_eq!(step.tool_use_id.as_deref(), Some("b-root"));
+        assert_eq!(step.desc.as_deref(), Some("Run tests"));
+    }
+
+    #[test]
+    fn flow_step_tool_text_off_omits_desc_and_clears_text() {
+        let capture = rocky_proto::hook::Capture {
+            tool_text: false,
+            prompt: true,
+        };
+        let subdir = repo_join("packages/api");
+        let r = RepoInfo {
+            root: Some(test_root().to_string()),
+            main_root: Some(test_root().to_string()),
+            name: "repo".to_string(),
+            branch: Some("main".to_string()),
+        };
+        let mut tracker = crate::cards::windows::Tracker::new();
+
+        let submit_raw = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "sess-1",
+            "cwd": test_root(),
+            "prompt": "run tests"
+        }))
+        .unwrap();
+        let pre_raw = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "sess-1",
+            "cwd": subdir,
+            "tool_name": "Bash",
+            "tool_use_id": "b-off",
+            "tool_input": {
+                "command": "npm test",
+                "description": "Run tests"
+            }
+        }))
+        .unwrap();
+        let post_raw = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PostToolUseFailure",
+            "session_id": "sess-1",
+            "cwd": subdir,
+            "tool_name": "Bash",
+            "tool_use_id": "b-off",
+            "tool_input": {
+                "command": "npm test",
+                "description": "Run tests"
+            },
+            "error": "Exit code 1\nError: secret",
+            "is_interrupt": false
+        }))
+        .unwrap();
+        let stop_raw = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "sess-1",
+            "cwd": test_root()
+        }))
+        .unwrap();
+
+        let submit = rocky_proto::hook::parse_hook_payload(&submit_raw, capture).unwrap();
+        let pre = rocky_proto::hook::parse_hook_payload(&pre_raw, capture).unwrap();
+        let post = rocky_proto::hook::parse_hook_payload(&post_raw, capture).unwrap();
+        let stop = rocky_proto::hook::parse_hook_payload(&stop_raw, capture).unwrap();
+
+        tracker.on_event(&submit, 1_000, &r);
+        tracker.on_event(&pre, 1_100, &r);
+        tracker.on_event(&post, 1_400, &r);
+        tracker.on_event(&stop, 2_000, &r);
+
+        let turn = tracker
+            .closed_turn(&main_agent("sess-1"))
+            .expect("closed turn")
+            .clone();
+        let card = build_card(&base_input(turn), &no_read, &no_stat);
+        assert_eq!(card.flow.len(), 1);
+        let step = &card.flow[0];
+        assert_eq!(step.kind, FlowKind::Cmd);
+        assert_eq!(step.text, "");
+        assert_eq!(step.desc, None);
+        assert_eq!(step.error, None);
+        assert_eq!(step.exit_code, Some(1));
+        assert_eq!(step.start_ms, Some(1_100));
+        assert_eq!(step.end_ms, Some(1_400));
+        assert_eq!(step.cwd.as_deref(), Some(subdir.as_str()));
+        assert_eq!(step.tool_use_id.as_deref(), Some("b-off"));
+    }
+
+    #[test]
+    fn flow_step_edit_carries_timing_and_id_without_desc() {
+        let mut tracker = crate::cards::windows::Tracker::new();
+        let r = RepoInfo {
+            root: Some(test_root().to_string()),
+            main_root: Some(test_root().to_string()),
+            name: "repo".to_string(),
+            branch: Some("main".to_string()),
+        };
+        let base = |name: &str| rocky_proto::hook::HookEvent {
+            hook_event_name: name.to_string(),
+            session_id: "sess-1".to_string(),
+            cwd: Some(test_root().to_string()),
+            ..Default::default()
+        };
+        tracker.on_event(&base("UserPromptSubmit"), 1_000, &r);
+
+        let mut pre = base("PreToolUse");
+        pre.tool_name = Some("Edit".to_string());
+        pre.tool_use_id = Some("e-1".to_string());
+        pre.target_path = Some(repo_join("src/a.ts"));
+        pre.description = Some("Should not appear on edit".to_string());
+        tracker.on_event(&pre, 1_200, &r);
+
+        let mut post = base("PostToolUse");
+        post.tool_name = Some("Edit".to_string());
+        post.tool_use_id = Some("e-1".to_string());
+        tracker.on_event(&post, 1_500, &r);
+
+        tracker.on_event(&base("Stop"), 2_000, &r);
+
+        let turn = tracker
+            .closed_turn(&main_agent("sess-1"))
+            .expect("closed turn")
+            .clone();
+        let card = build_card(&base_input(turn), &no_read, &no_stat);
+        assert_eq!(card.flow.len(), 1);
+        let step = &card.flow[0];
+        assert_eq!(step.kind, FlowKind::Edit);
+        assert!(step.ok);
+        assert_eq!(step.start_ms, Some(1_200));
+        assert_eq!(step.end_ms, Some(1_500));
+        assert_eq!(step.cwd, None);
+        assert_eq!(step.tool_use_id.as_deref(), Some("e-1"));
+        assert_eq!(step.desc, None);
     }
 }
