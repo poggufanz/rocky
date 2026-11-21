@@ -12,7 +12,7 @@ import {
   queryRecall,
   type MemoryQueries,
 } from "../core/memory-query.js";
-import { isCompleteMemoryCoverage } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, tailReadable } from "../core/memory-read.js";
 import { sanitizeTestimony } from "../core/redact.js";
 import { detail, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
@@ -210,7 +210,7 @@ export function renderProblemsText(
   }
 
   let coverageLine: string | undefined;
-  if (incomplete) {
+  if (!tailReadable(coverage) || coverage.skipped > 0 || (incomplete && n === 0)) {
     coverageLine = describeMemoryCoverage(coverage, opts.totalRecords, { counts: false });
   }
 

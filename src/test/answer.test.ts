@@ -166,7 +166,7 @@ const READS: readonly { name: string; coverage: MemoryCoverage; disclosed: boole
   { name: "whitespace-only lines, scanned exceeds records, still whole", coverage: coverage({ scanned: 5 }), disclosed: false, hold: false },
   { name: "one skipped line", coverage: coverage({ skipped: 1, complete: false }), disclosed: true, hold: false },
   { name: "full read above the skipped-line allowance", coverage: coverage({ scanned: 3, skipped: 2, complete: false }), disclosed: true, hold: true },
-  { name: "several skipped lines", coverage: coverage({ skipped: 4, complete: false }), disclosed: true, hold: true },
+  { name: "several skipped lines", coverage: coverage({ scanned: 5, skipped: 4, complete: false }), disclosed: true, hold: true },
   { name: "the record cap", coverage: coverage({ truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: true },
   { name: "the file size cap", coverage: coverage({ truncated: 1, complete: false, reason: "file-size-cap" }), disclosed: true, hold: true },
   { name: "a read race", coverage: coverage({ scanned: 0, truncated: 1, complete: false, reason: "read-race" }), disclosed: true, hold: true },

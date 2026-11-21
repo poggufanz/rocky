@@ -21,6 +21,7 @@ import {
 } from "../core/memory.js";
 import { createMemoryQueries, LINK_WINDOW_MS } from "../core/memory-query.js";
 import {
+  loadMemoryChecked,
   MEMORY_FORMAT_VERSION,
   skippedLineAllowance,
   tailReadable,
@@ -117,6 +118,7 @@ async function captureOutput(
 test("allowance is one per thousand, at least one", () => {
   assert.equal(skippedLineAllowance(0), 1);
   assert.equal(skippedLineAllowance(1999), 1);
+  assert.equal(skippedLineAllowance(2000), 2);
   assert.equal(skippedLineAllowance(10_000), 10);
   assert.equal(skippedLineAllowance(10_999), 10);
 });
@@ -130,6 +132,24 @@ test("tail with tolerated skipped lines is readable and linkable", () => {
     complete: false,
     scanned: 10_001,
     skipped: 2,
+    bytesScanned: 100_000,
+    bytesTotal: 200_000,
+    startOffset: 100_000,
+    oldestTs: NOW - 9 * 60 * 60 * 1000,
+  };
+  assert.equal(tailReadable(coverage), true);
+  assert.equal(windowCovered(coverage, NOW, LINK_WINDOW_MS), true);
+});
+
+test("tail at exact skipped-line allowance is readable and linkable", () => {
+  const coverage: MemoryCoverage = {
+    version: MEMORY_FORMAT_VERSION,
+    window: "tail",
+    reason: "record-cap",
+    truncated: 1,
+    complete: false,
+    scanned: 10_001,
+    skipped: 10,
     bytesScanned: 100_000,
     bytesTotal: 200_000,
     startOffset: 100_000,
@@ -238,6 +258,7 @@ test("unlock with a corrupt line in the tail", (t) => {
     strayHookLine,
   ];
   writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+  assert.equal(loadMemoryChecked().coverage.skipped, 1);
   touchPending();
   assert.equal(existsSync(pendingPath()), true);
 
@@ -251,6 +272,60 @@ test("unlock with a corrupt line in the tail", (t) => {
   const lastRecord = JSON.parse(lastLine) as FixRecord;
   assert.equal(lastRecord.kind, "fix");
   assert.equal(lastRecord.failureIds.includes(targetFailure.id), true);
+  assert.equal(existsSync(pendingPath()), false);
+});
+
+test("unlock with a corrupt line in a full read", (t) => {
+  const home = tempHome(t);
+  withRockyHome(t, home);
+  const targetCwd = join(home, "repo");
+  const targetFailure = reliableFailureRecord(
+    "target-full-failure",
+    "npm test",
+    targetCwd,
+    NOW - 60 * 60 * 1000,
+    "TypeError: token undefined",
+  );
+  const strayHookLine = JSON.stringify({
+    kind: "failure",
+    id: "stray-hook-full-1",
+    ts: NOW - 30 * 60 * 1000,
+    cwd: "=",
+    cmd: "pwsh",
+    exitCode: null,
+    fingerprint: "0".repeat(16),
+    signature: ["pwsh"],
+    excerpt: "exit NaN",
+    origin: "hook",
+  });
+  const lines = [
+    JSON.stringify(targetFailure),
+    strayHookLine,
+  ];
+  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+  const before = loadMemoryChecked();
+  assert.equal(before.coverage.window, undefined);
+  assert.equal(before.coverage.skipped, 1);
+  touchPending();
+  assert.equal(existsSync(pendingPath()), true);
+
+  const result = resolveFixOnSuccess("npm test", targetCwd, { now: NOW });
+  assert.equal(result.confirmedResolved, 1);
+  assert.equal(result.possibleAssociated, 0);
+  assert.equal(result.pausedReason, undefined);
+
+  const memoryLines = readFileSync(join(home, "memory.jsonl"), "utf8").trimEnd().split("\n");
+  const fixes = memoryLines
+    .map((line) => {
+      try {
+        return JSON.parse(line) as { kind?: string };
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((record): record is FixRecord => record?.kind === "fix");
+  assert.equal(fixes.length, 1);
+  assert.equal(fixes[0]!.failureIds.includes(targetFailure.id), true);
   assert.equal(existsSync(pendingPath()), false);
 });
 

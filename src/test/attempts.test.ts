@@ -68,7 +68,7 @@ function makeFix(overrides: Partial<FixRecord> & { id: string; ts: number }): Fi
 test("incomplete non-tail coverage gives unknown coverage", () => {
   const coverage: MemoryCoverage = {
     version: MEMORY_FORMAT_VERSION,
-    scanned: 1,
+    scanned: 3,
     skipped: 2,
     truncated: 0,
     bytesScanned: 100,

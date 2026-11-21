@@ -124,6 +124,30 @@ test("hookFail accepts PowerShell FileSystem UNC cwd on win32 and drops relative
   });
 });
 
+test("hookFail accepts PowerShell drive locations on win32 while still dropping '='", { skip: process.platform !== "win32" }, (t) => {
+  for (const driveCwd of ["Temp:\\", "Work:\\repo"]) {
+    withTempRockyHome(t, (home) => {
+      const memoryPath = join(home, "memory.jsonl");
+      assert.equal(hookFail("npm test", 1, driveCwd), 0);
+      assert.equal(existsSync(memoryPath), true);
+      const lines = readFileSync(memoryPath, "utf8").trim().split("\n");
+      assert.equal(lines.length, 1);
+      const parsed = parseMemoryRecord(JSON.parse(lines[0]!));
+      assert.ok(parsed !== undefined, `expected parseMemoryRecord to accept recorded failure for ${driveCwd}`);
+      assert.equal(parsed.kind, "failure");
+      assert.equal(parsed.cwd, driveCwd);
+    });
+  }
+
+  withTempRockyHome(t, (home) => {
+    const memoryPath = join(home, "memory.jsonl");
+    const pendingPath = join(home, "pending");
+    assert.equal(hookFail("npm test", 1, "="), 0);
+    assert.equal(existsSync(memoryPath), false);
+    assert.equal(existsSync(pendingPath), false);
+  });
+});
+
 test("failure writers refuse NaN and non-safe integers", (t) => {
   withTempRockyHome(t, (home, absDir) => {
     const memoryPath = join(home, "memory.jsonl");

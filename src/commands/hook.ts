@@ -128,7 +128,7 @@ function isUsableHookCwd(cwd: string): boolean {
     const rest = cwd.slice(0, POWERSHELL_FILESYSTEM_PREFIX.length).toLowerCase() === POWERSHELL_FILESYSTEM_PREFIX.toLowerCase()
       ? cwd.slice(POWERSHELL_FILESYSTEM_PREFIX.length)
       : cwd;
-    return isAbsolute(rest);
+    return isAbsolute(rest) || /^[A-Za-z][\w.-]*:[\\/]/u.test(rest);
   }
   return isAbsolute(cwd);
 }
