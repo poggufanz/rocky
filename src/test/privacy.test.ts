@@ -903,3 +903,78 @@ test("projectExplain forwards bounded provenance through the fifth argument", ()
   assert.ok(out.provenance?.subject.includes("[redacted"));
   assert.ok(!out.provenance?.subject.includes("sk-test-00000000000000000000"));
 });
+
+test("projectKnowledgeHits accepts agent failures, mcp and lowercase-hyphen rationales, and rejects Bad_Source", () => {
+  const agentFailureHit: KnowledgeSearchHit = {
+    id: "f-agent-hit",
+    ts: 100,
+    kind: "failure",
+    snippet: "npm test — missing token",
+    score: 0.9,
+    source: "agent",
+  };
+  const mcpRationaleHit: KnowledgeSearchHit = {
+    id: "r-mcp-hit",
+    ts: 110,
+    kind: "rationale",
+    snippet: "check auth token",
+    score: 0.8,
+    agent: "claude-code",
+    source: "mcp",
+  };
+  const patternRationaleHit: KnowledgeSearchHit = {
+    id: "r-future-hit",
+    ts: 120,
+    kind: "rationale",
+    snippet: "check retry guard",
+    score: 0.7,
+    source: "future-lane",
+  };
+  const accepted = projectKnowledgeHits([agentFailureHit, mcpRationaleHit, patternRationaleHit], "sanitized");
+  assert.equal(accepted.truncated, false);
+  assert.deepEqual(accepted.items.map((item) => item.id), ["f-agent-hit", "r-mcp-hit", "r-future-hit"]);
+  assert.deepEqual(accepted.items.map((item) => item.source), ["agent", "mcp", "future-lane"]);
+
+  const badRationale = projectKnowledgeHits(
+    [{ ...mcpRationaleHit, id: "r-bad-hit", source: "Bad_Source" }],
+    "sanitized",
+  );
+  assert.equal(badRationale.truncated, true);
+  assert.deepEqual(badRationale.items, []);
+
+  const badFailure = projectKnowledgeHits(
+    [{ ...agentFailureHit, id: "f-bad-hit", source: "Bad_Source" }],
+    "sanitized",
+  );
+  assert.equal(badFailure.truncated, true);
+  assert.deepEqual(badFailure.items, []);
+});
+
+test("projectRecallHits accepts agent-origin failure and rejects Bad_Source origin", () => {
+  const now = 200;
+  const agentFailure: FailureRecord = {
+    kind: "failure",
+    id: "f-agent-recall",
+    ts: 100,
+    cwd: "/work",
+    cmd: "npm test",
+    exitCode: 1,
+    fingerprint: "fp-agent",
+    signature: ["TypeError: token missing"],
+    excerpt: "TypeError: token missing",
+    origin: "agent",
+  };
+  const accepted = projectRecallHits([{ failure: agentFailure, score: 0.9 }], "sanitized", now);
+  assert.equal(accepted.truncated, false);
+  assert.equal(accepted.items.length, 1);
+  assert.equal(accepted.items[0]?.origin, "agent");
+
+  const rejected = projectRecallHits(
+    [{ failure: { ...agentFailure, origin: "Bad_Source" as unknown as FailureRecord["origin"] }, score: 0.9 }],
+    "sanitized",
+    now,
+  );
+  assert.equal(rejected.truncated, true);
+  assert.deepEqual(rejected.items, []);
+});
+
