@@ -250,13 +250,13 @@ export function renderProblemsText(
 }
 
 type ExitFn = (code: number) => void;
+type WriteSettlement = "pending" | "resolved" | "rejected";
 
 interface PersistentStdoutErrorState {
   reported: boolean;
   exit: ExitFn;
   activeHandlers: Set<(error: unknown) => void>;
-  suppressedFollowupError: unknown;
-  hasSuppressedFollowupError: boolean;
+  lastSettlement: WriteSettlement;
 }
 
 const persistentStdoutErrorStates = new WeakMap<object, PersistentStdoutErrorState>();
@@ -267,6 +267,30 @@ function defaultProcessExit(code: number): void {
 
 function isEpipeError(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "EPIPE";
+}
+
+function flushStderrAndExit(exit: ExitFn): void {
+  const stderr = process.stderr as NodeJS.WriteStream;
+  if (typeof stderr !== "object" || stderr === null || typeof stderr.write !== "function") {
+    exit(1);
+    return;
+  }
+  if (stderr.write.length === 1) {
+    stderr.write("");
+    exit(1);
+    return;
+  }
+  let exited = false;
+  const finish = (): void => {
+    if (exited) return;
+    exited = true;
+    exit(1);
+  };
+  try {
+    stderr.write("", finish);
+  } catch {
+    finish();
+  }
 }
 
 function ensurePersistentStdoutErrorListener(
@@ -284,30 +308,23 @@ function ensurePersistentStdoutErrorListener(
     reported: false,
     exit,
     activeHandlers: new Set(),
-    suppressedFollowupError: undefined,
-    hasSuppressedFollowupError: false,
+    lastSettlement: "pending",
   };
   persistentStdoutErrorStates.set(stdout, state);
   stdout.on("error", (error: unknown) => {
     if (state.activeHandlers.size > 0) {
-      state.hasSuppressedFollowupError = true;
-      state.suppressedFollowupError = error;
       const pending = [...state.activeHandlers];
       state.activeHandlers.clear();
       for (const handler of pending) handler(error);
       return;
     }
-    if (state.hasSuppressedFollowupError && state.suppressedFollowupError === error) {
-      state.hasSuppressedFollowupError = false;
-      state.suppressedFollowupError = undefined;
-      return;
-    }
+    if (state.lastSettlement !== "resolved") return;
     if (isEpipeError(error)) return;
     if (!state.reported) {
       state.reported = true;
       say("Cannot write attempts output.");
+      flushStderrAndExit(state.exit);
     }
-    state.exit(1);
   });
   return state;
 }
@@ -316,8 +333,7 @@ function registerActiveStdoutErrorHandler(
   state: PersistentStdoutErrorState,
   handler: (error: unknown) => void,
 ): () => void {
-  state.hasSuppressedFollowupError = false;
-  state.suppressedFollowupError = undefined;
+  state.lastSettlement = "pending";
   state.activeHandlers.add(handler);
   return () => {
     state.activeHandlers.delete(handler);
@@ -335,8 +351,9 @@ export async function writeStdoutQuietEpipe(
     let capturedError: unknown;
     let hasCaptured = false;
     let unregister: (() => void) | undefined;
+    let state: PersistentStdoutErrorState | undefined;
     if (hasOn) {
-      const state = ensurePersistentStdoutErrorListener(stdout, exit);
+      state = ensurePersistentStdoutErrorListener(stdout, exit);
       unregister = registerActiveStdoutErrorHandler(state, (error) => {
         if (!hasCaptured) {
           hasCaptured = true;
@@ -348,21 +365,31 @@ export async function writeStdoutQuietEpipe(
       stdout.write(payload);
     } catch (error) {
       unregister?.();
-      if (!isEpipeError(error)) throw error;
+      if (!isEpipeError(error)) {
+        if (state !== undefined) state.lastSettlement = "rejected";
+        throw error;
+      }
+      if (state !== undefined) state.lastSettlement = "resolved";
       return;
     }
     unregister?.();
-    if (hasCaptured && !isEpipeError(capturedError)) throw capturedError;
+    if (hasCaptured && !isEpipeError(capturedError)) {
+      if (state !== undefined) state.lastSettlement = "rejected";
+      throw capturedError;
+    }
+    if (state !== undefined) state.lastSettlement = "resolved";
     return;
   }
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     let unregister: (() => void) | undefined;
+    const state = hasOn ? ensurePersistentStdoutErrorListener(stdout, exit) : undefined;
 
     const settleSuccess = (): void => {
       if (settled) return;
       settled = true;
+      if (state !== undefined) state.lastSettlement = "resolved";
       unregister?.();
       resolve();
     };
@@ -370,13 +397,15 @@ export async function writeStdoutQuietEpipe(
     const settleError = (error: unknown): void => {
       if (settled) return;
       settled = true;
+      if (state !== undefined) {
+        state.lastSettlement = isEpipeError(error) ? "resolved" : "rejected";
+      }
       unregister?.();
       if (isEpipeError(error)) resolve();
       else reject(error);
     };
 
-    if (hasOn) {
-      const state = ensurePersistentStdoutErrorListener(stdout, exit);
+    if (state !== undefined) {
       unregister = registerActiveStdoutErrorHandler(state, settleError);
     }
 
