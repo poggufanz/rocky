@@ -249,106 +249,110 @@ export function renderProblemsText(
   };
 }
 
+const persistentStdoutErrorStreams = new WeakSet<object>();
+const activeStdoutErrorHandlers = new WeakMap<object, Set<(error: unknown) => void>>();
+
 function isEpipeError(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "EPIPE";
 }
 
-async function writeStdoutQuietEpipe(payload: string): Promise<void> {
-  const stdout = process.stdout as NodeJS.WriteStream & {
-    destroyed?: boolean;
-    errored?: unknown;
-    destroy?: (error?: Error) => unknown;
+function ensurePersistentStdoutErrorListener(stdout: {
+  on: (event: "error", listener: (error: unknown) => void) => unknown;
+}): void {
+  if (persistentStdoutErrorStreams.has(stdout)) return;
+  persistentStdoutErrorStreams.add(stdout);
+  let reported = false;
+  stdout.on("error", (error: unknown) => {
+    const handlers = activeStdoutErrorHandlers.get(stdout);
+    if (handlers !== undefined && handlers.size > 0) {
+      const pending = [...handlers];
+      handlers.clear();
+      for (const handler of pending) handler(error);
+    }
+    if (isEpipeError(error)) return;
+    process.exitCode = 1;
+    if (!reported) {
+      reported = true;
+      say("Cannot write attempts output.");
+    }
+  });
+}
+
+function registerActiveStdoutErrorHandler(
+  stdout: object,
+  handler: (error: unknown) => void,
+): () => void {
+  let handlers = activeStdoutErrorHandlers.get(stdout);
+  if (handlers === undefined) {
+    handlers = new Set();
+    activeStdoutErrorHandlers.set(stdout, handlers);
+  }
+  handlers.add(handler);
+  return () => {
+    handlers.delete(handler);
   };
-  const hasEvents = typeof stdout.on === "function" && typeof stdout.off === "function";
+}
+
+async function writeStdoutQuietEpipe(payload: string): Promise<void> {
+  const stdout = process.stdout as NodeJS.WriteStream;
+  const hasOn = typeof stdout === "object" && stdout !== null && typeof stdout.on === "function";
 
   if (stdout.write.length < 2) {
     let capturedError: unknown;
-    const onError = (error: unknown): void => {
-      if (!isEpipeError(error)) capturedError = error;
-    };
-    if (hasEvents) stdout.on("error", onError);
+    let hasCaptured = false;
+    let unregister: (() => void) | undefined;
+    if (hasOn) {
+      ensurePersistentStdoutErrorListener(stdout);
+      unregister = registerActiveStdoutErrorHandler(stdout, (error) => {
+        if (!hasCaptured) {
+          hasCaptured = true;
+          capturedError = error;
+        }
+      });
+    }
     try {
       stdout.write(payload);
     } catch (error) {
+      unregister?.();
       if (!isEpipeError(error)) throw error;
       return;
-    } finally {
-      if (hasEvents) stdout.off("error", onError);
     }
-    if (capturedError !== undefined) throw capturedError;
+    unregister?.();
+    if (hasCaptured && !isEpipeError(capturedError)) throw capturedError;
     return;
   }
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    let firstError: unknown;
-    let hasError = false;
-    let cbDone = false;
-    let closed = false;
-    let finishScheduled = false;
+    let unregister: (() => void) | undefined;
 
-    const cleanup = (): void => {
-      if (!hasEvents) return;
-      stdout.off("error", onError);
-      stdout.off("close", onClose);
-    };
-
-    const finish = (): void => {
+    const settleSuccess = (): void => {
       if (settled) return;
       settled = true;
-      cleanup();
-      if (hasError) {
-        if (isEpipeError(firstError)) resolve();
-        else reject(firstError);
-        return;
-      }
+      unregister?.();
       resolve();
     };
 
-    const scheduleFinish = (): void => {
-      if (settled || finishScheduled) return;
-      finishScheduled = true;
-      setImmediate(finish);
+    const settleError = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      unregister?.();
+      if (isEpipeError(error)) resolve();
+      else reject(error);
     };
 
-    const recordError = (error: unknown): void => {
-      if (!hasError) {
-        hasError = true;
-        firstError = error;
-      }
-      if (!hasEvents || cbDone || closed || Boolean(stdout.destroyed) || typeof stdout.destroy !== "function") {
-        scheduleFinish();
-      }
-    };
-
-    const onError = (error: unknown): void => {
-      recordError(error);
-    };
-
-    const onClose = (): void => {
-      closed = true;
-      scheduleFinish();
-    };
-
-    if (hasEvents) {
-      stdout.on("error", onError);
-      stdout.on("close", onClose);
+    if (hasOn) {
+      ensurePersistentStdoutErrorListener(stdout);
+      unregister = registerActiveStdoutErrorHandler(stdout, settleError);
     }
 
     try {
-      stdout.write(payload, (error) => {
-        cbDone = true;
-        if (error) {
-          recordError(error);
-        } else if (hasError || Boolean(stdout.destroyed) || stdout.errored != null || closed) {
-          scheduleFinish();
-        } else {
-          finish();
-        }
+      stdout.write(payload, (error?: Error | null) => {
+        if (error) settleError(error);
+        else settleSuccess();
       });
     } catch (error) {
-      cbDone = true;
-      recordError(error);
+      settleError(error);
     }
   });
 }

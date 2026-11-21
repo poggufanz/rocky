@@ -473,20 +473,53 @@ test("hostile cmd, signature, and changes render safe in both stderr and JSON wi
   );
 });
 
-test("--json handles stdout EPIPE quietly while preserving other write errors in any event order", async (t) => {
+test("--json keeps a single persistent stdout error listener and handles EPIPE/EIO in any order", async (t) => {
   const home = freshHome(t);
   seedDefaultListingMemory(home);
 
   const origDescriptor = Object.getOwnPropertyDescriptor(process, "stdout");
+  const origStderrWrite = process.stderr.write;
+  const origExitCode = process.exitCode;
+  const uncaught: unknown[] = [];
+  const onUncaught = (error: unknown): void => {
+    uncaught.push(error);
+  };
+  process.on("uncaughtException", onUncaught);
+
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+
+  const waitTicks = (ms = 25): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
   const installWritableStdout = (
     errorCode: string,
-    mode: "callback-then-error" | "sync-callback-then-error" | "error-then-callback" | "destroy-then-callback",
+    mode:
+      | "ok"
+      | "callback-then-error"
+      | "sync-callback-then-error"
+      | "error-then-callback"
+      | "destroy-then-callback"
+      | "delayed-destroy",
   ): Writable => {
-    const stream = new Writable({
+    let stream!: Writable;
+    stream = new Writable({
       write(_chunk, _encoding, callback) {
+        if (mode === "ok") {
+          callback();
+          return;
+        }
         const err = Object.assign(new Error(`write ${errorCode}`), { code: errorCode });
         if (mode === "sync-callback-then-error") {
           callback(err);
+          return;
+        }
+        if (mode === "delayed-destroy") {
+          callback();
+          stream.destroy(err);
           return;
         }
         setImmediate(() => {
@@ -501,34 +534,92 @@ test("--json handles stdout EPIPE quietly while preserving other write errors in
           }
         });
       },
+      destroy(error, callback) {
+        if (mode === "delayed-destroy") {
+          setTimeout(() => callback(error), 15);
+          return;
+        }
+        callback(error);
+      },
     });
     Object.defineProperty(process, "stdout", { value: stream, configurable: true, enumerable: true });
     return stream;
   };
 
   try {
+    // (a) callback-then-error EIO & (b) error-then-callback EIO & (c) EPIPE across all orderings
     for (const mode of [
       "callback-then-error",
       "sync-callback-then-error",
       "error-then-callback",
       "destroy-then-callback",
     ] as const) {
+      stderr = "";
+      process.exitCode = undefined;
       const epipeOut = installWritableStdout("EPIPE", mode);
       const epipeCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+      await waitTicks();
       assert.equal(epipeCode, 0, mode);
-      assert.equal(epipeOut.listenerCount("error"), 0, `${mode} EPIPE error listeners`);
-      assert.equal(epipeOut.listenerCount("close"), 0, `${mode} EPIPE close listeners`);
+      assert.equal(process.exitCode, undefined, `${mode} EPIPE exitCode`);
+      assert.equal(stderr, "", `${mode} EPIPE stderr`);
+      assert.equal(epipeOut.listenerCount("error"), 1, `${mode} EPIPE error listeners`);
+      assert.deepEqual(uncaught, [], `${mode} EPIPE uncaught`);
 
+      stderr = "";
+      process.exitCode = undefined;
       const eioOut = installWritableStdout("EIO", mode);
       await assert.rejects(
         () => attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
         (error: NodeJS.ErrnoException) => error.code === "EIO",
         mode,
       );
-      assert.equal(eioOut.listenerCount("error"), 0, `${mode} EIO error listeners`);
-      assert.equal(eioOut.listenerCount("close"), 0, `${mode} EIO close listeners`);
+      await waitTicks();
+      assert.equal(process.exitCode, 1, `${mode} EIO exitCode`);
+      assert.equal(stderr, "rocky: Cannot write attempts output.\n", `${mode} EIO stderr`);
+      assert.equal(eioOut.listenerCount("error"), 1, `${mode} EIO error listeners`);
+      assert.deepEqual(uncaught, [], `${mode} EIO uncaught`);
     }
+
+    // (d) delayed destroy (error emitted asynchronously after write callback) for both EPIPE and EIO
+    stderr = "";
+    process.exitCode = undefined;
+    const delayedEpipeOut = installWritableStdout("EPIPE", "delayed-destroy");
+    const delayedEpipeCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+    assert.equal(delayedEpipeCode, 0);
+    await waitTicks(40);
+    assert.equal(process.exitCode, undefined);
+    assert.equal(stderr, "");
+    assert.equal(delayedEpipeOut.listenerCount("error"), 1);
+    assert.deepEqual(uncaught, []);
+
+    stderr = "";
+    process.exitCode = undefined;
+    const delayedEioOut = installWritableStdout("EIO", "delayed-destroy");
+    const delayedEioCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+    assert.equal(delayedEioCode, 0);
+    await waitTicks(40);
+    assert.equal(process.exitCode, 1);
+    assert.equal(stderr, "rocky: Cannot write attempts output.\n");
+    assert.equal(delayedEioOut.listenerCount("error"), 1);
+    assert.deepEqual(uncaught, []);
+
+    // Repeated calls on the same stream do not add a second error listener
+    stderr = "";
+    process.exitCode = undefined;
+    const reusableOut = installWritableStdout("EIO", "ok");
+    const firstCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+    assert.equal(firstCode, 0);
+    assert.equal(reusableOut.listenerCount("error"), 1);
+    const secondCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+    assert.equal(secondCode, 0);
+    assert.equal(reusableOut.listenerCount("error"), 1);
+    assert.equal(process.exitCode, undefined);
+    assert.equal(stderr, "");
+    assert.deepEqual(uncaught, []);
   } finally {
+    process.off("uncaughtException", onUncaught);
+    process.stderr.write = origStderrWrite;
+    process.exitCode = origExitCode;
     if (origDescriptor) Object.defineProperty(process, "stdout", origDescriptor);
   }
 });
