@@ -1,0 +1,53 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999880000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000003",
+      "fingerprintV": 2,
+      "signature": ["error: missing module"],
+      "excerpt": "Error: missing module",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "f2",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "bbbb000000000003",
+      "fingerprintV": 2,
+      "signature": ["error: type mismatch"],
+      "excerpt": "Error: type mismatch",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"]
+      },
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["different_failure"]
+      }
+    ]
+  }
+}

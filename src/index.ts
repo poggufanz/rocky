@@ -5,6 +5,8 @@
  * Public surface:
  *   rocky run "<command>"     run a command; rocky remembers its failures and what followed
  *   rocky recall [--ai] <query> search the memory of past errors
+ *   rocky attempts [<fingerprint|query>] [--all-dirs] [--limit 1..50] [--json]
+ *                             show every attempt at a recurring error
  *   rocky                     open the desktop app where it is installed,
  *                             otherwise the browser view on Main
  *   rocky dash                open the browser view on Dash
@@ -33,7 +35,7 @@ import { detail, flushHookSpeech, say } from "./ui/rocky.js";
 const HELP_SHORT = `rocky — a local CLI that remembers failed commands and what fixed them.
 version: ${PACKAGE_NAME}@${PACKAGE_VERSION}
 usage: rocky <verb> [args]
-  core    run | watch | recall | stats | dash
+  core    run | watch | recall | attempts | stats | dash
   review  check | brief | what | how | why | teach
   memory  digest | quiz | export | concepts | sessions | invariants |
           journal | repl
@@ -75,6 +77,8 @@ usage:
   rocky recall --ai [--] <query...>
                             --ai asks the configured local Ollama after the
                             deterministic recall.
+  rocky attempts [<fingerprint|query>] [--all-dirs] [--limit 1..50] [--json]
+                            show every attempt at a recurring error.
   rocky what [--ai] [--] <query...>
                             look up what a remembered intent became.
   rocky how [--diff] [--] <query...>
@@ -502,6 +506,8 @@ async function main(): Promise<number> {
         return (await import("./commands/watch.js")).watch(rest);
       case "recall":
         return (await import("./commands/recall.js")).recall(rest);
+      case "attempts":
+        return (await import("./commands/attempts.js")).attempts(rest);
       case "model":
         return (await import("./commands/model.js")).model(rest);
       case "stats":

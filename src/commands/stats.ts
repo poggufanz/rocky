@@ -72,7 +72,7 @@ function statsCycles(): number {
   return 0;
 }
 
-function formatUtcDate(ts: number): string {
+export function formatUtcDate(ts: number): string {
   const d = new Date(ts);
   const year = String(d.getUTCFullYear()).padStart(4, "0");
   const month = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -80,7 +80,7 @@ function formatUtcDate(ts: number): string {
   return `${year}-${month}-${day}`;
 }
 
-function formatUtcDateTime(ts: number): string {
+export function formatUtcDateTime(ts: number): string {
   const d = new Date(ts);
   const hours = String(d.getUTCHours()).padStart(2, "0");
   const minutes = String(d.getUTCMinutes()).padStart(2, "0");

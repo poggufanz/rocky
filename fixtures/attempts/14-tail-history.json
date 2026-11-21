@@ -1,0 +1,45 @@
+{
+  "now": 1700000000000,
+  "coverage": {
+    "version": 1,
+    "scanned": 10000,
+    "skipped": 0,
+    "truncated": 1,
+    "bytesScanned": 100000,
+    "bytesTotal": 200000,
+    "complete": false,
+    "reason": "record-cap",
+    "window": "tail",
+    "startOffset": 100000,
+    "oldestTs": 1699990000000
+  },
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000014",
+      "fingerprintV": 2,
+      "signature": ["error: tail entry"],
+      "excerpt": "Error: tail entry",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"],
+        "historyMayStartEarlier": true
+      }
+    ]
+  }
+}

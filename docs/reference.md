@@ -159,6 +159,7 @@ On native Windows, `rocky run` and `rocky watch` use `shell: true`, so `cmd.exe`
 Ask its memory directly:
 
 ```bash
+rocky attempts                           # every attempt at a recurring error
 rocky recall "connection refused"
 rocky recall "sharp"
 rocky recall --ai "connection refused"   # optional configured loopback Ollama
@@ -261,6 +262,30 @@ rocky teach src/core/memory.ts:307 --ladder   # also print every hop, expanded
 When no `explain` record matches, `rocky teach` reads local desk change cards for the file and matches blocks by function name, line (for hunk blocks without a symbol), or whole file (newest block when neither snippet nor line is given). A matched card renders `<subject>, changed by <agent> on <date> (from change card)` (omitting `on <date>` when the timestamp is not a valid date) with `Asked: "<prompt title>"`, `Changed: <labels>`, `Sequence: <sentence>` when the hit block's `seq` is in `sequence.edit_seqs` (stating command and edit order, not cause), `Agent said: "<quote>"` (or `No agent words recorded for this edit.`), and `Matched by <function name|line|file>; code not compared.`, followed by `Recorded, not verified.` (and `Change card coverage incomplete (<reason>).` when card reading stopped early). All card answer strings pass through secret redaction and single-line terminal sanitization.
 
 When neither an `explain` record nor a change card matches, Rocky assembles a deterministic why-ladder from the file itself — construct catalog, enclosing function, callee definition, nearest comment, tests and first `git log -L` commit — and renders the summary card with one compact evidence line naming the sources used; `--ladder` also prints the full hop-by-hop view. `rocky teach <file>` skips the ladder (explain record or change card only), and `rocky teach --stdin <file>` matches the piped snippet (bounded read, same 2 MB cap as the gate-event stdin reader) against the file. No matching `explain` record, change card, or ladder rung prints `No reason recorded for this code. No change card or local evidence matched it.` Ladder output is rendered, never written to memory, and assembled or change-card answers never masquerade as witness testimony. Every flow outcome exits 0.
+
+## `rocky attempts` (implemented)
+
+Show every recorded attempt at a recurring error in chronological order, grouped by error fingerprint and working directory:
+
+```bash
+rocky attempts [<fingerprint|query>] [--all-dirs] [--limit 1..50] [--json]
+```
+
+With no query, Rocky lists up to 10 recurring errors in the current working directory that have at least two attempts within the last 30 days, ranked by non-passing attempt count and then most recent occurrence. Pass a 16-character hex fingerprint to show one error family directly, or pass text words to match through recall. `--all-dirs` includes other directories, `--limit` sets the entry count (1–50, default 10), and `--json` prints `{ v: 1, coverage, ungroupedLegacy, entries }` on stdout.
+
+```text
+rocky: 3 repeated errors in C:\work\app (newest 10000 records, from 2026-10-02)
+3f2a9c1e44d0b7a1  TypeError: token undefined
+  2026-11-12 13:20  npm test          failed same way     said: edited src/auth.ts
+  2026-11-12 13:55  npm test          other error         said: edited src/token.ts
+  2026-11-12 14:03  npm test          passed              said: edited src/session.ts
+  2026-11-15 09:10  npm test -- auth  no later run        changes unknown
+rocky: Rocky records order, not cause.
+```
+
+Each attempt reports one outcome relative to the next run within eight hours (`passed`, `possible pass`, `failed same way`, `other error`, `no later run`, or `unknown`) and stated file changes when recorded (`said: edited ...` or `changes unknown`). Text output hides attempts older than 30 days; `--json` keeps them. Rocky records order, not cause.
+
+Exit codes: `0` when entries or an empty-memory notice are printed, `1` when memory cannot be read, and `2` on invalid options or an out-of-range `--limit`.
 
 ## `rocky watch` (v0.3, implemented)
 

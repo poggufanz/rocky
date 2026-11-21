@@ -1,0 +1,38 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    "{",
+    {
+      "kind": "zzz",
+      "id": "z1",
+      "ts": 1699999940000,
+      "cwd": "/app"
+    },
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000016",
+      "fingerprintV": 2,
+      "signature": ["error: valid failure"],
+      "excerpt": "Error: valid failure",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"]
+      }
+    ]
+  }
+}

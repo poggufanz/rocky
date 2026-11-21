@@ -843,7 +843,7 @@ function safeProviderFailureRecord(
     if (typeof exitCode !== "number" || !Number.isSafeInteger(exitCode)) return undefined;
 
     const origin = originSnapshotted ? knownOrigin : raw.origin;
-    if (origin !== undefined && origin !== "run" && origin !== "hook" && origin !== "watch") return undefined;
+    if (origin !== undefined && origin !== "run" && origin !== "hook" && origin !== "watch" && origin !== "agent") return undefined;
     const fingerprintV = raw.fingerprintV;
     if (fingerprintV !== undefined && fingerprintV !== 1 && fingerprintV !== 2) return undefined;
     const resolvedBy = optionalProviderText(raw.resolvedBy, 512, MAX_FIELD_BYTES);
@@ -1829,7 +1829,7 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               if (recordKind === "note") return notFoundResult(coverage);
               const origin = recordKind === "failure" ? recordObject.origin : undefined;
               if (recordKind === "failure" && origin !== undefined &&
-                  origin !== "run" && origin !== "hook" && origin !== "watch") return notFoundResult(coverage);
+                  origin !== "run" && origin !== "hook" && origin !== "watch" && origin !== "agent") return notFoundResult(coverage);
               // Custom providers are untrusted: once the discriminator is
               // read, every supported kind must stay on a bounded snapshot
               // path.  The durable parser may inspect canonical records, but

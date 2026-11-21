@@ -21,16 +21,16 @@ existing kind.
 
 | Kind | File | Since | Status | Payload |
 |------|------|-------|--------|---------|
-| `failure` | `memory.jsonl` | v0.1 | active | `cwd, cmd, exitCode, fingerprint, fingerprintV, signature[], excerpt, origin?, resolvedBy?, commandIdentity?, identityV?, identityReliable?, platform?` |
-| `fix` | `memory.jsonl` | v0.1 | active | `cwd, cmd, failureIds[], candidateFailureIds?, links?, commandIdentity?, identityV?, identityReliable?, platform?` |
-| `association` | `memory.jsonl` | v0.5 | active | like `fix`, weak-evidence links only |
+| `failure` | `memory.jsonl` | v0.1 | active | `cwd, cmd, exitCode, fingerprint, fingerprintV, signature[], excerpt, origin? (run\|hook\|watch\|agent), agent?{vendor,session,agentId?,toolUseId?}, resolvedBy?, commandIdentity?, identityV?, identityReliable?, platform?` (no writer emits `origin: "agent"` or `agent` yet) |
+| `fix` | `memory.jsonl` | v0.1 | active | `cwd, cmd, failureIds[], candidateFailureIds?, links?, agent?{vendor,session,agentId?,toolUseId?}, commandIdentity?, identityV?, identityReliable?, platform?` (no writer emits `agent` yet) |
+| `association` | `memory.jsonl` | v0.5 | active | like `fix` (including `agent?`), weak-evidence links only |
 | `note` | `memory.jsonl` | v0.5 | active | `cwd, cmd, file, line, subject, answer` |
 | `triple` | `memory.jsonl` | v0.5 | active | intent/mechanism/rationale triple, `schemaV: 1`, agent-hook origin |
 | `journal` | `journal.jsonl` | v0.6 | active | `note` (single line, ≤500 chars) |
 | `brief_run` | `memory.jsonl` | v0.6 | active | `cwd, sinceTs, commits, files` |
 | `invariant_touch` | `memory.jsonl` | v0.6 | active | `cwd, invariant, path` |
 | `guard` | `memory.jsonl` | v1.0 | active | `cwd, cmd, rule, outcome (cancelled\|proceeded)` — hook guard triggers; drained from `guard.pending` TSV (`ts, outcome, rule, cwd, cmd`) |
-| `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human), excerpt, pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}, files?[]` (bounded paths from notify `--files` (v0.7.5+) or `rocky why --add --files`, which writes the same field, max 8 entries of 512 chars; the PreToolUse gate reads them as file-linked evidence. `why --add` with `--files` writes no `links`; without it, `links` may name the newest failure or fix heard in that directory within 8 hours) |
+| `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human\|mcp, or any ^[a-z][a-z-]{0,31}$ source, read as testimony), excerpt, expectedCommand? (≤200 code points), pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}, files?[]` (bounded paths from notify `--files` (v0.7.5+) or `rocky why --add --files`, which writes the same field, max 8 entries of 512 chars; the PreToolUse gate reads them as file-linked evidence. `why --add` with `--files` writes no `links`; without it, `links` may name the newest failure or fix heard in that directory within 8 hours. No writer emits `source: "mcp"` or `expectedCommand` yet) |
 | `alias` | `memory.jsonl` | v0.7 | active | `alias, concept, action (add\|retract)` |
 | `explain` | `memory.jsonl` | v0.7.x teach | active | `cwd, path (bounded 512 chars), source (agent:<harness>), code (bounded excerpt: why this code shape), business (bounded excerpt: business concern), snippet? (written hunk, ≤2048 bytes, redacted), contentHash? (sha256/32 of normalized snippet). Witness testimony from the writing AI, captured at edit time via PostToolUse pending-snippet + notify join. Hearsay, never ground truth. Ladder/assembled answers are NEVER stored as this kind. |
 

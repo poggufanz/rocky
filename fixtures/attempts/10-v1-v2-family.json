@@ -1,0 +1,69 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f-v1-unproven",
+      "ts": 1699928000000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "deadbeefdeadbeef",
+      "signature": ["error: forged or stale signature"],
+      "excerpt": "Error: forged or stale signature",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "f-v1-proven",
+      "ts": 1699992800000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "21d0bfa9828e2099",
+      "signature": ["error: boom"],
+      "excerpt": "Error: boom",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "f-v2",
+      "ts": 1699996400000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "32739f35da794b55",
+      "fingerprintV": 2,
+      "signature": ["error: boom"],
+      "excerpt": "Error: boom",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "ungroupedLegacy": 1,
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["same_failure", "no_later_run"]
+      },
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"]
+      }
+    ]
+  }
+}

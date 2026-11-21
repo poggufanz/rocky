@@ -1,0 +1,43 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699971198999,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000005",
+      "fingerprintV": 2,
+      "signature": ["error: timeout"],
+      "excerpt": "Error: timeout",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "fix",
+      "id": "x1",
+      "ts": 1699999999000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "failureIds": ["f1"],
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"]
+      }
+    ]
+  }
+}

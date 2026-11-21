@@ -3018,3 +3018,99 @@ test("teach_lookup falls through to ladder when change card read throws", async 
   assert.equal(thrown.structuredContent.match, "ladder");
   assert.deepEqual(thrown.structuredContent, baseline.structuredContent);
 });
+
+test("MCP tools accept agent-origin failures and mcp rationales across search, recall, fetch_record, and provider records", async (t) => {
+  const signal = new AbortController().signal;
+  const agentFailure: FailureRecord = {
+    kind: "failure",
+    id: "failure-agent-1",
+    ts: 100,
+    cwd: "/private/app",
+    cmd: "npm test authguard",
+    exitCode: 1,
+    fingerprint: "fp-agent-1",
+    signature: ["authguard token error"],
+    excerpt: "authguard token error",
+    origin: "agent",
+  };
+  const mcpRationale: RationaleRecord = {
+    kind: "rationale",
+    id: "rationale-mcp-1",
+    ts: 110,
+    v: 1,
+    cwd: "/private/app",
+    agent: "claude-code",
+    rationale_fidelity: "summary",
+    source: "mcp",
+    excerpt: "authguard fallback rationale",
+  };
+
+  const home = mkdtempSync(join(tmpdir(), "rocky-mcp-agent-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const prevHome = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = prevHome;
+  });
+  const memoryPath = resolveRockyPaths({ ROCKY_HOME: home }).memory;
+  mkdirSync(dirname(memoryPath), { recursive: true });
+  writeFileSync(memoryPath, `${JSON.stringify(agentFailure)}\n${JSON.stringify(mcpRationale)}\n`, "utf8");
+
+  const canonicalTools = createToolRegistry({
+    exposure: "sanitized",
+    memory: createMemoryQueries(),
+    recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
+  });
+
+  const search = await canonicalTools.call("search_knowledge", { query: "authguard" }, signal);
+  assert.equal(search.isError, undefined);
+  assert.equal(search.structuredContent.truncated, false);
+  const searchItems = search.structuredContent.items as Array<{ id: string; kind: string; source?: string }>;
+  assert.deepEqual(
+    searchItems.map((item) => ({ id: item.id, kind: item.kind, source: item.source })).sort((a, b) => a.id.localeCompare(b.id)),
+    [
+      { id: "failure-agent-1", kind: "failure", source: "agent" },
+      { id: "rationale-mcp-1", kind: "rationale", source: "mcp" },
+    ],
+  );
+
+  const recall = await canonicalTools.call("recall", { query: "authguard" }, signal);
+  assert.equal(recall.isError, undefined);
+  assert.equal(recall.structuredContent.truncated, false);
+  const recallItems = recall.structuredContent.items as Array<{ origin: string; fingerprint: string }>;
+  assert.equal(recallItems.length, 1);
+  assert.equal(recallItems[0]?.origin, "agent");
+
+  const canonicalFetch = await canonicalTools.call("fetch_record", { id: agentFailure.id }, signal);
+  assert.equal(canonicalFetch.isError, undefined);
+  assert.equal((canonicalFetch.structuredContent.record as { id: string; origin?: string }).id, agentFailure.id);
+  assert.equal((canonicalFetch.structuredContent.record as { id: string; origin?: string }).origin, "agent");
+
+  // Custom provider path exercises fetch_record + safeProviderFailureRecord.
+  const customAcceptTools = createToolRegistry({
+    exposure: "sanitized",
+    memory: { ...createMemoryQueries(() => []), fetchRecord: () => ({ ...agentFailure }) },
+    recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
+  });
+  const providerFetch = await customAcceptTools.call("fetch_record", { id: agentFailure.id }, signal);
+  assert.equal(providerFetch.isError, undefined);
+  assert.equal((providerFetch.structuredContent.record as { id: string; origin?: string }).origin, "agent");
+
+  const customRejectTools = createToolRegistry({
+    exposure: "sanitized",
+    memory: {
+      ...createMemoryQueries(() => []),
+      fetchRecord: () => ({ ...agentFailure, origin: "Bad_Source" as unknown as FailureRecord["origin"] }),
+    },
+    recallWithAi: disabledRecallWithAi,
+    cards: emptyCards,
+  });
+  const badProviderFetch = await customRejectTools.call("fetch_record", { id: agentFailure.id }, signal);
+  assert.equal(badProviderFetch.isError, true);
+  assert.deepEqual(badProviderFetch.structuredContent.error, { code: "not_found", message: "record not found" });
+});
+
+

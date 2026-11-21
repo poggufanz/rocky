@@ -1,0 +1,60 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000015",
+      "fingerprintV": 2,
+      "signature": ["error: present failure"],
+      "excerpt": "Error: present failure",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "f-future",
+      "ts": 1700000000001,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000015",
+      "fingerprintV": 2,
+      "signature": ["error: present failure"],
+      "excerpt": "Error: present failure",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "fix",
+      "id": "x-future",
+      "ts": 1700000000001,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "failureIds": ["f1"],
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"]
+      }
+    ]
+  }
+}

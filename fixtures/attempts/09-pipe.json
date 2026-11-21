@@ -1,0 +1,60 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999880000,
+      "cwd": "/app",
+      "cmd": "npm test | tee out.log",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000009",
+      "fingerprintV": 2,
+      "signature": ["error: pipe failure"],
+      "excerpt": "Error: pipe failure",
+      "origin": "run",
+      "commandIdentity": "[]",
+      "identityV": 1,
+      "identityReliable": false,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "f2",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test | tee out.log",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000009",
+      "fingerprintV": 2,
+      "signature": ["error: pipe failure"],
+      "excerpt": "Error: pipe failure",
+      "origin": "run",
+      "commandIdentity": "[]",
+      "identityV": 1,
+      "identityReliable": false,
+      "platform": "linux"
+    },
+    {
+      "kind": "fix",
+      "id": "x1",
+      "ts": 1699999970000,
+      "cwd": "/app",
+      "cmd": "npm test | tee out.log",
+      "failureIds": [],
+      "commandIdentity": "[]",
+      "identityV": 1,
+      "identityReliable": false,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["same_failure", "no_later_run"]
+      }
+    ]
+  }
+}

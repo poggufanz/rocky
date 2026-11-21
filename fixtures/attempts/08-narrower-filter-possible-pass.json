@@ -1,0 +1,46 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000008",
+      "fingerprintV": 2,
+      "signature": ["error: suite failed"],
+      "excerpt": "Error: suite failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "association",
+      "id": "a1",
+      "ts": 1699999970000,
+      "cwd": "/app",
+      "cmd": "npm test -- foo.test.ts",
+      "candidateFailureIds": ["f1"],
+      "links": [
+        { "id": "f1", "basis": "program", "confidence": "possible" }
+      ],
+      "commandIdentity": "[\"npm\",\"test\",\"--\",\"foo.test.ts\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["possible_pass"]
+      }
+    ]
+  }
+}

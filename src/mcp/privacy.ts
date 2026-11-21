@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { Exposure } from "../core/config-read.js";
-import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isSafeNonNegativeInteger, MAX_TRIPLE_FILES } from "../core/memory-read.js";
+import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isSafeNonNegativeInteger, MAX_TRIPLE_FILES, RATIONALE_SOURCE_PATTERN } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, LinkConfidence, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 import { hasCanonicalKnowledgeProof } from "../core/memory-query.js";
@@ -1160,11 +1160,11 @@ function normalizeKnowledgeHit(value: unknown, now = Date.now()): KnowledgeSearc
     const agent = raw.agent === "claude-code" || raw.agent === "codex" ? raw.agent : undefined;
     const sourceValue = safeKnowledgeString(raw.source);
     const source = sourceValue !== undefined && (
-      (kind === "failure" && (sourceValue === "run" || sourceValue === "hook" || sourceValue === "watch"))
+      (kind === "failure" && (sourceValue === "run" || sourceValue === "hook" || sourceValue === "watch" || sourceValue === "agent"))
       || (kind === "fix" && sourceValue === "fix")
       || (kind === "triple" && sourceValue === "agent-hook")
       || (kind === "note" && sourceValue === "note")
-      || (kind === "rationale" && (sourceValue === "log-thinking" || sourceValue === "log-response" || sourceValue === "notify" || sourceValue === "human" || sourceValue === "agent-hook" || sourceValue === "rationale"))
+      || (kind === "rationale" && (sourceValue === "log-thinking" || sourceValue === "log-response" || sourceValue === "notify" || sourceValue === "human" || sourceValue === "mcp" || sourceValue === "agent-hook" || sourceValue === "rationale" || RATIONALE_SOURCE_PATTERN.test(sourceValue)))
       || (kind === "explain" && (sourceValue === "agent-hook" || sourceValue === "explain" || typeof sourceValue === "string"))
     ) ? sourceValue : undefined;
     if ((raw.agent !== undefined && agent === undefined) || (raw.source !== undefined && source === undefined)) {
@@ -1711,7 +1711,7 @@ function snapshotSourceFailure(value: unknown, now: number): FailureRecord | und
   const excerpt = boundedSourceString(raw.excerpt);
   if (excerpt === undefined) return undefined;
   const origin = raw.origin;
-  if (origin !== undefined && origin !== "run" && origin !== "hook" && origin !== "watch") return undefined;
+  if (origin !== undefined && origin !== "run" && origin !== "hook" && origin !== "watch" && origin !== "agent") return undefined;
   return {
     kind: "failure", id, ts, cwd, cmd, exitCode, fingerprint, signature, excerpt,
     ...(origin === undefined ? {} : { origin: origin as FailureOrigin }),

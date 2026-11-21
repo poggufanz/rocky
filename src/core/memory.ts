@@ -40,9 +40,9 @@ import {
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, tailReadable, windowCovered } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, KnownRationaleSource, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
-import { redactSecretsAtBoundary } from "./redact.js";
+import { flattenControls, redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
 import { LINK_WINDOW_MS, recentUnresolvedFailures, type UnresolvedLink } from "./memory-query.js";
@@ -1621,15 +1621,6 @@ function boundHeadTail(text: string, capBytes: number): string {
   return `${head} … ${tail}`;
 }
 
-/**
- * Replace C0, DEL, and C1 controls with spaces. Runs after redaction: the
- * redactor recognizes escape sequences, so flattening first leaves "[31m"
- * glued to a following token and the token goes unrecognized.
- */
-function flattenControls(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-}
-
 /** Redact secrets, flatten control characters, and cap head+tail by bytes. */
 export function boundRationaleExcerpt(text: string): string {
   const clean = flattenControls(redactSecretsAtBoundary(text));
@@ -1670,7 +1661,12 @@ function boundGitAnchor(input: GitAnchor | undefined): { git?: GitAnchor } {
 }
 
 export function recordRationale(
-  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number; git?: GitAnchor },
+  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt" | "source"> & {
+    source: KnownRationaleSource;
+    text: string;
+    ts?: number;
+    git?: GitAnchor;
+  },
   paths?: RockyPaths,
 ): RationaleRecord {
   const ts = input.ts ?? Date.now();
