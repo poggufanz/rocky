@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildProblems, type AttemptOutcome } from "../core/attempts.js";
-import { commandFingerprint, commandIdentity } from "../core/fingerprint.js";
+import { commandFingerprint, commandIdentity, legacyFingerprint } from "../core/fingerprint.js";
 import {
   MEMORY_FORMAT_VERSION,
   type AgentStamp,
@@ -315,3 +315,122 @@ test("opts.cwd sets cwdScope without filtering entries", () => {
   assert.equal(result.entries[0]!.cwdScope, "elsewhere");
   assert.equal(result.entries[1]!.cwdScope, "here");
 });
+
+test("migrated legacy command-only run failure stays in output family", () => {
+  const cmd = "npm test";
+  const legacyFp = legacyFingerprint("", cmd, 1);
+  const cmdFp = commandFingerprint(cmd, 1);
+  assert.notEqual(legacyFp, cmdFp);
+
+  const legacyRun: FailureRecord = {
+    ...makeFailure({
+      id: "f-legacy-cmd-only",
+      ts: NOW - 60_000,
+      origin: "run",
+      cmd,
+      fingerprint: legacyFp,
+      signature: [],
+      excerpt: "",
+    }),
+    fingerprintV: undefined,
+  };
+  const v2CmdWitness = makeFailure({
+    id: "f-v2-cmd-only",
+    ts: NOW - 30_000,
+    origin: "run",
+    cmd,
+    fingerprint: cmdFp,
+    fingerprintV: 2,
+    signature: [],
+    excerpt: "",
+  });
+
+  const result = buildProblems([legacyRun, v2CmdWitness], completeCoverage(2), { now: NOW });
+  assert.equal(result.ungroupedLegacy, 0);
+  assert.equal(result.entries.length, 2);
+
+  const commandEntry = result.entries.find((entry) => entry.keyStrength === "command");
+  const outputEntry = result.entries.find((entry) => entry.keyStrength === "output");
+  assert.ok(commandEntry);
+  assert.ok(outputEntry);
+  assert.equal(commandEntry.fingerprint, cmdFp);
+  assert.deepEqual(commandEntry.family, [cmdFp]);
+  assert.equal(outputEntry.fingerprint, cmdFp);
+  assert.deepEqual(outputEntry.family, [legacyFp]);
+});
+
+test("one pass record id counts as passed once for newest linked failure at same timestamp", () => {
+  const fix = makeFix({ id: "x1", ts: NOW - 30_000, failureIds: ["f1", "f2"] });
+  const f1 = makeFailure({ id: "f1", ts: NOW - 60_000, resolvedBy: fix.id });
+  const f2 = makeFailure({ id: "f2", ts: NOW - 60_000, resolvedBy: fix.id });
+
+  const sameTsResult = buildProblems([f1, f2, fix], completeCoverage(3), { now: NOW });
+  assert.equal(sameTsResult.entries.length, 1);
+  const sameTsEntry = sameTsResult.entries[0]!;
+  assert.deepEqual(
+    sameTsEntry.attempts.map((attempt) => attempt.outcome),
+    ["same_failure", "passed"],
+  );
+  assert.equal(sameTsEntry.attempts[0]!.failureId, "f1");
+  assert.equal(sameTsEntry.attempts[0]!.outcomeRecordId, "f2");
+  assert.equal(sameTsEntry.attempts[0]!.outcomeTs, f2.ts);
+  assert.equal(sameTsEntry.attempts[1]!.failureId, "f2");
+  assert.equal(sameTsEntry.attempts[1]!.outcomeRecordId, "x1");
+  assert.equal(sameTsEntry.attempts[1]!.outcomeTs, fix.ts);
+  assert.equal(sameTsEntry.counts.attempts, 2);
+  assert.equal(sameTsEntry.counts.passed, 1);
+  assert.equal(sameTsEntry.counts.same_failure, 1);
+  assert.equal(sameTsEntry.latestOutcome, "passed");
+
+  const s1: AgentStamp = { vendor: "claude-code", session: "s1" };
+  const s2: AgentStamp = { vendor: "claude-code", session: "s2" };
+  const crossFix = makeFix({ id: "x2", ts: NOW - 30_000, failureIds: ["f3", "f4"], agent: s2 });
+  const f3 = makeFailure({ id: "f3", ts: NOW - 70_000, resolvedBy: crossFix.id, agent: s1 });
+  const f4 = makeFailure({ id: "f4", ts: NOW - 60_000, resolvedBy: crossFix.id, agent: s2 });
+
+  const crossResult = buildProblems([f3, f4, crossFix], completeCoverage(3), { now: NOW });
+  assert.equal(crossResult.entries.length, 1);
+  const crossEntry = crossResult.entries[0]!;
+  assert.deepEqual(
+    crossEntry.attempts.map((attempt) => attempt.outcome),
+    ["same_failure", "passed"],
+  );
+  assert.equal(crossEntry.attempts[0]!.crossSession, undefined);
+  assert.equal(crossEntry.counts.passed, 1);
+  assert.equal(crossEntry.counts.same_failure, 1);
+  assert.equal(crossEntry.counts.attempts, 2);
+});
+
+test("fingerprint filtering preserves ungroupedLegacy count even when filtered out", () => {
+  const unprovenLegacy: FailureRecord = {
+    ...makeFailure({
+      id: "f-legacy-unproven",
+      ts: NOW - 60_000,
+      fingerprint: "deadbeefdeadbeef",
+      signature: ["error: stale or unprovable"],
+      excerpt: "Error: stale or unprovable",
+    }),
+    fingerprintV: undefined,
+  };
+  const v2Failure = makeFailure({
+    id: "f-v2",
+    ts: NOW - 30_000,
+    fingerprint: "aaaa000000000001",
+  });
+
+  const matchOther = buildProblems([unprovenLegacy, v2Failure], completeCoverage(2), {
+    now: NOW,
+    fingerprint: "aaaa000000000001",
+  });
+  assert.equal(matchOther.entries.length, 1);
+  assert.equal(matchOther.entries[0]!.fingerprint, "aaaa000000000001");
+  assert.equal(matchOther.ungroupedLegacy, 1);
+
+  const matchNone = buildProblems([unprovenLegacy, v2Failure], completeCoverage(2), {
+    now: NOW,
+    fingerprint: "ffffffffffffffff",
+  });
+  assert.equal(matchNone.entries.length, 0);
+  assert.equal(matchNone.ungroupedLegacy, 1);
+});
+

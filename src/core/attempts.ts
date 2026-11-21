@@ -86,7 +86,6 @@ interface FailureGroup {
   canonical: string;
   keyStrength: "output" | "command";
   cwdKey: string;
-  isUnprovenLegacy: boolean;
   family: Set<string>;
   failures: IndexedFailure[];
 }
@@ -291,6 +290,8 @@ export function buildProblems(
     return cached;
   };
 
+  let ungroupedLegacy = 0;
+
   for (let i = 0; i < failureRecords.length; i += 1) {
     const record = failureRecords[i]!;
     const order = failureOrders[i]!;
@@ -300,11 +301,13 @@ export function buildProblems(
       keyStrength = "command";
     } else {
       const cmdFp = cachedCommandFingerprint(cmdFpCache, record.cmd, record.exitCode);
-      keyStrength = record.fingerprint === cmdFp || canonical === cmdFp ? "command" : "output";
+      keyStrength = record.fingerprint === cmdFp ? "command" : "output";
     }
     const cwdKey = resolveCwdKey(record.cwd, record.platform);
     const key = `${keyStrength}:${canonical}:${cwdKey}`;
-    const isUnprovenLegacy = record.fingerprintV !== 2 && !migration.provenLegacyRecords.has(record.id);
+    if (record.fingerprintV !== 2 && !migration.provenLegacyRecords.has(record.id)) {
+      ungroupedLegacy += 1;
+    }
 
     const indexed: IndexedFailure = {
       kind: "failure",
@@ -325,7 +328,6 @@ export function buildProblems(
         canonical,
         keyStrength,
         cwdKey,
-        isUnprovenLegacy,
         family: new Set([record.fingerprint]),
         failures: [indexed],
       };
@@ -356,7 +358,7 @@ export function buildProblems(
   }
 
   if (keptGroups.length === 0) {
-    return { entries: [], coverage, ungroupedLegacy: 0 };
+    return { entries: [], coverage, ungroupedLegacy };
   }
 
   for (let i = 0; i < deferredFixes.length; i += 1) {
@@ -401,11 +403,9 @@ export function buildProblems(
   const tailWindow = coverage.window === "tail";
   const tailIsReadable = tailReadable(coverage);
   const entries: ProblemEntry[] = [];
-  let ungroupedLegacy = 0;
 
   for (let gIdx = 0; gIdx < keptGroups.length; gIdx += 1) {
     const group = keptGroups[gIdx]!;
-    if (group.isUnprovenLegacy) ungroupedLegacy += 1;
     group.failures.sort(compareByTsOrder);
     const cwdList = recordsByCwdKey.get(group.cwdKey)!;
     const attempts: Attempt[] = [];
@@ -517,6 +517,25 @@ export function buildProblems(
       if (crossSession !== undefined) attempt.crossSession = crossSession;
       if (stated !== undefined) attempt.stated = stated;
       attempts.push(attempt);
+    }
+
+    const claimedPassIds = new Map<string, Attempt>();
+    for (let i = attempts.length - 1; i >= 0; i -= 1) {
+      const attempt = attempts[i]!;
+      if (attempt.outcome !== "passed" || attempt.outcomeRecordId === undefined) continue;
+      const passId = attempt.outcomeRecordId;
+      const newerLinked = claimedPassIds.get(passId);
+      if (newerLinked === undefined) {
+        claimedPassIds.set(passId, attempt);
+      } else {
+        counts.passed -= 1;
+        counts.same_failure += 1;
+        attempt.outcome = "same_failure";
+        attempt.outcomeRecordId = newerLinked.failureId;
+        attempt.outcomeTs = newerLinked.ts;
+        delete attempt.crossSession;
+        claimedPassIds.set(passId, attempt);
+      }
     }
 
     const newestFailure = group.failures[group.failures.length - 1]!.record;

@@ -37,12 +37,12 @@ function makeDataset() {
 
   while (records.length < RECORD_COUNT) {
     ts += 5_000;
-    const cwdIdx = seq % CWD_COUNT;
-    const fpIdx = (seq * 7 + cwdIdx) % FINGERPRINT_COUNT;
+    const slot = Math.floor(seq / FINGERPRINT_COUNT) % 10;
+    const fpIdx = seq % FINGERPRINT_COUNT;
+    const cwdIdx = (Math.floor(fpIdx / 10) + Math.floor(seq / (FINGERPRINT_COUNT * 10))) % CWD_COUNT;
     const cwd = cwds[cwdIdx];
     const fpMeta = fingerprints[fpIdx];
     const cmdMeta = cmds[fpIdx % cmds.length];
-    const slot = seq % 10;
     const key = `${cwdIdx}:${fpIdx}`;
     const prior = lastFailureByCwdFp.get(key);
 
@@ -101,8 +101,20 @@ function makeDataset() {
     seq += 1;
   }
 
+  const actualFingerprints = new Set(
+    records.filter((record) => record.kind === "failure").map((record) => record.fingerprint),
+  ).size;
+  const actualCwds = new Set(records.map((record) => record.cwd)).size;
+  if (actualFingerprints !== FINGERPRINT_COUNT || actualCwds !== CWD_COUNT) {
+    throw new Error(
+      `Benchmark dataset cardinality mismatch: expected ${FINGERPRINT_COUNT} fingerprints and ${CWD_COUNT} cwds, got ${actualFingerprints} and ${actualCwds}`,
+    );
+  }
+
   return {
     records,
+    actualFingerprints,
+    actualCwds,
     targetFingerprint: fingerprints[0].fp,
     coverage: {
       version: MEMORY_FORMAT_VERSION,
@@ -128,7 +140,7 @@ function measure(fn) {
 }
 
 const assertBudget = process.argv.includes("--assert");
-const { records, targetFingerprint, coverage } = makeDataset();
+const { records, actualFingerprints, actualCwds, targetFingerprint, coverage } = makeDataset();
 
 for (let index = 0; index < WARMUPS; index += 1) {
   buildProblems(records, coverage, { now: NOW, platform: "linux" });
@@ -163,8 +175,8 @@ const report = {
   environment: { node: process.version, platform: process.platform, arch: process.arch, cpus: os.cpus().length },
   dataset: {
     records: records.length,
-    fingerprints: FINGERPRINT_COUNT,
-    cwds: CWD_COUNT,
+    fingerprints: actualFingerprints,
+    cwds: actualCwds,
     targetFingerprint,
   },
   warmups: WARMUPS,
