@@ -6,14 +6,30 @@ import { join } from "node:path";
 import test from "node:test";
 import { disabledRecallWithAi } from "../ai/port.js";
 import { commandIdentity } from "../core/fingerprint.js";
-import { createMemoryQueries, type MemoryQueries } from "../core/memory-query.js";
-import type { FailureRecord, FixRecord, MemoryRecord, RationaleRecord } from "../core/memory-read.js";
+import {
+  createMemoryQueries,
+  loadDurableMemorySnapshot,
+  queryRecall,
+  type MemoryQueries,
+} from "../core/memory-query.js";
+import {
+  memoryReadMetrics,
+  type AssociationRecord,
+  type FailureRecord,
+  type FixRecord,
+  type MemoryRecord,
+  type RationaleRecord,
+} from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   ATTEMPT_HISTORY_NOTICE,
   type ProjectedProblemEntry,
 } from "../mcp/attempts-projection.js";
-import { MAX_RESPONSE_BYTES, projectRecentFailures } from "../mcp/privacy.js";
+import {
+  MAX_RESPONSE_BYTES,
+  projectRecallHits,
+  projectRecentFailures,
+} from "../mcp/privacy.js";
 import {
   createToolRegistry,
   MCP_TOOL_CATALOG,
@@ -884,4 +900,390 @@ test("no causal words in the response", async () => {
     ];
     assert.deepEqual(causalWordViolations(strings), []);
   });
+});
+
+function makeAssociation(
+  overrides: Partial<AssociationRecord> & { id: string; ts: number; candidateFailureIds: string[] },
+): AssociationRecord {
+  return {
+    kind: "association",
+    cwd: process.cwd(),
+    cmd: "npm run fix-step",
+    links: overrides.candidateFailureIds.map((id) => ({
+      id,
+      basis: "same-program" as const,
+      confidence: "possible" as const,
+    })),
+    ...overrides,
+  };
+}
+
+function freezeOldRecallEnvelope(
+  memory: MemoryQueries,
+  input: { query: string; limit?: number; cwd?: string },
+  exposure: "sanitized" | "raw",
+): string {
+  const hits = memory.recall(input);
+  const coverage = memory.coverage?.();
+  const projected = projectRecallHits(hits, exposure);
+  const coveragePayload = coverage === undefined
+    ? {}
+    : {
+        coverage,
+        memoryCoverage: coverage,
+        memoryVersion: coverage.version,
+        memoryCoverageIncomplete: !coverage.complete || coverage.skipped > 0 || coverage.truncated > 0,
+      };
+  const payload = { ...projected, ...coveragePayload };
+  const result = {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+    structuredContent: payload,
+  };
+  return JSON.stringify(result);
+}
+
+test("durable snapshot + queryRecall produces identical hits to memory.recall", async () => {
+  const now = Date.now();
+  const dirA = join(process.cwd(), "dir-equiv-a");
+  const dirB = join(process.cwd(), "dir-equiv-b");
+  const f1 = makeFailure({
+    id: "eq-f1",
+    ts: now - 30 * MINUTE,
+    cwd: dirA,
+    cmd: "npm test auth-token",
+    fingerprint: "1111000011110001",
+    signature: ["TypeError: authToken missing"],
+  });
+  const fix1 = makeFix({
+    id: "eq-fix1",
+    ts: now - 25 * MINUTE,
+    cwd: dirA,
+    cmd: "npm test auth-token",
+    failureIds: [f1.id],
+  });
+  const f2 = makeFailure({
+    id: "eq-f2",
+    ts: now - 20 * MINUTE,
+    cwd: dirB,
+    cmd: "npm test auth-token",
+    fingerprint: "1111000011110002",
+    signature: ["Error: authToken expired"],
+  });
+  const assoc2 = makeAssociation({
+    id: "eq-assoc2",
+    ts: now - 15 * MINUTE,
+    cwd: dirB,
+    candidateFailureIds: [f2.id],
+  });
+  const futureFailure = makeFailure({
+    id: "eq-future",
+    ts: now + 10 * MINUTE,
+    cwd: dirA,
+    cmd: "npm test auth-token",
+    fingerprint: "1111000011110003",
+    signature: ["Error: authToken future"],
+  });
+
+  await withDurableMemory([f1, f1, fix1, f2, assoc2, futureFailure], async (memory) => {
+    const snapshot = loadDurableMemorySnapshot(memory, now);
+    assert.ok(snapshot !== undefined);
+
+    const directAll = memory.recall({ query: "authToken", limit: 10, now });
+    const snapAll = queryRecall(snapshot.records, { query: "authToken", limit: 10, now });
+    assert.deepEqual(snapAll, directAll);
+    assert.deepEqual(snapshot.coverage, memory.coverage?.());
+
+    const directDirA = memory.recall({ query: "authToken", limit: 10, cwd: dirA, now });
+    const snapDirA = queryRecall(snapshot.records, { query: "authToken", limit: 10, cwd: dirA, now });
+    assert.deepEqual(snapDirA, directDirA);
+    assert.equal(snapDirA.length, 1);
+    assert.equal(snapDirA[0]!.failure.id, f1.id);
+  });
+});
+
+test("recall output is byte-identical when no hit has two attempts", async () => {
+  const now = Date.now();
+  const here = process.cwd();
+  const f1 = makeFailure({
+    id: "single-f1",
+    ts: now - 20 * MINUTE,
+    cwd: here,
+    cmd: "npm test cache-key",
+    fingerprint: "aaaa111122223333",
+    signature: ["Error: cacheKey invalid"],
+  });
+  const fix1 = makeFix({
+    id: "single-fix1",
+    ts: now - 15 * MINUTE,
+    cwd: here,
+    cmd: "npm test cache-key",
+    failureIds: [f1.id],
+  });
+  const f2 = makeFailure({
+    id: "single-f2",
+    ts: now - 10 * MINUTE,
+    cwd: here,
+    cmd: "npm test cache-key-miss",
+    fingerprint: "bbbb111122223333",
+    signature: ["Error: cacheKey missing"],
+  });
+
+  await withDurableMemory([f1, fix1, f2], async (memory) => {
+    const signal = new AbortController().signal;
+    for (const exposure of ["sanitized", "raw"] as const) {
+      const oldJson = freezeOldRecallEnvelope(memory, { query: "cacheKey", limit: 5 }, exposure);
+      const reg = createToolRegistry({
+        exposure,
+        memory,
+        recallWithAi: disabledRecallWithAi,
+      });
+      const result = await reg.call("recall", { query: "cacheKey", limit: 5 }, signal);
+      assert.equal(JSON.stringify(result), oldJson);
+      const items = (result.structuredContent as { items: Record<string, unknown>[] }).items;
+      assert.equal(items.length, 2);
+      for (const item of items) {
+        assert.equal("attemptsSummary" in item, false);
+      }
+    }
+  });
+});
+
+test("recall adds attemptsSummary only for entries with two or more attempts", async () => {
+  const now = Date.now();
+  const here = process.cwd();
+  const fpRepeat = "cc11223344556677";
+  const fpOtherErr = "dd11223344556677";
+  const fpDiffAndPossible = "ee11223344556677";
+  const fpSingle = "ff11223344556677";
+
+  const f1 = makeFailure({
+    id: "rep-f1",
+    ts: now - 40 * MINUTE,
+    cwd: here,
+    cmd: "npm test retry-budget",
+    fingerprint: fpRepeat,
+    signature: ["TypeError: retryBudget undefined"],
+  });
+  const f2 = makeFailure({
+    id: "rep-f2",
+    ts: now - 35 * MINUTE,
+    cwd: here,
+    cmd: "npm test retry-budget",
+    fingerprint: fpRepeat,
+    signature: ["TypeError: retryBudget undefined"],
+  });
+  const fix2 = makeFix({
+    id: "rep-fix2",
+    ts: now - 30 * MINUTE,
+    cwd: here,
+    cmd: "npm test retry-budget",
+    failureIds: [f2.id],
+  });
+
+  const f3 = makeFailure({
+    id: "rep-f3",
+    ts: now - 25 * MINUTE,
+    cwd: here,
+    cmd: "npm test retry-budget-alt",
+    fingerprint: fpDiffAndPossible,
+    signature: ["RangeError: retryBudget negative"],
+  });
+  const f3Next = makeFailure({
+    id: "rep-f3-other",
+    ts: now - 22 * MINUTE,
+    cwd: here,
+    cmd: "npm test retry-budget-alt",
+    fingerprint: fpOtherErr,
+    signature: ["SyntaxError: unrelated parse fault"],
+  });
+  const f4 = makeFailure({
+    id: "rep-f4",
+    ts: now - 15 * MINUTE,
+    cwd: here,
+    cmd: "npm test retry-budget-alt",
+    fingerprint: fpDiffAndPossible,
+    signature: ["RangeError: retryBudget negative"],
+  });
+  const assoc4 = makeAssociation({
+    id: "rep-assoc4",
+    ts: now - 12 * MINUTE,
+    cwd: here,
+    cmd: "npm run retry-budget-alt",
+    candidateFailureIds: [f4.id],
+  });
+
+  const fSingle = makeFailure({
+    id: "rep-single",
+    ts: now - 5 * MINUTE,
+    cwd: here,
+    cmd: "npm test retry-budget-once",
+    fingerprint: fpSingle,
+    signature: ["Error: retryBudget single occurrence"],
+  });
+
+  await withDurableMemory([f1, f2, fix2, f3, f3Next, f4, assoc4, fSingle], async (memory) => {
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const result = await reg.call(
+      "recall",
+      { query: "retryBudget", limit: 10 },
+      new AbortController().signal,
+    );
+    const items = (result.structuredContent as { items: Record<string, unknown>[] }).items;
+    const byFp = new Map(items.map((item) => [item.fingerprint as string, item]));
+
+    const repeatHit = byFp.get(fpRepeat);
+    assert.ok(repeatHit !== undefined);
+    assert.deepEqual(repeatHit.attemptsSummary, {
+      attempts: 2,
+      passed: 1,
+      sameFailure: 1,
+      differentFailure: 0,
+      possiblePass: 0,
+      latestOutcome: "passed",
+    });
+    const repeatKeys = Object.keys(repeatHit);
+    assert.equal(repeatKeys[repeatKeys.length - 1], "attemptsSummary");
+
+    const altHit = byFp.get(fpDiffAndPossible);
+    assert.ok(altHit !== undefined);
+    assert.deepEqual(altHit.attemptsSummary, {
+      attempts: 2,
+      passed: 0,
+      sameFailure: 0,
+      differentFailure: 1,
+      possiblePass: 1,
+      latestOutcome: "possible_pass",
+    });
+
+    const singleHit = byFp.get(fpSingle);
+    assert.ok(singleHit !== undefined);
+    assert.equal("attemptsSummary" in singleHit, false);
+
+    const summaryTokens = [
+      "attemptsSummary",
+      ...Object.keys(repeatHit.attemptsSummary as Record<string, unknown>),
+      (repeatHit.attemptsSummary as { latestOutcome: string }).latestOutcome,
+      (altHit.attemptsSummary as { latestOutcome: string }).latestOutcome,
+    ];
+    assert.deepEqual(causalWordViolations(summaryTokens), []);
+  });
+});
+
+test("recall summary and hits come from one snapshot", async () => {
+  const now = Date.now();
+  const here = process.cwd();
+  const fp = "aabbccddeeff0011";
+  const f1 = makeFailure({
+    id: "snap-f1",
+    ts: now - 20 * MINUTE,
+    cwd: here,
+    cmd: "npm test snapshot-once",
+    fingerprint: fp,
+    signature: ["Error: snapshotOnce failure"],
+  });
+  const f2 = makeFailure({
+    id: "snap-f2",
+    ts: now - 10 * MINUTE,
+    cwd: here,
+    cmd: "npm test snapshot-once",
+    fingerprint: fp,
+    signature: ["Error: snapshotOnce failure"],
+  });
+  const fix = makeFix({
+    id: "snap-fix",
+    ts: now - 5 * MINUTE,
+    cwd: here,
+    cmd: "npm test snapshot-once",
+    failureIds: [f2.id],
+  });
+
+  await withDurableMemory([f1, f2, fix], async (memory) => {
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const signal = new AbortController().signal;
+
+    const beforeFirst = memoryReadMetrics();
+    const first = await reg.call("recall", { query: "snapshotOnce" }, signal);
+    const afterFirst = memoryReadMetrics();
+
+    assert.equal(afterFirst.parses - beforeFirst.parses, 1);
+    assert.equal(afterFirst.cacheHits - beforeFirst.cacheHits, 0);
+    const firstItems = (first.structuredContent as { items: Record<string, unknown>[] }).items;
+    assert.equal(firstItems.length, 1);
+    assert.deepEqual(firstItems[0]!.attemptsSummary, {
+      attempts: 2,
+      passed: 1,
+      sameFailure: 1,
+      differentFailure: 0,
+      possiblePass: 0,
+      latestOutcome: "passed",
+    });
+
+    const beforeSecond = memoryReadMetrics();
+    const second = await reg.call("recall", { query: "snapshotOnce" }, signal);
+    const afterSecond = memoryReadMetrics();
+
+    assert.equal(afterSecond.parses - beforeSecond.parses, 0);
+    assert.equal(afterSecond.cacheHits - beforeSecond.cacheHits, 1);
+    assert.equal(JSON.stringify(second), JSON.stringify(first));
+  });
+});
+
+test("custom memory host recall has no summary and unchanged bytes", async () => {
+  const now = Date.now();
+  const here = process.cwd();
+  const fp = "1020304050607080";
+  const records: MemoryRecord[] = [
+    makeFailure({
+      id: "cust-f1",
+      ts: now - 20 * MINUTE,
+      cwd: here,
+      cmd: "npm test custom-host",
+      fingerprint: fp,
+      signature: ["Error: customHost repeated"],
+    }),
+    makeFailure({
+      id: "cust-f2",
+      ts: now - 10 * MINUTE,
+      cwd: here,
+      cmd: "npm test custom-host",
+      fingerprint: fp,
+      signature: ["Error: customHost repeated"],
+    }),
+    makeFix({
+      id: "cust-fix",
+      ts: now - 5 * MINUTE,
+      cwd: here,
+      cmd: "npm test custom-host",
+      failureIds: ["cust-f2"],
+    }),
+  ];
+
+  const customMemory = createMemoryQueries(() => records);
+  const expectedOldJson = freezeOldRecallEnvelope(
+    customMemory,
+    { query: "customHost", limit: 3 },
+    "sanitized",
+  );
+  const reg = createToolRegistry({
+    exposure: "sanitized",
+    memory: customMemory,
+    recallWithAi: disabledRecallWithAi,
+  });
+  const result = await reg.call(
+    "recall",
+    { query: "customHost" },
+    new AbortController().signal,
+  );
+  assert.equal(JSON.stringify(result), expectedOldJson);
+  const items = (result.structuredContent as { items: Record<string, unknown>[] }).items;
+  assert.equal(items.length, 1);
+  assert.equal("attemptsSummary" in items[0]!, false);
 });

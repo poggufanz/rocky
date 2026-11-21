@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
+import type { AttemptOutcome } from "../core/attempts.js";
 import type { Exposure } from "../core/config-read.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isSafeNonNegativeInteger, MAX_TRIPLE_FILES, RATIONALE_SOURCE_PATTERN } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
@@ -122,6 +123,14 @@ export interface ProjectedRecallHit {
   excerpt?: string;
   rawRecord?: { failure: FailureRecord; fix?: FixRecord };
   truncatedFields: readonly string[];
+  attemptsSummary?: {
+    attempts: number;
+    passed: number;
+    sameFailure: number;
+    differentFailure: number;
+    possiblePass: number;
+    latestOutcome: AttemptOutcome;
+  };
 }
 
 export interface ProjectedRecallResponse {
