@@ -519,22 +519,28 @@ export function buildProblems(
       attempts.push(attempt);
     }
 
-    const claimedPassIds = new Map<string, Attempt>();
+    const claimedPassIds = new Map<string, number>();
     for (let i = attempts.length - 1; i >= 0; i -= 1) {
       const attempt = attempts[i]!;
       if (attempt.outcome !== "passed" || attempt.outcomeRecordId === undefined) continue;
       const passId = attempt.outcomeRecordId;
-      const newerLinked = claimedPassIds.get(passId);
-      if (newerLinked === undefined) {
-        claimedPassIds.set(passId, attempt);
+      const keptIndex = claimedPassIds.get(passId);
+      if (keptIndex === undefined) {
+        claimedPassIds.set(passId, i);
       } else {
+        const keptAttempt = attempts[keptIndex]!;
+        const keptFailure = group.failures[keptIndex]!.record;
+        const demotedFailure = group.failures[i]!.record;
         counts.passed -= 1;
         counts.same_failure += 1;
         attempt.outcome = "same_failure";
-        attempt.outcomeRecordId = newerLinked.failureId;
-        attempt.outcomeTs = newerLinked.ts;
-        delete attempt.crossSession;
-        claimedPassIds.set(passId, attempt);
+        attempt.outcomeRecordId = keptAttempt.failureId;
+        attempt.outcomeTs = keptAttempt.ts;
+        if (isDifferentAgentSession(demotedFailure.agent, keptFailure.agent)) {
+          attempt.crossSession = true;
+        } else {
+          delete attempt.crossSession;
+        }
       }
     }
 

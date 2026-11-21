@@ -395,10 +395,39 @@ test("one pass record id counts as passed once for newest linked failure at same
     crossEntry.attempts.map((attempt) => attempt.outcome),
     ["same_failure", "passed"],
   );
-  assert.equal(crossEntry.attempts[0]!.crossSession, undefined);
+  assert.equal(crossEntry.attempts[0]!.failureId, "f3");
+  assert.equal(crossEntry.attempts[0]!.outcomeRecordId, "f4");
+  assert.equal(crossEntry.attempts[0]!.outcomeTs, f4.ts);
+  assert.equal(crossEntry.attempts[0]!.crossSession, true);
+  assert.equal(crossEntry.attempts[1]!.failureId, "f4");
+  assert.equal(crossEntry.attempts[1]!.outcomeRecordId, "x2");
+  assert.equal(crossEntry.attempts[1]!.crossSession, undefined);
   assert.equal(crossEntry.counts.passed, 1);
   assert.equal(crossEntry.counts.same_failure, 1);
   assert.equal(crossEntry.counts.attempts, 2);
+
+  const sameSessionFix = makeFix({ id: "x3", ts: NOW - 30_000, failureIds: ["f5", "f6"], agent: s2 });
+  const f5 = makeFailure({ id: "f5", ts: NOW - 60_000, resolvedBy: sameSessionFix.id, agent: s1 });
+  const f6 = makeFailure({ id: "f6", ts: NOW - 60_000, resolvedBy: sameSessionFix.id, agent: s1 });
+
+  const sameSessionResult = buildProblems([f5, f6, sameSessionFix], completeCoverage(3), { now: NOW });
+  assert.equal(sameSessionResult.entries.length, 1);
+  const sameSessionEntry = sameSessionResult.entries[0]!;
+  assert.deepEqual(
+    sameSessionEntry.attempts.map((attempt) => attempt.outcome),
+    ["same_failure", "passed"],
+  );
+  assert.equal(sameSessionEntry.attempts[0]!.failureId, "f5");
+  assert.equal(sameSessionEntry.attempts[0]!.outcomeRecordId, "f6");
+  assert.equal(sameSessionEntry.attempts[0]!.outcomeTs, f6.ts);
+  assert.equal(sameSessionEntry.attempts[0]!.crossSession, undefined);
+  assert.equal("crossSession" in sameSessionEntry.attempts[0]!, false);
+  assert.equal(sameSessionEntry.attempts[1]!.failureId, "f6");
+  assert.equal(sameSessionEntry.attempts[1]!.outcomeRecordId, "x3");
+  assert.equal(sameSessionEntry.attempts[1]!.crossSession, true);
+  assert.equal(sameSessionEntry.counts.passed, 1);
+  assert.equal(sameSessionEntry.counts.same_failure, 1);
+  assert.equal(sameSessionEntry.counts.attempts, 2);
 });
 
 test("fingerprint filtering preserves ungroupedLegacy count even when filtered out", () => {
