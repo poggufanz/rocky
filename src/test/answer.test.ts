@@ -165,7 +165,8 @@ const READS: readonly { name: string; coverage: MemoryCoverage; disclosed: boole
   { name: "a whole read", coverage: coverage(), disclosed: false, hold: false },
   { name: "whitespace-only lines, scanned exceeds records, still whole", coverage: coverage({ scanned: 5 }), disclosed: false, hold: false },
   { name: "one skipped line", coverage: coverage({ skipped: 1, complete: false }), disclosed: true, hold: false },
-  { name: "several skipped lines", coverage: coverage({ skipped: 4, complete: false }), disclosed: true, hold: false },
+  { name: "full read above the skipped-line allowance", coverage: coverage({ scanned: 3, skipped: 2, complete: false }), disclosed: true, hold: true },
+  { name: "several skipped lines", coverage: coverage({ skipped: 4, complete: false }), disclosed: true, hold: true },
   { name: "the record cap", coverage: coverage({ truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: true },
   { name: "the file size cap", coverage: coverage({ truncated: 1, complete: false, reason: "file-size-cap" }), disclosed: true, hold: true },
   { name: "a read race", coverage: coverage({ scanned: 0, truncated: 1, complete: false, reason: "read-race" }), disclosed: true, hold: true },
@@ -173,7 +174,8 @@ const READS: readonly { name: string; coverage: MemoryCoverage; disclosed: boole
   { name: "a clean tail at the record cap", coverage: coverage({ window: "tail", startOffset: 60, truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: false },
   { name: "a clean tail at the file size cap", coverage: coverage({ window: "tail", startOffset: 60, truncated: 1, complete: false, reason: "file-size-cap" }), disclosed: true, hold: false },
   { name: "a tail with a skipped line", coverage: coverage({ window: "tail", startOffset: 60, skipped: 1, truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: false },
-  { name: "incomplete with no reason and nothing skipped", coverage: coverage({ complete: false }), disclosed: true, hold: false },
+  { name: "a tail above the skipped-line allowance", coverage: coverage({ window: "tail", startOffset: 60, skipped: 2, truncated: 1, complete: false, reason: "record-cap" }), disclosed: true, hold: true },
+  { name: "incomplete with no reason and nothing skipped", coverage: coverage({ complete: false }), disclosed: true, hold: true },
   { name: "truncated with no reason and nothing skipped", coverage: coverage({ truncated: 2, complete: false }), disclosed: true, hold: true },
 ];
 

@@ -733,7 +733,7 @@ export function tailReadable(coverage: MemoryCoverage): boolean {
   if (isCompleteMemoryCoverage(coverage)) return true;
   if (coverage.reason === "read-race" || coverage.skipped > skippedLineAllowance(coverage.scanned)) return false;
   if (coverage.window === "tail") return coverage.reason === "record-cap" || coverage.reason === "file-size-cap";
-  return coverage.reason === undefined && coverage.truncated === 0;
+  return coverage.skipped > 0 && coverage.reason === undefined && coverage.truncated === 0;
 }
 
 /**

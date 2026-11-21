@@ -53,20 +53,27 @@ export async function run(cmd: string, processRunner: (cmd: string) => Promise<E
 }
 
 /** An unreadable memory file is reported, not thrown — callers get `undefined` and carry on. */
-function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolean } | undefined {
+function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolean; linesSkipped: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
+    const coverageDetail = (): string => {
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      return !isVerbose() && words !== undefined
+        ? `    ${words}`
+        : `    memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+    };
     if (!tailReadable(loaded.coverage)) {
       say("Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.");
-      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
-      detail(!isVerbose() && words !== undefined
-        ? `    ${words}`
-        : `    memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      detail(coverageDetail());
       return undefined;
+    }
+    if (loaded.coverage.skipped > 0) {
+      detail(coverageDetail());
     }
     return {
       records: loaded.records,
-      historyMayStartEarlier: loaded.coverage.window === "tail" || loaded.coverage.skipped > 0,
+      historyMayStartEarlier: loaded.coverage.window === "tail",
+      linesSkipped: loaded.coverage.skipped > 0,
     };
   } catch {
     say("Memory file could not be opened. No records were read.");
@@ -89,16 +96,19 @@ export function speakFailureMemory(
   cmd: string,
   exitCode: number,
   _cwd: string,
-  scope: { historyMayStartEarlier: boolean },
+  scope: { historyMayStartEarlier: boolean; linesSkipped?: boolean },
   now = Date.now(),
 ): void {
   const previous = findByFingerprint(memory, fp, now);
+  const partial = scope.historyMayStartEarlier || scope.linesSkipped === true;
 
   if (previous.length > 0) {
     const first = previous[0];
     say(scope.historyMayStartEarlier
       ? `Same error as before, first recorded ${ago(first.ts)} (earlier records were not read).`
-      : `Same error as before, first recorded ${ago(first.ts)}.`);
+      : scope.linesSkipped
+        ? `Same error as before, first recorded ${ago(first.ts)} in the records read.`
+        : `Same error as before, first recorded ${ago(first.ts)}.`);
     const withFix = [...previous].reverse().find((f) => getFix(memory, f, now));
     if (withFix) {
       const fix = getFix(memory, withFix, now)!;
@@ -150,7 +160,7 @@ export function speakFailureMemory(
     } else {
       const candidate = speakablePossibleFix(memory, previous, now);
       if (candidate) {
-        say(scope.historyMayStartEarlier
+        say(partial
           ? "No confirmed fix in the records read. After that error, you ran:"
           : "No confirmed fix. After that error, you ran:");
         detail(`    ${safeTerminalLine(candidate.cmd)}`);
@@ -162,7 +172,7 @@ export function speakFailureMemory(
           ? "Different program. It may or may not be a fix. Check before acting."
           : "It may or may not be a fix. Check before acting.");
       } else {
-        say(scope.historyMayStartEarlier
+        say(partial
           ? "No fix in the records read."
           : "No fix recorded yet.");
       }
@@ -173,7 +183,9 @@ export function speakFailureMemory(
       : `Only the newest ${memory.length} records were checked.`;
     say(scope.historyMayStartEarlier
       ? `New error recorded (exit code ${exitCode}). ${checked}`
-      : `New error recorded (exit code ${exitCode}).`);
+      : scope.linesSkipped
+        ? `New error recorded (exit code ${exitCode}). No match in the records read.`
+        : `New error recorded (exit code ${exitCode}).`);
   }
 }
 
@@ -222,7 +234,7 @@ function onFailure(cmd: string, result: ExecResult): void {
       cmd,
       result.code,
       process.cwd(),
-      { historyMayStartEarlier: memory.historyMayStartEarlier },
+      { historyMayStartEarlier: memory.historyMayStartEarlier, linesSkipped: memory.linesSkipped },
     );
   }
 

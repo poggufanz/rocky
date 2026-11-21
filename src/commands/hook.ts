@@ -96,17 +96,23 @@ export function hookStaleLine(installed: string): string | undefined {
 function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
+    const coverageDetail = (): string => {
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      return !isVerbose() && words !== undefined
+        ? words
+        : `memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+    };
     if (!tailReadable(loaded.coverage)) {
       sayTty("Memory coverage is incomplete, so no prior fix is claimed. Check the details below.");
-      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
-      detailTty(!isVerbose() && words !== undefined
-        ? words
-        : `memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      detailTty(coverageDetail());
       return undefined;
+    }
+    if (loaded.coverage.skipped > 0) {
+      detailTty(coverageDetail());
     }
     return {
       records: loaded.records,
-      historyMayStartEarlier: loaded.coverage.window === "tail" || loaded.coverage.skipped > 0,
+      historyMayStartEarlier: loaded.coverage.window === "tail",
     };
   } catch {
     sayTty("The memory file could not be opened, so nothing is recalled.");

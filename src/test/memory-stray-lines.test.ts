@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { attempts } from "../commands/attempts.js";
 import { run } from "../commands/run.js";
+import { watch } from "../commands/watch.js";
 import type { ExecResult } from "../core/exec.js";
 import {
   commandIdentity,
@@ -192,6 +193,20 @@ test("full read with one skipped line is readable", () => {
   assert.equal(windowCovered(twoSkipped, NOW, LINK_WINDOW_MS), false);
 });
 
+test("unexplained incomplete coverage with zero skipped stays closed", () => {
+  const unexplained: MemoryCoverage = {
+    version: MEMORY_FORMAT_VERSION,
+    complete: false,
+    skipped: 0,
+    truncated: 0,
+    scanned: 5,
+    bytesScanned: 100,
+    bytesTotal: 100,
+  };
+  assert.equal(tailReadable(unexplained), false);
+  assert.equal(windowCovered(unexplained, NOW, LINK_WINDOW_MS), false);
+});
+
 test("unlock with a corrupt line in the tail", (t) => {
   withRecordCap(t, 10_000);
   const home = tempHome(t);
@@ -264,11 +279,8 @@ test("full read with skipped line scopes copy", async (t) => {
     excerpt: "exit NaN",
     origin: "hook",
   });
-  writeFileSync(
-    join(home, "memory.jsonl"),
-    `${JSON.stringify(priorFailure)}\n${strayHookLine}\n`,
-    "utf8",
-  );
+  const fixture = `${JSON.stringify(priorFailure)}\n${strayHookLine}\n`;
+  writeFileSync(join(home, "memory.jsonl"), fixture, "utf8");
 
   const failExec: ExecResult = {
     started: true,
@@ -278,10 +290,39 @@ test("full read with skipped line scopes copy", async (t) => {
     durationMs: 5,
   };
   const { stderr } = await captureOutput(() => run(cmd, async () => failExec));
-  assert.match(stderr, /Same error as before, first recorded .+ \(earlier records were not read\)\./);
+  assert.match(stderr, /Same error as before, first recorded .+ in the records read\./);
   assert.match(stderr, /rocky: No fix in the records read\./);
+  assert.ok(stderr.includes("1 line could not be used."), stderr);
+  assert.doesNotMatch(stderr, /earlier records were not read/);
+  assert.doesNotMatch(stderr, /Only the newest/);
   assert.doesNotMatch(stderr, /No fix recorded yet\./);
   assert.doesNotMatch(stderr, /Memory coverage is incomplete/);
+
+  writeFileSync(join(home, "memory.jsonl"), fixture, "utf8");
+  const novelExec: ExecResult = {
+    started: true,
+    code: 1,
+    stderr: "ReferenceError: never seen before",
+    tail: ["ReferenceError: never seen before"],
+    durationMs: 5,
+  };
+  const { stderr: noMatchStderr } = await captureOutput(() => run("npm run lint", async () => novelExec));
+  assert.match(noMatchStderr, /New error recorded \(exit code 1\)\. No match in the records read\./);
+  assert.ok(noMatchStderr.includes("1 line could not be used."), noMatchStderr);
+  assert.doesNotMatch(noMatchStderr, /earlier records were not read/);
+  assert.doesNotMatch(noMatchStderr, /Only the newest/);
+  assert.doesNotMatch(noMatchStderr, /Memory coverage is incomplete/);
+
+  writeFileSync(join(home, "memory.jsonl"), fixture, "utf8");
+  const { stderr: watchStderr } = await captureOutput(() =>
+    watch([cmd], { notify: () => {}, runProcess: async () => failExec }),
+  );
+  assert.match(watchStderr, /Same error as before, first recorded .+ in the records read\./);
+  assert.match(watchStderr, /rocky: No fix in the records read\./);
+  assert.ok(watchStderr.includes("1 line could not be used."), watchStderr);
+  assert.doesNotMatch(watchStderr, /earlier records were not read/);
+  assert.doesNotMatch(watchStderr, /Only the newest/);
+  assert.doesNotMatch(watchStderr, /Memory coverage is incomplete/);
 });
 
 test("attempts still discloses skipped lines", async (t) => {

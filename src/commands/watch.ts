@@ -156,14 +156,17 @@ function unrefTimer(timer: WatchTimer): void {
  * always happens (fix-linking on success needs it regardless of quiet), but
  * the unreadable-memory disclosure is a commentary line, so it's silenced.
  */
-function readMemory(quiet: boolean): { records: MemoryRecord[]; historyMayStartEarlier: boolean } | undefined {
+function readMemory(quiet: boolean): { records: MemoryRecord[]; historyMayStartEarlier: boolean; linesSkipped: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
-    if (!tailReadable(loaded.coverage)) {
+    const coverageDiagnostic = (): string => {
       const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
-      const diagnostic = !isVerbose() && words !== undefined
+      return !isVerbose() && words !== undefined
         ? words
         : `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+    };
+    if (!tailReadable(loaded.coverage)) {
+      const diagnostic = coverageDiagnostic();
       if (quiet) writeRockyStderr(`${diagnostic}\n`);
       else {
         say("Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.");
@@ -171,9 +174,15 @@ function readMemory(quiet: boolean): { records: MemoryRecord[]; historyMayStartE
       }
       return undefined;
     }
+    if (loaded.coverage.skipped > 0) {
+      const diagnostic = coverageDiagnostic();
+      if (quiet) writeRockyStderr(`${diagnostic}\n`);
+      else detail(`    ${diagnostic}`);
+    }
     return {
       records: loaded.records,
-      historyMayStartEarlier: loaded.coverage.window === "tail" || loaded.coverage.skipped > 0,
+      historyMayStartEarlier: loaded.coverage.window === "tail",
+      linesSkipped: loaded.coverage.skipped > 0,
     };
   } catch {
     if (!quiet) {
@@ -231,7 +240,7 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
         cmd,
         result.code,
         cwd,
-        { historyMayStartEarlier: memory.historyMayStartEarlier },
+        { historyMayStartEarlier: memory.historyMayStartEarlier, linesSkipped: memory.linesSkipped },
       );
     }
     // Same disclosure as `run`. It sits in this non-quiet block because `--quiet`
