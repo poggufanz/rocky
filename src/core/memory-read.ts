@@ -13,7 +13,14 @@ import { resolveRockyPaths } from "./state-paths.js";
 import { commandIdentity, type FingerprintAlgorithmVersion } from "./fingerprint.js";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "./fs-safety.js";
 
-export type FailureOrigin = "run" | "hook" | "watch";
+export type FailureOrigin = "run" | "hook" | "watch" | "agent";
+
+export interface AgentStamp {
+  vendor: "claude-code" | "codex" | "generic";
+  session: string;
+  agentId?: string;
+  toolUseId?: string;
+}
 
 export interface FailureRecord {
   kind: "failure";
@@ -28,6 +35,7 @@ export interface FailureRecord {
   signature: string[];
   excerpt: string;
   origin?: FailureOrigin;
+  agent?: AgentStamp;
   resolvedBy?: string;
   commandIdentity?: string;
   identityV?: 1;
@@ -85,6 +93,7 @@ export interface FixRecord {
   failureIds: string[];
   candidateFailureIds?: string[];
   links?: FixLink[];
+  agent?: AgentStamp;
   commandIdentity?: string;
   identityV?: 1;
   identityReliable?: boolean;
@@ -99,6 +108,7 @@ export interface AssociationRecord {
   cmd: string;
   candidateFailureIds: string[];
   links: FixLink[];
+  agent?: AgentStamp;
   commandIdentity?: string;
   identityV?: 1;
   identityReliable?: boolean;
@@ -152,7 +162,23 @@ export interface GuardRecord {
 }
 
 export type RationaleFidelity = "raw" | "summary" | "none";
-export type RationaleSource = "log-thinking" | "log-response" | "notify" | "human";
+export type KnownRationaleSource = "log-thinking" | "log-response" | "notify" | "human" | "mcp";
+export type RationaleSource = KnownRationaleSource | string;
+export const RATIONALE_SOURCE_PATTERN = /^[a-z][a-z-]{0,31}$/u;
+export const MAX_EXPECTED_COMMAND_CODE_POINTS = 200;
+
+const KNOWN_RATIONALE_SOURCES: ReadonlySet<string> = new Set<KnownRationaleSource>([
+  "log-thinking",
+  "log-response",
+  "notify",
+  "human",
+  "mcp",
+]);
+
+export function isKnownRationaleSource(source: string): source is KnownRationaleSource {
+  return KNOWN_RATIONALE_SOURCES.has(source);
+}
+
 /** Bounds for the optional rationale `files` list (notify lane `--files`). */
 export const MAX_RATIONALE_FILES = 8;
 export const MAX_RATIONALE_FILE_CHARS = 512;
@@ -173,6 +199,7 @@ export interface RationaleRecord {
   rationale_fidelity: RationaleFidelity;
   source: RationaleSource;
   excerpt: string;
+  expectedCommand?: string;
   pointer?: RationalePointer;
   links?: RationaleLinks;
   /** Bounded file paths this stated reason covers (notify lane `--files`). */
@@ -790,7 +817,7 @@ function fingerprintFields(record: Record<string, unknown>): Pick<FailureRecord,
   return { fingerprintV: record.fingerprintV as FingerprintAlgorithmVersion };
 }
 
-// A record's origin is defined but not one of the three known values — including when it
+// A record's origin is defined but not one of the four known values — including when it
 // isn't a string at all (a number, an object, null) — is read as "run" rather than
 // discarding the whole record. Compatibility cost this design accepts: an already-released
 // v0.2.1 binary's parser only knows "run"/"hook" and still discards a "watch" record
@@ -799,8 +826,40 @@ function fingerprintFields(record: Record<string, unknown>): Pick<FailureRecord,
 // origin value is introduced, not after.
 function normalizeOrigin(origin: unknown): FailureOrigin | undefined {
   if (origin === undefined) return undefined;
-  if (origin === "run" || origin === "hook" || origin === "watch") return origin;
+  if (origin === "run" || origin === "hook" || origin === "watch" || origin === "agent") return origin;
   return "run";
+}
+
+const STAMP_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/u;
+
+function isStampString(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 128
+    && !STAMP_CONTROL_CHARS.test(value);
+}
+
+function parseAgentStamp(value: unknown): AgentStamp | undefined {
+  const obj = objectValue(value);
+  if (!obj) return undefined;
+  if (obj.vendor !== "claude-code" && obj.vendor !== "codex" && obj.vendor !== "generic") return undefined;
+  if (!isStampString(obj.session)) return undefined;
+  if (obj.agentId !== undefined && !isStampString(obj.agentId)) return undefined;
+  if (obj.toolUseId !== undefined && !isStampString(obj.toolUseId)) return undefined;
+  return {
+    vendor: obj.vendor,
+    session: obj.session,
+    ...(obj.agentId === undefined ? {} : { agentId: obj.agentId }),
+    ...(obj.toolUseId === undefined ? {} : { toolUseId: obj.toolUseId }),
+  };
+}
+
+function parseExpectedCommand(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_EXPECTED_COMMAND_CODE_POINTS * 2) return undefined;
+  if (STAMP_CONTROL_CHARS.test(value)) return undefined;
+  const codePoints = [...value].length;
+  if (codePoints < 1 || codePoints > MAX_EXPECTED_COMMAND_CODE_POINTS) return undefined;
+  return value;
 }
 
 export function parseMemoryRecord(value: unknown): MemoryRecord | undefined {
@@ -833,8 +892,10 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     if (record.v !== 1 ||
         (agent !== "claude-code" && agent !== "codex" && agent !== "dsh" && agent !== "generic" && agent !== "human") ||
         (fidelity !== "raw" && fidelity !== "summary" && fidelity !== "none") ||
-        (source !== "log-thinking" && source !== "log-response" && source !== "notify" && source !== "human") ||
+        typeof source !== "string" ||
+        (!isKnownRationaleSource(source) && !RATIONALE_SOURCE_PATTERN.test(source)) ||
         typeof record.excerpt !== "string" || record.excerpt.length === 0 || record.excerpt.length > MAX_RECORD_ITEM_CHARS) return undefined;
+    const expectedCommand = parseExpectedCommand(record.expectedCommand);
     let pointer: RationalePointer | undefined;
     if (record.pointer !== undefined) {
       const value = objectValue(record.pointer);
@@ -875,6 +936,7 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     return {
       kind: "rationale", id: record.id, ts: Number(record.ts), v: 1, cwd: record.cwd,
       agent, rationale_fidelity: fidelity, source, excerpt: record.excerpt,
+      ...(expectedCommand === undefined ? {} : { expectedCommand }),
       ...(pointer === undefined ? {} : { pointer }),
       ...(links === undefined ? {} : { links }),
       ...(files === undefined ? {} : { files }),
@@ -942,11 +1004,13 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     if (typeof record.exitCode !== "number" || !Number.isSafeInteger(record.exitCode) || typeof record.fingerprint !== "string" ||
         !signature || !identity || !fingerprintVersion || typeof record.excerpt !== "string" || typeof record.cmd !== "string") return undefined;
     const origin = normalizeOrigin(record.origin);
+    const agent = parseAgentStamp(record.agent);
     return {
       kind: "failure", id: record.id, ts: Number(record.ts), cwd: record.cwd,
       cmd: record.cmd, exitCode: Number(record.exitCode), fingerprint: record.fingerprint,
       ...fingerprintVersion, signature, excerpt: record.excerpt,
       ...(origin === undefined ? {} : { origin }),
+      ...(agent === undefined ? {} : { agent }),
       ...identity,
     };
   }
@@ -960,10 +1024,12 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
       links = parseFixLinks(record.links);
       if (!links) return undefined;
     }
+    const agent = parseAgentStamp(record.agent);
     return {
       kind: "fix", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd, failureIds,
       ...(candidateFailureIds === undefined ? {} : { candidateFailureIds }),
       ...(links === undefined ? {} : { links }),
+      ...(agent === undefined ? {} : { agent }),
       ...identity,
     };
   }
@@ -978,9 +1044,12 @@ function parseMemoryRecordUnsafe(value: unknown): MemoryRecord | undefined {
     if (!candidateFailureIds || !identity || !links || typeof record.cmd !== "string" ||
         links.some((link) => isConfirmableLinkBasis(link.basis) ||
           (link.confidence !== undefined && link.confidence !== "possible"))) return undefined;
+    const agent = parseAgentStamp(record.agent);
     return {
       kind: "association", id: record.id, ts: Number(record.ts), cwd: record.cwd, cmd: record.cmd,
-      candidateFailureIds, links, ...identity,
+      candidateFailureIds, links,
+      ...(agent === undefined ? {} : { agent }),
+      ...identity,
     };
   }
   if (record.kind === "note") {

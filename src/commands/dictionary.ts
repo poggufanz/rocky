@@ -569,9 +569,9 @@ export function how(argv: string[], deps: DictionaryCommandDeps = {}): number {
 
 /**
  * Rationale evidence is unverified until labeled: raw agent thinking, an
- * agent's final reply, an agent self-reporting via `notify`, or the human
- * typing it themselves. Exported so brief and sessions label the same four
- * ways instead of re-deriving this text.
+ * agent's final reply, an agent self-reporting via `notify`, an agent noting
+ * via `mcp`, or the human typing it themselves. Exported so brief and sessions
+ * label the same sources instead of re-deriving this text.
  */
 export function rationaleSourceLabel(source: RationaleSource): string {
   switch (source) {
@@ -579,6 +579,8 @@ export function rationaleSourceLabel(source: RationaleSource): string {
     case "log-response": return "agent said in reply";
     case "notify": return "agent said";
     case "human": return "you said";
+    case "mcp": return "agent noted";
+    default: return `noted (${source})`;
   }
 }
 
