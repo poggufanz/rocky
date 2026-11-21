@@ -128,7 +128,8 @@ function isUsableHookCwd(cwd: string): boolean {
     const rest = cwd.slice(0, POWERSHELL_FILESYSTEM_PREFIX.length).toLowerCase() === POWERSHELL_FILESYSTEM_PREFIX.toLowerCase()
       ? cwd.slice(POWERSHELL_FILESYSTEM_PREFIX.length)
       : cwd;
-    return isAbsolute(rest) || /^[A-Za-z][\w.-]*:[\\/]/u.test(rest);
+    // PowerShell drive locations (`Temp:\`, `Work:\repo`) always use a backslash; a `/` after the colon is a URL.
+    return isAbsolute(rest) || /^[A-Za-z][\w.-]*:\\/u.test(rest);
   }
   return isAbsolute(cwd);
 }

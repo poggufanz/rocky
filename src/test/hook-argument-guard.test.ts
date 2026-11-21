@@ -139,13 +139,15 @@ test("hookFail accepts PowerShell drive locations on win32 while still dropping 
     });
   }
 
-  withTempRockyHome(t, (home) => {
-    const memoryPath = join(home, "memory.jsonl");
-    const pendingPath = join(home, "pending");
-    assert.equal(hookFail("npm test", 1, "="), 0);
-    assert.equal(existsSync(memoryPath), false);
-    assert.equal(existsSync(pendingPath), false);
-  });
+  for (const junkCwd of ["=", "http://x", "file:///C:/x"]) {
+    withTempRockyHome(t, (home) => {
+      const memoryPath = join(home, "memory.jsonl");
+      const pendingPath = join(home, "pending");
+      assert.equal(hookFail("npm test", 1, junkCwd), 0);
+      assert.equal(existsSync(memoryPath), false, `expected no memory.jsonl for cwd=${junkCwd}`);
+      assert.equal(existsSync(pendingPath), false);
+    });
+  }
 });
 
 test("failure writers refuse NaN and non-safe integers", (t) => {
