@@ -652,13 +652,53 @@ export function commandBase(cmd: string): string {
 
 const ROCKY_BIN_RE = /^rocky(?:\.cmd|\.ps1|\.exe)?$/iu;
 
+function skipShellToken(str: string, start: number): number {
+  let i = start;
+  let quote: "'" | '"' | undefined;
+  while (i < str.length) {
+    const char = str[i]!;
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else if (char === "\\" && quote === '"' && (str[i + 1] === '"' || str[i + 1] === "\\")) i++;
+    } else if (char === "'" || char === '"') {
+      quote = char;
+    } else if (/\s/u.test(char)) {
+      break;
+    } else if (char === "\\" && (str[i + 1] === " " || str[i + 1] === "'" || str[i + 1] === '"')) {
+      i++;
+    }
+    i++;
+  }
+  return i;
+}
+
+function isSingleQuotedSpan(raw: string): boolean {
+  if (raw.length < 2) return false;
+  const quote = raw[0];
+  if (quote !== '"' && quote !== "'") return false;
+  for (let i = 1; i < raw.length; i++) {
+    const char = raw[i]!;
+    if (char === "\\" && quote === '"' && (raw[i + 1] === '"' || raw[i + 1] === "\\")) {
+      i++;
+      continue;
+    }
+    if (char === quote) return i === raw.length - 1;
+  }
+  return false;
+}
+
 /** `rocky run "<cmd>"` → `<cmd>`; anything else unchanged. */
 export function unwrapRockyRun(cmd: string): string {
-  const tokens = tokenizeCommand(cmd.trim()).tokens;
-  if (tokens.length === 3 && ROCKY_BIN_RE.test(basename(tokens[0]!)) && tokens[1] === "run") {
-    return tokens[2]!;
-  }
-  return cmd;
+  if (/[\r\n]/u.test(cmd)) return cmd;
+  const trimmed = cmd.trim();
+  const parsed = tokenizeCommand(trimmed);
+  if (!parsed.reliable || parsed.tokens.length !== 3) return cmd;
+  if (!ROCKY_BIN_RE.test(basename(parsed.tokens[0]!)) || parsed.tokens[1] !== "run") return cmd;
+  let pos = skipShellToken(trimmed, 0);
+  while (pos < trimmed.length && /\s/u.test(trimmed[pos]!)) pos++;
+  pos = skipShellToken(trimmed, pos);
+  const rawArg = trimmed.slice(pos).trim();
+  return isSingleQuotedSpan(rawArg) ? parsed.tokens[2]! : cmd;
 }
 
 /** Versioned, conservative identity used only for memory attribution. */

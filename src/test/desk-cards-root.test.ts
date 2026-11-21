@@ -7,6 +7,7 @@ import { canonicalPath } from "../core/memory-read.js";
 import {
   cardsForRoot,
   findCardById,
+  resolveGitRootForCwd,
   toolTextAllowed,
   type StoredBlock,
   type StoredCard,
@@ -264,4 +265,65 @@ test("toolTextAllowed returns false when <home>/desk/tool-text-off exists and tr
 
   writeFileSync(join(home, "desk", "tool-text-off"), "", "utf8");
   assert.equal(toolTextAllowed(home), false);
+});
+
+test("cardsForRoot does not trim trailing-space cwd into a sibling nested repo", (t) => {
+  if (process.platform === "win32") {
+    t.skip("trailing-space directory names are not distinct from trimmed siblings on win32");
+    return;
+  }
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const parentRepo = join(temp, "project");
+  const nestedRepo = join(parentRepo, "pkg");
+  const trailingSpaceSubdir = join(parentRepo, "pkg ");
+  mkdirSync(join(parentRepo, ".git"), { recursive: true });
+  mkdirSync(join(nestedRepo, ".git"), { recursive: true });
+  mkdirSync(trailingSpaceSubdir, { recursive: true });
+
+  const parentCanon = canonicalPath(parentRepo);
+  const nestedCanon = canonicalPath(nestedRepo);
+  writeJsonl(cardsFilePath(parentCanon, home), [
+    makeCard("card-parent", parentCanon, [makeBlock(1, "src/parent.ts")], { ended_ms: 2000 }),
+  ]);
+  writeJsonl(cardsFilePath(nestedCanon, home), [
+    makeCard("card-nested", nestedCanon, [makeBlock(1, "src/nested.ts")], { ended_ms: 3000 }),
+  ]);
+
+  const result = cardsForRoot(trailingSpaceSubdir, { home, toolText: true });
+  assert.equal(result.complete, true);
+  assert.deepEqual(
+    result.cards.map((c) => c.card_id),
+    ["card-parent"],
+  );
+});
+
+test("resolveGitRootForCwd preserves trailing whitespace instead of probing a trimmed sibling repo", () => {
+  const base = process.platform === "win32" ? "C:\\work\\project" : "/work/project";
+  const basePosix = base.replace(/\\/g, "/");
+  const parentGit = `${basePosix}/.git`;
+  const nestedGit = `${basePosix}/pkg/.git`;
+  const exists = (p: string): boolean => {
+    const norm = p.replace(/\\/g, "/");
+    return norm === parentGit || norm === nestedGit || norm === `${basePosix}/pkg `;
+  };
+  assert.equal(resolveGitRootForCwd(join(base, "pkg "), exists), basePosix);
+});
+
+test("resolveGitRootForCwd keeps Windows drive roots absolute so their log key matches C:/", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("drive-root spelling is win32-specific");
+    return;
+  }
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const driveGitOnly = (p: string): boolean => p.replace(/\\/g, "/").toLowerCase() === "c:/.git";
+
+  for (const cwd of ["C:\\", "C:/", "C:\\sub\\dir"]) {
+    const root = resolveGitRootForCwd(cwd, driveGitOnly);
+    assert.equal(root, "C:/");
+    assert.equal(canonicalPath(root), canonicalPath("C:/"));
+    assert.equal(cardsFilePath(canonicalPath(root), home), cardsFilePath(canonicalPath("C:/"), home));
+    assert.notEqual(cardsFilePath(canonicalPath(root), home), cardsFilePath(canonicalPath("C:"), home));
+  }
 });

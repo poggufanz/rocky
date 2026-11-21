@@ -714,13 +714,21 @@ function readProbedLog(
   return parsed.cardsById;
 }
 
+/** @internal Resolve the git root for a directory `cwd` without trimming or collapsing Windows drive roots. */
+export function resolveGitRootForCwd(
+  cwd: string,
+  exists: (p: string) => boolean = existsSync,
+): string | undefined {
+  if (cwd.length === 0) return undefined;
+  const resolvedCwd = resolve(cwd);
+  const rootRaw = gitRootFor(join(resolvedCwd, "_"), exists);
+  if (rootRaw === undefined) return undefined;
+  return /^[a-zA-Z]:$/.test(rootRaw) ? `${rootRaw}/` : rootRaw;
+}
+
 /** Cards logged for the repo that contains `cwd` (or `_none.jsonl` outside a repo). */
 export function cardsForRoot(cwd: string, options: { home: string; toolText: boolean }): CardsForRoot {
-  const trimmed = cwd.trim();
-  const rootRaw =
-    trimmed.length > 0
-      ? gitRootFor(`${resolveInputPath(trimmed, process.cwd(), process.platform).replace(/[\\/]+$/, "")}/_`, existsSync)
-      : undefined;
+  const rootRaw = resolveGitRootForCwd(cwd, existsSync);
   const covAcc: CoverageAccumulator = { complete: true, skipped: 0 };
   let cardsById: Map<string, StoredCard>;
   if (rootRaw !== undefined) {
