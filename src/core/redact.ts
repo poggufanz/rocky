@@ -551,3 +551,18 @@ export function redactSecretsAtBoundary(text: string, options: SecretBoundaryOpt
   }
   return out;
 }
+
+/**
+ * Replace C0, DEL, and C1 controls with spaces. Runs after redaction: the
+ * redactor recognizes escape sequences, so flattening first leaves "[31m"
+ * glued to a following token and the token goes unrecognized.
+ */
+export function flattenControls(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+}
+
+/** Redact secrets, flatten control characters, and remove invisible format controls. */
+export function sanitizeTestimony(text: string): string {
+  return stripInvisibleControls(flattenControls(redactSecretsAtBoundary(text)));
+}
+

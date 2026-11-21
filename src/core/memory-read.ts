@@ -1471,7 +1471,7 @@ function freezeMaterializedRecords(records: MemoryRecord[]): MemoryRecord[] {
   return Object.freeze(records.map(freezeMemoryRecord)) as unknown as MemoryRecord[];
 }
 
-function resolveMemoryRecords(records: MemoryRecord[], now: number): void {
+export function resolveMemoryRecords(records: MemoryRecord[], now: number): void {
   const byId = new Map(records.map((record) => [record.id, record]));
   for (const record of records) {
     if (record.kind !== "fix") continue;

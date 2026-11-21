@@ -1,0 +1,556 @@
+import { createHash } from "node:crypto";
+import { commandFingerprint } from "./fingerprint.js";
+import {
+  canonicalFingerprint,
+  fingerprintMigrationIndex,
+  LINK_WINDOW_MS,
+  type FingerprintMigrationIndex,
+} from "./memory-query.js";
+import {
+  cwdIdentityKey,
+  isOperationalMemoryRecord,
+  tailReadable,
+  type AgentStamp,
+  type AssociationRecord,
+  type FailureRecord,
+  type FixRecord,
+  type MemoryCoverage,
+  type MemoryRecord,
+  type RationaleRecord,
+} from "./memory-read.js";
+import { sanitizeTestimony } from "./redact.js";
+
+export type AttemptOutcome =
+  | "passed" | "possible_pass" | "same_failure" | "different_failure" | "no_later_run" | "unknown";
+
+export interface Attempt {
+  failureId: string; ts: number; cmd: string;
+  outcome: AttemptOutcome; outcomeRecordId?: string; outcomeTs?: number;
+  nextFingerprint?: string;
+  unknownReason?: "coverage" | "unlinked-pass" | "ambiguous-join";
+  session?: { vendor: string; agentId?: string }; sessionScoped: boolean; crossSession?: true;
+  changes: { state: "observed"; files: string[]; more: number; cardId: string; partial: boolean }
+         | { state: "testimony"; files: string[]; rationaleId: string }
+         | { state: "unknown" };
+  stated?: { text: string; source: "bash-description" | "card-quote" | "rationale"; recordId: string };
+  expectations?: { text: string; command?: string; rationaleId: string;
+    observed: "same_command_passed" | "same_command_failed" | "no_matching_run" | "not_comparable" }[];
+}
+
+export interface ProblemEntry {
+  problemId: string; key: string; fingerprint: string; family: string[];
+  keyStrength: "output" | "command";
+  cwd: string; cwdScope?: "here" | "elsewhere";
+  firstSeenTs: number; lastSeenTs: number; signature: string[];
+  counts: Record<AttemptOutcome, number> & { attempts: number };
+  latestOutcome: AttemptOutcome; attempts: Attempt[]; historyMayStartEarlier: boolean;
+}
+
+export interface ProblemSet { entries: ProblemEntry[]; coverage: MemoryCoverage; ungroupedLegacy: number }
+
+interface IndexedFailure {
+  kind: "failure";
+  record: FailureRecord;
+  order: number;
+  cwdKey: string;
+  keyStrength: "output" | "command";
+  canonical: string;
+  key: string;
+  cwdIndex: number;
+}
+
+interface IndexedFix {
+  kind: "fix";
+  record: FixRecord;
+  order: number;
+  cwdKey: string;
+  cwdIndex: number;
+}
+
+type IndexedRunRecord = IndexedFailure | IndexedFix;
+
+interface IndexedAssociation {
+  record: AssociationRecord;
+  order: number;
+  cwdKey: string;
+}
+
+interface IndexedRationale {
+  record: RationaleRecord;
+  order: number;
+}
+
+interface FailureGroup {
+  key: string;
+  problemId?: string;
+  canonical: string;
+  keyStrength: "output" | "command";
+  cwdKey: string;
+  isUnprovenLegacy: boolean;
+  family: Set<string>;
+  failures: IndexedFailure[];
+}
+
+function sha256Hex16(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
+}
+
+function isDifferentAgentSession(a: AgentStamp | undefined, b: AgentStamp | undefined): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (a.session !== b.session) return true;
+  if (a.agentId !== undefined && b.agentId !== undefined && a.agentId !== b.agentId) return true;
+  return false;
+}
+
+function addToMapArray<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const existing = map.get(key);
+  if (existing === undefined) map.set(key, [value]);
+  else existing.push(value);
+}
+
+function cachedCommandFingerprint(
+  cache: Map<number, Map<string, string>>,
+  cmd: string,
+  exitCode: number,
+): string {
+  let byCmd = cache.get(exitCode);
+  if (byCmd === undefined) {
+    byCmd = new Map<string, string>();
+    cache.set(exitCode, byCmd);
+  }
+  let fp = byCmd.get(cmd);
+  if (fp === undefined) {
+    fp = commandFingerprint(cmd, exitCode);
+    byCmd.set(cmd, fp);
+  }
+  return fp;
+}
+
+function compareByTsOrder(a: { record: { ts: number }; order: number }, b: { record: { ts: number }; order: number }): number {
+  return a.record.ts - b.record.ts || a.order - b.order;
+}
+
+function findMatchingAssociation(
+  associations: readonly IndexedAssociation[] | undefined,
+  failure: FailureRecord,
+  cwdKey: string,
+  windowEnd: number,
+): AssociationRecord | undefined {
+  if (associations === undefined || associations.length === 0) return undefined;
+  let best: IndexedAssociation | undefined;
+  for (let i = 0; i < associations.length; i += 1) {
+    const candidate = associations[i]!;
+    const record = candidate.record;
+    if (candidate.cwdKey !== cwdKey) continue;
+    if (record.ts <= failure.ts || record.ts > windowEnd) continue;
+    if (isDifferentAgentSession(failure.agent, record.agent)) continue;
+    if (best === undefined || compareByTsOrder(candidate, best) < 0) {
+      best = candidate;
+    }
+  }
+  return best?.record;
+}
+
+function buildTestimony(
+  rationales: readonly IndexedRationale[] | undefined,
+): { changes: Attempt["changes"]; stated?: Attempt["stated"] } {
+  if (rationales === undefined || rationales.length === 0) {
+    return { changes: { state: "unknown" } };
+  }
+  let newestAny: IndexedRationale | undefined;
+  let newestWithFiles: IndexedRationale | undefined;
+  for (let i = 0; i < rationales.length; i += 1) {
+    const item = rationales[i]!;
+    if (newestAny === undefined || compareByTsOrder(item, newestAny) > 0) {
+      newestAny = item;
+    }
+    if (item.record.files !== undefined && item.record.files.length > 0) {
+      if (newestWithFiles === undefined || compareByTsOrder(item, newestWithFiles) > 0) {
+        newestWithFiles = item;
+      }
+    }
+  }
+  const changes: Attempt["changes"] = newestWithFiles !== undefined
+    ? {
+        state: "testimony",
+        files: [...newestWithFiles.record.files!],
+        rationaleId: newestWithFiles.record.id,
+      }
+    : { state: "unknown" };
+  const stated: Attempt["stated"] = newestAny !== undefined
+    ? {
+        text: sanitizeTestimony(newestAny.record.excerpt),
+        source: "rationale",
+        recordId: newestAny.record.id,
+      }
+    : undefined;
+  return stated === undefined ? { changes } : { changes, stated };
+}
+
+function emptyCounts(): Record<AttemptOutcome, number> & { attempts: number } {
+  return {
+    attempts: 0,
+    passed: 0,
+    possible_pass: 0,
+    same_failure: 0,
+    different_failure: 0,
+    no_later_run: 0,
+    unknown: 0,
+  };
+}
+
+function indexAssociation(
+  associationsByFailureId: Map<string, IndexedAssociation[]>,
+  record: AssociationRecord,
+  order: number,
+  cwdKey: string,
+): void {
+  const indexed: IndexedAssociation = { record, order, cwdKey };
+  if (
+    record.candidateFailureIds.length === 1 &&
+    record.links.length === 1 &&
+    record.candidateFailureIds[0] === record.links[0]!.id
+  ) {
+    addToMapArray(associationsByFailureId, record.candidateFailureIds[0]!, indexed);
+    return;
+  }
+  const linkedIds = new Set<string>(record.candidateFailureIds);
+  for (const link of record.links) linkedIds.add(link.id);
+  for (const failureId of linkedIds) {
+    addToMapArray(associationsByFailureId, failureId, indexed);
+  }
+}
+
+export function buildProblems(
+  records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
+  opts: { now: number; fingerprint?: string; cwd?: string; platform?: NodeJS.Platform },
+): ProblemSet {
+  const defaultPlatform = opts.platform ?? process.platform;
+  const targetFilter = opts.fingerprint;
+  const seenIds = new Set<string>();
+  const failureRecords: FailureRecord[] = [];
+  const failureOrders: number[] = [];
+  const fixesById = new Map<string, FixRecord>();
+  const associationsByFailureId = new Map<string, IndexedAssociation[]>();
+  const rationalesByFailureId = new Map<string, IndexedRationale[]>();
+  const deferredFixes: Array<{ record: FixRecord; order: number }> = [];
+  const deferredAssociations: Array<{ record: AssociationRecord; order: number }> = [];
+  const deferredRationales: Array<{ record: RationaleRecord; order: number }> = [];
+  const collectNonFailuresNow = targetFilter === undefined;
+
+  for (let order = 0; order < records.length; order += 1) {
+    const record = records[order]!;
+    if (seenIds.has(record.id)) continue;
+    seenIds.add(record.id);
+    if (!isOperationalMemoryRecord(record, opts.now)) continue;
+
+    if (record.kind === "failure") {
+      failureRecords.push(record);
+      failureOrders.push(order);
+    } else if (record.kind === "fix") {
+      if (collectNonFailuresNow) {
+        fixesById.set(record.id, record);
+        deferredFixes.push({ record, order });
+      } else {
+        deferredFixes.push({ record, order });
+      }
+    } else if (record.kind === "association") {
+      if (collectNonFailuresNow) {
+        const cwdKey = cwdIdentityKey(record.cwd, record.platform ?? defaultPlatform);
+        indexAssociation(associationsByFailureId, record, order, cwdKey);
+      } else {
+        deferredAssociations.push({ record, order });
+      }
+    } else if (record.kind === "rationale" && record.links?.failureId !== undefined) {
+      if (collectNonFailuresNow) {
+        addToMapArray(rationalesByFailureId, record.links.failureId, { record, order });
+      } else {
+        deferredRationales.push({ record, order });
+      }
+    }
+  }
+
+  if (failureRecords.length === 0) {
+    return { entries: [], coverage, ungroupedLegacy: 0 };
+  }
+
+  const migration: FingerprintMigrationIndex = fingerprintMigrationIndex(failureRecords);
+  const cmdFpCache = new Map<number, Map<string, string>>();
+  const recordsByCwdKey = new Map<string, IndexedRunRecord[]>();
+  const groups = new Map<string, FailureGroup>();
+  const cwdKeyCache = new Map<string, string>();
+  const resolveCwdKey = (cwd: string, platform: NodeJS.Platform | undefined): string => {
+    const resolvedPlatform = platform ?? defaultPlatform;
+    if (resolvedPlatform !== "win32") return cwd;
+    let cached = cwdKeyCache.get(cwd);
+    if (cached === undefined) {
+      cached = cwdIdentityKey(cwd, "win32");
+      cwdKeyCache.set(cwd, cached);
+    }
+    return cached;
+  };
+
+  for (let i = 0; i < failureRecords.length; i += 1) {
+    const record = failureRecords[i]!;
+    const order = failureOrders[i]!;
+    const canonical = canonicalFingerprint(record, migration);
+    let keyStrength: "output" | "command";
+    if (record.origin === "hook") {
+      keyStrength = "command";
+    } else {
+      const cmdFp = cachedCommandFingerprint(cmdFpCache, record.cmd, record.exitCode);
+      keyStrength = record.fingerprint === cmdFp || canonical === cmdFp ? "command" : "output";
+    }
+    const cwdKey = resolveCwdKey(record.cwd, record.platform);
+    const key = `${keyStrength}:${canonical}:${cwdKey}`;
+    const isUnprovenLegacy = record.fingerprintV !== 2 && !migration.provenLegacyRecords.has(record.id);
+
+    const indexed: IndexedFailure = {
+      kind: "failure",
+      record,
+      order,
+      cwdKey,
+      keyStrength,
+      canonical,
+      key,
+      cwdIndex: -1,
+    };
+    addToMapArray(recordsByCwdKey, cwdKey, indexed);
+
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = {
+        key,
+        canonical,
+        keyStrength,
+        cwdKey,
+        isUnprovenLegacy,
+        family: new Set([record.fingerprint]),
+        failures: [indexed],
+      };
+      groups.set(key, group);
+    } else {
+      group.family.add(record.fingerprint);
+      group.failures.push(indexed);
+    }
+  }
+
+  const keptGroups: FailureGroup[] = [];
+  const neededCwdKeys = new Set<string>();
+  const neededFailureIds = targetFilter !== undefined ? new Set<string>() : undefined;
+
+  for (const group of groups.values()) {
+    if (targetFilter !== undefined) {
+      const directMatch = group.canonical === targetFilter || group.family.has(targetFilter);
+      if (!directMatch) {
+        group.problemId = sha256Hex16(group.key);
+        if (group.problemId !== targetFilter) continue;
+      }
+      for (let i = 0; i < group.failures.length; i += 1) {
+        neededFailureIds!.add(group.failures[i]!.record.id);
+      }
+    }
+    keptGroups.push(group);
+    neededCwdKeys.add(group.cwdKey);
+  }
+
+  if (keptGroups.length === 0) {
+    return { entries: [], coverage, ungroupedLegacy: 0 };
+  }
+
+  for (let i = 0; i < deferredFixes.length; i += 1) {
+    const { record, order } = deferredFixes[i]!;
+    const cwdKey = resolveCwdKey(record.cwd, record.platform);
+    if (!neededCwdKeys.has(cwdKey)) continue;
+    if (!collectNonFailuresNow) fixesById.set(record.id, record);
+    addToMapArray(recordsByCwdKey, cwdKey, {
+      kind: "fix",
+      record,
+      order,
+      cwdKey,
+      cwdIndex: -1,
+    });
+  }
+
+  if (!collectNonFailuresNow) {
+    for (let i = 0; i < deferredAssociations.length; i += 1) {
+      const { record, order } = deferredAssociations[i]!;
+      const cwdKey = resolveCwdKey(record.cwd, record.platform);
+      if (!neededCwdKeys.has(cwdKey)) continue;
+      indexAssociation(associationsByFailureId, record, order, cwdKey);
+    }
+    for (let i = 0; i < deferredRationales.length; i += 1) {
+      const { record, order } = deferredRationales[i]!;
+      const failureId = record.links?.failureId;
+      if (failureId !== undefined && neededFailureIds!.has(failureId)) {
+        addToMapArray(rationalesByFailureId, failureId, { record, order });
+      }
+    }
+  }
+
+  for (const cwdKey of neededCwdKeys) {
+    const list = recordsByCwdKey.get(cwdKey);
+    if (list === undefined) continue;
+    list.sort(compareByTsOrder);
+    for (let index = 0; index < list.length; index += 1) {
+      list[index]!.cwdIndex = index;
+    }
+  }
+
+  const tailWindow = coverage.window === "tail";
+  const tailIsReadable = tailReadable(coverage);
+  const entries: ProblemEntry[] = [];
+  let ungroupedLegacy = 0;
+
+  for (let gIdx = 0; gIdx < keptGroups.length; gIdx += 1) {
+    const group = keptGroups[gIdx]!;
+    if (group.isUnprovenLegacy) ungroupedLegacy += 1;
+    group.failures.sort(compareByTsOrder);
+    const cwdList = recordsByCwdKey.get(group.cwdKey)!;
+    const attempts: Attempt[] = [];
+    const counts = emptyCounts();
+
+    for (let fIdx = 0; fIdx < group.failures.length; fIdx += 1) {
+      const fItem = group.failures[fIdx]!;
+      const failure = fItem.record;
+      const windowEnd = failure.ts + LINK_WINDOW_MS;
+      const failureReliable = failure.identityReliable === true && failure.commandIdentity !== undefined;
+
+      let outcome: AttemptOutcome | undefined;
+      let outcomeRecordId: string | undefined;
+      let outcomeTs: number | undefined;
+      let nextFingerprint: string | undefined;
+      let unknownReason: Attempt["unknownReason"];
+      let crossSession: true | undefined;
+
+      for (let index = fItem.cwdIndex + 1; index < cwdList.length; index += 1) {
+        const candidate = cwdList[index]!;
+        const candidateRecord = candidate.record;
+        if (candidateRecord.ts > windowEnd) break;
+        if (candidateRecord.ts <= failure.ts) continue;
+
+        if (candidate.kind === "fix") {
+          const fix = candidate.record;
+          if (failure.resolvedBy === fix.id && fixesById.has(fix.id)) {
+            outcome = "passed";
+            outcomeRecordId = fix.id;
+            outcomeTs = fix.ts;
+            if (isDifferentAgentSession(failure.agent, fix.agent)) {
+              crossSession = true;
+            }
+            break;
+          }
+          if (isDifferentAgentSession(failure.agent, fix.agent)) continue;
+          if (failureReliable && fix.identityReliable === true && fix.commandIdentity === failure.commandIdentity) {
+            outcome = "unknown";
+            unknownReason = "unlinked-pass";
+            outcomeRecordId = fix.id;
+            outcomeTs = fix.ts;
+            break;
+          }
+        } else {
+          const nextFailure = candidate.record;
+          if (isDifferentAgentSession(failure.agent, nextFailure.agent)) continue;
+          if (candidate.key === fItem.key) {
+            outcome = "same_failure";
+            outcomeRecordId = nextFailure.id;
+            outcomeTs = nextFailure.ts;
+            break;
+          }
+          if (
+            failureReliable &&
+            nextFailure.identityReliable === true &&
+            nextFailure.commandIdentity === failure.commandIdentity
+          ) {
+            outcome = "different_failure";
+            outcomeRecordId = nextFailure.id;
+            outcomeTs = nextFailure.ts;
+            nextFingerprint = candidate.canonical;
+            break;
+          }
+        }
+      }
+
+      if (outcome === undefined) {
+        const matchedAssociation = findMatchingAssociation(
+          associationsByFailureId.get(failure.id),
+          failure,
+          group.cwdKey,
+          windowEnd,
+        );
+        if (matchedAssociation !== undefined) {
+          outcome = "possible_pass";
+          outcomeRecordId = matchedAssociation.id;
+          outcomeTs = matchedAssociation.ts;
+        } else if (!tailIsReadable) {
+          outcome = "unknown";
+          unknownReason = "coverage";
+        } else {
+          outcome = "no_later_run";
+        }
+      }
+
+      counts.attempts += 1;
+      counts[outcome] += 1;
+
+      const { changes, stated } = buildTestimony(rationalesByFailureId.get(failure.id));
+      const session = failure.agent !== undefined
+        ? (failure.agent.agentId !== undefined
+            ? { vendor: failure.agent.vendor, agentId: failure.agent.agentId }
+            : { vendor: failure.agent.vendor })
+        : undefined;
+
+      const attempt: Attempt = {
+        failureId: failure.id,
+        ts: failure.ts,
+        cmd: failure.cmd,
+        outcome,
+        sessionScoped: failure.agent !== undefined,
+        changes,
+      };
+      if (outcomeRecordId !== undefined) attempt.outcomeRecordId = outcomeRecordId;
+      if (outcomeTs !== undefined) attempt.outcomeTs = outcomeTs;
+      if (nextFingerprint !== undefined) attempt.nextFingerprint = nextFingerprint;
+      if (unknownReason !== undefined) attempt.unknownReason = unknownReason;
+      if (session !== undefined) attempt.session = session;
+      if (crossSession !== undefined) attempt.crossSession = crossSession;
+      if (stated !== undefined) attempt.stated = stated;
+      attempts.push(attempt);
+    }
+
+    const newestFailure = group.failures[group.failures.length - 1]!.record;
+    const problemId = group.problemId ?? sha256Hex16(group.key);
+    const entryPlatform = newestFailure.platform ?? defaultPlatform;
+
+    const entry: ProblemEntry = {
+      problemId,
+      key: group.key,
+      fingerprint: group.canonical,
+      family: [...group.family].sort(),
+      keyStrength: group.keyStrength,
+      cwd: newestFailure.cwd,
+      firstSeenTs: attempts[0]!.ts,
+      lastSeenTs: attempts[attempts.length - 1]!.ts,
+      signature: [...newestFailure.signature],
+      counts,
+      latestOutcome: attempts[attempts.length - 1]!.outcome,
+      attempts,
+      historyMayStartEarlier: tailWindow,
+    };
+    if (opts.cwd !== undefined) {
+      entry.cwdScope = cwdIdentityKey(opts.cwd, entryPlatform) === group.cwdKey ? "here" : "elsewhere";
+    }
+    entries.push(entry);
+  }
+
+  entries.sort(
+    (a, b) => b.lastSeenTs - a.lastSeenTs || (a.problemId < b.problemId ? -1 : a.problemId > b.problemId ? 1 : 0),
+  );
+
+  return {
+    entries,
+    coverage,
+    ungroupedLegacy,
+  };
+}

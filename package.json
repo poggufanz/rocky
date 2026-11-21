@@ -33,6 +33,7 @@
     "dev": "tsc -p tsconfig.build.json --watch",
     "test": "node scripts/test.mjs",
     "package:smoke": "node scripts/package-smoke.mjs",
+    "benchmark:attempts": "npm run build --silent && node scripts/benchmark-attempts.mjs --assert",
     "benchmark:mcp": "npm run build --silent && node scripts/benchmark-mcp.mjs",
     "benchmark:memory-query": "npm run build --silent && node scripts/benchmark-memory-query.mjs",
     "benchmark:memory-budget": "npm run build --silent && node scripts/benchmark-memory-budget.mjs --assert",

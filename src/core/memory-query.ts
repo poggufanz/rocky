@@ -218,7 +218,7 @@ function fingerprintMatches(record: FailureRecord, candidates: Set<string>): boo
       : candidates.has(current)));
 }
 
-interface FingerprintMigrationIndex {
+export interface FingerprintMigrationIndex {
   migrated: ReadonlyMap<string, ReadonlySet<string>>;
   provenLegacyRecords: ReadonlySet<string>;
 }
@@ -233,7 +233,7 @@ function trustedCurrentEvidence(record: FailureRecord, current: string): boolean
  * Raw excerpts never participate in either state; malformed records remain
  * outside the proven legacy set.
  */
-function fingerprintMigrationIndex(records: readonly FailureRecord[]): FingerprintMigrationIndex {
+export function fingerprintMigrationIndex(records: readonly FailureRecord[]): FingerprintMigrationIndex {
   // Modern records already carry their current fingerprint witness. Avoid a
   // 50k-entry hash/array index when there is no legacy family to migrate.
   if (!records.some((record) => record.fingerprintV !== 2)) {
@@ -277,7 +277,7 @@ function fingerprintMigrationIndex(records: readonly FailureRecord[]): Fingerpri
   return { migrated, provenLegacyRecords };
 }
 
-function canonicalFingerprint(record: FailureRecord, migration: FingerprintMigrationIndex): string {
+export function canonicalFingerprint(record: FailureRecord, migration: FingerprintMigrationIndex): string {
   if (record.fingerprintV === 2) return record.fingerprint;
   const unprovenKey = `legacy:${record.id}`;
   if (!FINGERPRINT_TEXT.test(record.fingerprint)) return unprovenKey;
