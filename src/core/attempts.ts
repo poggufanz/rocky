@@ -4,6 +4,7 @@ import {
   canonicalFingerprint,
   fingerprintMigrationIndex,
   LINK_WINDOW_MS,
+  queryRecall,
   type FingerprintMigrationIndex,
 } from "./memory-query.js";
 import {
@@ -47,6 +48,11 @@ export interface ProblemEntry {
 }
 
 export interface ProblemSet { entries: ProblemEntry[]; coverage: MemoryCoverage; ungroupedLegacy: number }
+
+export interface ProblemSelection { set: ProblemSet; entries: ProblemEntry[]; cutoffTs?: number }
+
+const THIRTY_DAYS_MS = 30 * 86_400_000;
+const FINGERPRINT_HEX_RE = /^[0-9a-f]{16}$/u;
 
 interface IndexedFailure {
   kind: "failure";
@@ -578,4 +584,70 @@ export function buildProblems(
     coverage,
     ungroupedLegacy,
   };
+}
+
+export function selectProblemEntries(
+  records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
+  opts: { now: number; cwd: string; query: string | undefined; allDirs: boolean; limit: number },
+): ProblemSelection {
+  const { now, cwd, query, allDirs, limit } = opts;
+
+  if (query === undefined) {
+    const cutoffTs = now - THIRTY_DAYS_MS;
+    const set = buildProblems(records, coverage, { now, cwd });
+    const recentCount = (entry: ProblemEntry): number => {
+      let count = 0;
+      for (const attempt of entry.attempts) {
+        if (attempt.ts >= cutoffTs) count += 1;
+      }
+      return count;
+    };
+    const recentNonPassed = (entry: ProblemEntry): number => {
+      let count = 0;
+      for (const attempt of entry.attempts) {
+        if (attempt.ts >= cutoffTs && attempt.outcome !== "passed") count += 1;
+      }
+      return count;
+    };
+    const entries = set.entries
+      .filter((entry) => (allDirs || entry.cwdScope === "here") && recentCount(entry) >= 2)
+      .sort((a, b) =>
+        recentNonPassed(b) - recentNonPassed(a) ||
+        b.lastSeenTs - a.lastSeenTs ||
+        (a.problemId < b.problemId ? -1 : a.problemId > b.problemId ? 1 : 0),
+      )
+      .slice(0, limit);
+    return { set, entries, cutoffTs };
+  }
+
+  if (FINGERPRINT_HEX_RE.test(query)) {
+    const set = buildProblems(records, coverage, {
+      now,
+      fingerprint: query,
+      cwd,
+    });
+    const entries = set.entries
+      .filter((entry) => allDirs || entry.cwdScope === "here")
+      .slice(0, limit);
+    return { set, entries };
+  }
+
+  const set = buildProblems(records, coverage, { now, cwd });
+  const hits = queryRecall(records, { query, limit: 50, now });
+  const eligible = set.entries.filter((entry) => allDirs || entry.cwdScope === "here");
+  const seenProblemIds = new Set<string>();
+  const matched: ProblemEntry[] = [];
+  for (const hit of hits) {
+    for (const entry of eligible) {
+      if (seenProblemIds.has(entry.problemId)) continue;
+      if (entry.family.includes(hit.failure.fingerprint)) {
+        seenProblemIds.add(entry.problemId);
+        matched.push(entry);
+        if (matched.length >= limit) break;
+      }
+    }
+    if (matched.length >= limit) break;
+  }
+  return { set, entries: matched };
 }
