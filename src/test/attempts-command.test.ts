@@ -231,6 +231,44 @@ test("snapshot: tail header names newest window", async (t) => {
   );
 });
 
+test("snapshot: tail coverage with skipped lines discloses coverage", async (t) => {
+  withRecordCap(t, 4);
+  const home = freshHome(t);
+  const tOld = Date.UTC(2026, 9, 2, 8, 0);
+  const t1 = Date.UTC(2026, 10, 12, 13, 20);
+  const t2 = Date.UTC(2026, 10, 12, 13, 55);
+  const lines = [
+    JSON.stringify(failureRecord({ id: "old1", ts: tOld, fingerprint: "9999000011112222", signature: ["old error"] })),
+    JSON.stringify(failureRecord({ id: "old2", ts: tOld + 1000, fingerprint: "9999000011112222", signature: ["old error"] })),
+    JSON.stringify(failureRecord({ id: "old3", ts: tOld + 2000, fingerprint: "9999000011112222", signature: ["old error"] })),
+    JSON.stringify(failureRecord({ id: "old4", ts: tOld + 3000, fingerprint: "9999000011112222", signature: ["old error"] })),
+    JSON.stringify(failureRecord({ id: "f1", ts: t1, cmd: "npm test", fingerprint: "3f2a9c1e44d0b7a1" })),
+    "{bad json 1",
+    JSON.stringify(failureRecord({ id: "f2", ts: t2, cmd: "npm test", fingerprint: "3f2a9c1e44d0b7a1" })),
+    "{bad json 2",
+  ];
+  writeFileSync(join(home, "memory.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const out = await captureOutput(() =>
+    attempts([], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+  );
+
+  assert.equal(out.code, 0);
+  assert.equal(out.stdout, "");
+  assert.equal(
+    out.stderr,
+    [
+      "rocky: 1 repeated error in /work/app (newest 2 records, from 2026-11-12)",
+      "memory coverage incomplete: 2 lines could not be used. Only the newest 2 records were read; earlier lines were not read.",
+      "9a509759c962b731  TypeError: token undefined",
+      "  2026-11-12 13:20  npm test  failed same way     changes unknown",
+      "  2026-11-12 13:55  npm test  unknown             changes unknown",
+      "rocky: Rocky records order, not cause.",
+      "",
+    ].join("\n"),
+  );
+});
+
 test("json is valid and versioned", async (t) => {
   const home = freshHome(t);
   seedDefaultListingMemory(home);
