@@ -566,51 +566,131 @@ function cappedResult(
   }
 }
 
-function trimAttemptHistoryPayload(
+const RESULT_ENVELOPE_WIRE_BYTES = Buffer.byteLength(
+  '{"content":[{"type":"text","text":""}],"structuredContent":}',
+  "utf8",
+);
+
+function wireFragmentBytes(jsonText: string): number {
+  return Buffer.byteLength(jsonText, "utf8") + Buffer.byteLength(JSON.stringify(jsonText), "utf8") - 2;
+}
+
+const TRUNCATED_FIELD_WIRE_BYTES = wireFragmentBytes(',"truncated":true');
+
+/**
+ * Trim attempt_history payloads in linear time and decide fit by exact wire
+ * length rather than cappedResult's conservative 2x+1024 estimate gate.
+ */
+function cappedAttemptHistoryResult(
   payload: Record<string, unknown>,
   entries: ProjectedProblemEntry[],
-): void {
-  const exceedsCap = (): boolean => {
-    const payloadBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
-    if (payloadBytes * 2 + 1026 > RESPONSE_CAP_BYTES) return true;
-    return Buffer.byteLength(JSON.stringify(buildResult(payload)), "utf8") > RESPONSE_CAP_BYTES;
-  };
+): ToolCallResult {
+  const envelopeBaseBytes = RESULT_ENVELOPE_WIRE_BYTES + wireFragmentBytes(JSON.stringify({ ...payload, entries: [] }));
+  const entryCurrentWireBytes: number[] = [];
+  const remainingAttempts: number[] = [];
+  const currentOmitted: number[] = [];
+  const droppedAttemptMask: boolean[][] = [];
+  const originalAttempts: ProjectedProblemEntry["attempts"][] = [];
+  const dropOrder: { entryIndex: number; attemptIndex: number; ts: number; wireBytes: number }[] = [];
+
+  let currentWireBytes = envelopeBaseBytes;
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+    const entry = entries[entryIndex]!;
+    const baseBytes = wireFragmentBytes(JSON.stringify({ ...entry, attempts: [] }));
+    remainingAttempts.push(entry.attempts.length);
+    currentOmitted.push(entry.attemptsOmitted);
+    droppedAttemptMask.push(new Array<boolean>(entry.attempts.length).fill(false));
+    originalAttempts.push(entry.attempts);
+
+    let entryWireBytes = baseBytes;
+    for (let attemptIndex = 0; attemptIndex < entry.attempts.length; attemptIndex += 1) {
+      const attempt = entry.attempts[attemptIndex]!;
+      const attemptWireBytes = wireFragmentBytes(JSON.stringify(attempt));
+      entryWireBytes += attemptWireBytes + (attemptIndex > 0 ? 2 : 0);
+      dropOrder.push({ entryIndex, attemptIndex, ts: attempt.ts, wireBytes: attemptWireBytes });
+    }
+    entryCurrentWireBytes.push(entryWireBytes);
+    currentWireBytes += entryWireBytes + (entryIndex > 0 ? 2 : 0);
+  }
+
   let dropped = false;
-  while (exceedsCap()) {
-    let dropEntryIndex = -1;
-    let dropAttemptIndex = -1;
-    let oldestTs = Infinity;
-    for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
-      const attempts = entries[entryIndex]!.attempts;
-      for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
-        const ts = attempts[attemptIndex]!.ts;
-        if (
-          dropEntryIndex === -1 ||
-          ts < oldestTs ||
-          (ts === oldestTs && entryIndex > dropEntryIndex)
-        ) {
-          oldestTs = ts;
-          dropEntryIndex = entryIndex;
-          dropAttemptIndex = attemptIndex;
-        }
+  const hadTruncatedKey = Object.prototype.hasOwnProperty.call(payload, "truncated");
+  const markTruncated = (): void => {
+    if (!dropped) {
+      dropped = true;
+      if (!hadTruncatedKey) currentWireBytes += TRUNCATED_FIELD_WIRE_BYTES;
+    }
+  };
+
+  let sorted = false;
+  const ensureSorted = (): void => {
+    if (sorted) return;
+    dropOrder.sort(
+      (a, b) => a.ts - b.ts || b.entryIndex - a.entryIndex || a.attemptIndex - b.attemptIndex,
+    );
+    sorted = true;
+  };
+
+  let nextDropCursor = 0;
+  let survivingEntries = entries.length;
+  const dropNext = (): boolean => {
+    ensureSorted();
+    while (nextDropCursor < dropOrder.length) {
+      const item = dropOrder[nextDropCursor]!;
+      nextDropCursor += 1;
+      if (item.entryIndex >= survivingEntries) continue;
+      markTruncated();
+      droppedAttemptMask[item.entryIndex]![item.attemptIndex] = true;
+      const commaBytes = remainingAttempts[item.entryIndex]! > 1 ? 2 : 0;
+      const delta = item.wireBytes + commaBytes;
+      remainingAttempts[item.entryIndex]! -= 1;
+      entryCurrentWireBytes[item.entryIndex]! -= delta;
+      currentWireBytes -= delta;
+      const prevDigits = String(currentOmitted[item.entryIndex]!).length;
+      currentOmitted[item.entryIndex]! += 1;
+      const nextDigits = String(currentOmitted[item.entryIndex]!).length;
+      if (nextDigits !== prevDigits) {
+        const digitDelta = (nextDigits - prevDigits) * 2;
+        entryCurrentWireBytes[item.entryIndex]! += digitDelta;
+        currentWireBytes += digitDelta;
+      }
+      return true;
+    }
+    if (survivingEntries > 0) {
+      markTruncated();
+      const lastIndex = survivingEntries - 1;
+      const commaBytes = survivingEntries > 1 ? 2 : 0;
+      currentWireBytes -= entryCurrentWireBytes[lastIndex]! + commaBytes;
+      survivingEntries -= 1;
+      return true;
+    }
+    return false;
+  };
+
+  const applyTrim = (): void => {
+    entries.length = survivingEntries;
+    for (let entryIndex = 0; entryIndex < survivingEntries; entryIndex += 1) {
+      const entry = entries[entryIndex]!;
+      if (entry.attemptsOmitted !== currentOmitted[entryIndex]!) {
+        const mask = droppedAttemptMask[entryIndex]!;
+        entry.attempts = originalAttempts[entryIndex]!.filter((_, index) => !mask[index]);
+        entry.attemptsOmitted = currentOmitted[entryIndex]!;
       }
     }
-    if (dropEntryIndex !== -1) {
-      entries[dropEntryIndex]!.attempts.splice(dropAttemptIndex, 1);
-      entries[dropEntryIndex]!.attemptsOmitted += 1;
-      dropped = true;
-      payload.truncated = true;
-      continue;
-    }
-    if (entries.length > 0) {
-      entries.pop();
-      dropped = true;
-      payload.truncated = true;
-      continue;
-    }
-    break;
+    if (dropped) payload.truncated = true;
+  };
+
+  while (currentWireBytes > RESPONSE_CAP_BYTES) {
+    if (!dropNext()) break;
   }
-  if (dropped) payload.truncated = true;
+  applyTrim();
+
+  while (true) {
+    const output = buildResult(payload);
+    if (Buffer.byteLength(JSON.stringify(output), "utf8") <= RESPONSE_CAP_BYTES) return output;
+    if (!dropNext()) throw new Error("response too large");
+    applyTrim();
+  }
 }
 
 /** Listening metadata-first projection: locators, hashes, IDs, bases, coverage. Never raw bodies. */
@@ -1863,20 +1943,15 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
             if (snapshot === undefined) {
               const coverage = memoryCoverage(options.memory, true, coverageReader);
               pairedCoverage = coverage;
+              const emptyPayload: Record<string, unknown> = {
+                exposure: options.exposure,
+                entries: [],
+                notice: ATTEMPT_HISTORY_NOTICE,
+                ...memoryCoveragePayload(coverage),
+              };
               return safeProjection(
-                () => cappedResult({
-                  exposure: options.exposure,
-                  entries: [],
-                  notice: ATTEMPT_HISTORY_NOTICE,
-                  ...memoryCoveragePayload(coverage),
-                }),
-                cappedResult({
-                  exposure: options.exposure,
-                  entries: [],
-                  notice: ATTEMPT_HISTORY_NOTICE,
-                  truncated: true,
-                  ...memoryCoveragePayload(coverage),
-                }),
+                () => cappedAttemptHistoryResult(emptyPayload, []),
+                buildResult({ ...emptyPayload, truncated: true }),
               );
             }
             const coverage = snapshot.coverage;
@@ -1904,9 +1979,8 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 notice: ATTEMPT_HISTORY_NOTICE,
                 ...memoryCoveragePayload(coverage),
               };
-              trimAttemptHistoryPayload(payload, entries);
-              return cappedResult(payload);
-            }, cappedResult(fallbackPayload));
+              return cappedAttemptHistoryResult(payload, entries);
+            }, buildResult(fallbackPayload));
           }
           case "recent_failures": {
             const input = parseRecentArgs(args, options.exposure);

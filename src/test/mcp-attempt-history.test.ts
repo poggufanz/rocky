@@ -13,7 +13,7 @@ import {
   ATTEMPT_HISTORY_NOTICE,
   type ProjectedProblemEntry,
 } from "../mcp/attempts-projection.js";
-import { MAX_RESPONSE_BYTES } from "../mcp/privacy.js";
+import { MAX_RESPONSE_BYTES, projectRecentFailures } from "../mcp/privacy.js";
 import {
   createToolRegistry,
   MCP_TOOL_CATALOG,
@@ -552,6 +552,258 @@ test("oversized multi-entry cap breaks timestamp ties by later entry and drops t
       assert.equal(entry.attempts.length, 0);
       assert.equal(entry.attemptsOmitted, 1);
     }
+  });
+});
+
+function makeWordPadding(targetBytes: number): string {
+  const unit = "word ";
+  const full = Math.floor(targetBytes / unit.length);
+  const rem = targetBytes - full * unit.length;
+  if (rem === 0) return unit.repeat(full).trimEnd() + (full > 0 ? "a" : "");
+  return `${unit.repeat(full)}${"a".repeat(rem)}`;
+}
+
+test("just-fitting attempt_history keeps all attempts without truncated while cappedResult callers keep conservative gate", async () => {
+  const now = Date.now();
+  const fp = "5566778899aabbcc";
+  const here = process.cwd();
+  const attemptCount = 16;
+  const fixedPad = makeWordPadding(16_200);
+
+  const buildRecords = (lastPadBytes: number): MemoryRecord[] =>
+    Array.from({ length: attemptCount }, (_, i) =>
+      makeFailure({
+        id: `fit-${String(i).padStart(2, "0")}`,
+        ts: now - (attemptCount - i) * MINUTE,
+        cwd: here,
+        cmd: `npm test ${String(i).padStart(2, "0")} ${i === attemptCount - 1 ? makeWordPadding(lastPadBytes) : fixedPad}`,
+        fingerprint: fp,
+        signature: ["Error: exact wire cap boundary test"],
+      }),
+    );
+
+  // Calibrate the 16th attempt so the exact wire response lands just below RESPONSE_CAP_BYTES
+  // while payloadBytes * 2 + 1024 exceeds RESPONSE_CAP_BYTES (where cappedResult's estimate gate trips).
+  const probePad = 10_000;
+  let probeWireBytes = 0;
+  await withDurableMemory(buildRecords(probePad), async (memory) => {
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const probe = await reg.call(
+      "attempt_history",
+      { fingerprint: fp, attempts: attemptCount },
+      new AbortController().signal,
+    );
+    const probeBody = probe.structuredContent as {
+      truncated?: boolean;
+      entries: ProjectedProblemEntry[];
+    };
+    assert.equal("truncated" in probeBody, false);
+    assert.equal(probeBody.entries[0]!.attempts.length, attemptCount);
+    probeWireBytes = Buffer.byteLength(JSON.stringify(probe), "utf8");
+  });
+
+  // Each added ASCII byte in observedCommand adds 2 wire bytes (structuredContent + text).
+  const targetWireBytes = RESPONSE_CAP_BYTES - 120;
+  const exactFitPad = probePad + Math.floor((targetWireBytes - probeWireBytes) / 2);
+
+  let exactWireBytes = 0;
+  await withDurableMemory(buildRecords(exactFitPad), async (memory) => {
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const result = await reg.call(
+      "attempt_history",
+      { fingerprint: fp, attempts: attemptCount },
+      new AbortController().signal,
+    );
+    exactWireBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+    const payloadBytes = Buffer.byteLength(JSON.stringify(result.structuredContent), "utf8");
+    assert.ok(
+      exactWireBytes <= RESPONSE_CAP_BYTES,
+      `expected exact wire size ${exactWireBytes} <= ${RESPONSE_CAP_BYTES}`,
+    );
+    assert.ok(
+      payloadBytes * 2 + 1024 > RESPONSE_CAP_BYTES,
+      `expected fixture to exceed conservative estimate gate (${payloadBytes * 2 + 1024} > ${RESPONSE_CAP_BYTES})`,
+    );
+
+    const body = result.structuredContent as {
+      truncated?: boolean;
+      entries: ProjectedProblemEntry[];
+    };
+    assert.equal("truncated" in body, false);
+    assert.equal(body.entries.length, 1);
+    assert.equal(body.entries[0]!.attempts.length, attemptCount);
+    assert.equal(body.entries[0]!.attemptsOmitted, 0);
+  });
+
+  // Pushing past RESPONSE_CAP_BYTES by a few bytes must trim exactly one oldest attempt.
+  const justOverPad = exactFitPad + Math.floor((RESPONSE_CAP_BYTES - exactWireBytes) / 2) + 4;
+  await withDurableMemory(buildRecords(justOverPad), async (memory) => {
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const result = await reg.call(
+      "attempt_history",
+      { fingerprint: fp, attempts: attemptCount },
+      new AbortController().signal,
+    );
+    assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= RESPONSE_CAP_BYTES);
+    const body = result.structuredContent as {
+      truncated?: boolean;
+      entries: ProjectedProblemEntry[];
+    };
+    assert.equal(body.truncated, true);
+    assert.equal(body.entries.length, 1);
+    assert.equal(body.entries[0]!.attempts.length, attemptCount - 1);
+    assert.equal(body.entries[0]!.attemptsOmitted, 1);
+    assert.equal(body.entries[0]!.attempts[0]!.ts, now - (attemptCount - 1) * MINUTE);
+  });
+
+  // Opposite direction: existing cappedResult caller (recent_failures) keeps its conservative
+  // estimate gate in the same narrow band where exact wire size fits under RESPONSE_CAP_BYTES.
+  const buildRecentHits = (lastPadBytes: number) =>
+    Array.from({ length: attemptCount }, (_, i) => ({
+      failure: makeFailure({
+        id: `recent-fit-${String(i).padStart(2, "0")}`,
+        ts: now - (attemptCount - i) * MINUTE,
+        cwd: here,
+        cmd: `npm test ${String(i).padStart(2, "0")} ${i === attemptCount - 1 ? makeWordPadding(lastPadBytes) : fixedPad}`,
+        fingerprint: `00000000000000${String(i).padStart(2, "0")}`,
+        signature: ["Error: cappedResult boundary lock"],
+      }),
+    }));
+
+  const probeRecentPayload = projectRecentFailures(buildRecentHits(8_000), "sanitized", now);
+  const probeRecentWire = Buffer.byteLength(
+    JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify(probeRecentPayload) }],
+      structuredContent: probeRecentPayload,
+    }),
+    "utf8",
+  );
+  const recentBandPad = 8_000 + Math.floor((RESPONSE_CAP_BYTES - 120 - probeRecentWire) / 2);
+  const bandHits = buildRecentHits(recentBandPad);
+  const unfilteredRecent = projectRecentFailures(bandHits, "sanitized", now);
+  const unfilteredRecentText = JSON.stringify(unfilteredRecent);
+  const unfilteredRecentWire = Buffer.byteLength(
+    JSON.stringify({
+      content: [{ type: "text", text: unfilteredRecentText }],
+      structuredContent: unfilteredRecent,
+    }),
+    "utf8",
+  );
+  assert.equal(unfilteredRecent.items.length, attemptCount);
+  assert.equal(unfilteredRecent.truncated, false);
+  assert.ok(unfilteredRecentWire <= RESPONSE_CAP_BYTES);
+  assert.ok(Buffer.byteLength(unfilteredRecentText, "utf8") * 2 + 1024 > RESPONSE_CAP_BYTES);
+
+  const recentMemory: MemoryQueries = {
+    ...createMemoryQueries(() => []),
+    recentFailures: () => bandHits,
+  };
+  const recentReg = createToolRegistry({
+    exposure: "sanitized",
+    memory: recentMemory,
+    recallWithAi: disabledRecallWithAi,
+  });
+  const recentResult = await recentReg.call(
+    "recent_failures",
+    { limit: 20 },
+    new AbortController().signal,
+  );
+  const recentBody = recentResult.structuredContent as {
+    truncated: boolean;
+    items: unknown[];
+  };
+  assert.equal(recentBody.truncated, true);
+  assert.equal(recentBody.items.length, attemptCount - 1);
+});
+
+test("maximum shape (10 entries x 20 attempts with long commands) trims oldest-first under the cap", async () => {
+  const now = Date.now();
+  const fp = "deadbeefcafebabe";
+  const here = process.cwd();
+  const entryCount = 10;
+  const attemptsPerEntry = 20;
+  const longPad = makeWordPadding(15_500);
+
+  const records: MemoryRecord[] = [];
+  const expectedOrder: { entryIndex: number; attemptIndex: number; ts: number }[] = [];
+
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+    const dir = join(here, "..", `rocky-max-shape-${entryIndex}`);
+    for (let attemptIndex = 0; attemptIndex < attemptsPerEntry; attemptIndex += 1) {
+      // Newest attempt establishes deterministic entry ordering (entry 0 newest .. entry 9 oldest).
+      // Earlier attempts include intentional cross-entry timestamp ties (entryIndex % 3).
+      const ts =
+        attemptIndex === attemptsPerEntry - 1
+          ? now - (entryIndex + 1) * 1_000
+          : now - (attemptsPerEntry - attemptIndex) * MINUTE - (entryIndex % 3) * 1_000;
+      expectedOrder.push({ entryIndex, attemptIndex, ts });
+      records.push(
+        makeFailure({
+          id: `max-e${entryIndex}-a${String(attemptIndex).padStart(2, "0")}`,
+          ts,
+          cwd: dir,
+          cmd: `npm test e${entryIndex} a${String(attemptIndex).padStart(2, "0")} ${longPad}`,
+          fingerprint: fp,
+          signature: ["Error: maximum shape trimming test"],
+        }),
+      );
+    }
+  }
+
+  expectedOrder.sort(
+    (a, b) => a.ts - b.ts || b.entryIndex - a.entryIndex || a.attemptIndex - b.attemptIndex,
+  );
+
+  await withDurableMemory(records, async (memory) => {
+    const reg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+    });
+    const result = await reg.call(
+      "attempt_history",
+      { fingerprint: fp, limit: entryCount, attempts: attemptsPerEntry },
+      new AbortController().signal,
+    );
+
+    const wireBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+    assert.ok(wireBytes <= RESPONSE_CAP_BYTES, `wireBytes ${wireBytes} must be <= ${RESPONSE_CAP_BYTES}`);
+
+    const body = result.structuredContent as {
+      truncated?: boolean;
+      entries: ProjectedProblemEntry[];
+    };
+    assert.equal(body.truncated, true);
+    assert.equal(body.entries.length, entryCount);
+
+    const keptKeys: string[] = [];
+    for (let entryIndex = 0; entryIndex < body.entries.length; entryIndex += 1) {
+      const entry = body.entries[entryIndex]!;
+      assert.equal(entry.attempts.length + entry.attemptsOmitted, attemptsPerEntry);
+      assert.equal(entry.lastSeen, now - (entryIndex + 1) * 1_000);
+      for (const attempt of entry.attempts) {
+        keptKeys.push(`${entryIndex}:${attempt.ts}`);
+      }
+    }
+
+    assert.ok(keptKeys.length > 0 && keptKeys.length < entryCount * attemptsPerEntry);
+    const expectedKept = expectedOrder
+      .slice(expectedOrder.length - keptKeys.length)
+      .map((item) => `${item.entryIndex}:${item.ts}`)
+      .sort();
+    assert.deepEqual([...keptKeys].sort(), expectedKept);
   });
 });
 
