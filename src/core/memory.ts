@@ -40,7 +40,7 @@ import {
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, tailReadable, windowCovered } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, KnownRationaleSource, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
@@ -1670,7 +1670,12 @@ function boundGitAnchor(input: GitAnchor | undefined): { git?: GitAnchor } {
 }
 
 export function recordRationale(
-  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt"> & { text: string; ts?: number; git?: GitAnchor },
+  input: Omit<RationaleRecord, "kind" | "id" | "ts" | "v" | "excerpt" | "source"> & {
+    source: KnownRationaleSource;
+    text: string;
+    ts?: number;
+    git?: GitAnchor;
+  },
   paths?: RockyPaths,
 ): RationaleRecord {
   const ts = input.ts ?? Date.now();
