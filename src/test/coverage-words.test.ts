@@ -171,18 +171,21 @@ test("rocky stats over the record cap ends its ROCKY_VERBOSE counter line with t
 });
 
 /**
- * One valid record and one line that is not JSON: the read is whole except for a
- * line Rocky cannot use, so every site discloses the same skipped-only coverage.
+ * One valid record plus either one tolerated non-JSON line (scanned 2, skipped 1)
+ * or two non-JSON lines exceeding the allowance (scanned 3, skipped 2).
  */
 interface IncompleteMemory {
   readonly bytes: number;
 }
 
-function incompleteMemory(t: TestContext): IncompleteMemory {
+function incompleteMemory(t: TestContext, skippedCount: 1 | 2): IncompleteMemory {
   const root = mkdtempSync(join(tmpdir(), "rocky-coverage-sites-"));
   const home = join(root, "rocky-home");
   mkdirSync(home, { recursive: true });
-  const body = `${failureLine(0)}\nthis line is not json\n`;
+  const badLines = skippedCount === 1
+    ? "this line is not json\n"
+    : "this line is not json\nthis line is also not json\n";
+  const body = `${failureLine(0)}\n${badLines}`;
   writeFileSync(join(home, "memory.jsonl"), body, "utf8");
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
@@ -226,45 +229,51 @@ function captureHookSpeech(fn: () => unknown): string {
 }
 
 const FAILED: ExecResult = { started: true, code: 1, stderr: "boom", tail: ["boom"], durationMs: 5 };
-const WORDS = `${PREFIX}1 line could not be used.`;
+const ONE_SKIP_WORDS = `${PREFIX}1 line could not be used.`;
+const TWO_SKIP_WORDS = `${PREFIX}2 lines could not be used.`;
 
 interface Site {
   readonly name: string;
   readonly speak: () => Promise<string> | string;
-  readonly plainLine: string;
-  readonly legacyLine: (memory: IncompleteMemory) => string;
+  readonly plainLine: (words: string) => string;
+  readonly legacyLine: (memory: IncompleteMemory, scanned: number, skipped: number) => string;
+  /** Blocked-recall sentence emitted only when `!tailReadable(coverage)`. */
+  readonly blockedMessage?: string;
 }
 
 const SITES: readonly Site[] = [
   {
     name: "run",
     speak: () => captureStderr(() => run("synthetic-failure", async () => FAILED)),
-    plainLine: `    ${WORDS}`,
-    legacyLine: () => "    memory coverage: version 1; scanned 2; skipped 1; truncated 0",
+    plainLine: (words) => `    ${words}`,
+    legacyLine: (_memory, scanned, skipped) => `    memory coverage: version 1; scanned ${scanned}; skipped ${skipped}; truncated 0`,
+    blockedMessage: "Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.",
   },
   {
     name: "hook",
     speak: () => captureHookSpeech(() => hookFail("synthetic-failure", 1, process.cwd())),
-    plainLine: `    ${WORDS}`,
-    legacyLine: () => "    memory coverage: version 1; scanned 2; skipped 1; truncated 0",
+    plainLine: (words) => `    ${words}`,
+    legacyLine: (_memory, scanned, skipped) => `    memory coverage: version 1; scanned ${scanned}; skipped ${skipped}; truncated 0`,
+    blockedMessage: "Memory coverage is incomplete, so no prior fix is claimed. Check the details below.",
   },
   {
     name: "watch",
     speak: () => captureStderr(() => watch(["synthetic-failure"], { notify: () => {}, runProcess: async () => FAILED })),
-    plainLine: `    ${WORDS}`,
-    legacyLine: () => "    memory coverage incomplete: version 1; scanned 2; skipped 1; truncated 0",
+    plainLine: (words) => `    ${words}`,
+    legacyLine: (_memory, scanned, skipped) => `    memory coverage incomplete: version 1; scanned ${scanned}; skipped ${skipped}; truncated 0`,
+    blockedMessage: "Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.",
   },
   {
     name: "recall",
     speak: () => captureStderr(() => recall(["synthetic-query"])),
-    plainLine: WORDS,
-    legacyLine: () => "memory coverage incomplete: version 1, scanned 2, skipped 1, truncated 0, complete false",
+    plainLine: (words) => words,
+    legacyLine: (_memory, scanned, skipped) => `memory coverage incomplete: version 1, scanned ${scanned}, skipped ${skipped}, truncated 0, complete false`,
   },
   {
     name: "concepts",
     speak: () => captureStderr(() => conceptsCommand([])),
-    plainLine: WORDS,
-    legacyLine: (memory) => `memory coverage incomplete: version 1; scanned 2; skipped 1; truncated 0; bytes ${memory.bytes}/${memory.bytes}`,
+    plainLine: (words) => words,
+    legacyLine: (memory, scanned, skipped) => `memory coverage incomplete: version 1; scanned ${scanned}; skipped ${skipped}; truncated 0; bytes ${memory.bytes}/${memory.bytes}`,
   },
 ];
 
@@ -273,19 +282,47 @@ function spokenLines(text: string): string[] {
 }
 
 for (const site of SITES) {
-  test(`${site.name} says memory coverage in plain words by default`, async (t) => {
+  test(`${site.name} says memory coverage in plain words by default for one tolerated skip`, async (t) => {
     setVerbose(t, undefined);
-    incompleteMemory(t);
+    incompleteMemory(t, 1);
     const spoken = await site.speak();
-    assert.ok(spokenLines(spoken).includes(site.plainLine), spoken);
+    assert.ok(spokenLines(spoken).includes(site.plainLine(ONE_SKIP_WORDS)), spoken);
     assert.doesNotMatch(spoken, /scanned|truncated|version 1/u);
+    if (site.blockedMessage !== undefined) {
+      assert.ok(!spoken.includes(site.blockedMessage), spoken);
+    }
   });
 
-  test(`${site.name} keeps its own counter text under ROCKY_VERBOSE`, async (t) => {
+  test(`${site.name} keeps its own counter text under ROCKY_VERBOSE for one tolerated skip`, async (t) => {
     setVerbose(t, "1");
-    const memory = incompleteMemory(t);
+    const memory = incompleteMemory(t, 1);
     const spoken = await site.speak();
-    assert.ok(spokenLines(spoken).includes(site.legacyLine(memory)), spoken);
-    assert.ok(!spokenLines(spoken).includes(site.plainLine), spoken);
+    assert.ok(spokenLines(spoken).includes(site.legacyLine(memory, 2, 1)), spoken);
+    assert.ok(!spokenLines(spoken).includes(site.plainLine(ONE_SKIP_WORDS)), spoken);
+    if (site.blockedMessage !== undefined) {
+      assert.ok(!spoken.includes(site.blockedMessage), spoken);
+    }
+  });
+
+  test(`${site.name} says memory coverage in plain words by default above the skipped-line allowance`, async (t) => {
+    setVerbose(t, undefined);
+    incompleteMemory(t, 2);
+    const spoken = await site.speak();
+    assert.ok(spokenLines(spoken).includes(site.plainLine(TWO_SKIP_WORDS)), spoken);
+    assert.doesNotMatch(spoken, /scanned|truncated|version 1/u);
+    if (site.blockedMessage !== undefined) {
+      assert.ok(spoken.includes(site.blockedMessage), spoken);
+    }
+  });
+
+  test(`${site.name} keeps its own counter text under ROCKY_VERBOSE above the skipped-line allowance`, async (t) => {
+    setVerbose(t, "1");
+    const memory = incompleteMemory(t, 2);
+    const spoken = await site.speak();
+    assert.ok(spokenLines(spoken).includes(site.legacyLine(memory, 3, 2)), spoken);
+    assert.ok(!spokenLines(spoken).includes(site.plainLine(TWO_SKIP_WORDS)), spoken);
+    if (site.blockedMessage !== undefined) {
+      assert.ok(spoken.includes(site.blockedMessage), spoken);
+    }
   });
 }

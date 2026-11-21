@@ -210,7 +210,7 @@ export function renderProblemsText(
   }
 
   let coverageLine: string | undefined;
-  if (!tailReadable(coverage) || (incomplete && n === 0)) {
+  if (!tailReadable(coverage) || coverage.skipped > 0 || (incomplete && n === 0)) {
     coverageLine = describeMemoryCoverage(coverage, opts.totalRecords, { counts: false });
   }
 

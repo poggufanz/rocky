@@ -11,10 +11,8 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  isCompleteMemoryCoverage,
   loadMemoryChecked,
   tailReadable,
-  type MemoryCoverage,
   type MemoryLoadResult,
   type MemoryRecord,
 } from "../core/memory-read.js";
@@ -228,30 +226,23 @@ export function readDecisionSelection(): { engine: "heuristic" | "local" | "jev"
 /**
  * Memory as one chat answer sees it. Disclosing and holding are two decisions.
  * A read that was not whole is always disclosed, in plain words. Only a read
- * that stopped early holds the answer, because silence in it proves nothing.
- * Lines rocky cannot use (a repeated id, a kind this build does not know)
- * leave every other record parsed, so the answer comes from those records and
- * says what could not be used.
+ * that is not `tailReadable` holds the answer, because silence in it proves
+ * nothing. A few unusable lines within the allowance leave the rest readable,
+ * so the answer comes from those records and says what could not be used.
  */
 export interface MemorySnapshot {
   list: MemoryRecord[];
   /** Plain words, set for every read that was not whole, skipped lines included. */
   disclosure: string | undefined;
-  /** True when the read stopped early: a cap, a race, or a failure with no reason. */
+  /** True when `!tailReadable(coverage)`: a cap, a race, excess skipped lines, or unexplained incomplete coverage. */
   hold: boolean;
-}
-
-function readStoppedEarly(coverage: MemoryCoverage): boolean {
-  if (isCompleteMemoryCoverage(coverage) || tailReadable(coverage)) return false;
-  const skippedOnly = coverage.skipped > 0 && coverage.truncated === 0 && coverage.reason === undefined;
-  return !skippedOnly;
 }
 
 export function snapshotOf(loaded: Pick<MemoryLoadResult, "records" | "coverage">): MemorySnapshot {
   return {
     list: loaded.records,
     disclosure: describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false }),
-    hold: readStoppedEarly(loaded.coverage),
+    hold: !tailReadable(loaded.coverage),
   };
 }
 

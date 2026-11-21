@@ -295,21 +295,41 @@ test("hookSuccess says the command passes now when the failure was recorded unde
   }
 });
 
-test("hookFail does not call a same-directory fix 'a different directory' because it was recorded under another spelling", () => {
-  const gitBash = "C:/Users/x/p";
-  const native = "C:\\Users\\x\\p";
-  seedElsewhereFix(gitBash, native, "spelling-test-cmd", 1);
-  try {
-    const { result, tty } = captureTty(() => hookFail("spelling-test-cmd", 1, gitBash));
-    assert.equal(result, 0);
-    // sanity: the base fix line speaks either way, so only the elsewhere
-    // admission can differ between win32 (same directory) and POSIX (two).
-    assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
-    assert.equal(/different directory/.test(tty), process.platform !== "win32");
-  } finally {
-    process.env.ROCKY_HOME = home;
-  }
-});
+test(
+  "hookFail does not call a same-directory fix 'a different directory' because it was recorded under another spelling",
+  { skip: process.platform !== "win32" },
+  () => {
+    const gitBash = "C:/Users/x/p";
+    const native = "C:\\Users\\x\\p";
+    seedElsewhereFix(gitBash, native, "spelling-test-cmd", 1);
+    try {
+      const { result, tty } = captureTty(() => hookFail("spelling-test-cmd", 1, gitBash));
+      assert.equal(result, 0);
+      assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
+      assert.equal(/different directory/.test(tty), false);
+    } finally {
+      process.env.ROCKY_HOME = home;
+    }
+  },
+);
+
+test(
+  "on POSIX hookFail drops a Windows-literal cwd without speaking or writing memory",
+  { skip: process.platform === "win32" },
+  () => {
+    const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-spelling-posix-drop-"));
+    process.env.ROCKY_HOME = isolatedHome;
+    try {
+      const { result, tty } = captureTty(() => hookFail("spelling-test-cmd", 1, "C:/Users/x/p"));
+      assert.equal(result, 0);
+      assert.equal(tty, "");
+      assert.equal(existsSync(join(isolatedHome, "memory.jsonl")), false);
+    } finally {
+      process.env.ROCKY_HOME = home;
+      rmSync(isolatedHome, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "on POSIX a differing spelling of the working directory stays a different directory and never links",
@@ -462,9 +482,9 @@ test("hookFail says when only the write fails, naming the memory file", RUNNING_
 test("hookFail discloses incomplete memory coverage without claiming a prior fix", () => {
   const partialHome = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-"));
   const partialCwd = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-cwd-"));
-  // One unparseable line makes the bounded reader skip a record, which is
-  // exactly the incomplete coverage the hook must disclose.
-  writeFileSync(join(partialHome, "memory.jsonl"), "this line is not json\n", "utf8");
+  // Two unparseable lines exceed the skipped-line allowance, which triggers
+  // the incomplete-coverage disclosure without claiming a prior fix.
+  writeFileSync(join(partialHome, "memory.jsonl"), "this line is not json\nthis line is also not json\n", "utf8");
   process.env.ROCKY_HOME = partialHome;
   try {
     const { result, tty } = captureTty(() => hookFail("partial-memory-cmd", 1, partialCwd));

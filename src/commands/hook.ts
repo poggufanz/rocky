@@ -96,13 +96,19 @@ export function hookStaleLine(installed: string): string | undefined {
 function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
+    const coverageDetail = (): string => {
+      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
+      return !isVerbose() && words !== undefined
+        ? words
+        : `memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
+    };
     if (!tailReadable(loaded.coverage)) {
       sayTty("Memory coverage is incomplete, so no prior fix is claimed. Check the details below.");
-      const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
-      detailTty(!isVerbose() && words !== undefined
-        ? words
-        : `memory coverage: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`);
+      detailTty(coverageDetail());
       return undefined;
+    }
+    if (loaded.coverage.skipped > 0) {
+      detailTty(coverageDetail());
     }
     return {
       records: loaded.records,
@@ -115,8 +121,22 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
   }
 }
 
+const POWERSHELL_FILESYSTEM_PREFIX = "Microsoft.PowerShell.Core\\FileSystem::";
+
+function isUsableHookCwd(cwd: string): boolean {
+  if (process.platform === "win32") {
+    const rest = cwd.slice(0, POWERSHELL_FILESYSTEM_PREFIX.length).toLowerCase() === POWERSHELL_FILESYSTEM_PREFIX.toLowerCase()
+      ? cwd.slice(POWERSHELL_FILESYSTEM_PREFIX.length)
+      : cwd;
+    // PowerShell drive locations (`Temp:\`, `Work:\repo`) always use a backslash; a `/` after the colon is a URL.
+    return isAbsolute(rest) || /^[A-Za-z][\w.-]*:\\/u.test(rest);
+  }
+  return isAbsolute(cwd);
+}
+
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
 export function hookFail(cmd: string, exitCode: number, cwd: string): number {
+  if (!Number.isSafeInteger(exitCode) || !isUsableHookCwd(cwd)) return 0;
   if (CANCEL_CODES.has(exitCode)) return 0;
   try {
     drainGuardPending();
@@ -224,6 +244,7 @@ export function isTypoSymptom(cmd: string, exitCode: number): boolean {
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
 export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): number {
+  if (!isUsableHookCwd(cwd)) return 0;
   try {
     drainGuardPending();
   } catch {
