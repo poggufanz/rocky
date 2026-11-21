@@ -221,6 +221,7 @@ test("snapshot: tail header names newest window", async (t) => {
     out.stderr,
     [
       "rocky: 1 repeated error in /work/app (newest 4 records, from 2026-11-12)",
+      "memory coverage incomplete: Only the newest 4 records were read; earlier lines were not read.",
       "9a509759c962b731  TypeError: token undefined",
       "  2026-11-12 13:20  npm test  failed same way     changes unknown",
       "  2026-11-12 13:55  npm test  failed same way     changes unknown",

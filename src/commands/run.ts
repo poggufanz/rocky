@@ -66,7 +66,7 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
     }
     return {
       records: loaded.records,
-      historyMayStartEarlier: loaded.coverage.window === "tail",
+      historyMayStartEarlier: loaded.coverage.window === "tail" || loaded.coverage.skipped > 0,
     };
   } catch {
     say("Memory file could not be opened. No records were read.");

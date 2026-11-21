@@ -171,8 +171,8 @@ test("rocky stats over the record cap ends its ROCKY_VERBOSE counter line with t
 });
 
 /**
- * One valid record and one line that is not JSON: the read is whole except for a
- * line Rocky cannot use, so every site discloses the same skipped-only coverage.
+ * One valid record and two lines that are not JSON: exceeding the skipped-line
+ * allowance, so every site discloses the same skipped-only coverage.
  */
 interface IncompleteMemory {
   readonly bytes: number;
@@ -182,7 +182,7 @@ function incompleteMemory(t: TestContext): IncompleteMemory {
   const root = mkdtempSync(join(tmpdir(), "rocky-coverage-sites-"));
   const home = join(root, "rocky-home");
   mkdirSync(home, { recursive: true });
-  const body = `${failureLine(0)}\nthis line is not json\n`;
+  const body = `${failureLine(0)}\nthis line is not json\nthis line is also not json\n`;
   writeFileSync(join(home, "memory.jsonl"), body, "utf8");
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
@@ -226,7 +226,7 @@ function captureHookSpeech(fn: () => unknown): string {
 }
 
 const FAILED: ExecResult = { started: true, code: 1, stderr: "boom", tail: ["boom"], durationMs: 5 };
-const WORDS = `${PREFIX}1 line could not be used.`;
+const WORDS = `${PREFIX}2 lines could not be used.`;
 
 interface Site {
   readonly name: string;
@@ -240,31 +240,31 @@ const SITES: readonly Site[] = [
     name: "run",
     speak: () => captureStderr(() => run("synthetic-failure", async () => FAILED)),
     plainLine: `    ${WORDS}`,
-    legacyLine: () => "    memory coverage: version 1; scanned 2; skipped 1; truncated 0",
+    legacyLine: () => "    memory coverage: version 1; scanned 3; skipped 2; truncated 0",
   },
   {
     name: "hook",
     speak: () => captureHookSpeech(() => hookFail("synthetic-failure", 1, process.cwd())),
     plainLine: `    ${WORDS}`,
-    legacyLine: () => "    memory coverage: version 1; scanned 2; skipped 1; truncated 0",
+    legacyLine: () => "    memory coverage: version 1; scanned 3; skipped 2; truncated 0",
   },
   {
     name: "watch",
     speak: () => captureStderr(() => watch(["synthetic-failure"], { notify: () => {}, runProcess: async () => FAILED })),
     plainLine: `    ${WORDS}`,
-    legacyLine: () => "    memory coverage incomplete: version 1; scanned 2; skipped 1; truncated 0",
+    legacyLine: () => "    memory coverage incomplete: version 1; scanned 3; skipped 2; truncated 0",
   },
   {
     name: "recall",
     speak: () => captureStderr(() => recall(["synthetic-query"])),
     plainLine: WORDS,
-    legacyLine: () => "memory coverage incomplete: version 1, scanned 2, skipped 1, truncated 0, complete false",
+    legacyLine: () => "memory coverage incomplete: version 1, scanned 3, skipped 2, truncated 0, complete false",
   },
   {
     name: "concepts",
     speak: () => captureStderr(() => conceptsCommand([])),
     plainLine: WORDS,
-    legacyLine: (memory) => `memory coverage incomplete: version 1; scanned 2; skipped 1; truncated 0; bytes ${memory.bytes}/${memory.bytes}`,
+    legacyLine: (memory) => `memory coverage incomplete: version 1; scanned 3; skipped 2; truncated 0; bytes ${memory.bytes}/${memory.bytes}`,
   },
 ];
 

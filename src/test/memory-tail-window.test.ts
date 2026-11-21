@@ -326,7 +326,7 @@ test("tail parses CRLF lines like LF lines", (t) => {
   assert.equal(tailReadable(loaded.coverage), true);
 });
 
-test("tail with one oversized line reports skipped and is not tailReadable", (t) => {
+test("tail with one oversized line reports skipped and stays tailReadable", (t) => {
   withRecordCap(t, 50);
   const home = tempHome(t);
   const path = join(home, "oversized-tail.jsonl");
@@ -339,8 +339,8 @@ test("tail with one oversized line reports skipped and is not tailReadable", (t)
   assert.equal(loaded.coverage.window, "tail");
   assert.equal(loaded.coverage.skipped, 1);
   assert.equal(loaded.records.length, 49);
-  assert.equal(tailReadable(loaded.coverage), false);
-  assert.equal(windowCovered(loaded.coverage, NOW, EIGHT_HOURS_MS), false);
+  assert.equal(tailReadable(loaded.coverage), true);
+  assert.equal(windowCovered(loaded.coverage, NOW, EIGHT_HOURS_MS), true);
 });
 
 test("file over 32 MiB reads a tail bounded by the byte cap", (t) => {
@@ -847,8 +847,8 @@ test("corrupt line in the tail pauses linking", (t) => {
     "TypeError: token undefined",
   );
   const lines = [
-    ...fillerFailureLines(10_048, otherCwd, NOW - THREE_DAYS_MS),
-    "{not-json}",
+    ...fillerFailureLines(10_038, otherCwd, NOW - THREE_DAYS_MS),
+    ...Array<string>(11).fill("{not-json}"),
     JSON.stringify(targetFailure),
   ];
   const memoryFile = join(home, "memory.jsonl");
@@ -1376,10 +1376,10 @@ test("rocky run prints the paused-linking line only for tail windows with pendin
   );
   rmSync(pendingPath(), { force: true });
 
-  // Tail with a corrupt line and pending present: prints the incomplete fallback copy.
+  // Tail with corrupt lines exceeding allowance and pending present: prints the incomplete fallback copy.
   const corruptTailLines = [
-    ...fillerFailureLines(10_049, otherCwd, now - 2 * 60 * 60 * 1000),
-    "{not-json}",
+    ...fillerFailureLines(10_039, otherCwd, now - 2 * 60 * 60 * 1000),
+    ...Array<string>(11).fill("{not-json}"),
   ];
   writeFileSync(memoryFile, `${corruptTailLines.join("\n")}\n`, "utf8");
   touchPending();
@@ -1413,10 +1413,10 @@ test("paused linking discloses skew boundary, incomplete fallback, and uses deci
     skewErr,
   );
 
-  // Tail with one corrupt line: paused with incomplete-coverage fallback, not shortTail.
+  // Tail with corrupt lines exceeding allowance: paused with incomplete-coverage fallback, not shortTail.
   const corruptLines = [
-    ...fillerFailureLines(10_049, otherCwd, NOW - 2 * 60 * 60 * 1000),
-    "{not-json}",
+    ...fillerFailureLines(10_039, otherCwd, NOW - 2 * 60 * 60 * 1000),
+    ...Array<string>(11).fill("{not-json}"),
   ];
   writeFileSync(memoryFile, `${corruptLines.join("\n")}\n`, "utf8");
   touchPending();
@@ -1425,7 +1425,7 @@ test("paused linking discloses skew boundary, incomplete fallback, and uses deci
     corruptResult = linkFixOnSuccess("npm test", join(home, "repo"), false, { now: NOW });
   });
   assert.equal(corruptResult?.pausedReason, "coverage");
-  assert.deepEqual(corruptResult?.pausedDetail, { recordsRead: 9_999, shortTail: false, tail: true, pendingWaiting: true });
+  assert.deepEqual(corruptResult?.pausedDetail, { recordsRead: 9_989, shortTail: false, tail: true, pendingWaiting: true });
   assert.ok(
     corruptErr.includes("fix linking paused: memory coverage is incomplete."),
     corruptErr,

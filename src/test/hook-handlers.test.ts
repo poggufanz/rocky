@@ -462,9 +462,9 @@ test("hookFail says when only the write fails, naming the memory file", RUNNING_
 test("hookFail discloses incomplete memory coverage without claiming a prior fix", () => {
   const partialHome = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-"));
   const partialCwd = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-cwd-"));
-  // One unparseable line makes the bounded reader skip a record, which is
-  // exactly the incomplete coverage the hook must disclose.
-  writeFileSync(join(partialHome, "memory.jsonl"), "this line is not json\n", "utf8");
+  // Two unparseable lines exceed the skipped-line allowance, which triggers
+  // the incomplete-coverage disclosure without claiming a prior fix.
+  writeFileSync(join(partialHome, "memory.jsonl"), "this line is not json\nthis line is also not json\n", "utf8");
   process.env.ROCKY_HOME = partialHome;
   try {
     const { result, tty } = captureTty(() => hookFail("partial-memory-cmd", 1, partialCwd));

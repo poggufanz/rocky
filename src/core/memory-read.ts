@@ -723,25 +723,27 @@ export function isCompleteMemoryCoverage(coverage: MemoryCoverage): boolean {
   return coverage.complete && coverage.skipped === 0 && coverage.truncated === 0 && coverage.reason === undefined;
 }
 
+export function skippedLineAllowance(scanned: number): number { return Math.max(1, Math.floor(scanned / 1000)); }
+
 /**
- * True when the snapshot covers either all of memory or a clean tail window
- * truncated only by the record or byte cap.
+ * True when the snapshot covers either all of memory or a readable window
+ * within the skipped-line allowance (never after a read-race).
  */
 export function tailReadable(coverage: MemoryCoverage): boolean {
   if (isCompleteMemoryCoverage(coverage)) return true;
-  return coverage.window === "tail"
-    && coverage.skipped === 0
-    && (coverage.reason === "record-cap" || coverage.reason === "file-size-cap");
+  if (coverage.reason === "read-race" || coverage.skipped > skippedLineAllowance(coverage.scanned)) return false;
+  if (coverage.window === "tail") return coverage.reason === "record-cap" || coverage.reason === "file-size-cap";
+  return coverage.reason === undefined && coverage.truncated === 0;
 }
 
 /**
- * True when the snapshot covers the full file or a clean tail window whose
- * oldest Rocky-timestamped record precedes `now - windowMs - CLOCK_SKEW_MS`.
+ * True when the snapshot covers the full file (within tolerance) or a readable
+ * tail window whose oldest Rocky-timestamped record precedes `now - windowMs - CLOCK_SKEW_MS`.
  */
 export function windowCovered(coverage: MemoryCoverage, now: number, windowMs: number): boolean {
-  if (isCompleteMemoryCoverage(coverage)) return true;
-  return tailReadable(coverage)
-    && coverage.oldestTs !== undefined
+  if (!tailReadable(coverage)) return false;
+  if (coverage.window !== "tail") return true;
+  return coverage.oldestTs !== undefined
     && coverage.oldestTs < now - windowMs - CLOCK_SKEW_MS;
 }
 

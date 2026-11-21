@@ -173,7 +173,7 @@ function readMemory(quiet: boolean): { records: MemoryRecord[]; historyMayStartE
     }
     return {
       records: loaded.records,
-      historyMayStartEarlier: loaded.coverage.window === "tail",
+      historyMayStartEarlier: loaded.coverage.window === "tail" || loaded.coverage.skipped > 0,
     };
   } catch {
     if (!quiet) {

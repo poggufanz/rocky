@@ -181,10 +181,10 @@ test("skipped corrupt evidence is incomplete for transactions and keeps pending"
     else process.env.ROCKY_HOME = previous;
   });
   const known = failure("known-corrupt");
-  writeFileSync(join(root, "memory.jsonl"), `${known}\n{not-json}\n`, "utf8");
+  writeFileSync(join(root, "memory.jsonl"), `${known}\n{not-json}\n{not-json}\n`, "utf8");
   writeFileSync(join(root, "pending"), "", "utf8");
   const loaded = loadMemoryChecked(join(root, "memory.jsonl"));
-  assert.equal(loaded.coverage.skipped, 1);
+  assert.equal(loaded.coverage.skipped, 2);
   assert.equal(loaded.complete, false);
   const knownRecord = loaded.records.find((record) => record.kind === "failure");
   assert.ok(knownRecord);

@@ -106,7 +106,7 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
     }
     return {
       records: loaded.records,
-      historyMayStartEarlier: loaded.coverage.window === "tail",
+      historyMayStartEarlier: loaded.coverage.window === "tail" || loaded.coverage.skipped > 0,
     };
   } catch {
     sayTty("The memory file could not be opened, so nothing is recalled.");

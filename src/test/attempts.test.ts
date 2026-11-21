@@ -69,7 +69,7 @@ test("incomplete non-tail coverage gives unknown coverage", () => {
   const coverage: MemoryCoverage = {
     version: MEMORY_FORMAT_VERSION,
     scanned: 1,
-    skipped: 1,
+    skipped: 2,
     truncated: 0,
     bytesScanned: 100,
     bytesTotal: 100,
