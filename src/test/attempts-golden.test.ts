@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildProblems, type AttemptOutcome } from "../core/attempts.js";
+import { joinAttemptCards } from "../core/attempt-cards.js";
 import {
   MEMORY_FORMAT_VERSION,
   parseMemoryRecord,
@@ -11,11 +12,13 @@ import {
   type MemoryCoverage,
   type MemoryRecord,
 } from "../core/memory-read.js";
+import type { StoredCard } from "../desk/cards-record.js";
 
 interface ExpectedEntry {
   cwd: string;
   keyStrength: "output" | "command";
   outcomes: AttemptOutcome[];
+  changes?: Array<"observed" | "testimony" | "unknown">;
   historyMayStartEarlier?: boolean;
   crossSession?: boolean;
 }
@@ -24,6 +27,7 @@ interface GoldenFixture {
   now: number;
   coverage?: MemoryCoverage;
   lines: unknown[];
+  cards?: StoredCard[];
   expect: {
     ungroupedLegacy?: number;
     entries: ExpectedEntry[];
@@ -66,15 +70,23 @@ for (const file of fixtureFiles) {
     };
 
     const result = buildProblems(records, coverage, { now: fixture.now });
+    const entries = fixture.cards !== undefined
+      ? joinAttemptCards(
+          result.entries,
+          records,
+          () => ({ cards: fixture.cards!, complete: true }),
+          { platform: "linux" },
+        ).entries
+      : result.entries;
 
     if (fixture.expect.ungroupedLegacy !== undefined) {
       assert.equal(result.ungroupedLegacy, fixture.expect.ungroupedLegacy);
     }
-    assert.equal(result.entries.length, fixture.expect.entries.length);
+    assert.equal(entries.length, fixture.expect.entries.length);
 
     for (let index = 0; index < fixture.expect.entries.length; index += 1) {
       const expected = fixture.expect.entries[index]!;
-      const actual = result.entries[index]!;
+      const actual = entries[index]!;
       assert.equal(actual.cwd, expected.cwd, `${file} entry[${index}].cwd`);
       assert.equal(actual.keyStrength, expected.keyStrength, `${file} entry[${index}].keyStrength`);
       assert.deepEqual(
@@ -82,6 +94,13 @@ for (const file of fixtureFiles) {
         expected.outcomes,
         `${file} entry[${index}].outcomes`,
       );
+      if (expected.changes !== undefined) {
+        assert.deepEqual(
+          actual.attempts.map((attempt) => attempt.changes.state),
+          expected.changes,
+          `${file} entry[${index}].changes`,
+        );
+      }
       if (expected.historyMayStartEarlier !== undefined) {
         assert.equal(
           actual.historyMayStartEarlier,
