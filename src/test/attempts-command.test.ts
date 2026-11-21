@@ -57,8 +57,12 @@ async function captureOutput(
     stderr += String(chunk);
     return true;
   }) as typeof process.stderr.write;
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    stdout += String(chunk);
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    // Node 18 `--test` children send v8-serialized report frames (binary) over stdout;
+    // `attempts` awaits card-module imports, so frames can land inside this window.
+    // Rocky's own stdout writes are strings, so binary chunks go to the real stream.
+    if (typeof chunk !== "string") return (origStdout as (...args: unknown[]) => boolean).call(process.stdout, chunk, ...rest);
+    stdout += chunk;
     return true;
   }) as typeof process.stdout.write;
   try {
