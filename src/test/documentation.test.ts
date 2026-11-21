@@ -827,3 +827,20 @@ test("scientific grounding keeps v0.5 learning mechanisms bounded and evidence c
     "Original Rocky project tagline; not a quotation from an external source",
   ));
 });
+
+test("CLI help and reference document rocky attempts --card and lane testimony provenance", () => {
+  const help = helpOutput();
+  assert.ok(
+    help.includes("rocky attempts --card <card_id> --json [--limit 1..50]"),
+    "CLI help --all must list rocky attempts --card <card_id> --json [--limit 1..50]",
+  );
+  const sectionStart = reference.indexOf("## `rocky attempts`");
+  assert.ok(sectionStart >= 0, "reference must keep the rocky attempts section");
+  const nextHeading = reference.indexOf("\n## ", sectionStart + 1);
+  const section = reference.slice(sectionStart, nextHeading === -1 ? undefined : nextHeading);
+  assert.match(section, /same session and agent lane/i);
+  assert.match(section, /<card_id>#<tool_use_id>/);
+  assert.match(section, /possibly on another card/i);
+  assert.doesNotMatch(section, /\bon the matched card\b/i);
+  assert.doesNotMatch(section, /\b(?:fixed|resolved|because)\b/i);
+});

@@ -33,7 +33,7 @@ function sha16(value: string): string {
 }
 
 function freshHome(t: TestContext): string {
-  const root = mkdtempSync(join(tmpdir(), "rocky-attempts-cmd-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-attempts-cmd-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
   mkdirSync(home, { recursive: true });
@@ -1028,20 +1028,6 @@ test("no causal words in any rendered string", () => {
   assert.deepEqual(causalWordViolations(allLines), []);
 });
 
-function makeTempWorkspace(t: TestContext): { root: string; home: string } {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-attempts-card-")));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const home = join(root, "home");
-  mkdirSync(home, { recursive: true });
-  const prev = process.env.ROCKY_HOME;
-  process.env.ROCKY_HOME = home;
-  t.after(() => {
-    if (prev === undefined) delete process.env.ROCKY_HOME;
-    else process.env.ROCKY_HOME = prev;
-  });
-  return { root, home };
-}
-
 function makeTempGitRepo(baseDir: string, name: string): { repoRoot: string; subDir: string } {
   const repoRoot = join(baseDir, name);
   const subDir = join(repoRoot, "packages", "app");
@@ -1050,10 +1036,112 @@ function makeTempGitRepo(baseDir: string, name: string): { repoRoot: string; sub
   return { repoRoot, subDir };
 }
 
+function writeMemoryRecords(home: string, records: readonly Record<string, unknown>[]): void {
+  writeFileSync(join(home, "memory.jsonl"), `${records.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf8");
+}
+
+function hostFailureRecord(opts: {
+  id: string;
+  ts: number;
+  cwd: string;
+  cmd?: string;
+  fingerprint?: string;
+  signature?: string[];
+  resolvedBy?: string;
+}): Record<string, unknown> {
+  const cmd = opts.cmd ?? "npm test";
+  const identity = commandIdentity(cmd, { platform: process.platform });
+  return {
+    ...failureRecord({ ...opts, cmd }),
+    commandIdentity: identity.value,
+    identityReliable: identity.reliable,
+    platform: process.platform,
+  };
+}
+
+function hostFixRecord(opts: {
+  id: string;
+  ts: number;
+  cwd: string;
+  cmd?: string;
+  failureIds: string[];
+}): Record<string, unknown> {
+  const cmd = opts.cmd ?? "npm test";
+  const identity = commandIdentity(cmd, { platform: process.platform });
+  return {
+    ...fixRecord({ ...opts, cmd }),
+    commandIdentity: identity.value,
+    identityReliable: identity.reliable,
+    platform: process.platform,
+  };
+}
+
 function writeCardsLog(repoRoot: string, home: string, cards: readonly Record<string, unknown>[]): void {
   const logPath = cardsFilePath(canonicalPath(repoRoot), home);
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, `${cards.map((c) => JSON.stringify(c)).join("\n")}\n`, "utf8");
+}
+
+function makeEditBlock(opts: {
+  seq: number;
+  path: string;
+  line?: number;
+  quote?: string;
+  toolUseId?: string;
+}): Record<string, unknown> {
+  return {
+    seq: opts.seq,
+    path: opts.path,
+    symbol: null,
+    labels: [{ id: "body_changed", args: {} }],
+    importance: "medium",
+    via: "edit",
+    tool_use_ids: [opts.toolUseId ?? `tu-edit-${opts.seq}`],
+    bash: null,
+    before: null,
+    after: null,
+    recorded: true,
+    line: opts.line ?? 1,
+    added: 1,
+    removed: 0,
+    ...(opts.quote === undefined ? {} : { quote: { text: opts.quote, shared: false } }),
+  };
+}
+
+function makeCmdStep(opts: {
+  cmd?: string;
+  ok: boolean;
+  startMs: number;
+  endMs: number;
+  cwd: string;
+  toolUseId?: string;
+  desc?: string;
+}): Record<string, unknown> {
+  return {
+    kind: "cmd",
+    text: opts.cmd ?? "npm test",
+    ok: opts.ok,
+    dur_ms: Math.max(1, opts.endMs - opts.startMs),
+    seqs: [],
+    exit_code: opts.ok ? 0 : 1,
+    start_ms: opts.startMs,
+    end_ms: opts.endMs,
+    cwd: opts.cwd,
+    ...(opts.toolUseId === undefined ? {} : { tool_use_id: opts.toolUseId }),
+    ...(opts.desc === undefined ? {} : { desc: opts.desc }),
+  };
+}
+
+function makeEditStep(seqs: readonly number[], startMs: number, endMs: number): Record<string, unknown> {
+  return {
+    kind: "edit",
+    text: "edit",
+    ok: true,
+    dur_ms: Math.max(1, endMs - startMs),
+    seqs: [...seqs],
+    start_ms: startMs,
+    end_ms: endMs,
+  };
 }
 
 function makeJoinedCard(opts: {
@@ -1092,107 +1180,95 @@ function makeJoinedCard(opts: {
   };
 }
 
-function seedJoinedRepoFixture(t: TestContext): {
-  home: string;
-  repoRoot: string;
-  cardId: string;
-} {
-  const { root, home } = makeTempWorkspace(t);
-  const { repoRoot } = makeTempGitRepo(root, "app");
-  const canonicalRoot = canonicalPath(repoRoot);
+function makeSingleFailureCard(cardId: string, repoRoot: string, cwd: string, ts: number): Record<string, unknown> {
+  return makeJoinedCard({
+    cardId,
+    root: canonicalPath(repoRoot),
+    startedMs: ts - 5_000,
+    endedMs: ts + 5_000,
+    blocks: [],
+    flow: [makeCmdStep({ ok: false, startMs: ts - 500, endMs: ts, cwd })],
+  });
+}
+
+function seedJoinedRepoFixture(t: TestContext): { home: string; repoRoot: string; cardId: string } {
+  const home = freshHome(t);
+  const { repoRoot } = makeTempGitRepo(dirname(home), "app");
   const t1 = Date.UTC(2026, 10, 12, 13, 20);
   const t2 = Date.UTC(2026, 10, 12, 13, 25);
   const cardId = "4e5e1a6d22cea72d7a8b3985c9c27fcf";
 
-  const cmd = "npm test";
-  const identity = commandIdentity(cmd, { platform: process.platform });
-  const records = [
-    {
-      ...failureRecord({ id: "f1", ts: t1, cwd: repoRoot, cmd, resolvedBy: "x1" }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-    {
-      ...fixRecord({ id: "x1", ts: t1 + 60_000, cwd: repoRoot, cmd, failureIds: ["f1"] }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-    {
-      ...failureRecord({ id: "f2", ts: t2, cwd: repoRoot, cmd }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-  ];
-  writeFileSync(join(home, "memory.jsonl"), `${records.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf8");
-
+  writeMemoryRecords(home, [
+    hostFailureRecord({ id: "f1", ts: t1, cwd: repoRoot, resolvedBy: "x1" }),
+    hostFixRecord({ id: "x1", ts: t1 + 60_000, cwd: repoRoot, failureIds: ["f1"] }),
+    hostFailureRecord({ id: "f2", ts: t2, cwd: repoRoot }),
+  ]);
   writeCardsLog(repoRoot, home, [
     makeJoinedCard({
       cardId,
-      root: canonicalRoot,
+      root: canonicalPath(repoRoot),
       startedMs: t1 - 5_000,
       endedMs: t1 + 90_000,
-      blocks: [
-        {
-          seq: 1,
-          path: "src/a.ts",
-          symbol: null,
-          labels: [{ id: "body_changed", args: {} }],
-          importance: "medium",
-          via: "edit",
-          tool_use_ids: ["tu-edit-1"],
-          bash: null,
-          before: null,
-          after: null,
-          recorded: true,
-          line: 10,
-          added: 2,
-          removed: 1,
-          quote: { text: "guard empty token", shared: false },
-        },
-      ],
+      blocks: [makeEditBlock({ seq: 1, path: "src/a.ts", line: 10, quote: "guard empty token" })],
       flow: [
-        {
-          kind: "cmd",
-          text: cmd,
-          ok: false,
-          dur_ms: 1_000,
-          seqs: [],
-          exit_code: 1,
-          start_ms: t1 - 1_000,
-          end_ms: t1,
-          cwd: repoRoot,
-          tool_use_id: "tu-fail-1",
-        },
-        {
-          kind: "edit",
-          text: "edit",
+        makeCmdStep({ ok: false, startMs: t1 - 1_000, endMs: t1, cwd: repoRoot, toolUseId: "tu-fail-1" }),
+        makeEditStep([1], t1 + 10_000, t1 + 11_000),
+        makeCmdStep({
           ok: true,
-          dur_ms: 1_000,
-          seqs: [1],
-          start_ms: t1 + 10_000,
-          end_ms: t1 + 11_000,
-        },
-        {
-          kind: "cmd",
-          text: cmd,
-          ok: true,
-          dur_ms: 800,
-          seqs: [],
-          exit_code: 0,
-          start_ms: t1 + 59_500,
-          end_ms: t1 + 60_300,
+          startMs: t1 + 59_500,
+          endMs: t1 + 60_300,
           cwd: repoRoot,
-          tool_use_id: "tu-pass-1",
+          toolUseId: "tu-pass-1",
           desc: "Re-run tests after guard",
-        },
+        }),
       ],
     }),
   ]);
 
   return { home, repoRoot, cardId };
+}
+
+function seedMultiCardFixture(t: TestContext): {
+  home: string;
+  repoRoot: string;
+  otherRepo: string;
+  targetCardId: string;
+} {
+  const home = freshHome(t);
+  const { repoRoot, subDir } = makeTempGitRepo(dirname(home), "repo-a");
+  const { repoRoot: otherRepo } = makeTempGitRepo(dirname(home), "repo-b");
+  const targetCardId = "4e5e1a6d22cea72d7a8b3985c9c27fcf";
+  const otherCardId = "97394ac43381e6ac7a3b66cb264cd2b9";
+  const oldTs = NOW - 45 * 86_400_000;
+  const midTs = NOW - 40 * 86_400_000;
+  const recentTs = NOW - 60_000;
+
+  writeMemoryRecords(home, [
+    hostFailureRecord({ id: "f-old", ts: oldTs, cwd: subDir, fingerprint: "1111111111111111", signature: ["TypeError: old failure"], resolvedBy: "x-old" }),
+    hostFixRecord({ id: "x-old", ts: oldTs + 30_000, cwd: subDir, failureIds: ["f-old"] }),
+    hostFailureRecord({ id: "f-mid", ts: midTs, cwd: repoRoot, fingerprint: "2222222222222222", signature: ["TypeError: mid failure"] }),
+    hostFailureRecord({ id: "f-other-card", ts: recentTs, cwd: repoRoot, fingerprint: "3333333333333333", signature: ["TypeError: other card failure"] }),
+    hostFailureRecord({ id: "f-other-repo", ts: recentTs, cwd: otherRepo, fingerprint: "4444444444444444", signature: ["TypeError: other repo failure"] }),
+  ]);
+  writeCardsLog(repoRoot, home, [
+    makeJoinedCard({
+      cardId: targetCardId,
+      root: canonicalPath(repoRoot),
+      startedMs: oldTs - 5_000,
+      endedMs: midTs + 10_000,
+      blocks: [makeEditBlock({ seq: 1, path: "src/old.ts", toolUseId: "tu-e1" })],
+      flow: [
+        makeCmdStep({ ok: false, startMs: oldTs - 500, endMs: oldTs, cwd: subDir }),
+        makeEditStep([1], oldTs + 5_000, oldTs + 5_500),
+        makeCmdStep({ ok: false, startMs: midTs - 500, endMs: midTs, cwd: repoRoot }),
+      ],
+    }),
+    makeSingleFailureCard(otherCardId, repoRoot, repoRoot, recentTs),
+  ]);
+  writeCardsLog(otherRepo, home, [
+    makeSingleFailureCard("085fd43e5e4c84caf8d98e99af9d6ff2", otherRepo, otherRepo, recentTs),
+  ]);
+  return { home, repoRoot, otherRepo, targetCardId };
 }
 
 test("default listing prints observed card edits and --json carries changes.state observed", async (t) => {
@@ -1252,189 +1328,8 @@ test("desk/tool-text-off hides bash-description and card-quote in --json while k
   assert.equal(firstAttempt.stated, undefined);
 });
 
-test("--card <id> --json returns only entries joined to that card across all ages and respects --limit", async (t) => {
-  const { root, home } = makeTempWorkspace(t);
-  const { repoRoot, subDir } = makeTempGitRepo(root, "repo-a");
-  const { repoRoot: otherRepo } = makeTempGitRepo(root, "repo-b");
-  const canonicalA = canonicalPath(repoRoot);
-  const canonicalB = canonicalPath(otherRepo);
-
-  const targetCardId = "4e5e1a6d22cea72d7a8b3985c9c27fcf";
-  const otherCardId = "97394ac43381e6ac7a3b66cb264cd2b9";
-  const oldTs = NOW - 45 * 86_400_000; // older than 30 days
-  const midTs = NOW - 40 * 86_400_000;
-  const recentTs = NOW - 60_000;
-  const cmd = "npm test";
-  const identity = commandIdentity(cmd, { platform: process.platform });
-
-  const records = [
-    // Entry A: old (>30d), single attempt, inside subDir of repo-a, joined to targetCardId.
-    {
-      ...failureRecord({
-        id: "f-old",
-        ts: oldTs,
-        cwd: subDir,
-        cmd,
-        fingerprint: "1111111111111111",
-        signature: ["TypeError: old failure"],
-        resolvedBy: "x-old",
-      }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-    {
-      ...fixRecord({ id: "x-old", ts: oldTs + 30_000, cwd: subDir, cmd, failureIds: ["f-old"] }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-    // Entry D: newer than Entry A (still >30d), in repoRoot, no later run, also joined to targetCardId.
-    {
-      ...failureRecord({
-        id: "f-mid",
-        ts: midTs,
-        cwd: repoRoot,
-        cmd,
-        fingerprint: "2222222222222222",
-        signature: ["TypeError: mid failure"],
-      }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-    // Entry B: recent in repo-a, joined to a DIFFERENT card.
-    {
-      ...failureRecord({
-        id: "f-other-card",
-        ts: recentTs,
-        cwd: repoRoot,
-        cmd,
-        fingerprint: "3333333333333333",
-        signature: ["TypeError: other card failure"],
-      }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-    // Entry C: recent in repo-b (outside card.root).
-    {
-      ...failureRecord({
-        id: "f-other-repo",
-        ts: recentTs,
-        cwd: otherRepo,
-        cmd,
-        fingerprint: "4444444444444444",
-        signature: ["TypeError: other repo failure"],
-      }),
-      commandIdentity: identity.value,
-      identityReliable: identity.reliable,
-      platform: process.platform,
-    },
-  ];
-  writeFileSync(join(home, "memory.jsonl"), `${records.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf8");
-
-  writeCardsLog(repoRoot, home, [
-    makeJoinedCard({
-      cardId: targetCardId,
-      root: canonicalA,
-      startedMs: oldTs - 5_000,
-      endedMs: midTs + 10_000,
-      blocks: [
-        {
-          seq: 1,
-          path: "src/old.ts",
-          symbol: null,
-          labels: [{ id: "body_changed", args: {} }],
-          importance: "medium",
-          via: "edit",
-          tool_use_ids: ["tu-e1"],
-          bash: null,
-          before: null,
-          after: null,
-          recorded: true,
-          line: 1,
-          added: 1,
-          removed: 0,
-        },
-      ],
-      flow: [
-        {
-          kind: "cmd",
-          text: cmd,
-          ok: false,
-          dur_ms: 500,
-          seqs: [],
-          exit_code: 1,
-          start_ms: oldTs - 500,
-          end_ms: oldTs,
-          cwd: subDir,
-        },
-        {
-          kind: "edit",
-          text: "edit",
-          ok: true,
-          dur_ms: 500,
-          seqs: [1],
-          start_ms: oldTs + 5_000,
-          end_ms: oldTs + 5_500,
-        },
-        {
-          kind: "cmd",
-          text: cmd,
-          ok: false,
-          dur_ms: 500,
-          seqs: [],
-          exit_code: 1,
-          start_ms: midTs - 500,
-          end_ms: midTs,
-          cwd: repoRoot,
-        },
-      ],
-    }),
-    makeJoinedCard({
-      cardId: otherCardId,
-      root: canonicalA,
-      startedMs: recentTs - 5_000,
-      endedMs: recentTs + 5_000,
-      blocks: [],
-      flow: [
-        {
-          kind: "cmd",
-          text: cmd,
-          ok: false,
-          dur_ms: 500,
-          seqs: [],
-          exit_code: 1,
-          start_ms: recentTs - 500,
-          end_ms: recentTs,
-          cwd: repoRoot,
-        },
-      ],
-    }),
-  ]);
-  writeCardsLog(otherRepo, home, [
-    makeJoinedCard({
-      cardId: "085fd43e5e4c84caf8d98e99af9d6ff2",
-      root: canonicalB,
-      startedMs: recentTs - 5_000,
-      endedMs: recentTs + 5_000,
-      blocks: [],
-      flow: [
-        {
-          kind: "cmd",
-          text: cmd,
-          ok: false,
-          dur_ms: 500,
-          seqs: [],
-          exit_code: 1,
-          start_ms: recentTs - 500,
-          end_ms: recentTs,
-          cwd: otherRepo,
-        },
-      ],
-    }),
-  ]);
+test("--card <id> --json returns only entries joined to that card across all ages, newest first", async (t) => {
+  const { otherRepo, targetCardId } = seedMultiCardFixture(t);
 
   // Run from otherRepo to prove --card ignores caller cwd and filters by card.root.
   const out = await captureOutput(() =>
@@ -1455,6 +1350,16 @@ test("--card <id> --json returns only entries joined to that card across all age
     payload.entries.map((e) => e.fingerprint),
     ["2222222222222222", "1111111111111111"],
   );
+});
+
+test("--card <id> --json preserves observed card changes on joined entries", async (t) => {
+  const { otherRepo, targetCardId } = seedMultiCardFixture(t);
+
+  const out = await captureOutput(() =>
+    attempts(["--card", targetCardId, "--json"], { memory: createMemoryQueries(), now: NOW, cwd: otherRepo }),
+  );
+  assert.equal(out.code, 0);
+  const payload = JSON.parse(out.stdout) as { entries: ProblemEntry[] };
   assert.deepEqual(payload.entries[1]!.attempts[0]!.changes, {
     state: "observed",
     files: ["src/old.ts"],
@@ -1462,6 +1367,10 @@ test("--card <id> --json returns only entries joined to that card across all age
     cardId: targetCardId,
     partial: false,
   });
+});
+
+test("--card <id> --json respects --limit", async (t) => {
+  const { otherRepo, targetCardId } = seedMultiCardFixture(t);
 
   const limited = await captureOutput(() =>
     attempts(["--card", targetCardId, "--json", "--limit", "1"], {
@@ -1471,6 +1380,7 @@ test("--card <id> --json returns only entries joined to that card across all age
     }),
   );
   assert.equal(limited.code, 0);
+  assert.equal(limited.stderr, "");
   const limitedPayload = JSON.parse(limited.stdout) as { entries: ProblemEntry[] };
   assert.deepEqual(
     limitedPayload.entries.map((e) => e.fingerprint),
@@ -1550,15 +1460,14 @@ test("exit 2 on invalid --card flag combinations and malformed ids", async (t) =
 });
 
 test("unreadable card log does not fail attempts or --card lookup", async (t) => {
-  const { root, home } = makeTempWorkspace(t);
-  const { repoRoot } = makeTempGitRepo(root, "broken-cards");
+  const home = freshHome(t);
+  const { repoRoot } = makeTempGitRepo(dirname(home), "broken-cards");
   const t1 = Date.UTC(2026, 10, 12, 13, 20);
   const t2 = Date.UTC(2026, 10, 12, 13, 25);
-  const lines = [
+  writeMemoryRecords(home, [
     failureRecord({ id: "f1", ts: t1, cwd: repoRoot, cmd: "npm test" }),
     failureRecord({ id: "f2", ts: t2, cwd: repoRoot, cmd: "npm test" }),
-  ];
-  writeFileSync(join(home, "memory.jsonl"), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+  ]);
   // Place a directory where the card log file would live so card reading hits non-regular.
   mkdirSync(cardsFilePath(canonicalPath(repoRoot), home), { recursive: true });
 
