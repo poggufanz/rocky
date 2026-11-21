@@ -271,23 +271,26 @@ Show every recorded attempt at a recurring error in chronological order, grouped
 
 ```bash
 rocky attempts [<fingerprint|query>] [--all-dirs] [--limit 1..50] [--json]
+rocky attempts --card <card_id> --json [--limit 1..50]
 ```
 
 With no query, Rocky lists up to 10 recurring errors in the current working directory that have at least two attempts within the last 30 days, ranked by non-passing attempt count and then most recent occurrence. Pass a 16-character hex fingerprint to show one error family directly, or pass text words to match through recall. `--all-dirs` includes other directories, `--limit` sets the entry count (1–50, default 10), and `--json` prints `{ v: 1, coverage, ungroupedLegacy, entries }` on stdout.
 
+`--card <card_id> --json` returns only entries across all ages that have at least one attempt joined to that change card (sorted newest first and capped by `--limit`, or `entries: []` when the card id is unknown). `--card` requires `--json`, cannot be combined with a query or `--all-dirs`, cannot be repeated, and requires an id matching `^[A-Za-z0-9._:-]{1,128}$`.
+
 ```text
 rocky: 3 repeated errors in C:\work\app (newest 10000 records, from 2026-10-02)
 3f2a9c1e44d0b7a1  TypeError: token undefined
-  2026-11-12 13:20  npm test          failed same way     said: edited src/auth.ts
+  2026-11-12 13:20  npm test          failed same way     edited src/auth.ts
   2026-11-12 13:55  npm test          other error         said: edited src/token.ts
   2026-11-12 14:03  npm test          passed              said: edited src/session.ts
   2026-11-15 09:10  npm test -- auth  no later run        changes unknown
 rocky: Rocky records order, not cause.
 ```
 
-Each attempt reports one outcome relative to the next run within eight hours (`passed`, `possible pass`, `failed same way`, `other error`, `no later run`, or `unknown`) and stated file changes when recorded (`said: edited ...` or `changes unknown`). Text output hides attempts older than 30 days; `--json` keeps them. Rocky records order, not cause.
+Each attempt reports one outcome relative to the next run within eight hours (`passed`, `possible pass`, `failed same way`, `other error`, `no later run`, or `unknown`) and file changes when recorded: observed changes (`edited ...`, `changes.state: "observed"`) come from local desk change cards recording repo-relative edits between the failed run and the next run (paths outside the repo are counted in `more`), falling back to agent testimony (`said: edited ...`) or `changes unknown`. In `--json`, `stated` carries a recorded description from one of three sources—`rationale` (memory rationale record, taking precedence), `bash-description` (the rerun command step's description on the matched card), or `card-quote` (the newest in-range edited block quote on the matched card). Creating `$ROCKY_HOME/desk/tool-text-off` hides card descriptions and quotes (`bash-description` and `card-quote`) while keeping observed edited file paths. Text output hides attempts older than 30 days; `--json` keeps them. Rocky records order, not cause.
 
-Exit codes: `0` when entries or an empty-memory notice are printed, `1` when memory cannot be read, and `2` on invalid options or an out-of-range `--limit`.
+Exit codes: `0` when entries or an empty-memory notice are printed (missing or unreadable card logs do not fail the command), `1` when memory cannot be read, and `2` on invalid options, invalid `--card` usage, or an out-of-range `--limit`.
 
 ## `rocky watch` (v0.3, implemented)
 

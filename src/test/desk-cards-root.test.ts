@@ -7,6 +7,7 @@ import { canonicalPath } from "../core/memory-read.js";
 import {
   cardsForRoot,
   findCardById,
+  makeCardsFor,
   resolveGitRootForCwd,
   toolTextAllowed,
   type StoredBlock,
@@ -326,4 +327,37 @@ test("resolveGitRootForCwd keeps Windows drive roots absolute so their log key m
     assert.equal(cardsFilePath(canonicalPath(root), home), cardsFilePath(canonicalPath("C:/"), home));
     assert.notEqual(cardsFilePath(canonicalPath(root), home), cardsFilePath(canonicalPath("C:"), home));
   }
+});
+
+test("makeCardsFor caches per git root across subdirectories, respects toolText, and falls back to cwd outside a repo", (t) => {
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const { repoRoot, subDir } = makeRepo(temp, "cached-repo");
+  const outsideDir = join(temp, "outside");
+  mkdirSync(outsideDir, { recursive: true });
+  const canonicalRoot = canonicalPath(repoRoot);
+
+  writeJsonl(cardsFilePath(canonicalRoot, home), [
+    makeCard("card-cached", canonicalRoot, [makeBlock(1, "src/a.ts", { quote: { text: "note", shared: false } })], {
+      flow: [makeStep({ desc: "Run tests" })],
+    }),
+  ]);
+  writeJsonl(join(home, "desk", "cards", "_none.jsonl"), [
+    makeCard("card-none", "", [makeBlock(1, join(outsideDir, "a.txt"))]),
+  ]);
+
+  const cardsFor = makeCardsFor({ home, toolText: false });
+  const fromRoot = cardsFor(repoRoot);
+  const fromSub = cardsFor(subDir);
+  assert.equal(fromSub, fromRoot, "repo root and subdir should share the cached result");
+  assert.equal(fromRoot.complete, true);
+  assert.equal(fromRoot.cards.length, 1);
+  assert.equal(fromRoot.cards[0]?.card_id, "card-cached");
+  assert.equal(fromRoot.cards[0]?.blocks[0]?.quote, undefined);
+  assert.equal(fromRoot.cards[0]?.flow?.[0]?.desc, undefined);
+
+  const outsideFirst = cardsFor(outsideDir);
+  const outsideSecond = cardsFor(outsideDir);
+  assert.equal(outsideSecond, outsideFirst);
+  assert.equal(outsideFirst.cards[0]?.card_id, "card-none");
 });

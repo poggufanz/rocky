@@ -771,3 +771,26 @@ export function findCardById(cardId: string, options: { home: string; toolText: 
   if (best === undefined) return undefined;
   return options.toolText ? best : stripCardToolText(best);
 }
+
+/** Cached per-repo card loader keyed by git root (or `cwd` outside a repo). */
+export function makeCardsFor(options: { home: string; toolText: boolean }): (cwd: string) => CardsForRoot {
+  const rootCache = new Map<string, CardsForRoot>();
+  return (cwd: string): CardsForRoot => {
+    let key: string;
+    try {
+      key = resolveGitRootForCwd(cwd, existsSync) ?? cwd;
+    } catch {
+      return { cards: [], complete: false };
+    }
+    let hit = rootCache.get(key);
+    if (hit === undefined) {
+      try {
+        hit = cardsForRoot(cwd, { home: options.home, toolText: options.toolText });
+      } catch {
+        hit = { cards: [], complete: false };
+      }
+      rootCache.set(key, hit);
+    }
+    return hit;
+  };
+}
