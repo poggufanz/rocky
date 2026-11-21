@@ -41,13 +41,13 @@ function registry() {
 test("catalog appends 5 listening tools after 8 frozen originals", () => {
   assert.equal(MCP_TOOL_CATALOG_VERSION, 1);
   assert.deepEqual([...MCP_TOOL_CATALOG.slice(0, 8)], [...OLD]);
-  assert.deepEqual([...MCP_TOOL_CATALOG.slice(8)], [...NEW]);
-  assert.deepEqual(registry().list().map((d) => d.name), [...OLD, ...NEW]);
+  assert.deepEqual([...MCP_TOOL_CATALOG.slice(8, 13)], [...NEW]);
+  assert.deepEqual(registry().list().slice(0, 13).map((d) => d.name), [...OLD, ...NEW]);
   assert.equal(Object.isFrozen(MCP_TOOL_CATALOG_CONTRACT.tools), true);
 });
 
 test("listening descriptors carry bounds and read-only annotations", () => {
-  for (const def of registry().list().slice(8)) {
+  for (const def of registry().list().slice(8, 13)) {
     assert.ok(def.annotations.readOnlyHint && !def.annotations.destructiveHint);
     assert.match(def.description, /no scan/i);
     const props = (def.inputSchema.properties ?? {}) as Record<string, unknown>;

@@ -6,10 +6,12 @@ import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySn
 import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import { rationalesForFile } from "../core/dictionary.js";
+import { selectProblemEntries } from "../core/attempts.js";
 import { teachLookup } from "../core/teach.js";
 import { teachFromCards } from "../core/teach-cards.js";
 import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
 import { gapRungFor, renderCardTeach, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
+import { ATTEMPT_HISTORY_NOTICE, projectProblemEntries, type ProjectedProblemEntry } from "./attempts-projection.js";
 import { projectExplain } from "./privacy.js";
 import { cardsForFile, type CardsForFile } from "../desk/cards-read.js";
 import { readListeningTail } from "../listening/event-log-read.js";
@@ -33,6 +35,7 @@ import {
   safeOpaqueIdentifier,
   validateRecallCandidateIds,
   type ProjectedWhyCard,
+  type Truncation,
 } from "./privacy.js";
 import { gitProvenanceChain, resolveGitDiff } from "../core/git-diff.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, maxSupportedMemoryRecords, parseMemoryRecord } from "../core/memory-read.js";
@@ -53,6 +56,7 @@ const MCP_TOOL_NAMES = [
   "bundles_list",
   "bundle_get",
   "session_timeline",
+  "attempt_history",
 ] as const;
 const MCP_TOOL_NAMES_FROZEN = Object.freeze(MCP_TOOL_NAMES);
 export const MCP_TOOL_CATALOG_CONTRACT = Object.freeze({
@@ -159,6 +163,51 @@ function parseRecallArgs(args: unknown, exposure: Exposure, defaultLimit = 3): R
   }
   const cwd = parseCwd(value, exposure);
   return { query: value.query, limit: parseLimit(value.limit, 1, 10, defaultLimit), ...(cwd === undefined ? {} : { cwd }) };
+}
+
+interface AttemptHistoryArgs {
+  fingerprint?: string;
+  query?: string;
+  limit: number;
+  attempts: number;
+  cwd?: string;
+}
+
+const ATTEMPT_FINGERPRINT_RE = /^[0-9a-f]{16}$/u;
+
+function parseAttemptHistoryArgs(args: unknown, exposure: Exposure): AttemptHistoryArgs {
+  const value = objectArgs(args);
+  rejectUnknown(
+    value,
+    exposure === "raw"
+      ? ["fingerprint", "query", "limit", "attempts", "cwd"]
+      : ["fingerprint", "query", "limit", "attempts"],
+  );
+  const hasFingerprint = value.fingerprint !== undefined;
+  const hasQuery = value.query !== undefined;
+  if (hasFingerprint === hasQuery) throw new McpInvalidParamsError("invalid params");
+  let fingerprint: string | undefined;
+  if (hasFingerprint) {
+    if (typeof value.fingerprint !== "string" || !ATTEMPT_FINGERPRINT_RE.test(value.fingerprint)) {
+      throw new McpInvalidParamsError("invalid params");
+    }
+    fingerprint = value.fingerprint;
+  }
+  let query: string | undefined;
+  if (hasQuery) {
+    if (typeof value.query !== "string" || [...value.query].length < 1 || [...value.query].length > 500) {
+      throw new McpInvalidParamsError("invalid params");
+    }
+    query = value.query;
+  }
+  const cwd = parseCwd(value, exposure);
+  return {
+    ...(fingerprint === undefined ? {} : { fingerprint }),
+    ...(query === undefined ? {} : { query }),
+    limit: parseLimit(value.limit, 1, 10, 3),
+    attempts: parseLimit(value.attempts, 1, 20, 10),
+    ...(cwd === undefined ? {} : { cwd }),
+  };
 }
 
 function parseRecentArgs(args: unknown, exposure: Exposure): RecentFailuresQuery {
@@ -359,6 +408,16 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
         cursor: { type: "string", maxLength: MAX_FIELD_BYTES },
       }, ["repo", "session"]), annotations: ANNOTATIONS,
     },
+    {
+      name: "attempt_history", title: "Attempt history",
+      description: "Every remembered attempt at one recurring error: the order of runs and edits, never a cause.",
+      inputSchema: schema(withCwd(exposure, {
+        fingerprint: { type: "string", pattern: "^[0-9a-f]{16}$" },
+        query: { type: "string", minLength: 1, maxLength: 500 },
+        limit: { type: "integer", minimum: 1, maximum: 10 },
+        attempts: { type: "integer", minimum: 1, maximum: 20 },
+      })), annotations: ANNOTATIONS,
+    },
   ];
   const byName = new Map(definitions.map((definition) => [definition.name, definition] as const));
   const catalog = MCP_TOOL_CATALOG_CONTRACT.tools;
@@ -505,6 +564,53 @@ function cappedResult(
     }
     copy.truncated = true;
   }
+}
+
+function trimAttemptHistoryPayload(
+  payload: Record<string, unknown>,
+  entries: ProjectedProblemEntry[],
+): void {
+  const exceedsCap = (): boolean => {
+    const payloadBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    if (payloadBytes * 2 + 1026 > RESPONSE_CAP_BYTES) return true;
+    return Buffer.byteLength(JSON.stringify(buildResult(payload)), "utf8") > RESPONSE_CAP_BYTES;
+  };
+  let dropped = false;
+  while (exceedsCap()) {
+    let dropEntryIndex = -1;
+    let dropAttemptIndex = -1;
+    let oldestTs = Infinity;
+    for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+      const attempts = entries[entryIndex]!.attempts;
+      for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+        const ts = attempts[attemptIndex]!.ts;
+        if (
+          dropEntryIndex === -1 ||
+          ts < oldestTs ||
+          (ts === oldestTs && entryIndex > dropEntryIndex)
+        ) {
+          oldestTs = ts;
+          dropEntryIndex = entryIndex;
+          dropAttemptIndex = attemptIndex;
+        }
+      }
+    }
+    if (dropEntryIndex !== -1) {
+      entries[dropEntryIndex]!.attempts.splice(dropAttemptIndex, 1);
+      entries[dropEntryIndex]!.attemptsOmitted += 1;
+      dropped = true;
+      payload.truncated = true;
+      continue;
+    }
+    if (entries.length > 0) {
+      entries.pop();
+      dropped = true;
+      payload.truncated = true;
+      continue;
+    }
+    break;
+  }
+  if (dropped) payload.truncated = true;
 }
 
 /** Listening metadata-first projection: locators, hashes, IDs, bases, coverage. Never raw bodies. */
@@ -1747,6 +1853,60 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
               () => cappedResult(enriched),
               cappedResult({ exposure: options.exposure, items: [], truncated: true, ...memoryCoveragePayload(coverage) }),
             );
+          }
+          case "attempt_history": {
+            const input = parseAttemptHistoryArgs(args, options.exposure);
+            const now = Date.now();
+            const snapshot = hasDurableMemoryQueries(options.memory)
+              ? loadDurableMemorySnapshot(options.memory, now)
+              : undefined;
+            if (snapshot === undefined) {
+              const coverage = memoryCoverage(options.memory, true, coverageReader);
+              pairedCoverage = coverage;
+              return safeProjection(
+                () => cappedResult({
+                  exposure: options.exposure,
+                  entries: [],
+                  notice: ATTEMPT_HISTORY_NOTICE,
+                  ...memoryCoveragePayload(coverage),
+                }),
+                cappedResult({
+                  exposure: options.exposure,
+                  entries: [],
+                  notice: ATTEMPT_HISTORY_NOTICE,
+                  truncated: true,
+                  ...memoryCoveragePayload(coverage),
+                }),
+              );
+            }
+            const coverage = snapshot.coverage;
+            pairedCoverage = coverage;
+            const fallbackPayload = {
+              exposure: options.exposure,
+              entries: [],
+              notice: ATTEMPT_HISTORY_NOTICE,
+              truncated: true,
+              ...memoryCoveragePayload(coverage),
+            };
+            return safeProjection(() => {
+              const selection = selectProblemEntries(snapshot.records, coverage, {
+                now,
+                cwd: input.cwd ?? process.cwd(),
+                query: input.fingerprint ?? input.query,
+                allDirs: input.cwd === undefined,
+                limit: input.limit,
+              });
+              const truncation: Truncation = { fields: [] };
+              const entries = projectProblemEntries(selection.entries, options.exposure, input.attempts, truncation);
+              const payload: Record<string, unknown> = {
+                exposure: options.exposure,
+                entries,
+                notice: ATTEMPT_HISTORY_NOTICE,
+                ...memoryCoveragePayload(coverage),
+              };
+              trimAttemptHistoryPayload(payload, entries);
+              return cappedResult(payload);
+            }, cappedResult(fallbackPayload));
           }
           case "recent_failures": {
             const input = parseRecentArgs(args, options.exposure);
