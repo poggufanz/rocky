@@ -1,5 +1,6 @@
 import type { StoredBlock, StoredCard, StoredFlowStep } from "../desk/cards-record.js";
 import type { Attempt, ProblemEntry } from "./attempts.js";
+import { isAbsOrTildeBlockPath, normalizeRepoBlockPath } from "./block-paths.js";
 import { COMMAND_IDENTITY_VERSION, commandIdentity, unwrapRockyRun } from "./fingerprint.js";
 import { sameCwd, type FailureRecord, type MemoryRecord } from "./memory-read.js";
 import { sanitizeTestimony } from "./redact.js";
@@ -20,18 +21,6 @@ type MatchResult =
 interface IndexedStep extends StepRef {
   cardOrder: number;
   stepIndex: number;
-}
-
-/** Pure copy of `cards-record.ts:isAbsOrTildeBlockPath` to avoid runtime imports from `src/desk/`. */
-function isAbsOrTildeBlockPath(blockPath: string): boolean {
-  return (
-    blockPath === "~" ||
-    blockPath.startsWith("~/") ||
-    blockPath.startsWith("~\\") ||
-    /^[a-zA-Z]:[\\/]/.test(blockPath) ||
-    blockPath.startsWith("/") ||
-    blockPath.startsWith("\\")
-  );
 }
 
 function inWindow(ts: number, step: StoredFlowStep): boolean {
@@ -151,11 +140,16 @@ function laneEdits(
     for (let stepIndex = 0; stepIndex < flow.length; stepIndex += 1) {
       const step = flow[stepIndex]!;
       if (step.kind !== "edit") continue;
-      if (step.start_ms === undefined || step.end_ms === undefined) {
+      if (step.start_ms === undefined) {
         if (overlaps) partial = true;
         continue;
       }
-      if (step.start_ms >= rangeStart && step.end_ms <= rangeEnd) {
+      if (step.start_ms < rangeStart || step.start_ms > rangeEnd) continue;
+      if (step.end_ms === undefined) {
+        if (overlaps) partial = true;
+        continue;
+      }
+      if (step.end_ms <= rangeEnd) {
         if (step.seqs.length === 0) partial = true;
         edits.push({ card, step, cardOrder, stepIndex });
       }
@@ -183,6 +177,7 @@ function observedChanges(
   join: CardJoin,
   laneCards: readonly StoredCard[],
   blockCache: Map<StoredCard, Map<number, StoredBlock>>,
+  platform: NodeJS.Platform,
 ): { changes: Attempt["changes"]; edits: IndexedStep[] } {
   const rangeStart = matched.step.end_ms ?? failure.ts;
   const { edits, partial: lanePartial } = laneEdits(laneCards, rangeStart, outcomeTs);
@@ -194,12 +189,18 @@ function observedChanges(
     const map = blocksBySeq(card, blockCache);
     for (const seq of step.seqs) {
       const block = map.get(seq);
-      if (block === undefined) continue;
-      if (isAbsOrTildeBlockPath(block.path)) {
+      if (block === undefined || block.path.length === 0) continue;
+      const rel = isAbsOrTildeBlockPath(block.path)
+        ? undefined
+        : normalizeRepoBlockPath(block.path, "linux");
+      if (rel === undefined) {
         seenOutside.add(block.path);
-      } else if (block.path.length > 0 && !seenFiles.has(block.path)) {
-        seenFiles.add(block.path);
-        files.push(block.path);
+      } else {
+        const key = platform === "win32" ? rel.toLowerCase() : rel;
+        if (!seenFiles.has(key)) {
+          seenFiles.add(key);
+          files.push(rel);
+        }
       }
     }
   }
@@ -240,6 +241,7 @@ function findRerunStep(
       if (sameCard && stepIndex <= matchedStepIndex) continue;
       if (!sameCard && (step.start_ms === undefined || step.start_ms < afterMs)) continue;
       if (!inWindow(outcomeTs, step)) continue;
+      if (!sameCwd(failure.cwd, step.cwd ?? card.root, platform)) continue;
       if (stepCommandIdentity(step, platform) !== targetId) continue;
       candidates.push({ card, step, cardOrder, stepIndex });
     }
@@ -326,7 +328,7 @@ function joinSingleAttempt(
   const platform = failure.platform ?? fallbackPlatform;
   const laneCards = chronologicalLaneCards(join.cards, matched.ref.card);
   const blockCache = new Map<StoredCard, Map<number, StoredBlock>>();
-  const { changes, edits } = observedChanges(matched.ref, failure, next.outcomeTs, join, laneCards, blockCache);
+  const { changes, edits } = observedChanges(matched.ref, failure, next.outcomeTs, join, laneCards, blockCache, platform);
   next.changes = changes;
 
   const stated = statedFromCards(next, matched.ref, failure, next.outcomeTs, laneCards, edits, blockCache, platform);

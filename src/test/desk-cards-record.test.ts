@@ -2,11 +2,13 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   collapseDotSegments,
-  expandTilde,
   isAbsOrTildeBlockPath,
+  normalizeRepoBlockPath,
+} from "../core/block-paths.js";
+import {
+  expandTilde,
   isPathInside,
   normalizeAbsForPlatform,
-  normalizeRepoBlockPath,
   parseCardLine,
   validateCard,
 } from "../desk/cards-record.js";

@@ -233,91 +233,62 @@ test("unique fallback matches run failure including rocky run unwrap and boundar
   assert.equal(atEndEdge.matchedCardByFailureId.get("f1"), "card-end");
 });
 
-test("fallback fails when any single condition is broken", () => {
-  const baseFailure = makeFailure({
+const FALLBACK_BROKEN_CASES: ReadonlyArray<{ name: string; failure?: Partial<FailureRecord>; card: StoredCard }> = [
+  { name: "step kind is not cmd", card: makeCard("c1", { agent_id: "sub-1", flow: [makeCmdStep({ kind: "edit" })] }) },
+  { name: "step ok is true", card: makeCard("c2", { agent_id: "sub-1", flow: [makeCmdStep({ ok: true })] }) },
+  { name: "step exit_code differs", card: makeCard("c3", { agent_id: "sub-1", flow: [makeCmdStep({ exit_code: 2 })] }) },
+  { name: "F.ts before start_ms - 1000", card: makeCard("c4", { agent_id: "sub-1", flow: [makeCmdStep({ start_ms: T + 1_001, end_ms: T + 2_000 })] }) },
+  { name: "F.ts after end_ms + 5000", card: makeCard("c5", { agent_id: "sub-1", flow: [makeCmdStep({ start_ms: T - 7_000, end_ms: T - 5_001 })] }) },
+  { name: "cwd differs via step.cwd", card: makeCard("c6", { agent_id: "sub-1", flow: [makeCmdStep({ cwd: "/other" })] }) },
+  { name: "cwd differs via card.root fallback", card: makeCard("c7", { root: "/other", agent_id: "sub-1", flow: [makeCmdStep()] }) },
+  { name: "command identity differs", card: makeCard("c8", { agent_id: "sub-1", flow: [makeCmdStep({ text: "npm run lint" })] }) },
+  { name: "step command identity is unreliable", card: makeCard("c9", { agent_id: "sub-1", flow: [makeCmdStep({ text: "npm test | head" })] }) },
+  { name: "failure identityReliable is false", failure: { identityReliable: false }, card: makeCard("c10", { agent_id: "sub-1", flow: [makeCmdStep()] }) },
+  { name: "failure identityV is missing", failure: { identityV: undefined }, card: makeCard("c11", { agent_id: "sub-1", flow: [makeCmdStep()] }) },
+  { name: "session_id differs when both sides stamped", card: makeCard("c12", { session_id: "sess-other", agent_id: "sub-1", flow: [makeCmdStep()] }) },
+  { name: "agent_id differs when both sides non-empty", card: makeCard("c13", { session_id: "sess-1", agent_id: "sub-2", flow: [makeCmdStep()] }) },
+];
+
+for (const tc of FALLBACK_BROKEN_CASES) {
+  test(`fallback rejects when ${tc.name}`, () => {
+    const f1 = makeFailure({
+      id: "f1",
+      ts: T,
+      origin: "run",
+      agent: { vendor: "claude-code", session: "sess-1", agentId: "sub-1" },
+      resolvedBy: "x1",
+      ...tc.failure,
+    });
+    const x1 = makeFix({
+      id: "x1",
+      ts: T + 60_000,
+      failureIds: ["f1"],
+      agent: { vendor: "claude-code", session: "sess-1", agentId: "sub-1" },
+    });
+    const records: MemoryRecord[] = [f1, x1];
+    const joined = joinAttemptCards(problemsFor(records), records, cardsJoin([tc.card]), { platform: "linux" });
+    assert.equal(joined.matchedCardByFailureId.has("f1"), false);
+    assert.deepEqual(joined.entries[0]!.attempts[0]!.changes, { state: "unknown" });
+  });
+}
+
+test("fallback accepts non-empty failure agentId when card.agent_id is empty", () => {
+  const f1 = makeFailure({
     id: "f1",
     ts: T,
     origin: "run",
     agent: { vendor: "claude-code", session: "sess-1", agentId: "sub-1" },
     resolvedBy: "x1",
   });
-  const baseFix = makeFix({
+  const x1 = makeFix({
     id: "x1",
     ts: T + 60_000,
     failureIds: ["f1"],
     agent: { vendor: "claude-code", session: "sess-1", agentId: "sub-1" },
   });
-
-  const cases: Array<{ name: string; failure?: Partial<FailureRecord>; card: StoredCard }> = [
-    {
-      name: "step kind is not cmd",
-      card: makeCard("c1", { agent_id: "sub-1", flow: [makeCmdStep({ kind: "edit" })] }),
-    },
-    {
-      name: "step ok is true",
-      card: makeCard("c2", { agent_id: "sub-1", flow: [makeCmdStep({ ok: true })] }),
-    },
-    {
-      name: "step exit_code differs",
-      card: makeCard("c3", { agent_id: "sub-1", flow: [makeCmdStep({ exit_code: 2 })] }),
-    },
-    {
-      name: "F.ts before start_ms - 1000",
-      card: makeCard("c4", { agent_id: "sub-1", flow: [makeCmdStep({ start_ms: T + 1_001, end_ms: T + 2_000 })] }),
-    },
-    {
-      name: "F.ts after end_ms + 5000",
-      card: makeCard("c5", { agent_id: "sub-1", flow: [makeCmdStep({ start_ms: T - 7_000, end_ms: T - 5_001 })] }),
-    },
-    {
-      name: "cwd differs via step.cwd",
-      card: makeCard("c6", { agent_id: "sub-1", flow: [makeCmdStep({ cwd: "/other" })] }),
-    },
-    {
-      name: "cwd differs via card.root fallback",
-      card: makeCard("c7", { root: "/other", agent_id: "sub-1", flow: [makeCmdStep()] }),
-    },
-    {
-      name: "command identity differs",
-      card: makeCard("c8", { agent_id: "sub-1", flow: [makeCmdStep({ text: "npm run lint" })] }),
-    },
-    {
-      name: "step command identity is unreliable",
-      card: makeCard("c9", { agent_id: "sub-1", flow: [makeCmdStep({ text: "npm test | head" })] }),
-    },
-    {
-      name: "failure identityReliable is false",
-      failure: { identityReliable: false },
-      card: makeCard("c10", { agent_id: "sub-1", flow: [makeCmdStep()] }),
-    },
-    {
-      name: "failure identityV is missing",
-      failure: { identityV: undefined },
-      card: makeCard("c11", { agent_id: "sub-1", flow: [makeCmdStep()] }),
-    },
-    {
-      name: "session_id differs when both sides stamped",
-      card: makeCard("c12", { session_id: "sess-other", agent_id: "sub-1", flow: [makeCmdStep()] }),
-    },
-    {
-      name: "agent_id differs when both sides non-empty",
-      card: makeCard("c13", { session_id: "sess-1", agent_id: "sub-2", flow: [makeCmdStep()] }),
-    },
-  ];
-
-  for (const tc of cases) {
-    const f1: FailureRecord = { ...baseFailure, ...tc.failure };
-    const records: MemoryRecord[] = [f1, baseFix];
-    const entries = problemsFor(records);
-    const joined = joinAttemptCards(entries, records, cardsJoin([tc.card]), { platform: "linux" });
-    assert.equal(joined.matchedCardByFailureId.has("f1"), false, `expected no match for: ${tc.name}`);
-    assert.deepEqual(joined.entries[0]!.attempts[0]!.changes, { state: "unknown" }, tc.name);
-  }
-
-  // Positive control: when card.agent_id is empty, non-empty F.agent.agentId does not reject.
-  const openAgentCard = makeCard("c-ok", { session_id: "sess-1", agent_id: "", flow: [makeCmdStep()] });
-  const records: MemoryRecord[] = [baseFailure, baseFix];
-  const ok = joinAttemptCards(problemsFor(records), records, cardsJoin([openAgentCard]), { platform: "linux" });
+  const card = makeCard("c-ok", { session_id: "sess-1", agent_id: "", flow: [makeCmdStep()] });
+  const records: MemoryRecord[] = [f1, x1];
+  const ok = joinAttemptCards(problemsFor(records), records, cardsJoin([card]), { platform: "linux" });
   assert.equal(ok.matchedCardByFailureId.get("f1"), "c-ok");
 });
 
@@ -436,64 +407,125 @@ test("observed changes single-card exact shape with ~/x.ts counted in more", () 
   });
 });
 
-test("partial is true for each of the five partial conditions", () => {
+test("observed changes count escaping block paths in more for both slash spellings", () => {
   const f1 = makeFailure({ id: "f1", ts: T, resolvedBy: "x1" });
   const x1 = makeFix({ id: "x1", ts: T + 60_000, failureIds: ["f1"] });
+  const card = makeCard("card-escape", {
+    blocks: [
+      makeBlock(1, "src/a.ts"),
+      makeBlock(2, "../outside/private.ts"),
+      makeBlock(3, "..\\outside\\secret.ts"),
+      makeBlock(4, "a/../../outside/nested.ts"),
+      makeBlock(5, "~/x.ts"),
+    ],
+    flow: [
+      makeCmdStep({ start_ms: T - 500, end_ms: T }),
+      makeEditStep([1, 2, 3, 4, 5], T + 10_000, T + 12_000),
+    ],
+  });
   const records: MemoryRecord[] = [f1, x1];
-  const entries = problemsFor(records);
+  const joined = joinAttemptCards(problemsFor(records), records, cardsJoin([card]), { platform: "linux" });
+  assert.deepEqual(joined.entries[0]!.attempts[0]!.changes, {
+    state: "observed",
+    files: ["src/a.ts"],
+    more: 4,
+    cardId: "card-escape",
+    partial: false,
+  });
+});
 
-  const baseCard = makeCard("card-base", {
+function observedPartialFor(
+  cards: readonly StoredCard[],
+  opts: { complete?: boolean; fixTs?: number } = {},
+): boolean {
+  const f1 = makeFailure({ id: "f1", ts: T, resolvedBy: "x1" });
+  const x1 = makeFix({ id: "x1", ts: opts.fixTs ?? T + 60_000, failureIds: ["f1"] });
+  const records: MemoryRecord[] = [f1, x1];
+  const joined = joinAttemptCards(
+    problemsFor(records),
+    records,
+    cardsJoin(cards, opts.complete ?? true),
+    { platform: "linux" },
+  );
+  const changes = joined.entries[0]!.attempts[0]!.changes;
+  assert.equal(changes.state, "observed");
+  return changes.partial;
+}
+
+function makeBasePartialCard(): StoredCard {
+  return makeCard("card-base", {
     blocks: [makeBlock(1, "src/a.ts")],
     flow: [
       makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
       makeEditStep([1], T + 10_000, T + 11_000),
     ],
   });
+}
 
-  // 1. complete: false
-  const incomplete = joinAttemptCards(entries, records, cardsJoin([baseCard], false), { platform: "linux" });
-  assert.equal(incomplete.entries[0]!.attempts[0]!.changes.state, "observed");
-  assert.equal((incomplete.entries[0]!.attempts[0]!.changes as { partial: boolean }).partial, true);
+test("partial is true when card join is incomplete", () => {
+  assert.equal(observedPartialFor([makeBasePartialCard()], { complete: false }), true);
+});
 
-  // 2. overlapping lane card has flow_more > 0
-  const flowMoreCard = makeCard("card-more", {
-    started_ms: T + 20_000,
-    ended_ms: T + 40_000,
-    flow_more: 2,
-  });
-  const withFlowMore = joinAttemptCards(entries, records, cardsJoin([baseCard, flowMoreCard]), { platform: "linux" });
-  assert.equal((withFlowMore.entries[0]!.attempts[0]!.changes as { partial: boolean }).partial, true);
+test("partial is true when an overlapping lane card has flow_more > 0", () => {
+  const flowMoreCard = makeCard("card-more", { started_ms: T + 20_000, ended_ms: T + 40_000, flow_more: 2 });
+  assert.equal(observedPartialFor([makeBasePartialCard(), flowMoreCard]), true);
+});
 
-  // 3. overlapping lane card has coverage.state === "partial"
+test("partial is true when an overlapping lane card has partial coverage", () => {
   const partialCovCard = makeCard("card-cov", {
     started_ms: T + 20_000,
     ended_ms: T + 40_000,
     coverage: { state: "partial", reasons: ["daemon_gap"] },
   });
-  const withPartialCov = joinAttemptCards(entries, records, cardsJoin([baseCard, partialCovCard]), { platform: "linux" });
-  assert.equal((withPartialCov.entries[0]!.attempts[0]!.changes as { partial: boolean }).partial, true);
+  assert.equal(observedPartialFor([makeBasePartialCard(), partialCovCard]), true);
+});
 
-  // 4. edit step in range has empty seqs
+test("partial is true when an in-range edit step has empty seqs", () => {
   const emptySeqsCard = makeCard("card-empty-seqs", {
     blocks: [makeBlock(1, "src/a.ts")],
-    flow: [
-      makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
-      makeEditStep([], T + 10_000, T + 11_000),
-    ],
+    flow: [makeCmdStep({ start_ms: T - 1_000, end_ms: T }), makeEditStep([], T + 10_000, T + 11_000)],
   });
-  const withEmptySeqs = joinAttemptCards(entries, records, cardsJoin([emptySeqsCard]), { platform: "linux" });
-  assert.equal((withEmptySeqs.entries[0]!.attempts[0]!.changes as { partial: boolean }).partial, true);
+  assert.equal(observedPartialFor([emptySeqsCard]), true);
+});
 
-  // 5. overlapping lane card has an edit step without start_ms
+test("partial is true when an overlapping lane card has an edit missing start_ms", () => {
   const untimedEditCard = makeCard("card-untimed-edit", {
     started_ms: T + 20_000,
     ended_ms: T + 40_000,
     flow: [{ kind: "edit", text: "edit", ok: true, dur_ms: 100, seqs: [1] }],
   });
-  const withUntimedEdit = joinAttemptCards(entries, records, cardsJoin([baseCard, untimedEditCard]), { platform: "linux" });
-  assert.equal((withUntimedEdit.entries[0]!.attempts[0]!.changes as { partial: boolean }).partial, true);
+  assert.equal(observedPartialFor([makeBasePartialCard(), untimedEditCard]), true);
+});
 
-  // Control: non-overlapping lane cards with flow_more/partial coverage do not trigger partial
+test("partial is false when an unfinished edit starts after the rerun or before the failure end", () => {
+  const openCard = makeCard("card-open", {
+    started_ms: T - 10_000,
+    ended_ms: null,
+    blocks: [makeBlock(1, "src/a.ts")],
+    flow: [
+      { kind: "edit", text: "edit", ok: true, dur_ms: 0, seqs: [], start_ms: T - 5_000 },
+      makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
+      makeEditStep([1], T + 10_000, T + 11_000),
+      { kind: "edit", text: "edit", ok: true, dur_ms: 0, seqs: [], start_ms: T + 21_000 },
+    ],
+  });
+  assert.equal(observedPartialFor([openCard], { fixTs: T + 20_000 }), false);
+});
+
+test("partial is true when an unfinished edit starts inside the attempt interval", () => {
+  const openCard = makeCard("card-open-in-range", {
+    started_ms: T - 10_000,
+    ended_ms: null,
+    blocks: [makeBlock(1, "src/a.ts")],
+    flow: [
+      makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
+      { kind: "edit", text: "edit", ok: true, dur_ms: 0, seqs: [], start_ms: T + 5_000 },
+    ],
+  });
+  assert.equal(observedPartialFor([openCard], { fixTs: T + 20_000 }), true);
+});
+
+test("partial is false for non-overlapping earlier or later cards with gaps", () => {
   const earlierCard = makeCard("card-before", {
     started_ms: T - 30_000,
     ended_ms: T - 20_000,
@@ -505,8 +537,7 @@ test("partial is true for each of the five partial conditions", () => {
     ended_ms: T + 80_000,
     flow: [{ kind: "edit", text: "edit", ok: true, dur_ms: 100, seqs: [1] }],
   });
-  const nonOverlapping = joinAttemptCards(entries, records, cardsJoin([baseCard, earlierCard, laterCard]), { platform: "linux" });
-  assert.equal((nonOverlapping.entries[0]!.attempts[0]!.changes as { partial: boolean }).partial, false);
+  assert.equal(observedPartialFor([makeBasePartialCard(), earlierCard, laterCard]), false);
 });
 
 test("attempt without outcomeTs keeps previous changes while still recording matched card", () => {
@@ -544,15 +575,14 @@ test("attempt without outcomeTs keeps previous changes while still recording mat
   });
 });
 
-test("stated prefers rationale, then rerun bash-description, then newest in-range card-quote, all sanitized", () => {
+const RAW_TEST_DESC = "Verify fix with token=ghp_123456789012345678901234567890123456\nline2";
+const RAW_TEST_QUOTE = "Use secret=AKIAIOSFODNN7EXAMPLE\tguard";
+
+test("stated uses sanitized rerun bash-description and tool_use_id", () => {
   const f1 = makeFailure({ id: "f1", ts: T, resolvedBy: "x1" });
   const x1 = makeFix({ id: "x1", ts: T + 60_000, failureIds: ["f1"] });
-  const rawDesc = "Verify fix with token=ghp_123456789012345678901234567890123456\nline2";
-  const rawQuote = "Use secret=AKIAIOSFODNN7EXAMPLE\tguard";
-
-  // 1. rerun step desc -> bash-description
-  const cardWithDesc = makeCard("card-desc", {
-    blocks: [makeBlock(1, "src/a.ts", { quote: { text: rawQuote, shared: false } })],
+  const card = makeCard("card-desc", {
+    blocks: [makeBlock(1, "src/a.ts", { quote: { text: RAW_TEST_QUOTE, shared: false } })],
     flow: [
       makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
       makeEditStep([1], T + 10_000, T + 11_000),
@@ -562,38 +592,80 @@ test("stated prefers rationale, then rerun bash-description, then newest in-rang
         start_ms: T + 59_500,
         end_ms: T + 60_200,
         tool_use_id: "tu-rerun",
-        desc: rawDesc,
+        desc: RAW_TEST_DESC,
       }),
     ],
   });
-  const baseRecords: MemoryRecord[] = [f1, x1];
-  const baseEntries = problemsFor(baseRecords);
-  const fromDesc = joinAttemptCards(baseEntries, baseRecords, cardsJoin([cardWithDesc]), { platform: "linux" });
-  assert.deepEqual(fromDesc.entries[0]!.attempts[0]!.stated, {
-    text: sanitizeTestimony(rawDesc),
+  const records: MemoryRecord[] = [f1, x1];
+  const joined = joinAttemptCards(problemsFor(records), records, cardsJoin([card]), { platform: "linux" });
+  assert.deepEqual(joined.entries[0]!.attempts[0]!.stated, {
+    text: sanitizeTestimony(RAW_TEST_DESC),
     source: "bash-description",
     recordId: "card-desc#tu-rerun",
   });
+});
 
-  // 1b. rerun step desc without tool_use_id falls back to #step
-  const cardDescNoToolId = makeCard("card-desc-step", {
+test("stated falls back to #step when rerun step omits tool_use_id", () => {
+  const f1 = makeFailure({ id: "f1", ts: T, resolvedBy: "x1" });
+  const x1 = makeFix({ id: "x1", ts: T + 60_000, failureIds: ["f1"] });
+  const card = makeCard("card-desc-step", {
     flow: [
       makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
       makeCmdStep({ ok: true, exit_code: 0, start_ms: T + 59_500, end_ms: T + 60_200, desc: "Re-run suite" }),
     ],
   });
-  const fromDescNoId = joinAttemptCards(baseEntries, baseRecords, cardsJoin([cardDescNoToolId]), { platform: "linux" });
-  assert.deepEqual(fromDescNoId.entries[0]!.attempts[0]!.stated, {
+  const records: MemoryRecord[] = [f1, x1];
+  const joined = joinAttemptCards(problemsFor(records), records, cardsJoin([card]), { platform: "linux" });
+  assert.deepEqual(joined.entries[0]!.attempts[0]!.stated, {
     text: "Re-run suite",
     source: "bash-description",
     recordId: "card-desc-step#step",
   });
+});
 
-  // 2. no desc -> newest in-range block quote -> card-quote
-  const cardWithQuotes = makeCard("card-quote", {
+test("stated ignores same-identity rerun descriptions from another cwd", () => {
+  const f1 = makeFailure({ id: "f1", ts: T, cwd: "/app", resolvedBy: "x1" });
+  const x1 = makeFix({ id: "x1", ts: T + 60_000, cwd: "/app", failureIds: ["f1"] });
+  const card = makeCard("card-cwd", {
+    root: "/app",
+    flow: [
+      makeCmdStep({ cwd: "/app", start_ms: T - 1_000, end_ms: T }),
+      makeCmdStep({
+        cwd: "/app/nested",
+        ok: true,
+        exit_code: 0,
+        start_ms: T + 59_000,
+        end_ms: T + 59_500,
+        tool_use_id: "tu-nested",
+        desc: "Nested suite",
+      }),
+      makeCmdStep({
+        cwd: "/app",
+        ok: true,
+        exit_code: 0,
+        start_ms: T + 59_600,
+        end_ms: T + 60_200,
+        tool_use_id: "tu-root",
+        desc: "Root suite",
+      }),
+    ],
+  });
+  const records: MemoryRecord[] = [f1, x1];
+  const joined = joinAttemptCards(problemsFor(records), records, cardsJoin([card]), { platform: "linux" });
+  assert.deepEqual(joined.entries[0]!.attempts[0]!.stated, {
+    text: "Root suite",
+    source: "bash-description",
+    recordId: "card-cwd#tu-root",
+  });
+});
+
+test("stated falls back to newest sanitized in-range card-quote when rerun has no desc", () => {
+  const f1 = makeFailure({ id: "f1", ts: T, resolvedBy: "x1" });
+  const x1 = makeFix({ id: "x1", ts: T + 60_000, failureIds: ["f1"] });
+  const card = makeCard("card-quote", {
     blocks: [
       makeBlock(1, "src/a.ts", { quote: { text: "older quote", shared: false } }),
-      makeBlock(2, "src/b.ts", { quote: { text: rawQuote, shared: false } }),
+      makeBlock(2, "src/b.ts", { quote: { text: RAW_TEST_QUOTE, shared: false } }),
     ],
     flow: [
       makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
@@ -602,14 +674,18 @@ test("stated prefers rationale, then rerun bash-description, then newest in-rang
       makeCmdStep({ ok: true, exit_code: 0, start_ms: T + 59_500, end_ms: T + 60_200 }),
     ],
   });
-  const fromQuote = joinAttemptCards(baseEntries, baseRecords, cardsJoin([cardWithQuotes]), { platform: "linux" });
-  assert.deepEqual(fromQuote.entries[0]!.attempts[0]!.stated, {
-    text: sanitizeTestimony(rawQuote),
+  const records: MemoryRecord[] = [f1, x1];
+  const joined = joinAttemptCards(problemsFor(records), records, cardsJoin([card]), { platform: "linux" });
+  assert.deepEqual(joined.entries[0]!.attempts[0]!.stated, {
+    text: sanitizeTestimony(RAW_TEST_QUOTE),
     source: "card-quote",
     recordId: "card-quote",
   });
+});
 
-  // 3. existing rationale stated is kept over both
+test("stated preserves existing rationale over bash-description and card-quote", () => {
+  const f1 = makeFailure({ id: "f1", ts: T, resolvedBy: "x1" });
+  const x1 = makeFix({ id: "x1", ts: T + 60_000, failureIds: ["f1"] });
   const r1: RationaleRecord = {
     kind: "rationale",
     id: "r1",
@@ -622,15 +698,17 @@ test("stated prefers rationale, then rerun bash-description, then newest in-rang
     excerpt: "explicit rationale wins",
     links: { failureId: "f1" },
   };
-  const withRationaleRecords: MemoryRecord[] = [f1, x1, r1];
-  const withRationaleEntries = problemsFor(withRationaleRecords);
-  const keptRationale = joinAttemptCards(
-    withRationaleEntries,
-    withRationaleRecords,
-    cardsJoin([cardWithDesc]),
-    { platform: "linux" },
-  );
-  assert.deepEqual(keptRationale.entries[0]!.attempts[0]!.stated, {
+  const card = makeCard("card-desc", {
+    blocks: [makeBlock(1, "src/a.ts", { quote: { text: RAW_TEST_QUOTE, shared: false } })],
+    flow: [
+      makeCmdStep({ start_ms: T - 1_000, end_ms: T }),
+      makeEditStep([1], T + 10_000, T + 11_000),
+      makeCmdStep({ ok: true, exit_code: 0, start_ms: T + 59_500, end_ms: T + 60_200, desc: RAW_TEST_DESC }),
+    ],
+  });
+  const records: MemoryRecord[] = [f1, x1, r1];
+  const joined = joinAttemptCards(problemsFor(records), records, cardsJoin([card]), { platform: "linux" });
+  assert.deepEqual(joined.entries[0]!.attempts[0]!.stated, {
     text: "explicit rationale wins",
     source: "rationale",
     recordId: "r1",

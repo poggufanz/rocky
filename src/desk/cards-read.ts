@@ -1,5 +1,6 @@
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { isAbsOrTildeBlockPath, normalizeRepoBlockPath } from "../core/block-paths.js";
 import { gitRootFor } from "../core/compare-data.js";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { canonicalPath } from "../core/memory-read.js";
@@ -7,9 +8,7 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { cardsFilePath } from "../listening/cards-path.js";
 import {
   expandTilde,
-  isAbsOrTildeBlockPath,
   normalizeAbsForPlatform,
-  normalizeRepoBlockPath,
   parseCardLine,
   type StoredBlock,
   type StoredCard,

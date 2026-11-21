@@ -139,6 +139,8 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     // Audited pure attempt-history grouping and selection: reads caller-supplied
     // records only, never touches the filesystem or writers.
     "core/attempts.ts",
+    // Audited pure lexical block-path helpers: zero imports, no filesystem access.
+    "core/block-paths.ts",
     "core/config-read.ts",
     // Audited pure keyword matcher and static explanation table: their only
     // import is core/fingerprint.ts and neither touches the filesystem. Both
