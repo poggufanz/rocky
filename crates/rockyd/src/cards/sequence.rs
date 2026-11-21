@@ -117,6 +117,11 @@ mod tests {
             seqs: Vec::new(),
             exit_code,
             error: error.map(str::to_string),
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: None,
+            desc: None,
         }
     }
 
@@ -129,6 +134,11 @@ mod tests {
             seqs: Vec::new(),
             exit_code: None,
             error: None,
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: None,
+            desc: None,
         }
     }
 
@@ -141,6 +151,11 @@ mod tests {
             seqs,
             exit_code: None,
             error: None,
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: None,
+            desc: None,
         }
     }
 

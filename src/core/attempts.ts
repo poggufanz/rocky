@@ -28,7 +28,7 @@ export interface Attempt {
   failureId: string; ts: number; cmd: string;
   outcome: AttemptOutcome; outcomeRecordId?: string; outcomeTs?: number;
   nextFingerprint?: string;
-  unknownReason?: "coverage" | "unlinked-pass" | "ambiguous-join";
+  unknownReason?: "coverage" | "unlinked-pass";
   session?: { vendor: string; agentId?: string }; sessionScoped: boolean; crossSession?: true;
   changes: { state: "observed"; files: string[]; more: number; cardId: string; partial: boolean }
          | { state: "testimony"; files: string[]; rationaleId: string }

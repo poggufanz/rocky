@@ -1,5 +1,6 @@
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { isAbsOrTildeBlockPath, normalizeRepoBlockPath } from "../core/block-paths.js";
 import { gitRootFor } from "../core/compare-data.js";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { canonicalPath } from "../core/memory-read.js";
@@ -7,12 +8,11 @@ import { resolveRockyPaths } from "../core/state-paths.js";
 import { cardsFilePath } from "../listening/cards-path.js";
 import {
   expandTilde,
-  isAbsOrTildeBlockPath,
   normalizeAbsForPlatform,
-  normalizeRepoBlockPath,
   parseCardLine,
   type StoredBlock,
   type StoredCard,
+  type StoredFlowStep,
 } from "./cards-record.js";
 
 const MAX_CARDS_FILE_BYTES = 16 * 1024 * 1024;
@@ -658,4 +658,179 @@ function cardsForFileInternal(
   }
 
   return { cards, matched, coverage: finalizeCoverage(covAcc) };
+}
+
+export interface CardsForRoot {
+  cards: StoredCard[];
+  complete: boolean;
+}
+
+/** False when `<home>/desk/tool-text-off` exists. */
+export function toolTextAllowed(home: string): boolean {
+  return !existsSync(join(home, "desk", "tool-text-off"));
+}
+
+function stripBlockToolText(block: StoredBlock): StoredBlock {
+  const copy = { ...block };
+  delete copy.quote;
+  return copy;
+}
+
+function stripStepToolText(step: StoredFlowStep): StoredFlowStep {
+  const copy = { ...step };
+  delete copy.desc;
+  return copy;
+}
+
+function stripCardToolText(card: StoredCard): StoredCard {
+  const copy: StoredCard = {
+    ...card,
+    blocks: card.blocks.map(stripBlockToolText),
+  };
+  if (card.flow !== undefined) {
+    copy.flow = card.flow.map(stripStepToolText);
+  }
+  return copy;
+}
+
+function isHardReadFailure(coverage: CardsReadCoverage): boolean {
+  if (coverage.complete) return false;
+  if (coverage.reason === "read-race") return true;
+  if (coverage.reason === "file-size-cap" || coverage.reason === "line-cap") return false;
+  return coverage.skipped === 0;
+}
+
+function readProbedLog(
+  logPath: string | undefined,
+  status: "missing" | "non-regular" | "race" | "ready",
+  lstat: ReturnType<typeof lstatSync> | undefined,
+  covAcc: CoverageAccumulator,
+  readBytes: CardsReadSyncHook = readSync,
+): Map<string, StoredCard> {
+  if (status === "missing") return new Map();
+  if (status === "non-regular") {
+    addCoverage(covAcc, { complete: false, skipped: 0 });
+    return new Map();
+  }
+  if (status === "race" || !logPath || !lstat) {
+    addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+    return new Map();
+  }
+  const parsed = readAndParseCardsLog(logPath, lstat, MAX_TOTAL_CARDS_BYTES, readBytes);
+  addCoverage(covAcc, parsed.coverage);
+  return isHardReadFailure(parsed.coverage) ? new Map() : parsed.cardsById;
+}
+
+/** @internal Resolve the git root for a directory `cwd` without trimming or collapsing Windows drive roots. */
+export function resolveGitRootForCwd(
+  cwd: string,
+  exists: (p: string) => boolean = existsSync,
+): string | undefined {
+  if (cwd.length === 0) return undefined;
+  const resolvedCwd = resolve(cwd);
+  const rootRaw = gitRootFor(join(resolvedCwd, "_"), exists);
+  if (rootRaw === undefined) return undefined;
+  return /^[a-zA-Z]:$/.test(rootRaw) ? `${rootRaw}/` : rootRaw;
+}
+
+function cardsForRootInternal(
+  cwd: string,
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook,
+): CardsForRoot {
+  const rootRaw = resolveGitRootForCwd(cwd, existsSync);
+  const covAcc: CoverageAccumulator = { complete: true, skipped: 0 };
+  let cardsById: Map<string, StoredCard>;
+  if (rootRaw !== undefined) {
+    const pick = pickExistingLogPath(buildRootSpellings(rootRaw), options.home);
+    cardsById = readProbedLog(pick.logPath, pick.status, pick.lstat, covAcc, readBytes);
+  } else {
+    const nonePath = join(options.home, "desk", "cards", "_none.jsonl");
+    const probe = inspectLogPath(nonePath);
+    cardsById = readProbedLog(nonePath, probe.status, probe.lstat, covAcc, readBytes);
+  }
+  const ordered = [...cardsById.values()].sort(compareCards);
+  const cards = options.toolText ? ordered : ordered.map(stripCardToolText);
+  return { cards, complete: finalizeCoverage(covAcc).complete };
+}
+
+/** Cards logged for the repo that contains `cwd` (or `_none.jsonl` outside a repo). */
+export function cardsForRoot(cwd: string, options: { home: string; toolText: boolean }): CardsForRoot {
+  return cardsForRootInternal(cwd, options, readSync);
+}
+
+/** @internal Test-only entry point for injecting `readSync` faults into `cardsForRoot`. */
+export function cardsForRootForTest(
+  cwd: string,
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook = readSync,
+): CardsForRoot {
+  return cardsForRootInternal(cwd, options, readBytes);
+}
+
+/** Highest revision of `cardId` across all card logs, bounded like `cardsForFile`. */
+export function findCardById(cardId: string, options: { home: string; toolText: boolean }): StoredCard | undefined {
+  if (cardId.length === 0) return undefined;
+  const listing = listExtraCardLogs(options.home, new Set(), process.platform);
+  if (listing.status !== "ready") return undefined;
+
+  let scanned = 0;
+  let totalBytesRead = 0;
+  let best: StoredCard | undefined;
+  for (const name of listing.files) {
+    if (scanned >= MAX_EXTRA_LOG_FILES) break;
+    const logPath = join(listing.cardsDir, name);
+    const probe = inspectLogPath(logPath);
+    if (probe.status === "missing") continue;
+    scanned += 1;
+    if (probe.status !== "ready" || !probe.lstat) continue;
+    if (totalBytesRead >= MAX_TOTAL_CARDS_BYTES) break;
+    const parsed = readAndParseCardsLog(logPath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+    totalBytesRead += parsed.bytesRead;
+    if (parsed.hitBudget) break;
+    const found = parsed.cardsById.get(cardId);
+    if (found && (!best || found.rev >= best.rev)) {
+      best = found;
+    }
+  }
+  if (best === undefined) return undefined;
+  return options.toolText ? best : stripCardToolText(best);
+}
+
+function makeCardsForInternal(
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook,
+): (cwd: string) => CardsForRoot {
+  const rootCache = new Map<string, CardsForRoot>();
+  return (cwd: string): CardsForRoot => {
+    let key: string;
+    try {
+      key = resolveGitRootForCwd(cwd, existsSync) ?? cwd;
+    } catch {
+      return { cards: [], complete: false };
+    }
+    let hit = rootCache.get(key);
+    if (hit === undefined) {
+      try {
+        hit = cardsForRootInternal(cwd, { home: options.home, toolText: options.toolText }, readBytes);
+      } catch {
+        hit = { cards: [], complete: false };
+      }
+      rootCache.set(key, hit);
+    }
+    return hit;
+  };
+}
+
+/** Cached per-repo card loader keyed by git root (or `cwd` outside a repo). */
+export function makeCardsFor(options: { home: string; toolText: boolean }): (cwd: string) => CardsForRoot {
+  return makeCardsForInternal(options, readSync);
+}
+
+/** @internal Test-only entry point for injecting `readSync` faults into `makeCardsFor`. */
+export function makeCardsForForTest(
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook = readSync,
+): (cwd: string) => CardsForRoot {
+  return makeCardsForInternal(options, readBytes);
 }

@@ -6,6 +6,7 @@
  *   rocky run "<command>"     run a command; rocky remembers its failures and what followed
  *   rocky recall [--ai] <query> search the memory of past errors
  *   rocky attempts [<fingerprint|query>] [--all-dirs] [--limit 1..50] [--json]
+ *   rocky attempts --card <card_id> --json [--limit 1..50]
  *                             show every attempt at a recurring error
  *   rocky                     open the desktop app where it is installed,
  *                             otherwise the browser view on Main
@@ -79,6 +80,8 @@ usage:
                             deterministic recall.
   rocky attempts [<fingerprint|query>] [--all-dirs] [--limit 1..50] [--json]
                             show every attempt at a recurring error.
+  rocky attempts --card <card_id> --json [--limit 1..50]
+                            list entries across all ages joined to one change card.
   rocky what [--ai] [--] <query...>
                             look up what a remembered intent became.
   rocky how [--diff] [--] <query...>

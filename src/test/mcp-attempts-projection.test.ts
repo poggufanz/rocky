@@ -658,3 +658,124 @@ test("quoted testimony preserves causal words while Rocky-authored text stays cl
     assert.deepEqual(causalWordViolations(rockyAuthored), []);
   }
 });
+
+test("sanitized canonicalizes POSIX testimony files against repo root (including ..-prefixed names) and keeps raw paths", () => {
+  const failure = makeFailure({ id: "failure-root-posix", ts: NOW - 10 * MINUTE, cwd: "/repo/pkg" });
+  const rationale = makeRationale({
+    id: "rationale-root-posix",
+    ts: NOW - 9 * MINUTE,
+    cwd: "/repo/pkg",
+    links: { failureId: failure.id },
+    files: ["../shared/x.ts", "../..cache/x.ts", "src/local.ts", "../../outside.ts", "../..", "/etc/passwd", "/repo/other/y.ts"],
+  });
+  const set = buildProblems([failure, rationale], completeCoverage(2), { now: NOW, cwd: "/repo/pkg" });
+
+  const projected = projectProblemEntries(set.entries, "sanitized", 10, { fields: [] }, () => "/repo");
+  assert.deepEqual(projected[0]!.attempts[0]!.changes, {
+    state: "testimony",
+    files: ["shared/x.ts", "..cache/x.ts", "pkg/src/local.ts", "other/y.ts"],
+    more: 3,
+  });
+  const json = JSON.stringify(projected);
+  assert.equal(json.includes("outside.ts"), false);
+  assert.equal(json.includes("passwd"), false);
+
+  const rawProjected = projectProblemEntries(set.entries, "raw", 10, { fields: [] }, () => "/repo");
+  assert.deepEqual(rawProjected[0]!.attempts[0]!.changes, {
+    state: "testimony",
+    files: ["../shared/x.ts", "../..cache/x.ts", "src/local.ts", "../../outside.ts", "../..", "/etc/passwd", "/repo/other/y.ts"],
+    more: 0,
+  });
+});
+
+test("sanitized canonicalizes Windows testimony files against repo root (including ..-prefixed names)", () => {
+  const failure = makeFailure({
+    id: "failure-root-win",
+    ts: NOW - 8 * MINUTE,
+    cwd: "C:\\work\\repo\\pkg",
+    platform: "win32",
+  });
+  const rationale = makeRationale({
+    id: "rationale-root-win",
+    ts: NOW - 7 * MINUTE,
+    cwd: "C:\\work\\repo\\pkg",
+    links: { failureId: failure.id },
+    files: ["..\\shared\\x.ts", "..\\..cache\\x.ts", "src\\local.ts", "..\\..\\outside.ts", "D:\\other\\secret.ts"],
+  });
+  const set = buildProblems([failure, rationale], completeCoverage(2), {
+    now: NOW,
+    cwd: "C:\\work\\repo\\pkg",
+    platform: "win32",
+  });
+  const projected = projectProblemEntries(set.entries, "sanitized", 10, { fields: [] }, () => "C:/work/repo");
+  assert.deepEqual(projected[0]!.attempts[0]!.changes, {
+    state: "testimony",
+    files: ["shared/x.ts", "..cache/x.ts", "pkg/src/local.ts"],
+    more: 2,
+  });
+  const json = JSON.stringify(projected);
+  assert.equal(json.includes("outside.ts"), false);
+  assert.equal(json.includes("secret.ts"), false);
+});
+
+test("sanitized keeps cwd limit for testimony files outside a repo", () => {
+  const failure = makeFailure({ id: "failure-no-repo", ts: NOW - 6 * MINUTE, cwd: "/tmp/scratch/pkg" });
+  const rationale = makeRationale({
+    id: "rationale-no-repo",
+    ts: NOW - 5 * MINUTE,
+    cwd: "/tmp/scratch/pkg",
+    links: { failureId: failure.id },
+    files: ["../shared/x.ts", "../..cache/x.ts", "src/local.ts", "..cache/in-cwd.ts"],
+  });
+  const set = buildProblems([failure, rationale], completeCoverage(2), {
+    now: NOW,
+    cwd: "/tmp/scratch/pkg",
+  });
+  const projected = projectProblemEntries(set.entries, "sanitized", 10, { fields: [] }, () => undefined);
+  assert.deepEqual(projected[0]!.attempts[0]!.changes, {
+    state: "testimony",
+    files: ["src/local.ts", "..cache/in-cwd.ts"],
+    more: 2,
+  });
+  const json = JSON.stringify(projected);
+  assert.equal(json.includes("shared"), false);
+  assert.equal(json.includes("x.ts"), false);
+});
+
+test("sanitized observed files keep only repo-relative paths without .. or absolute prefixes", () => {
+  const failure = makeFailure({ id: "failure-obs-rel", ts: NOW - 10 * MINUTE, cwd: "/repo/pkg" });
+  const set = buildProblems([failure], completeCoverage(1), { now: NOW, cwd: "/repo/pkg" });
+  set.entries[0]!.attempts[0]!.changes = {
+    state: "observed",
+    files: [
+      "shared/x.ts",
+      "pkg/src/a.ts",
+      "../escape.ts",
+      "src/../escape2.ts",
+      "/etc/passwd",
+      "~/secret.ts",
+      "C:\\Windows\\win.ini",
+      "C:drive.ts",
+    ],
+    more: 1,
+    cardId: "card-internal-id",
+    partial: false,
+  };
+
+  const projected = projectProblemEntries(
+    set.entries,
+    "sanitized",
+    10,
+    { fields: [] },
+    () => "/repo",
+  );
+  assert.deepEqual(projected[0]!.attempts[0]!.changes, {
+    state: "observed",
+    files: ["shared/x.ts", "pkg/src/a.ts"],
+    more: 7,
+  });
+  const json = JSON.stringify(projected);
+  for (const leak of ["escape", "passwd", "secret", "win.ini", "drive.ts", "card-internal-id"]) {
+    assert.equal(json.includes(leak), false, `expected sanitized observed output to omit ${leak}`);
+  }
+});

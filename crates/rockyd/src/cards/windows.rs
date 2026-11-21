@@ -36,6 +36,8 @@ pub struct ToolWindow {
     pub tool: String,
     pub target_path: Option<String>,
     pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub description: Option<String>,
     pub pre_ms: u64,
     pub post_ms: Option<u64>,
     pub ok: Option<bool>,
@@ -333,6 +335,8 @@ impl Tracker {
                     tool,
                     target_path: ev.target_path.clone(),
                     command: ev.command.clone(),
+                    cwd: ev.cwd.clone(),
+                    description: ev.description.clone(),
                     pre_ms: recv_ms,
                     post_ms: None,
                     ok: None,
@@ -623,6 +627,9 @@ fn close_window_at(
     }
     if window.command.is_none() && ev.command.is_some() {
         window.command = ev.command.clone();
+    }
+    if window.description.is_none() && ev.description.is_some() {
+        window.description = ev.description.clone();
     }
     if !ok && window.kind == ToolKind::Bash {
         if window.exit_code.is_none() && ev.exit_code.is_some() {
@@ -1865,5 +1872,65 @@ mod tests {
         assert_eq!(card.flow[0].kind, rocky_proto::cards::FlowKind::Cmd);
         assert_eq!(card.flow[0].text, "Get-ChildItem");
         assert!(card.flow[0].ok);
+    }
+
+    fn run_bash_pair(
+        tracker: &mut Tracker,
+        r: &RepoInfo,
+        id: &str,
+        pre: (u64, &str, Option<&str>, Option<&str>),
+        post: (u64, &str, Option<&str>, Option<&str>),
+    ) {
+        let mut a = tool_ev("PreToolUse", "S1", None, "Bash", id, None, Some(pre.1));
+        a.cwd = pre.2.map(str::to_owned);
+        a.description = pre.3.map(str::to_owned);
+        tracker.on_event(&a, pre.0, r);
+        let mut b = tool_ev(post.1, "S1", None, "Bash", id, None, None);
+        b.cwd = post.2.map(str::to_owned);
+        b.description = post.3.map(str::to_owned);
+        tracker.on_event(&b, post.0, r);
+    }
+
+    #[test]
+    fn tool_window_tracks_pre_cwd_and_backfills_description_only() {
+        let (mut tracker, r) = (Tracker::new(), repo(Some("C:/repo")));
+        tracker.on_event(&ev("UserPromptSubmit", "S1", None), 1_000, &r);
+
+        // b-1: Pre sets cwd, omits desc; PostFailure backfills desc without changing cwd.
+        run_bash_pair(
+            &mut tracker,
+            &r,
+            "b-1",
+            (1_100, "npm test", Some("C:/repo/sub"), None),
+            (
+                1_400,
+                "PostToolUseFailure",
+                Some("C:/repo/other"),
+                Some("Run tests"),
+            ),
+        );
+        // b-2: Pre omits cwd, sets desc; Post neither fills cwd nor overwrites desc.
+        run_bash_pair(
+            &mut tracker,
+            &r,
+            "b-2",
+            (1_500, "cargo test", None, Some("Original desc")),
+            (
+                1_800,
+                "PostToolUse",
+                Some("C:/repo/post-only"),
+                Some("Later desc"),
+            ),
+        );
+
+        let turn = tracker.open_turn(&key("S1", "")).expect("open turn");
+        assert_eq!(turn.windows.len(), 2);
+        assert_eq!(turn.windows[0].cwd.as_deref(), Some("C:/repo/sub"));
+        assert_eq!(turn.windows[0].description.as_deref(), Some("Run tests"));
+        assert_eq!(turn.windows[1].cwd, None);
+        assert_eq!(
+            turn.windows[1].description.as_deref(),
+            Some("Original desc")
+        );
     }
 }

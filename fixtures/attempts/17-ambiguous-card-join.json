@@ -1,0 +1,98 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999900000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000017",
+      "fingerprintV": 2,
+      "signature": ["error: assertion failed"],
+      "excerpt": "Error: assertion failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "fix",
+      "id": "x1",
+      "ts": 1699999960000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "failureIds": ["f1"],
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "cards": [
+    {
+      "v": 1,
+      "card_id": "card-17",
+      "rev": 1,
+      "root": "/app",
+      "session_id": "sess-17",
+      "agent_id": "",
+      "started_ms": 1699999890000,
+      "ended_ms": 1699999970000,
+      "prompt": "fix failing tests",
+      "blocks": [
+        {
+          "seq": 1,
+          "path": "src/app.ts",
+          "labels": [{ "id": "body_changed" }],
+          "importance": "medium"
+        }
+      ],
+      "flow": [
+        {
+          "kind": "cmd",
+          "text": "npm test",
+          "ok": false,
+          "dur_ms": 1000,
+          "seqs": [],
+          "exit_code": 1,
+          "start_ms": 1699999898000,
+          "end_ms": 1699999899000
+        },
+        {
+          "kind": "cmd",
+          "text": "npm test",
+          "ok": false,
+          "dur_ms": 1000,
+          "seqs": [],
+          "exit_code": 1,
+          "start_ms": 1699999899500,
+          "end_ms": 1699999900500
+        },
+        {
+          "kind": "edit",
+          "text": "src/app.ts",
+          "ok": true,
+          "dur_ms": 500,
+          "seqs": [1],
+          "start_ms": 1699999920000,
+          "end_ms": 1699999920500
+        }
+      ],
+      "flow_more": 0,
+      "coverage": { "state": "full", "reasons": [] }
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["passed"],
+        "changes": ["unknown"]
+      }
+    ]
+  }
+}

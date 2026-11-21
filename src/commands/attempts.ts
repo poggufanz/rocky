@@ -1,4 +1,5 @@
 import {
+  buildProblems,
   selectProblemEntries,
   type Attempt,
   type AttemptOutcome,
@@ -11,8 +12,14 @@ import {
   loadDurableMemorySnapshot,
   type MemoryQueries,
 } from "../core/memory-query.js";
-import { isCompleteMemoryCoverage, tailReadable } from "../core/memory-read.js";
+import {
+  isCompleteMemoryCoverage,
+  tailReadable,
+  type MemoryCoverage,
+  type MemoryRecord,
+} from "../core/memory-read.js";
 import { sanitizeTestimony } from "../core/redact.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { detail, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 import { formatUtcDate, formatUtcDateTime } from "./stats.js";
@@ -23,18 +30,67 @@ const MAX_LIMIT = 50;
 const MAX_CMD_DISPLAY_WIDTH = 24;
 const OUTCOME_COLUMN_WIDTH = 18;
 const FOOTER_TEXT = "Rocky records order, not cause.";
+const CARD_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/u;
 
 export interface ParsedAttemptsArgs {
   query?: string;
+  card?: string;
   allDirs: boolean;
   limit: number;
   json: boolean;
+}
+
+function parseLimitValue(next: string | undefined): number {
+  if (next === undefined) {
+    throw new Error("--limit requires an integer between 1 and 50");
+  }
+  if (!/^\d+$/u.test(next)) {
+    throw new Error("--limit must be an integer between 1 and 50");
+  }
+  const parsed = Number(next);
+  if (!Number.isSafeInteger(parsed) || parsed < MIN_LIMIT || parsed > MAX_LIMIT) {
+    throw new Error("--limit must be an integer between 1 and 50");
+  }
+  return parsed;
+}
+
+function parseCardValue(next: string | undefined): string {
+  if (next === undefined || next.startsWith("-")) {
+    throw new Error("--card requires a card id");
+  }
+  if (!CARD_ID_RE.test(next)) {
+    throw new Error("--card id must match ^[A-Za-z0-9._:-]{1,128}$");
+  }
+  return next;
+}
+
+function finalizeAttemptsArgs(
+  queryTokens: readonly string[],
+  card: string | undefined,
+  allDirs: boolean,
+  limit: number | undefined,
+  json: boolean,
+): ParsedAttemptsArgs {
+  const joined = queryTokens.join(" ").trim();
+  if (card !== undefined) {
+    if (joined.length > 0) throw new Error("--card cannot be combined with a query");
+    if (allDirs) throw new Error("--card cannot be combined with --all-dirs");
+    if (!json) throw new Error("--card requires --json");
+  }
+  return {
+    ...(joined.length > 0 ? { query: joined } : {}),
+    ...(card !== undefined ? { card } : {}),
+    allDirs,
+    limit: limit ?? DEFAULT_LIMIT,
+    json,
+  };
 }
 
 export function parseAttemptsArgs(argv: readonly string[]): ParsedAttemptsArgs {
   let allDirs = false;
   let json = false;
   let limit: number | undefined;
+  let card: string | undefined;
   let parsingOptions = true;
   const queryTokens: string[] = [];
 
@@ -56,18 +112,13 @@ export function parseAttemptsArgs(argv: readonly string[]): ParsedAttemptsArgs {
     }
     if (parsingOptions && token === "--limit") {
       if (limit !== undefined) throw new Error("repeated option: --limit");
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new Error("--limit requires an integer between 1 and 50");
-      }
-      if (!/^\d+$/u.test(next)) {
-        throw new Error("--limit must be an integer between 1 and 50");
-      }
-      const parsed = Number(next);
-      if (!Number.isSafeInteger(parsed) || parsed < MIN_LIMIT || parsed > MAX_LIMIT) {
-        throw new Error("--limit must be an integer between 1 and 50");
-      }
-      limit = parsed;
+      limit = parseLimitValue(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (parsingOptions && token === "--card") {
+      if (card !== undefined) throw new Error("repeated option: --card");
+      card = parseCardValue(argv[i + 1]);
       i += 1;
       continue;
     }
@@ -77,13 +128,7 @@ export function parseAttemptsArgs(argv: readonly string[]): ParsedAttemptsArgs {
     queryTokens.push(token);
   }
 
-  const joined = queryTokens.join(" ").trim();
-  return {
-    ...(joined.length > 0 ? { query: joined } : {}),
-    allDirs,
-    limit: limit ?? DEFAULT_LIMIT,
-    json,
-  };
+  return finalizeAttemptsArgs(queryTokens, card, allDirs, limit, json);
 }
 
 export function formatAttemptOutcome(outcome: AttemptOutcome): string {
@@ -417,6 +462,84 @@ export async function writeStdoutQuietEpipe(
   });
 }
 
+async function selectCardAttempts(
+  records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
+  opts: { cardId: string; limit: number; now: number; cwd: string; home: string; toolText: boolean },
+): Promise<{ set: ProblemSet; entries: ProblemEntry[] }> {
+  const [{ joinAttemptCards }, { findCardById, makeCardsFor }, { isPathInside }] = await Promise.all([
+    import("../core/attempt-cards.js"),
+    import("../desk/cards-read.js"),
+    import("../desk/cards-record.js"),
+  ]);
+
+  const baseSet = buildProblems(records, coverage, { now: opts.now, cwd: opts.cwd });
+  let card: ReturnType<typeof findCardById>;
+  try {
+    card = findCardById(opts.cardId, { home: opts.home, toolText: opts.toolText });
+  } catch {
+    card = undefined;
+  }
+  if (card === undefined) {
+    return { set: baseSet, entries: [] };
+  }
+  const inRoot = baseSet.entries.filter((entry) => isPathInside(entry.cwd, card.root));
+  const cardsFor = makeCardsFor({ home: opts.home, toolText: opts.toolText });
+  const joined = joinAttemptCards(inRoot, records, cardsFor, { platform: process.platform });
+  const matched = joined.entries
+    .filter((entry) =>
+      entry.attempts.some((attempt) => joined.matchedCardByFailureId.get(attempt.failureId) === card.card_id),
+    )
+    .sort(
+      (a, b) =>
+        b.lastSeenTs - a.lastSeenTs || (a.problemId < b.problemId ? -1 : a.problemId > b.problemId ? 1 : 0),
+    )
+    .slice(0, opts.limit);
+  return { set: baseSet, entries: matched };
+}
+
+async function selectAndJoinAttempts(
+  records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
+  parsed: ParsedAttemptsArgs,
+  now: number,
+  cwd: string,
+): Promise<{ set: ProblemSet; entries: ProblemEntry[]; cutoffTs?: number }> {
+  const [{ joinAttemptCards }, { makeCardsFor, toolTextAllowed }] = await Promise.all([
+    import("../core/attempt-cards.js"),
+    import("../desk/cards-read.js"),
+  ]);
+
+  const home = resolveRockyPaths().home;
+  const toolText = toolTextAllowed(home);
+
+  if (parsed.card !== undefined) {
+    return selectCardAttempts(records, coverage, {
+      cardId: parsed.card,
+      limit: parsed.limit,
+      now,
+      cwd,
+      home,
+      toolText,
+    });
+  }
+
+  const { set, entries, cutoffTs } = selectProblemEntries(records, coverage, {
+    now,
+    cwd,
+    query: parsed.query,
+    allDirs: parsed.allDirs,
+    limit: parsed.limit,
+  });
+  const cardsFor = makeCardsFor({ home, toolText });
+  const joined = joinAttemptCards(entries, records, cardsFor, { platform: process.platform });
+  return {
+    set,
+    entries: joined.entries,
+    ...(cutoffTs === undefined ? {} : { cutoffTs }),
+  };
+}
+
 export async function attempts(
   argv: readonly string[],
   deps?: { memory?: MemoryQueries; now?: number; cwd?: string; exit?: (code: number) => void },
@@ -439,13 +562,13 @@ export async function attempts(
     return 1;
   }
 
-  const { set: baseSet, entries, cutoffTs } = selectProblemEntries(snapshot.records, snapshot.coverage, {
+  const { set: baseSet, entries, cutoffTs } = await selectAndJoinAttempts(
+    snapshot.records,
+    snapshot.coverage,
+    parsed,
     now,
     cwd,
-    query: parsed.query,
-    allDirs: parsed.allDirs,
-    limit: parsed.limit,
-  });
+  );
 
   const sanitizedEntries = entries.map(sanitizeProblemEntry);
 

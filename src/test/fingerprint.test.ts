@@ -15,6 +15,7 @@ import {
   retrievalTokens,
   signatureLines,
   tokens,
+  unwrapRockyRun,
 } from "../core/fingerprint.js";
 
 test("normalizeLine masks paths and numbers", () => {
@@ -307,5 +308,25 @@ test("tokens and retrievalTokens extract constituent parts from CamelCase and Pa
   assert.ok(q.has("region"));
   assert.ok(q.has("inventory"));
   assert.ok(q.has("transfer"));
+});
+
+test("unwrapRockyRun unwraps single complete quoted rocky run invocations and leaves others unchanged", () => {
+  assert.equal(unwrapRockyRun('rocky run "npm test"'), "npm test");
+  assert.equal(unwrapRockyRun("rocky run 'npm test'"), "npm test");
+  assert.equal(unwrapRockyRun('rocky.cmd run "npm test"'), "npm test");
+  assert.equal(unwrapRockyRun('rocky.exe run "npm test"'), "npm test");
+  assert.equal(unwrapRockyRun('rocky.ps1 run "npm test"'), "npm test");
+  assert.equal(unwrapRockyRun('/usr/local/bin/rocky run "npm test"'), "npm test");
+  assert.equal(unwrapRockyRun('rocky run "echo \\"hi\\""'), 'echo "hi"');
+  assert.equal(unwrapRockyRun("npm test"), "npm test");
+  assert.equal(unwrapRockyRun("rocky run npm test"), "rocky run npm test");
+  assert.equal(unwrapRockyRun("rocky run npm"), "rocky run npm");
+  assert.equal(unwrapRockyRun('rocky run "npm test'), 'rocky run "npm test');
+  assert.equal(unwrapRockyRun('rocky run\n"npm test"'), 'rocky run\n"npm test"');
+  assert.equal(unwrapRockyRun('rocky run "npm\ntest"'), 'rocky run "npm\ntest"');
+  assert.equal(unwrapRockyRun('rocky run "a""b"'), 'rocky run "a""b"');
+  assert.equal(unwrapRockyRun('rocky run "echo $HOME"'), 'rocky run "echo $HOME"');
+  assert.equal(unwrapRockyRun('rocky watch "x"'), 'rocky watch "x"');
+  assert.equal(unwrapRockyRun('cd a && rocky run "x"'), 'cd a && rocky run "x"');
 });
 

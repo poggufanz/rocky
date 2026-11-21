@@ -1396,6 +1396,11 @@ mod tests {
                 seqs: Vec::new(),
                 exit_code: None,
                 error: None,
+                start_ms: None,
+                end_ms: None,
+                cwd: None,
+                tool_use_id: None,
+                desc: None,
             })
             .collect()
     }

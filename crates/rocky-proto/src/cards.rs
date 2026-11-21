@@ -220,6 +220,18 @@ pub struct FlowStep {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
+    /// PreToolUse cwd, omitted when it equals the card root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// Bounded tool `description`; absent under `desk/tool-text-off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
 }
 
 /// Detected behavioral pattern across a card's execution flow.
@@ -579,6 +591,90 @@ mod tests {
             !serialized.contains("error"),
             "unexpected error key: {serialized}"
         );
+    }
+
+    #[test]
+    fn old_v1_card_json_round_trips_byte_identical() {
+        // Serialized v1 card from rocky-desk card_detail_model::tests::timeline_steps_with_subs_and_facts
+        // with legacy cmd and edit flow steps (no start_ms, end_ms, cwd, tool_use_id, or desc keys).
+        let old_line = concat!(
+            r#"{"v":1,"card_id":"c1","rev":1,"repo_id":"repo-1","root":"/work/rocky","#,
+            r#""main_root":"/work/rocky","branch":"feat/cards","session_id":"sess-1","agent_id":"","#,
+            r#""agent_type":"","parent_card_id":null,"started_ms":1000,"ended_ms":90000,"#,
+            r#""status":"done","prompt":"Fix discount calculation","prompt_truncated":false,"#,
+            r#""importance":"medium","blocks":["#,
+            r#"{"seq":1,"path":"src/auth.rs","symbol":{"kind":"function","name":"login","container":null,"exported":false},"labels":[{"id":"guard_added","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-1"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":42,"added":3,"removed":1,"quote":null},"#,
+            r#"{"seq":2,"path":"src/auth.rs","symbol":null,"labels":[{"id":"return_changed","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-2"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":null,"added":3,"removed":1,"quote":null},"#,
+            r#"{"seq":3,"path":"src/auth.rs","symbol":null,"labels":[{"id":"body_changed","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-3"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":null,"added":null,"removed":null,"quote":null},"#,
+            r#"{"seq":4,"path":"src/auth.rs","symbol":null,"labels":[{"id":"loop_added","args":{}}],"importance":"medium","via":"edit","tool_use_ids":["tu-4"],"bash":null,"before":"sha-before","after":"sha-after","recorded":true,"line":99,"added":3,"removed":1,"quote":null}"#,
+            r#"],"more_count":0,"flow":["#,
+            r#"{"kind":"cmd","text":"cargo test\n-p rocky-desk","ok":true,"dur_ms":8000,"seqs":[]},"#,
+            r#"{"kind":"edit","text":"src/auth.rs › login","ok":false,"dur_ms":65000,"seqs":[1,999,2,3,4]}"#,
+            r#"],"flow_more":0,"outside_count":0,"coverage":{"state":"full","reasons":[]}}"#,
+        );
+        let card: Card = serde_json::from_str(old_line).expect("deserialize old v1 card line");
+        assert_eq!(card.blocks.len(), 4);
+        assert_eq!(card.flow.len(), 2);
+        for step in &card.flow {
+            assert_eq!(step.start_ms, None);
+            assert_eq!(step.end_ms, None);
+            assert_eq!(step.cwd, None);
+            assert_eq!(step.tool_use_id, None);
+            assert_eq!(step.desc, None);
+        }
+        let reserialized = serde_json::to_string(&card).expect("reserialize old v1 card");
+        assert_eq!(reserialized, old_line);
+    }
+
+    #[test]
+    fn flow_step_with_all_five_new_fields_round_trips() {
+        let step = FlowStep {
+            kind: FlowKind::Cmd,
+            text: "npm test".to_string(),
+            ok: false,
+            dur_ms: 300,
+            seqs: Vec::new(),
+            exit_code: Some(1),
+            error: Some("Error: boom".to_string()),
+            start_ms: Some(1_100),
+            end_ms: Some(1_400),
+            cwd: Some("/repo/packages/api".to_string()),
+            tool_use_id: Some("toolu_01abc".to_string()),
+            desc: Some("Run tests".to_string()),
+        };
+        let encoded = serde_json::to_string(&step).expect("serialize FlowStep");
+        let decoded: FlowStep = serde_json::from_str(&encoded).expect("deserialize FlowStep");
+        assert_eq!(decoded, step);
+    }
+
+    #[test]
+    fn flow_step_with_only_tool_use_id_omits_other_optional_keys() {
+        let step = FlowStep {
+            kind: FlowKind::Edit,
+            text: "src/a.ts".to_string(),
+            ok: true,
+            dur_ms: 50,
+            seqs: vec![1],
+            exit_code: None,
+            error: None,
+            start_ms: None,
+            end_ms: None,
+            cwd: None,
+            tool_use_id: Some("toolu_only".to_string()),
+            desc: None,
+        };
+        let val = serde_json::to_value(&step).expect("serialize FlowStep to Value");
+        let obj = val.as_object().expect("FlowStep serializes as JSON object");
+        assert_eq!(
+            obj.get("tool_use_id").and_then(|v| v.as_str()),
+            Some("toolu_only")
+        );
+        for omitted in ["start_ms", "end_ms", "cwd", "desc"] {
+            assert!(
+                !obj.contains_key(omitted),
+                "expected {omitted:?} to be omitted, got: {val}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { posix, win32 } from "node:path";
 import type { Attempt, AttemptOutcome, ProblemEntry } from "../core/attempts.js";
+import { isRepoRelativeBlockPath } from "../core/block-paths.js";
 import type { Exposure } from "../core/config-read.js";
 import {
   MAX_FIELD_BYTES,
@@ -74,10 +75,14 @@ function sliceCodePoints(
   return chars.slice(0, maxCodePoints).join("");
 }
 
+function isParentEscape(rel: string): boolean {
+  return rel === ".." || rel.startsWith("../") || rel.startsWith("..\\");
+}
+
 function isContainedPosixRelative(rel: string): boolean {
   return (
     rel.length > 0 &&
-    !rel.startsWith("..") &&
+    !isParentEscape(rel) &&
     !posix.isAbsolute(rel) &&
     Buffer.byteLength(rel, "utf8") <= MAX_FIELD_BYTES
   );
@@ -95,63 +100,109 @@ function projectHexOrOpaqueId(
     : value;
 }
 
-function sanitizeFileInsideCwd(cwd: string, filePath: string): string | undefined {
+function sanitizeObservedFile(filePath: string): string | undefined {
+  if (filePath.trim().length === 0 || CONTROL_CHARS_RE.test(filePath)) return undefined;
+  if (!isRepoRelativeBlockPath(filePath)) return undefined;
+  if (Buffer.byteLength(filePath, "utf8") > MAX_FIELD_BYTES) return undefined;
+  return filePath;
+}
+
+function resolveWindowsBase(resolvedCwd: string, root: string | undefined): string {
+  if (root === undefined || (!WINDOWS_DRIVE_ABS_RE.test(root) && !UNC_PREFIX_RE.test(root))) {
+    return resolvedCwd;
+  }
+  const candidate = win32.resolve(root);
+  const rel = win32.relative(candidate, resolvedCwd);
+  if (win32.isAbsolute(rel) || rel === ".." || rel.startsWith("..\\")) return resolvedCwd;
+  return candidate;
+}
+
+function resolvePosixBase(resolvedCwd: string, root: string | undefined): string {
+  if (root === undefined || !posix.isAbsolute(root) || WINDOWS_DRIVE_PREFIX_RE.test(root) || root.startsWith("//")) {
+    return resolvedCwd;
+  }
+  const candidate = posix.resolve(root);
+  const rel = posix.relative(candidate, resolvedCwd);
+  if (posix.isAbsolute(rel) || rel === ".." || rel.startsWith("../")) return resolvedCwd;
+  return candidate;
+}
+
+function sanitizeWindowsTestimonyFile(
+  cwd: string,
+  root: string | undefined,
+  filePath: string,
+): string | undefined {
+  if (WINDOWS_DRIVE_PREFIX_RE.test(filePath) && !WINDOWS_DRIVE_ABS_RE.test(filePath)) {
+    return undefined;
+  }
+  if ((filePath.startsWith("/") || filePath.startsWith("\\")) && !UNC_PREFIX_RE.test(filePath)) {
+    return undefined;
+  }
+  const resolvedCwd = win32.resolve(cwd);
+  const resolvedBase = resolveWindowsBase(resolvedCwd, root);
+  const resolvedFile = win32.resolve(resolvedCwd, filePath);
+  const rel = win32.relative(resolvedBase, resolvedFile);
+  if (rel.length === 0 || win32.isAbsolute(rel)) return undefined;
+  const posixRel = rel.replaceAll("\\", "/");
+  if (
+    isParentEscape(posixRel) ||
+    posix.isAbsolute(posixRel) ||
+    WINDOWS_DRIVE_PREFIX_RE.test(posixRel) ||
+    Buffer.byteLength(posixRel, "utf8") > MAX_FIELD_BYTES
+  ) {
+    return undefined;
+  }
+  return posixRel;
+}
+
+function sanitizePosixTestimonyFile(
+  cwd: string,
+  root: string | undefined,
+  filePath: string,
+): string | undefined {
+  if (
+    WINDOWS_DRIVE_PREFIX_RE.test(filePath) ||
+    filePath.startsWith("\\") ||
+    filePath.startsWith("//")
+  ) {
+    return undefined;
+  }
+  const resolvedCwd = posix.resolve(cwd);
+  const resolvedBase = resolvePosixBase(resolvedCwd, root);
+  const origRel = posix.relative(resolvedBase, posix.resolve(resolvedCwd, filePath));
+  if (!isContainedPosixRelative(origRel)) {
+    return undefined;
+  }
+  if (!filePath.includes("\\")) {
+    return origRel;
+  }
+  const normalized = filePath.replaceAll("\\", "/");
+  const normRel = posix.relative(resolvedBase, posix.resolve(resolvedCwd, normalized));
+  if (!isContainedPosixRelative(normRel)) {
+    return undefined;
+  }
+  return normRel;
+}
+
+function sanitizeTestimonyFile(
+  location: { cwd: string; root: string | undefined },
+  filePath: string,
+): string | undefined {
+  const { cwd, root } = location;
   if (cwd.length === 0 || filePath.length === 0 || filePath.trim().length === 0) return undefined;
   if (filePath.length > MAX_FIELD_BYTES * 2 || CONTROL_CHARS_RE.test(filePath)) return undefined;
-
   if (WINDOWS_DRIVE_ABS_RE.test(cwd) || UNC_PREFIX_RE.test(cwd)) {
-    if (WINDOWS_DRIVE_PREFIX_RE.test(filePath) && !WINDOWS_DRIVE_ABS_RE.test(filePath)) {
-      return undefined;
-    }
-    if ((filePath.startsWith("/") || filePath.startsWith("\\")) && !UNC_PREFIX_RE.test(filePath)) {
-      return undefined;
-    }
-    const resolvedCwd = win32.resolve(cwd);
-    const resolvedFile = win32.resolve(resolvedCwd, filePath);
-    const rel = win32.relative(resolvedCwd, resolvedFile);
-    if (rel.length === 0 || win32.isAbsolute(rel)) return undefined;
-    const posixRel = rel.replaceAll("\\", "/");
-    if (
-      posixRel.startsWith("..") ||
-      posix.isAbsolute(posixRel) ||
-      WINDOWS_DRIVE_PREFIX_RE.test(posixRel) ||
-      Buffer.byteLength(posixRel, "utf8") > MAX_FIELD_BYTES
-    ) {
-      return undefined;
-    }
-    return posixRel;
+    return sanitizeWindowsTestimonyFile(cwd, root, filePath);
   }
-
   if (posix.isAbsolute(cwd)) {
-    if (
-      WINDOWS_DRIVE_PREFIX_RE.test(filePath) ||
-      filePath.startsWith("\\") ||
-      filePath.startsWith("//")
-    ) {
-      return undefined;
-    }
-    const resolvedCwd = posix.resolve(cwd);
-    const origRel = posix.relative(resolvedCwd, posix.resolve(resolvedCwd, filePath));
-    if (!isContainedPosixRelative(origRel)) {
-      return undefined;
-    }
-    if (!filePath.includes("\\")) {
-      return origRel;
-    }
-    const normalized = filePath.replaceAll("\\", "/");
-    const normRel = posix.relative(resolvedCwd, posix.resolve(resolvedCwd, normalized));
-    if (!isContainedPosixRelative(normRel)) {
-      return undefined;
-    }
-    return normRel;
+    return sanitizePosixTestimonyFile(cwd, root, filePath);
   }
-
   return undefined;
 }
 
 function projectChanges(
   changes: Attempt["changes"],
-  cwd: string,
+  location: { cwd: string; root: string | undefined },
   exposure: Exposure,
 ): ProjectedAttempt["changes"] {
   if (changes.state === "unknown") {
@@ -171,7 +222,9 @@ function projectChanges(
     }
   } else {
     for (const file of changes.files) {
-      const safeRel = sanitizeFileInsideCwd(cwd, file);
+      const safeRel = changes.state === "observed"
+        ? sanitizeObservedFile(file)
+        : sanitizeTestimonyFile(location, file);
       if (safeRel === undefined) {
         more += 1;
       } else if (files.length < MAX_CHANGES_FILES) {
@@ -195,7 +248,7 @@ function projectChanges(
 
 function projectAttempt(
   attempt: Attempt,
-  cwd: string,
+  location: { cwd: string; root: string | undefined },
   exposure: Exposure,
   attemptPath: string,
   truncation: Truncation,
@@ -205,7 +258,7 @@ function projectAttempt(
     ts: attempt.ts,
     observedCommand: projectText(attempt.cmd, exposure, `${attemptPath}.observedCommand`, truncation),
     outcome: attempt.outcome,
-    changes: projectChanges(attempt.changes, cwd, exposure),
+    changes: projectChanges(attempt.changes, location, exposure),
   };
 
   if (attempt.outcomeTs !== undefined) {
@@ -237,6 +290,7 @@ export function projectProblemEntries(
   exposure: Exposure,
   maxAttempts: number,
   truncation: Truncation,
+  rootForCwd?: (cwd: string) => string | undefined,
 ): ProjectedProblemEntry[] {
   const keepCount = Number.isSafeInteger(maxAttempts) && maxAttempts >= 0
     ? maxAttempts
@@ -252,10 +306,11 @@ export function projectProblemEntries(
       projectText(line, exposure, `${entryPath}.signature[${lineIndex}]`, truncation),
     );
 
+    const location = { cwd: entry.cwd, root: rootForCwd?.(entry.cwd) };
     const start = Math.max(0, entry.attempts.length - keepCount);
     const keptAttempts = entry.attempts.slice(start);
     const attempts = keptAttempts.map((attempt, attemptIndex) =>
-      projectAttempt(attempt, entry.cwd, exposure, `${entryPath}.attempts[${attemptIndex}]`, truncation),
+      projectAttempt(attempt, location, exposure, `${entryPath}.attempts[${attemptIndex}]`, truncation),
     );
 
     const projected: ProjectedProblemEntry = {

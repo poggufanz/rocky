@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { collapseDotSegments, isAbsOrTildeBlockPath } from "../core/block-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
 
 const UTF8_FATAL_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -52,6 +53,11 @@ export interface StoredFlowStep {
   seqs: number[];
   exit_code?: number | null;
   error?: string | null;
+  start_ms?: number;
+  end_ms?: number;
+  cwd?: string;
+  tool_use_id?: string;
+  desc?: string;
 }
 
 export interface StoredCoverage {
@@ -171,6 +177,13 @@ function isValidFlowStep(value: unknown): value is StoredFlowStep {
   }
   if (value.exit_code !== undefined && value.exit_code !== null && !isSafeInt(value.exit_code)) return false;
   if (value.error !== undefined && value.error !== null && typeof value.error !== "string") return false;
+  if (value.start_ms !== undefined && !isSafeNonNegInt(value.start_ms)) delete value.start_ms;
+  if (value.end_ms !== undefined && !isSafeNonNegInt(value.end_ms)) delete value.end_ms;
+  if (value.cwd !== undefined && (typeof value.cwd !== "string" || value.cwd.length === 0)) delete value.cwd;
+  if (value.tool_use_id !== undefined && (typeof value.tool_use_id !== "string" || value.tool_use_id.length === 0)) {
+    delete value.tool_use_id;
+  }
+  if (value.desc !== undefined && typeof value.desc !== "string") delete value.desc;
   return true;
 }
 
@@ -241,64 +254,9 @@ export function expandTilde(pathValue: string, homeDir: string = homedir()): str
   return pathValue;
 }
 
-export function collapseDotSegments(rawPath: string): { prefix: string; segments: string[]; hadEscape: boolean } {
-  const forward = rawPath.replace(/\\/g, "/");
-  let prefix = "";
-  let rest = forward;
-
-  const unc = forward.match(/^(\/\/[^/]+\/[^/]+)(?:\/(.*))?$/);
-  if (unc) {
-    prefix = `${unc[1]}/`;
-    rest = unc[2] ?? "";
-  } else {
-    const drive = forward.match(/^([a-zA-Z]:)(?:\/(.*))?$/);
-    if (drive) {
-      prefix = `${drive[1]}/`;
-      rest = drive[2] ?? "";
-    } else if (forward.startsWith("/")) {
-      prefix = "/";
-      rest = forward.slice(1);
-    }
-  }
-
-  const segments: string[] = [];
-  let hadEscape = false;
-  for (const part of rest.split("/")) {
-    if (part === "" || part === ".") continue;
-    if (part === "..") {
-      if (segments.length > 0) {
-        segments.pop();
-      } else {
-        hadEscape = true;
-      }
-      continue;
-    }
-    segments.push(part);
-  }
-  return { prefix, segments, hadEscape };
-}
-
 export function normalizeAbsForPlatform(rawAbs: string, platform: NodeJS.Platform): string {
   const { prefix, segments } = collapseDotSegments(rawAbs);
   return canonicalPath(`${prefix}${segments.join("/")}`, { platform });
-}
-
-export function normalizeRepoBlockPath(rawPath: string, platform: NodeJS.Platform): string | undefined {
-  const { prefix, segments, hadEscape } = collapseDotSegments(rawPath);
-  if (prefix !== "" || hadEscape || segments.length === 0) return undefined;
-  const joined = segments.join("/");
-  return platform === "win32" ? joined.toLowerCase() : joined;
-}
-
-export function isAbsOrTildeBlockPath(blockPath: string): boolean {
-  return (
-    blockPath === "~" ||
-    blockPath.startsWith("~/") ||
-    blockPath.startsWith("~\\") ||
-    /^[a-zA-Z]:[\\/]/.test(blockPath) ||
-    blockPath.startsWith("/") ||
-    blockPath.startsWith("\\")
-  );
 }
 
 export type CardLine =
