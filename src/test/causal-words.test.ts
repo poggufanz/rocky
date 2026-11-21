@@ -45,3 +45,11 @@ test("matches the Rust rule", () => {
   assert.equal(causalWordViolations(["Edited in order to pass"]).length, 1);
   assert.equal(causalWordViolations(["KARENA, edit"]).length, 1);
 });
+
+test("counts repeated English phrase hits", () => {
+  assert.equal(causalWordViolations(["Fixed, then fixed"]).length, 2);
+});
+
+test("keeps Unicode Alphabetic combining marks inside tokens like Rust is_alphanumeric", () => {
+  assert.deepEqual(causalWordViolations(["karena\u0345"]), []);
+});
