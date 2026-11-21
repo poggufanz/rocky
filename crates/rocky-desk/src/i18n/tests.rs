@@ -282,23 +282,21 @@ fn card_catalog_renders_every_sample_in_both_languages() {
 
 #[test]
 fn card_templates_have_no_causal_words() {
-    let id_banned = [
-        "untuk",
-        "agar",
-        "supaya",
-        "karena",
-        "sehingga",
-        "diperbaiki",
-        "memperbaiki",
-    ];
-    let en_banned = [
-        "because",
-        "so that",
-        "in order to",
-        "to ensure",
-        "fixed",
-        "resolved",
-    ];
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../fixtures/causal-words.json"))
+            .expect("valid causal-words.json");
+    let id_banned: Vec<&str> = fixture["id_words"]
+        .as_array()
+        .expect("id_words array")
+        .iter()
+        .map(|v| v.as_str().expect("id_words string"))
+        .collect();
+    let en_banned: Vec<&str> = fixture["en_phrases"]
+        .as_array()
+        .expect("en_phrases array")
+        .iter()
+        .map(|v| v.as_str().expect("en_phrases string"))
+        .collect();
 
     let mut rendered = Vec::new();
     for lang in [UiLang::En, UiLang::Id] {
@@ -326,7 +324,7 @@ fn card_templates_have_no_causal_words() {
                 "banned ID word `{word}` in `{text}`"
             );
         }
-        for phrase in en_banned {
+        for phrase in &en_banned {
             assert!(
                 !lower.contains(phrase),
                 "banned EN phrase `{phrase}` in `{text}`"
