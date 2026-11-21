@@ -434,6 +434,52 @@ test("observed changes count escaping block paths in more for both slash spellin
   });
 });
 
+test("observed changes emit only repo-relative normalized paths across drive, dot-prefix, tilde, and traversal inputs", () => {
+  const outside = [
+    "D:private.ts",
+    "D:/outside/x.ts",
+    "./D:/outside/x.ts",
+    "./D:private.ts",
+    "./~/x.ts",
+    "~/x.ts",
+    "/abs/x.ts",
+    "../x.ts",
+    "..\\x.ts",
+    "src/../../x.ts",
+    "~/../escaped.ts",
+    "D:sub/../escaped.ts",
+  ];
+  const blocks = [
+    makeBlock(1, "src/a.ts"),
+    makeBlock(2, "./src/a.ts"),
+    ...outside.map((p, i) => makeBlock(i + 3, p)),
+  ];
+  const seqs = blocks.map((b) => b.seq);
+
+  for (const [platform, cwd] of [["linux", "/app"], ["win32", "C:/app"]] as const) {
+    const f1 = makeFailure({ id: "f1", ts: T, cwd, platform, resolvedBy: "x1" });
+    const x1 = makeFix({ id: "x1", ts: T + 60_000, cwd, platform, failureIds: ["f1"] });
+    const card = makeCard(`card-proj-${platform}`, {
+      root: cwd,
+      blocks,
+      flow: [
+        makeCmdStep({ start_ms: T - 500, end_ms: T }),
+        makeEditStep(seqs, T + 10_000, T + 12_000),
+      ],
+    });
+    const records: MemoryRecord[] = [f1, x1];
+    const entries = buildProblems(records, completeCoverage(records.length), { now: NOW, platform }).entries;
+    const joined = joinAttemptCards(entries, records, cardsJoin([card]), { platform });
+    assert.deepEqual(joined.entries[0]!.attempts[0]!.changes, {
+      state: "observed",
+      files: ["src/a.ts"],
+      more: outside.length,
+      cardId: `card-proj-${platform}`,
+      partial: false,
+    });
+  }
+});
+
 function observedPartialFor(
   cards: readonly StoredCard[],
   opts: { complete?: boolean; fixTs?: number } = {},

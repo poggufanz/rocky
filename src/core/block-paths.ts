@@ -58,3 +58,11 @@ export function isAbsOrTildeBlockPath(blockPath: string): boolean {
     blockPath.startsWith("\\")
   );
 }
+
+export function isRepoRelativeBlockPath(blockPath: string): boolean {
+  if (blockPath.length === 0) return false;
+  if (isAbsOrTildeBlockPath(blockPath)) return false;
+  if (/^[A-Za-z]:/.test(blockPath)) return false;
+  if (blockPath.split(/[\\/]/).includes("..")) return false;
+  return true;
+}

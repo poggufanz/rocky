@@ -1,6 +1,6 @@
 import type { StoredBlock, StoredCard, StoredFlowStep } from "../desk/cards-record.js";
 import type { Attempt, ProblemEntry } from "./attempts.js";
-import { isAbsOrTildeBlockPath, normalizeRepoBlockPath } from "./block-paths.js";
+import { isAbsOrTildeBlockPath, isRepoRelativeBlockPath, normalizeRepoBlockPath } from "./block-paths.js";
 import { COMMAND_IDENTITY_VERSION, commandIdentity, unwrapRockyRun } from "./fingerprint.js";
 import { sameCwd, type FailureRecord, type MemoryRecord } from "./memory-read.js";
 import { sanitizeTestimony } from "./redact.js";
@@ -170,6 +170,12 @@ function blocksBySeq(card: StoredCard, cache: Map<StoredCard, Map<number, Stored
   return map;
 }
 
+function projectRepoBlockPath(rawPath: string): string | undefined {
+  if (isAbsOrTildeBlockPath(rawPath) || /^[A-Za-z]:/.test(rawPath)) return undefined;
+  const normalized = normalizeRepoBlockPath(rawPath, "linux");
+  return normalized !== undefined && isRepoRelativeBlockPath(normalized) ? normalized : undefined;
+}
+
 function observedChanges(
   matched: StepRef,
   failure: FailureRecord,
@@ -190,9 +196,7 @@ function observedChanges(
     for (const seq of step.seqs) {
       const block = map.get(seq);
       if (block === undefined || block.path.length === 0) continue;
-      const rel = isAbsOrTildeBlockPath(block.path)
-        ? undefined
-        : normalizeRepoBlockPath(block.path, "linux");
+      const rel = projectRepoBlockPath(block.path);
       if (rel === undefined) {
         seenOutside.add(block.path);
       } else {

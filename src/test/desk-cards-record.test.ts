@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   collapseDotSegments,
   isAbsOrTildeBlockPath,
+  isRepoRelativeBlockPath,
   normalizeRepoBlockPath,
 } from "../core/block-paths.js";
 import {
@@ -254,6 +255,31 @@ test("expandTilde uses the injected home", () => {
 test("isAbsOrTildeBlockPath classifies spellings", () => {
   for (const yes of ["~", "~/a", "~\\a", "C:\\a", "c:/a", "/a", "\\a"]) assert.equal(isAbsOrTildeBlockPath(yes), true, yes);
   for (const no of ["a/b", "./a", "../a"]) assert.equal(isAbsOrTildeBlockPath(no), false, no);
+});
+
+test("isRepoRelativeBlockPath accepts only non-empty non-drive non-escaping relative paths", () => {
+  for (const yes of ["src/a.ts", "a.ts", "src/a..b.ts", "dir/~file.ts"]) {
+    assert.equal(isRepoRelativeBlockPath(yes), true, yes);
+  }
+  for (const no of [
+    "",
+    "~",
+    "~/x.ts",
+    "~\\x.ts",
+    "/abs/x.ts",
+    "\\abs\\x.ts",
+    "//host/share/x.ts",
+    "D:private.ts",
+    "d:private.ts",
+    "D:/outside/x.ts",
+    "D:\\outside\\x.ts",
+    "../x.ts",
+    "..\\x.ts",
+    "src/../../x.ts",
+    "src/..",
+  ]) {
+    assert.equal(isRepoRelativeBlockPath(no), false, no);
+  }
 });
 
 test("isPathInside matches whole segments only", () => {
