@@ -96,11 +96,11 @@ export function speakFailureMemory(
   cmd: string,
   exitCode: number,
   _cwd: string,
-  scope: { historyMayStartEarlier: boolean; linesSkipped?: boolean },
+  scope: { historyMayStartEarlier: boolean; linesSkipped: boolean },
   now = Date.now(),
 ): void {
   const previous = findByFingerprint(memory, fp, now);
-  const partial = scope.historyMayStartEarlier || scope.linesSkipped === true;
+  const partial = scope.historyMayStartEarlier || scope.linesSkipped;
 
   if (previous.length > 0) {
     const first = previous[0];

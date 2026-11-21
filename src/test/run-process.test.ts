@@ -82,7 +82,7 @@ test("run speech discloses cross-directory fix as possible, never strong", () =>
   try {
     // Invocation happens where the fix was learned, but the linked failure
     // came from another cwd; source disclosure must follow the failure.
-    speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, fixCwd, { historyMayStartEarlier: false });
+    speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, fixCwd, { historyMayStartEarlier: false, linesSkipped: false });
   } finally {
     process.stderr.write = original;
   }
@@ -105,7 +105,7 @@ test("run speech ignores a future failure at the captured clock", () => {
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([future], future.fingerprint, future.cmd, 1, future.cwd, { historyMayStartEarlier: false }, now);
+    speakFailureMemory([future], future.fingerprint, future.cmd, 1, future.cwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
   } finally {
     process.stderr.write = original;
   }
@@ -130,7 +130,7 @@ test("run speech shows the top weak association candidate instead of the old no-
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, association], failure.fingerprint, cmd, 67, cwd, { historyMayStartEarlier: false }, now);
+    speakFailureMemory([failure, association], failure.fingerprint, cmd, 67, cwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
   } finally {
     process.stderr.write = original;
   }
@@ -153,7 +153,7 @@ test("run speech keeps the plain no-fix line, byte for byte, when no association
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure], failure.fingerprint, cmd, 67, cwd, { historyMayStartEarlier: false }, now);
+    speakFailureMemory([failure], failure.fingerprint, cmd, 67, cwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
   } finally {
     process.stderr.write = original;
   }
@@ -183,7 +183,7 @@ test("run speech never overrides or duplicates a confirmed fix with an associati
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, fix, association], failure.fingerprint, cmd, 1, cwd, { historyMayStartEarlier: false }, now);
+    speakFailureMemory([failure, fix, association], failure.fingerprint, cmd, 1, cwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
   } finally {
     process.stderr.write = original;
   }
@@ -212,7 +212,7 @@ test("run speech marks a cross-cwd association candidate with a place line and s
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, association], failure.fingerprint, cmd, 67, failureCwd, { historyMayStartEarlier: false }, now);
+    speakFailureMemory([failure, association], failure.fingerprint, cmd, 67, failureCwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
   } finally {
     process.stderr.write = original;
   }
@@ -241,7 +241,7 @@ test("run speech grades an unrecognized FixRecord link basis as the weakest hedg
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, cwd, { historyMayStartEarlier: false }, now);
+    speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, cwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
   } finally {
     process.stderr.write = original;
   }
@@ -270,7 +270,7 @@ test("run speech grades a same-program link with the gap it recorded, never 'jus
     let output = "";
     process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
     try {
-      speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, cwd, { historyMayStartEarlier: false }, now);
+      speakFailureMemory([failure, fix], failure.fingerprint, cmd, 1, cwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
     } finally {
       process.stderr.write = original;
     }
@@ -312,7 +312,7 @@ test("run speech admits a stderr-matched fix may be a different command, not the
   let output = "";
   process.stderr.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stderr.write;
   try {
-    speakFailureMemory([failure, fix], sharedFingerprint, currentCmd, 1, cwd, { historyMayStartEarlier: false }, now);
+    speakFailureMemory([failure, fix], sharedFingerprint, currentCmd, 1, cwd, { historyMayStartEarlier: false, linesSkipped: false }, now);
   } finally {
     process.stderr.write = original;
   }
