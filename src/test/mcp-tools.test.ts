@@ -1082,6 +1082,7 @@ test("custom stats and coverage snapshot primitive fields once and reject hostil
       const values: Record<string, unknown> = {
         version: 1, scanned: 2, skipped: 0, truncated: 0,
         bytesScanned: 10, bytesTotal: 10, complete: true, reason: undefined,
+        window: undefined, startOffset: undefined, oldestTs: undefined,
       };
       if (!(property in values)) throw new Error(`unexpected coverage getter: ${property}`);
       return counted(`coverage.${property}`, values[property], "Bearer TOPSECRET")();
@@ -1107,7 +1108,10 @@ test("custom stats and coverage snapshot primitive fields once and reject hostil
   for (const field of ["failures", "fixEvents", "resolved", "unresolved", "confirmedFixes", "possibleFixes", "triples", "notes", "total"]) {
     assert.equal(reads.get(`stats.${field}`), 1, `stats.${field} getter count`);
   }
-  for (const field of ["version", "scanned", "skipped", "truncated", "bytesScanned", "bytesTotal", "complete", "reason"]) {
+  for (const field of [
+    "version", "scanned", "skipped", "truncated", "bytesScanned", "bytesTotal", "complete", "reason",
+    "window", "startOffset", "oldestTs",
+  ]) {
     assert.equal(reads.get(`coverage.${field}`), 1, `coverage.${field} getter count`);
   }
 

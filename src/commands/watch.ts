@@ -16,7 +16,7 @@ import { describeMemoryCoverage } from "../core/coverage.js";
 import { CANCEL_CODES, runProcess, type ExecOptions, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { recordWatchFailure, type MemoryRecord } from "../core/memory.js";
-import { isCompleteMemoryCoverage, loadMemoryChecked } from "../core/memory-read.js";
+import { loadMemoryChecked, tailReadable } from "../core/memory-read.js";
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
@@ -156,10 +156,10 @@ function unrefTimer(timer: WatchTimer): void {
  * always happens (fix-linking on success needs it regardless of quiet), but
  * the unreadable-memory disclosure is a commentary line, so it's silenced.
  */
-function readMemory(quiet: boolean): MemoryRecord[] | undefined {
+function readMemory(quiet: boolean): { records: MemoryRecord[]; historyMayStartEarlier: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
-    if (!isCompleteMemoryCoverage(loaded.coverage)) {
+    if (!tailReadable(loaded.coverage)) {
       const words = describeMemoryCoverage(loaded.coverage, loaded.records.length, { counts: false });
       const diagnostic = !isVerbose() && words !== undefined
         ? words
@@ -171,7 +171,10 @@ function readMemory(quiet: boolean): MemoryRecord[] | undefined {
       }
       return undefined;
     }
-    return loaded.records;
+    return {
+      records: loaded.records,
+      historyMayStartEarlier: loaded.coverage.window === "tail",
+    };
   } catch {
     if (!quiet) {
       say("Memory file could not be opened. No records were read.");
@@ -222,7 +225,14 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     say(outcomeLine(false, result.durationMs));
     const memory = readMemory(false);
     if (memory !== undefined) {
-      speakFailureMemory(memory, fingerprintCandidates(result.stderr, cmd, result.code), cmd, result.code, cwd);
+      speakFailureMemory(
+        memory.records,
+        fingerprintCandidates(result.stderr, cmd, result.code),
+        cmd,
+        result.code,
+        cwd,
+        { historyMayStartEarlier: memory.historyMayStartEarlier },
+      );
     }
     // Same disclosure as `run`. It sits in this non-quiet block because `--quiet`
     // prints plain facts only. `watch` never overrides runProcess's default `shell: true`.

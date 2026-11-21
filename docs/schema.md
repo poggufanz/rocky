@@ -60,6 +60,40 @@ Aggregates, rankings, and any recomputed views are never written back into
 evidence files. Raw history is the asset; intelligence is a replaceable
 layer.
 
+## Memory coverage
+
+Readers of `memory.jsonl` return a `MemoryCoverage` summary alongside parsed
+records:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `version` | number | Memory format version (`1`). |
+| `scanned` | number | Non-empty lines scanned in the pass. |
+| `skipped` | number | Lines skipped (unparsable, duplicate `id`, unknown `kind`, or larger than `1 MiB`). |
+| `truncated` | number | `0` when the whole file was read; `1` when stopped by a cap or `read-race`. |
+| `bytesScanned` | number | Bytes scanned in the pass (`bytesTotal - startOffset` in tail mode). |
+| `bytesTotal` | number | Total byte length of `memory.jsonl` at the read. |
+| `complete` | boolean | `true` only for a full-file read with `skipped === 0` and no cap or race; always `false` in tail mode. |
+| `reason` | string \| omitted | `"file-size-cap"`, `"record-cap"`, or `"read-race"` when one stopped the read. |
+| `window` | `"tail"` \| omitted | Present only as `"tail"` when the file exceeds the record cap (`10,000` records, or `50,000` on Linux Node 22) or the `32 MiB` byte cap. Omitted in full mode. |
+| `startOffset` | number \| omitted | Byte offset (`0 <= startOffset <= bytesTotal`) where the tail scan began. Present whenever `window === "tail"`, omitted otherwise. |
+| `oldestTs` | number \| omitted | Minimum `ts` across `failure`, `fix`, and `association` records in the kept tail window. Omitted when `window !== "tail"` or when none of those kinds appear in the window. |
+
+Rules for tail reading and `memory.jsonl` appends:
+
+- **Blank lines take no tail slot.** The backward tail scan skips empty lines
+  and ASCII whitespace-only lines (spaces, tabs, `\r`, `\v`, `\f`), whether
+  newline-terminated or at EOF, so only lines holding non-whitespace bytes
+  count against the record cap. CRLF lines and a final line with no trailing
+  newline parse the same as in full mode.
+- **Appends keep the JSONL line boundary.** Under the memory lock, appending to
+  a non-empty `memory.jsonl` checks the last byte and writes a leading `\n`
+  before the new record whenever the file does not already end in `\n`.
+- **Tail snapshots never write the sidecar or cache.** Only non-tail reads
+  within both caps compute a byte witness and populate the in-memory snapshot
+  cache, and `memory.idx.jsonl` maintenance runs only when the transaction
+  remains complete within the caps.
+
 ## Spool v1
 
 Spool files live in `<ROCKY_HOME>/desk/spool/`, one record per file. Name:

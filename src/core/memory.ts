@@ -4,6 +4,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   fstatSync,
   lstatSync,
@@ -38,8 +39,8 @@ import {
 } from "./fingerprint.js";
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
-import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, MAX_SUPPORTED_MEMORY_RECORDS, MEMORY_FORMAT_VERSION, sameCwd } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, tailReadable, windowCovered } from "./memory-read.js";
+import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
@@ -85,7 +86,45 @@ function ensureDir(home: string): void {
   }
 }
 
-function appendUnlocked(record: MemoryRecord, paths: RockyPaths): void {
+interface AppendResult {
+  offset: number;
+  bytesWritten: number;
+}
+
+function descriptorNeedsLeadingNewline(fd: number, size: number): boolean {
+  if (size <= 0) return false;
+  const lastByte = Buffer.allocUnsafe(1);
+  const read = readSync(fd, lastByte, 0, 1, size - 1);
+  if (read !== 1) {
+    throw new Error("Rocky memory boundary check could not read trailing byte");
+  }
+  return lastByte[0] !== 0x0a;
+}
+
+function memoryNeedsLeadingNewline(path: string): boolean {
+  let fd = -1;
+  try {
+    const existing = lstatSync(path);
+    if (!existing.isFile() || existing.isSymbolicLink() || existing.size === 0) return false;
+    const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+    fd = openSync(path, constants.O_RDONLY | noFollow);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.size === 0) return false;
+    return descriptorNeedsLeadingNewline(fd, opened.size);
+  } catch {
+    return true;
+  } finally {
+    if (fd >= 0) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Best effort descriptor close.
+      }
+    }
+  }
+}
+
+function appendUnlocked(record: MemoryRecord, paths: RockyPaths): AppendResult {
   const line = `${JSON.stringify(record)}\n`;
   const encoded = Buffer.from(line, "utf8");
   if (encoded.byteLength > MAX_MEMORY_LINE_BYTES) {
@@ -103,7 +142,7 @@ function appendUnlocked(record: MemoryRecord, paths: RockyPaths): void {
   }
 
   const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-  const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow;
+  const flags = constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | noFollow;
   let fd = -1;
   try {
     fd = openSync(paths.memory, flags, 0o600);
@@ -120,12 +159,21 @@ function appendUnlocked(record: MemoryRecord, paths: RockyPaths): void {
       throw new Error("Rocky memory must be private");
     }
 
+    const needsSeparator = descriptorNeedsLeadingNewline(fd, opened.size);
+    const separatorBytes = needsSeparator ? 1 : 0;
+    let recordOffset = Number.isSafeInteger(opened.size) && opened.size >= 0 ? opened.size : -1;
+    if (needsSeparator && recordOffset >= 0) recordOffset += 1;
+
+    const payload = separatorBytes === 1
+      ? Buffer.concat([Buffer.from([0x0a]), encoded])
+      : encoded;
     let offset = 0;
-    while (offset < encoded.byteLength) {
-      const written = writeSync(fd, encoded, offset, encoded.byteLength - offset);
+    while (offset < payload.byteLength) {
+      const written = writeSync(fd, payload, offset, payload.byteLength - offset);
       if (written <= 0) throw new Error("Rocky memory write made no progress");
       offset += written;
     }
+    return { offset: recordOffset, bytesWritten: payload.byteLength };
   } finally {
     if (fd >= 0) {
       try {
@@ -898,8 +946,12 @@ export interface MemoryTransaction {
   readonly coverage: MemoryCoverage;
   append(record: MemoryRecord): void;
   reload(): readonly MemoryRecord[];
+  /** Reload and require `windowCovered(coverage, now, windowMs)` for link/pending reconciliation. */
+  reloadWindow(windowMs: number): readonly MemoryRecord[];
   /** True only when this append can still be reloaded as a complete snapshot. */
   canAppendComplete(records: readonly MemoryRecord[]): boolean;
+  /** True when fix attribution can append under complete or window-covered tail coverage. */
+  canAppendLinked(records: readonly MemoryRecord[], windowMs: number): boolean;
 }
 
 export interface MemoryTransactionOptions {
@@ -925,6 +977,7 @@ export function withMemoryTransaction<T>(
   let records = initial.records;
   let complete = initial.complete;
   let coverage = initial.coverage;
+  let bytesTotal = initial.coverage.bytesTotal;
   // Writer-side sidecar tracking: file offsets parallel to `records`, seeded
   // from the initial pure load. Appends only ever add at the tail under the
   // triple lock, so old offsets stay valid. Undefined means untrackable: skip
@@ -946,7 +999,8 @@ export function withMemoryTransaction<T>(
     try {
       if (appendedCount === 0 || allOffsets === undefined) return;
       if (!initial.complete || !complete) return;
-      if (records.length > MAX_SUPPORTED_MEMORY_RECORDS) return;
+      const maxRecords = maxSupportedMemoryRecords();
+      if (records.length > maxRecords) return;
       let post: Stats;
       try {
         post = statSync(paths.memory);
@@ -985,9 +1039,18 @@ export function withMemoryTransaction<T>(
         complete: true,
         hasLegacy,
         maxBytes: MAX_MEMORY_FILE_BYTES,
-        maxRecords: MAX_SUPPORTED_MEMORY_RECORDS,
+        maxRecords,
       });
     } catch { /* advisory only; never fails the transaction */ }
+  };
+  const applyReloaded = (loaded: MemoryLoadResult): readonly MemoryRecord[] => {
+    records = loaded.records;
+    complete = loaded.complete;
+    coverage = loaded.coverage;
+    bytesTotal = loaded.coverage.bytesTotal;
+    const fresh = getMemoryRecordOffsets(loaded.records);
+    allOffsets = fresh === undefined ? (loaded.records.length === 0 ? [] : undefined) : [...fresh];
+    return records;
   };
   const transaction: MemoryTransaction = {
     paths,
@@ -996,42 +1059,43 @@ export function withMemoryTransaction<T>(
     get complete() { return complete; },
     get coverage() { return coverage; },
     append(record) {
-      let offset = -1;
-      try {
-        const before = lstatSync(paths.memory, { bigint: true });
-        if (before.isFile() && !before.isSymbolicLink()) {
-          const size = Number(before.size);
-          offset = Number.isSafeInteger(size) && size >= 0 ? size : -1;
-        } else if (before.isSymbolicLink()) {
-          offset = -1;
-        }
-      } catch (error) {
-        offset = (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : -1;
-      }
-      appendUnlocked(record, paths);
+      const appended = appendUnlocked(record, paths);
       records = [...records, record];
       appendedCount += 1;
-      noteAppendedOffset(offset);
+      bytesTotal = bytesTotal > Number.MAX_SAFE_INTEGER - appended.bytesWritten
+        ? Number.MAX_SAFE_INTEGER
+        : bytesTotal + appended.bytesWritten;
+      noteAppendedOffset(appended.offset);
     },
     reload() {
       const loaded = loadMemoryChecked(paths.memory, now);
       if (!loaded.complete) throw new Error("Rocky memory reload is incomplete");
-      records = loaded.records;
-      complete = true;
-      coverage = loaded.coverage;
-      const fresh = getMemoryRecordOffsets(loaded.records);
-      allOffsets = fresh === undefined ? (loaded.records.length === 0 ? [] : undefined) : [...fresh];
-      return records;
+      return applyReloaded(loaded);
+    },
+    reloadWindow(windowMs) {
+      const loaded = loadMemoryChecked(paths.memory, now);
+      if (!windowCovered(loaded.coverage, now, windowMs)) {
+        throw new Error("Rocky memory reload does not cover link window");
+      }
+      return applyReloaded(loaded);
     },
     canAppendComplete(nextRecords) {
       if (!complete || !isCompleteMemoryCoverage(coverage)) return false;
-      if (records.length + nextRecords.length > MAX_SUPPORTED_MEMORY_RECORDS) return false;
+      if (records.length + nextRecords.length > maxSupportedMemoryRecords()) return false;
       const addedBytes = nextRecords.reduce((total, record) => {
         const encoded = Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8");
         return total > Number.MAX_SAFE_INTEGER - encoded ? Number.MAX_SAFE_INTEGER : total + encoded;
       }, 0);
-      return coverage.bytesTotal <= MAX_MEMORY_FILE_BYTES
-        && addedBytes <= MAX_MEMORY_FILE_BYTES - coverage.bytesTotal;
+      if (bytesTotal > MAX_MEMORY_FILE_BYTES) return false;
+      const remaining = MAX_MEMORY_FILE_BYTES - bytesTotal;
+      if (addedBytes > remaining) return false;
+      if (nextRecords.length > 0 && bytesTotal > 0 && addedBytes === remaining) {
+        return !memoryNeedsLeadingNewline(paths.memory);
+      }
+      return true;
+    },
+    canAppendLinked(nextRecords, windowMs) {
+      return transaction.canAppendComplete(nextRecords) || windowCovered(coverage, now, windowMs);
     },
   };
   try {
@@ -1102,11 +1166,12 @@ function appendFixRecordsUnlocked(
   links: readonly UnresolvedLink[],
   cwd: string,
   now: number,
+  windowMs: number,
 ): WrittenFixRecords {
-  // Fix attribution proves absence/resolution from the whole snapshot. A
-  // capped, skipped, or raced read may still accept new failure/note evidence,
-  // but it must never append a FixRecord based on partial knowledge.
-  if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return {};
+  // Fix attribution proves absence/resolution across the link window. A
+  // skipped, raced, or insufficiently deep tail read may still accept new
+  // failure/note evidence, but must not append a FixRecord.
+  if (!windowCovered(transaction.coverage, now, windowMs)) return {};
   // Storage only: `links` were already matched on the raw command by the
   // caller. Redacting on the matching side would make `deploy "ghp_A"` and
   // `deploy "ghp_B"` the same command. Here the record gets the same bounded,
@@ -1153,9 +1218,8 @@ function appendFixRecordsUnlocked(
     ...(fix === undefined ? [] : [fix]),
     ...(association === undefined ? [] : [association]),
   ];
-  // Never append then discover that the reload would be capped. This keeps
-  // read/modify/write fail-closed without disabling append-only new evidence.
-  if (!transaction.canAppendComplete(pending)) return {};
+  // Never append when neither full-snapshot nor covered-window reload holds.
+  if (!transaction.canAppendLinked(pending, windowMs)) return {};
   for (const record of pending) transaction.append(record);
   return {
     ...(fix === undefined ? {} : { fix }),
@@ -1166,7 +1230,7 @@ function appendFixRecordsUnlocked(
 export function recordFix(cmd: string, links: readonly UnresolvedLink[], cwd = process.cwd()): FixRecord | AssociationRecord {
   return withMemoryTransaction((transaction) => {
     const eligible = links.filter((link) => link.failure.ts <= transaction.now);
-    const written = appendFixRecordsUnlocked(transaction, cmd, eligible, cwd, transaction.now);
+    const written = appendFixRecordsUnlocked(transaction, cmd, eligible, cwd, transaction.now, LINK_WINDOW_MS);
     if (written.fix) return written.fix;
     if (written.association) return written.association;
     throw new Error("Rocky fix attribution requires at least one link");
@@ -1182,14 +1246,19 @@ export interface ResolveFixOptions {
 export interface ResolveFixResult extends WrittenFixRecords {
   confirmedResolved: number;
   possibleAssociated: number;
+  pausedReason?: "coverage";
+  pausedDetail?: { recordsRead: number; shortTail: boolean; tail: boolean; pendingWaiting: boolean };
 }
 
 function hasConfirmedResolutionForCommand(
   records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
   cmd: string,
   cwd: string,
   now: number,
+  windowMs: number,
 ): boolean {
+  if (!windowCovered(coverage, now, windowMs)) return false;
   const currentIdentity = commandIdentity(cmd);
   if (!currentIdentity.reliable) return false;
   const fixesById = new Map<string, FixRecord>();
@@ -1236,34 +1305,47 @@ export function resolveFixOnSuccess(
   return withMemoryTransaction((transaction) => {
     const now = transaction.now;
     const windowMs = options.windowMs ?? LINK_WINDOW_MS;
-    const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
-    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) {
-      // No definitive fix or pending deletion from an incomplete snapshot.
+    if (!windowCovered(transaction.coverage, now, windowMs)) {
+      // No definitive fix or pending deletion without a covered window.
       // New failure/note/triple append paths remain available independently.
-      return { confirmedResolved: 0, possibleAssociated: 0 };
+      return {
+        confirmedResolved: 0,
+        possibleAssociated: 0,
+        pausedReason: "coverage",
+        pausedDetail: {
+          recordsRead: transaction.records.length,
+          shortTail: tailReadable(transaction.coverage)
+            && transaction.coverage.window === "tail"
+            && transaction.coverage.oldestTs !== undefined,
+          tail: transaction.coverage.window === "tail",
+          pendingWaiting: existsSync(transaction.paths.pending),
+        },
+      };
     }
+    const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
     if (links.length === 0) {
       // A prior process may have durably appended its FixRecord and died
       // before pending reconciliation.  Only a loader-confirmed resolution
       // for this command can recover that state; weak associations and an
-      // empty/incomplete snapshot never clear pending.
-      if (transaction.complete && hasConfirmedResolutionForCommand(transaction.records, cmd, cwd, now)) {
-        reconcilePendingUnlocked(transaction.records, transaction.paths, windowMs, now);
+      // uncovered snapshot never clear pending.
+      if (windowCovered(transaction.coverage, now, windowMs) &&
+          hasConfirmedResolutionForCommand(transaction.records, transaction.coverage, cmd, cwd, now, windowMs)) {
+        reconcilePendingUnlocked(transaction.records, transaction.coverage, transaction.paths, windowMs, now);
       }
       return { confirmedResolved: 0, possibleAssociated: 0 };
     }
 
-    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now);
+    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now, windowMs);
     if (written.fix) {
       // The append was preflighted against the bounded snapshot. A hostile
       // external replacement can still race the reload; retain pending and
       // return the durable attribution rather than append-then-throw.
       try {
-        const latest = transaction.reload();
-        reconcilePendingUnlocked(latest, transaction.paths, windowMs, now);
+        const latest = transaction.reloadWindow(windowMs);
+        reconcilePendingUnlocked(latest, transaction.coverage, transaction.paths, windowMs, now);
       } catch {
         // Explicit degraded mode: FixRecord remains evidence, pending remains
-        // present until a complete future read can reconcile it.
+        // present until a covered future read can reconcile it.
       }
     }
     return {
@@ -1329,10 +1411,12 @@ export function hasUnresolvedRecent(
 
 function reconcilePendingUnlocked(
   records: readonly MemoryRecord[],
+  coverage: MemoryCoverage,
   paths: RockyPaths,
   windowMs: number,
   now: number,
 ): void {
+  if (!windowCovered(coverage, now, windowMs)) return;
   if (hasUnresolvedRecent(records, windowMs, now)) touchPendingUnlocked(paths);
   else rmSync(paths.pending, { force: true });
 }
@@ -1344,7 +1428,7 @@ export function clearPendingIfResolved(
 ): void {
   const selectedNow = now ?? Date.now();
   withMemoryTransaction((transaction) => {
-    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) return;
+    if (!windowCovered(transaction.coverage, selectedNow, windowMs)) return;
     if (hasRecentConfirmedResolution(transaction.records, windowMs, selectedNow) &&
         !hasUnresolvedRecent(transaction.records, windowMs, selectedNow)) {
       rmSync(transaction.paths.pending, { force: true });

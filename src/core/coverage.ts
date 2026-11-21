@@ -348,11 +348,12 @@ export function renderUntriedCard(result: unknown): string[] {
 // The chat and GUI surfaces recognize this prefix, so it stays byte-stable.
 const COVERAGE_WORDS_PREFIX = "memory coverage incomplete: ";
 
-/** "Only the first 40 records were read", singular-safe for the count of kept records. */
-function onlyFirstRecordsRead(recordCount: number): string {
+/** "Only the first 40 records were read" / "Only the newest 40 records were read", singular-safe for the count of kept records. */
+function onlyRecordsRead(recordCount: number, tail: boolean): string {
+  const position = tail ? "newest" : "first";
   return recordCount === 1
-    ? "Only the first record was read"
-    : `Only the first ${recordCount} records were read`;
+    ? `Only the ${position} record was read`
+    : `Only the ${position} ${recordCount} records were read`;
 }
 
 /**
@@ -370,14 +371,16 @@ export function describeMemoryCoverage(
   options: { counts: boolean },
 ): string | undefined {
   if (isCompleteMemoryCoverage(coverage)) return undefined;
+  const tail = coverage.window === "tail";
+  const omitted = tail ? "earlier" : "later";
   const facts: string[] = [];
   if (coverage.skipped > 0) facts.push(`${coverage.skipped} line${coverage.skipped === 1 ? "" : "s"} could not be used.`);
   switch (coverage.reason) {
     case "record-cap":
-      facts.push(`${onlyFirstRecordsRead(recordCount)}; later lines were not read.`);
+      facts.push(`${onlyRecordsRead(recordCount, tail)}; ${omitted} lines were not read.`);
       break;
     case "file-size-cap":
-      facts.push(`The memory file is too large. ${onlyFirstRecordsRead(recordCount)}; later lines were not read.`);
+      facts.push(`The memory file is too large. ${onlyRecordsRead(recordCount, tail)}; ${omitted} lines were not read.`);
       break;
     case "read-race":
       facts.push("The memory file changed or did not open cleanly during the read. Nothing was read this time.");

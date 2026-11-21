@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import {
   isCompleteMemoryCoverage,
   loadMemoryChecked,
+  tailReadable,
   type MemoryCoverage,
   type MemoryLoadResult,
   type MemoryRecord,
@@ -241,7 +242,7 @@ export interface MemorySnapshot {
 }
 
 function readStoppedEarly(coverage: MemoryCoverage): boolean {
-  if (isCompleteMemoryCoverage(coverage)) return false;
+  if (isCompleteMemoryCoverage(coverage) || tailReadable(coverage)) return false;
   const skippedOnly = coverage.skipped > 0 && coverage.truncated === 0 && coverage.reason === undefined;
   return !skippedOnly;
 }

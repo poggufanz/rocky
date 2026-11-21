@@ -35,7 +35,7 @@ import {
   type ProjectedWhyCard,
 } from "./privacy.js";
 import { gitProvenanceChain, resolveGitDiff } from "../core/git-diff.js";
-import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, MAX_SUPPORTED_MEMORY_RECORDS, parseMemoryRecord } from "../core/memory-read.js";
+import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, maxSupportedMemoryRecords, parseMemoryRecord } from "../core/memory-read.js";
 import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 
 /** Versioned read-only catalog used by MCP discovery and setup health. */
@@ -658,7 +658,7 @@ function customTeachRecords(options: CreateToolRegistryOptions): readonly Memory
   try {
     const accessor = (options.memory as unknown as { records?: unknown }).records;
     if (typeof accessor !== "function") return [];
-    const bounded = boundedProviderArray(accessor.call(options.memory), MAX_SUPPORTED_MEMORY_RECORDS);
+    const bounded = boundedProviderArray(accessor.call(options.memory), maxSupportedMemoryRecords());
     if (!bounded.valid) return [];
     const records: MemoryRecord[] = [];
     for (const entry of bounded.values) {
@@ -1348,11 +1348,24 @@ function memoryCoverage(
     const bytesTotal = value.bytesTotal;
     const complete = value.complete;
     const reason = value.reason;
+    const window = value.window;
+    const startOffset = value.startOffset;
+    const oldestTs = value.oldestTs;
     if (version !== 1 || !isSafeNonNegativeInteger(scanned) ||
         !isSafeNonNegativeInteger(skipped) || !isSafeNonNegativeInteger(truncated) ||
         !isSafeNonNegativeInteger(bytesScanned) || !isSafeNonNegativeInteger(bytesTotal) ||
         typeof complete !== "boolean" ||
-        (reason !== undefined && reason !== "file-size-cap" && reason !== "record-cap" && reason !== "read-race")) return unknownMemoryCoverage();
+        (reason !== undefined && reason !== "file-size-cap" && reason !== "record-cap" && reason !== "read-race") ||
+        (window !== undefined && window !== "tail")) return unknownMemoryCoverage();
+    if (window === "tail" && (
+      complete === true ||
+      startOffset === undefined ||
+      (reason !== "record-cap" && reason !== "file-size-cap") ||
+      truncated !== 1
+    )) return unknownMemoryCoverage();
+    if (window !== "tail" && (startOffset !== undefined || oldestTs !== undefined)) return unknownMemoryCoverage();
+    if (startOffset !== undefined && (!isSafeNonNegativeInteger(startOffset) || startOffset > bytesTotal)) return unknownMemoryCoverage();
+    if (oldestTs !== undefined && !isSafeNonNegativeInteger(oldestTs)) return unknownMemoryCoverage();
     // `scanned` and `skipped` are independent evidence counters: a provider
     // may count only valid records as scanned while reporting corrupt lines
     // separately. Do not reject a legitimate 0-valid/10-skipped snapshot.
@@ -1360,11 +1373,14 @@ function memoryCoverage(
     if (complete === true && (bytesScanned !== bytesTotal || skipped > 0 || truncated > 0 || reason !== undefined)) return unknownMemoryCoverage();
     if (reason === "read-race" && (complete === true || truncated === 0)) return unknownMemoryCoverage();
     if (reason === "file-size-cap" && (complete === true || truncated === 0 || bytesTotal <= MAX_MEMORY_FILE_BYTES)) return unknownMemoryCoverage();
-    if (reason === "record-cap" && (complete === true || truncated === 0 || scanned < MAX_SUPPORTED_MEMORY_RECORDS)) return unknownMemoryCoverage();
+    if (reason === "record-cap" && (complete === true || truncated === 0 || scanned < maxSupportedMemoryRecords())) return unknownMemoryCoverage();
     return Object.freeze({
       version: 1 as const,
       scanned, skipped, truncated, bytesScanned, bytesTotal, complete,
       ...(reason === undefined ? {} : { reason }),
+      ...(window === undefined ? {} : { window }),
+      ...(startOffset === undefined ? {} : { startOffset }),
+      ...(oldestTs === undefined ? {} : { oldestTs }),
     });
   } catch {
     return unknownMemoryCoverage();

@@ -214,7 +214,7 @@ test("teach --ladder with exhausted provenance keeps the disclosure voice, exit 
 });
 
 const COVERAGE_PREFIX = "memory coverage incomplete";
-const CAP_LINE = `${COVERAGE_PREFIX}: Only the first ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; later lines were not read. These counts do not cover all of memory.`;
+const CAP_LINE = `${COVERAGE_PREFIX}: Only the newest ${MAX_SUPPORTED_MEMORY_RECORDS} records were read; earlier lines were not read. These counts do not cover all of memory.`;
 const ASYNC_FIXTURE = [
   "export async function loadFeed() {",
   "  const rows = await fetchRows();",
@@ -260,6 +260,8 @@ test("teach over the record cap says so before a witness card from the lines it 
   const home = freshHome();
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const { path, lines } = feedFixture(home, "capped-witness.ts");
+  // With the cap's worth of failures before the witness, the oldest failure falls outside the tail while the witness stays inside it.
+  appendFailures(home, MAX_SUPPORTED_MEMORY_RECORDS);
   recordExplain({
     cwd: process.cwd(),
     path,
@@ -268,8 +270,6 @@ test("teach over the record cap says so before a witness card from the lines it 
     business: "journal accepts DOCENTRY documents only",
     snippet: lines.slice(4, 11).join("\n"),
   }, resolveRockyPaths());
-  // The witness is the first record. With the cap's worth of failures after it, the last one falls past the cap.
-  appendFailures(home, MAX_SUPPORTED_MEMORY_RECORDS);
   const { events, deps } = orderedSinks();
   assert.equal(await teach([`${path}:8`], deps), 0);
   assert.equal(events[0], `say ${CAP_LINE}`);
@@ -289,7 +289,7 @@ test("teach over the file size cap says the memory file is too large and how man
   assert.equal(await teach([`${path}:2`], deps), 0);
   assert.equal(
     events[0],
-    `say ${COVERAGE_PREFIX}: The memory file is too large. Only the first ${heard.records.length} records were read; later lines were not read. These counts do not cover all of memory.`,
+    `say ${COVERAGE_PREFIX}: The memory file is too large. Only the newest ${heard.records.length} records were read; earlier lines were not read. These counts do not cover all of memory.`,
   );
   assert.equal(events[1], `heading ${LADDER_HEADER}`);
 });

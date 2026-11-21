@@ -1,3 +1,4 @@
+import type { TestContext } from "node:test";
 import { MAX_MEMORY_FILE_BYTES } from "../core/memory-read.js";
 
 /** Weight for a line that must add up to the byte cap in fewer lines than the record cap. */
@@ -7,9 +8,9 @@ const FAT_EXCERPT = "x".repeat(4096);
  * One failure record as a memory line, without its newline. The id is unique per
  * index, so every line is a record the reader keeps; `excerpt` only adds weight.
  */
-export function failureLine(index: number, excerpt = "false"): string {
+export function failureLine(index: number, excerpt = "false", ts = 1): string {
   return JSON.stringify({
-    kind: "failure", id: `r${index}`, ts: 1, cwd: "/cap-fixture", cmd: "false", exitCode: 1,
+    kind: "failure", id: `r${index}`, ts, cwd: "/cap-fixture", cmd: "false", exitCode: 1,
     fingerprint: `r${index}`.padStart(16, "0"), signature: ["false"], excerpt,
   });
 }
@@ -27,4 +28,18 @@ export function failureLinesPastByteCap(): string {
   const lineBytes = Buffer.byteLength(`${failureLine(0, FAT_EXCERPT)}\n`, "utf8");
   const count = Math.ceil(MAX_MEMORY_FILE_BYTES / lineBytes) + 1;
   return Array.from({ length: count }, (_, index) => `${failureLine(index, FAT_EXCERPT)}\n`).join("");
+}
+
+/** Enable the test seam record cap for the duration of `t` and restore prior env values afterward. */
+export function withRecordCap(t: TestContext, cap: number): void {
+  const prevSeams = process.env.ROCKY_TEST_SEAMS;
+  const prevCap = process.env.ROCKY_TEST_MAX_MEMORY_RECORDS;
+  process.env.ROCKY_TEST_SEAMS = "1";
+  process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = String(cap);
+  t.after(() => {
+    if (prevSeams === undefined) delete process.env.ROCKY_TEST_SEAMS;
+    else process.env.ROCKY_TEST_SEAMS = prevSeams;
+    if (prevCap === undefined) delete process.env.ROCKY_TEST_MAX_MEMORY_RECORDS;
+    else process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = prevCap;
+  });
 }

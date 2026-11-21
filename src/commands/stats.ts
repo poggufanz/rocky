@@ -72,6 +72,21 @@ function statsCycles(): number {
   return 0;
 }
 
+function formatUtcDate(ts: number): string {
+  const d = new Date(ts);
+  const year = String(d.getUTCFullYear()).padStart(4, "0");
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatUtcDateTime(ts: number): string {
+  const d = new Date(ts);
+  const hours = String(d.getUTCHours()).padStart(2, "0");
+  const minutes = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${formatUtcDate(ts)} ${hours}:${minutes}`;
+}
+
 export function memoryAgeDays(timestamps: readonly number[], now: number): number {
   if (timestamps.length === 0) return 0;
   const oldest = timestamps.reduce((min, ts) => Math.min(min, ts), Number.POSITIVE_INFINITY);
@@ -116,6 +131,20 @@ export function stats(argv: readonly string[] = []): number {
   say(`${result.failures} error${result.failures === 1 ? "" : "s"} recorded. ${result.resolved} ${result.resolved === 1 ? "has" : "have"} a fix. ${result.fixEvents} fix event${result.fixEvents === 1 ? "" : "s"} total.`);
   say(`Memory holds ${total} recorded item${total === 1 ? "" : "s"}. ${confirmedFixes} confirmed fix${confirmedFixes === 1 ? "" : "es"}. ${possibleFixes} possible fix${possibleFixes === 1 ? "" : "es"}. ${triples} ${intentWord}${triples === 1 ? "" : "s"}. ${notes} note${notes === 1 ? "" : "s"}.`);
   say(`memory file: ${memoryPath()}`);
+  let latestFixTs: number | undefined;
+  for (const record of records) {
+    if (record.kind === "fix" && Number.isFinite(record.ts)) {
+      if (latestFixTs === undefined || record.ts > latestFixTs) latestFixTs = record.ts;
+    }
+  }
+  say(latestFixTs !== undefined
+    ? `fix links: last written ${formatUtcDateTime(latestFixTs)}`
+    : "fix links: none in the records read");
+  if (coverage.window === "tail") {
+    const fromSuffix = coverage.oldestTs !== undefined ? ` (from ${formatUtcDate(coverage.oldestTs)})` : "";
+    const countLabel = records.length === 1 ? "the newest record" : `the newest ${records.length} records`;
+    say(`memory: reading ${countLabel}${fromSuffix}`);
+  }
   const byKind = result.byKind ?? {};
   if (isVerbose()) {
     const kindSummary = Object.entries(byKind)
@@ -127,7 +156,10 @@ export function stats(argv: readonly string[] = []): number {
   const ageDays = memoryAgeDays(records.map((record) => record.ts), Date.now());
   const journalCount = readJournal().records.length;
   const briefRuns = byKind["brief_run"] ?? 0;
-  say(`Memory is ${ageDays} day${ageDays === 1 ? "" : "s"} old. ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
+  const ageSentence = coverage.window === "tail"
+    ? `The records read span ${ageDays} day${ageDays === 1 ? "" : "s"}.`
+    : `Memory is ${ageDays} day${ageDays === 1 ? "" : "s"} old.`;
+  say(`${ageSentence} ${briefRuns} brief run${briefRuns === 1 ? "" : "s"}. ${journalCount} journal note${journalCount === 1 ? "" : "s"}.`);
   // Gate denials are never counted here: that state is ephemeral (never
   // written to memory), and counting it would imply a durability rocky
   // does not have.
