@@ -226,11 +226,10 @@ function stepNamesRoot(step: StoredFlowStep, ctx: ScrubContext): boolean {
   if (typeof step.error === "string" && textNamesRoot(step.error, normalizedRoots, platform, pathHome)) {
     return true;
   }
-  const extra = step as { cwd?: unknown; desc?: unknown };
-  if (typeof extra.cwd === "string" && textNamesRoot(extra.cwd, normalizedRoots, platform, pathHome)) {
+  if (step.cwd !== undefined && textNamesRoot(step.cwd, normalizedRoots, platform, pathHome)) {
     return true;
   }
-  if (typeof extra.desc === "string" && textNamesRoot(extra.desc, normalizedRoots, platform, pathHome)) {
+  if (step.desc !== undefined && textNamesRoot(step.desc, normalizedRoots, platform, pathHome)) {
     return true;
   }
   return false;

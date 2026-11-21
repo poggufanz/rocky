@@ -650,6 +650,17 @@ export function commandBase(cmd: string): string {
   return first ? basename(first) : "";
 }
 
+const ROCKY_BIN_RE = /^rocky(?:\.cmd|\.ps1|\.exe)?$/iu;
+
+/** `rocky run "<cmd>"` → `<cmd>`; anything else unchanged. */
+export function unwrapRockyRun(cmd: string): string {
+  const tokens = tokenizeCommand(cmd.trim()).tokens;
+  if (tokens.length === 3 && ROCKY_BIN_RE.test(basename(tokens[0]!)) && tokens[1] === "run") {
+    return tokens[2]!;
+  }
+  return cmd;
+}
+
 /** Versioned, conservative identity used only for memory attribution. */
 export function commandIdentity(
   cmd: string,

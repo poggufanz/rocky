@@ -114,6 +114,116 @@ test("parseCardLine rejects flow steps with wrong exit_code or error types", () 
   );
 });
 
+test("parseCardLine keeps valid flow step timing, cwd, tool_use_id, and desc fields", () => {
+  const fullStep = {
+    kind: "cmd",
+    text: "npm test",
+    ok: true,
+    dur_ms: 250,
+    seqs: [1],
+    start_ms: 1700000000000,
+    end_ms: 1700000000250,
+    cwd: "/work/app/pkg",
+    tool_use_id: "toolu_01",
+    desc: "Run package tests",
+  };
+  const zeroAndEmptyDesc = {
+    kind: "cmd",
+    text: "true",
+    ok: true,
+    dur_ms: 0,
+    seqs: [],
+    start_ms: 0,
+    end_ms: 0,
+    desc: "",
+  };
+  const legacyStep = { kind: "cmd", text: "npm run build", ok: true, dur_ms: 80, seqs: [2] };
+
+  const parsed = parseCardLine(
+    Buffer.from(JSON.stringify(card({ flow: [fullStep, zeroAndEmptyDesc, legacyStep] }))),
+  );
+  assert.equal(parsed.kind, "card");
+  if (parsed.kind === "card") {
+    assert.deepEqual(parsed.card.flow?.[0], fullStep);
+    assert.deepEqual(parsed.card.flow?.[1], zeroAndEmptyDesc);
+    assert.deepEqual(parsed.card.flow?.[2], legacyStep);
+    assert.equal("start_ms" in (parsed.card.flow?.[2] ?? {}), false);
+    assert.equal("end_ms" in (parsed.card.flow?.[2] ?? {}), false);
+    assert.equal("cwd" in (parsed.card.flow?.[2] ?? {}), false);
+    assert.equal("tool_use_id" in (parsed.card.flow?.[2] ?? {}), false);
+    assert.equal("desc" in (parsed.card.flow?.[2] ?? {}), false);
+  }
+});
+
+test("parseCardLine drops only invalid optional flow step fields without rejecting the card", () => {
+  const badStart = {
+    kind: "cmd",
+    text: "npm test",
+    ok: true,
+    dur_ms: 100,
+    seqs: [],
+    start_ms: -1,
+    end_ms: 200,
+    cwd: "/work/app/sub",
+    tool_use_id: "toolu_02",
+    desc: "Run tests",
+  };
+  const badCwd = {
+    kind: "cmd",
+    text: "npm test",
+    ok: true,
+    dur_ms: 100,
+    seqs: [],
+    start_ms: 100,
+    end_ms: 1.5,
+    cwd: 5,
+    tool_use_id: "",
+    desc: 42,
+  };
+  const emptyCwdAndNulls = {
+    kind: "cmd",
+    text: "npm test",
+    ok: true,
+    dur_ms: 100,
+    seqs: [],
+    start_ms: null,
+    end_ms: null,
+    cwd: "",
+    tool_use_id: null,
+    desc: null,
+  };
+
+  const parsed = parseCardLine(
+    Buffer.from(JSON.stringify(card({ flow: [badStart, badCwd, emptyCwdAndNulls] }))),
+  );
+  assert.equal(parsed.kind, "card");
+  if (parsed.kind === "card") {
+    const first = parsed.card.flow?.[0];
+    assert.ok(first);
+    assert.equal("start_ms" in first, false);
+    assert.equal(first.end_ms, 200);
+    assert.equal(first.cwd, "/work/app/sub");
+    assert.equal(first.tool_use_id, "toolu_02");
+    assert.equal(first.desc, "Run tests");
+
+    const second = parsed.card.flow?.[1];
+    assert.ok(second);
+    assert.equal(second.start_ms, 100);
+    assert.equal("end_ms" in second, false);
+    assert.equal("cwd" in second, false);
+    assert.equal("tool_use_id" in second, false);
+    assert.equal("desc" in second, false);
+
+    const third = parsed.card.flow?.[2];
+    assert.ok(third);
+    assert.equal("start_ms" in third, false);
+    assert.equal("end_ms" in third, false);
+    assert.equal("cwd" in third, false);
+    assert.equal("tool_use_id" in third, false);
+    assert.equal("desc" in third, false);
+  }
+});
+
 test("collapseDotSegments handles drives, unc, dots, and escapes", () => {
   assert.deepEqual(collapseDotSegments("C:\\a\\.\\b\\..\\c"), { prefix: "C:/", segments: ["a", "c"], hadEscape: false });
   assert.deepEqual(collapseDotSegments("../x"), { prefix: "", segments: ["x"], hadEscape: true });

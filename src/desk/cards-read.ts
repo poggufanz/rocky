@@ -13,6 +13,7 @@ import {
   parseCardLine,
   type StoredBlock,
   type StoredCard,
+  type StoredFlowStep,
 } from "./cards-record.js";
 
 const MAX_CARDS_FILE_BYTES = 16 * 1024 * 1024;
@@ -658,4 +659,108 @@ function cardsForFileInternal(
   }
 
   return { cards, matched, coverage: finalizeCoverage(covAcc) };
+}
+
+export interface CardsForRoot {
+  cards: StoredCard[];
+  complete: boolean;
+}
+
+/** False when `<home>/desk/tool-text-off` exists. */
+export function toolTextAllowed(home: string): boolean {
+  return !existsSync(join(home, "desk", "tool-text-off"));
+}
+
+function stripBlockToolText(block: StoredBlock): StoredBlock {
+  const copy = { ...block };
+  delete copy.quote;
+  return copy;
+}
+
+function stripStepToolText(step: StoredFlowStep): StoredFlowStep {
+  const copy = { ...step };
+  delete copy.desc;
+  return copy;
+}
+
+function stripCardToolText(card: StoredCard): StoredCard {
+  const copy: StoredCard = {
+    ...card,
+    blocks: card.blocks.map(stripBlockToolText),
+  };
+  if (card.flow !== undefined) {
+    copy.flow = card.flow.map(stripStepToolText);
+  }
+  return copy;
+}
+
+function readProbedLog(
+  logPath: string | undefined,
+  status: "missing" | "non-regular" | "race" | "ready",
+  lstat: ReturnType<typeof lstatSync> | undefined,
+  covAcc: CoverageAccumulator,
+): Map<string, StoredCard> {
+  if (status === "missing") return new Map();
+  if (status === "non-regular") {
+    addCoverage(covAcc, { complete: false, skipped: 0 });
+    return new Map();
+  }
+  if (status === "race" || !logPath || !lstat) {
+    addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
+    return new Map();
+  }
+  const parsed = readAndParseCardsLog(logPath, lstat, MAX_TOTAL_CARDS_BYTES);
+  addCoverage(covAcc, parsed.coverage);
+  return parsed.cardsById;
+}
+
+/** Cards logged for the repo that contains `cwd` (or `_none.jsonl` outside a repo). */
+export function cardsForRoot(cwd: string, options: { home: string; toolText: boolean }): CardsForRoot {
+  const trimmed = cwd.trim();
+  const rootRaw =
+    trimmed.length > 0
+      ? gitRootFor(`${resolveInputPath(trimmed, process.cwd(), process.platform).replace(/[\\/]+$/, "")}/_`, existsSync)
+      : undefined;
+  const covAcc: CoverageAccumulator = { complete: true, skipped: 0 };
+  let cardsById: Map<string, StoredCard>;
+  if (rootRaw !== undefined) {
+    const pick = pickExistingLogPath(buildRootSpellings(rootRaw), options.home);
+    cardsById = readProbedLog(pick.logPath, pick.status, pick.lstat, covAcc);
+  } else {
+    const nonePath = join(options.home, "desk", "cards", "_none.jsonl");
+    const probe = inspectLogPath(nonePath);
+    cardsById = readProbedLog(nonePath, probe.status, probe.lstat, covAcc);
+  }
+  const ordered = [...cardsById.values()].sort(compareCards);
+  const cards = options.toolText ? ordered : ordered.map(stripCardToolText);
+  return { cards, complete: finalizeCoverage(covAcc).complete };
+}
+
+/** Highest revision of `cardId` across all card logs, bounded like `cardsForFile`. */
+export function findCardById(cardId: string, options: { home: string; toolText: boolean }): StoredCard | undefined {
+  if (cardId.length === 0) return undefined;
+  const listing = listExtraCardLogs(options.home, new Set(), process.platform);
+  if (listing.status !== "ready") return undefined;
+
+  let scanned = 0;
+  let totalBytesRead = 0;
+  let best: StoredCard | undefined;
+  for (const name of listing.files) {
+    if (scanned >= MAX_EXTRA_LOG_FILES) break;
+    const logPath = join(listing.cardsDir, name);
+    const probe = inspectLogPath(logPath);
+    if (probe.status === "missing") continue;
+    scanned += 1;
+    if (probe.status !== "ready" || !probe.lstat) continue;
+    if (totalBytesRead >= MAX_TOTAL_CARDS_BYTES) break;
+    const parsed = readAndParseCardsLog(logPath, probe.lstat, MAX_TOTAL_CARDS_BYTES - totalBytesRead);
+    totalBytesRead += parsed.bytesRead;
+    if (parsed.hitBudget) break;
+    const found = parsed.cardsById.get(cardId);
+    if (found && (!best || found.rev >= best.rev)) {
+      best = found;
+    }
+  }
+  if (best === undefined) return undefined;
+  return options.toolText ? best : stripCardToolText(best);
 }

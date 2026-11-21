@@ -52,6 +52,11 @@ export interface StoredFlowStep {
   seqs: number[];
   exit_code?: number | null;
   error?: string | null;
+  start_ms?: number;
+  end_ms?: number;
+  cwd?: string;
+  tool_use_id?: string;
+  desc?: string;
 }
 
 export interface StoredCoverage {
@@ -171,6 +176,13 @@ function isValidFlowStep(value: unknown): value is StoredFlowStep {
   }
   if (value.exit_code !== undefined && value.exit_code !== null && !isSafeInt(value.exit_code)) return false;
   if (value.error !== undefined && value.error !== null && typeof value.error !== "string") return false;
+  if (value.start_ms !== undefined && !isSafeNonNegInt(value.start_ms)) delete value.start_ms;
+  if (value.end_ms !== undefined && !isSafeNonNegInt(value.end_ms)) delete value.end_ms;
+  if (value.cwd !== undefined && (typeof value.cwd !== "string" || value.cwd.length === 0)) delete value.cwd;
+  if (value.tool_use_id !== undefined && (typeof value.tool_use_id !== "string" || value.tool_use_id.length === 0)) {
+    delete value.tool_use_id;
+  }
+  if (value.desc !== undefined && typeof value.desc !== "string") delete value.desc;
   return true;
 }
 
