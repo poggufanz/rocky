@@ -13,8 +13,10 @@ import {
   type MemoryQueries,
 } from "../core/memory-query.js";
 import { isCompleteMemoryCoverage } from "../core/memory-read.js";
+import { sanitizeTestimony } from "../core/redact.js";
 import { detail, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
+import { formatUtcDate, formatUtcDateTime } from "./stats.js";
 
 const DEFAULT_LIMIT = 10;
 const MIN_LIMIT = 1;
@@ -87,21 +89,6 @@ export function parseAttemptsArgs(argv: readonly string[]): ParsedAttemptsArgs {
   };
 }
 
-function formatUtcDate(ts: number): string {
-  const d = new Date(ts);
-  const year = String(d.getUTCFullYear()).padStart(4, "0");
-  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function formatUtcDateTime(ts: number): string {
-  const d = new Date(ts);
-  const hours = String(d.getUTCHours()).padStart(2, "0");
-  const minutes = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${formatUtcDate(ts)} ${hours}:${minutes}`;
-}
-
 export function formatAttemptOutcome(outcome: AttemptOutcome): string {
   switch (outcome) {
     case "passed":
@@ -119,9 +106,37 @@ export function formatAttemptOutcome(outcome: AttemptOutcome): string {
   }
 }
 
+function sanitizeAttemptChanges(changes: Attempt["changes"]): Attempt["changes"] {
+  if (changes.state === "observed") {
+    return {
+      ...changes,
+      files: changes.files.map((file) => sanitizeTestimony(file)),
+    };
+  }
+  if (changes.state === "testimony") {
+    return {
+      ...changes,
+      files: changes.files.map((file) => sanitizeTestimony(file)),
+    };
+  }
+  return changes;
+}
+
+export function sanitizeProblemEntry(entry: ProblemEntry): ProblemEntry {
+  return {
+    ...entry,
+    signature: entry.signature.map((line) => sanitizeTestimony(line)),
+    attempts: entry.attempts.map((attempt) => ({
+      ...attempt,
+      cmd: sanitizeTestimony(attempt.cmd),
+      changes: sanitizeAttemptChanges(attempt.changes),
+    })),
+  };
+}
+
 export function formatAttemptChanges(changes: Attempt["changes"]): string {
   if (changes.state === "observed") {
-    const files = changes.files.map((file) => safeTerminalLine(file));
+    const files = changes.files.map((file) => safeTerminalLine(sanitizeTestimony(file)));
     if (files.length === 0) {
       return changes.more > 0 ? `edited (+${changes.more} more)` : "changes unknown";
     }
@@ -129,14 +144,14 @@ export function formatAttemptChanges(changes: Attempt["changes"]): string {
     return changes.more > 0 ? `${base} (+${changes.more} more)` : base;
   }
   if (changes.state === "testimony") {
-    const files = changes.files.map((file) => safeTerminalLine(file));
+    const files = changes.files.map((file) => safeTerminalLine(sanitizeTestimony(file)));
     return files.length > 0 ? `said: edited ${files.join(", ")}` : "changes unknown";
   }
   return "changes unknown";
 }
 
 function truncateDisplayCommand(cmd: string): string {
-  const safe = safeTerminalLine(cmd);
+  const safe = safeTerminalLine(sanitizeTestimony(cmd));
   const chars = [...safe];
   if (chars.length <= MAX_CMD_DISPLAY_WIDTH) return safe;
   return `${chars.slice(0, MAX_CMD_DISPLAY_WIDTH - 1).join("")}…`;
@@ -205,7 +220,7 @@ export function renderProblemsText(
       ? entry.attempts.filter((attempt) => attempt.ts >= opts.cutoffTs!)
       : entry.attempts;
     const rawSig = entry.signature[0] ?? visibleAttempts[0]?.cmd ?? entry.attempts[0]?.cmd ?? "";
-    const sig = safeTerminalLine(rawSig);
+    const sig = safeTerminalLine(sanitizeTestimony(rawSig));
     const elsewhereSuffix = entry.cwdScope === "elsewhere" ? `  (in ${safeTerminalLine(entry.cwd)})` : "";
     detailLines.push(`${entry.problemId}  ${sig}${elsewhereSuffix}`);
 
@@ -234,6 +249,85 @@ export function renderProblemsText(
   };
 }
 
+function isEpipeError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "EPIPE";
+}
+
+async function writeStdoutQuietEpipe(payload: string): Promise<void> {
+  const stdout = process.stdout as NodeJS.WriteStream;
+  const hasEvents = typeof stdout.on === "function" && typeof stdout.off === "function";
+
+  if (stdout.write.length < 2) {
+    let capturedError: unknown;
+    const onError = (error: unknown): void => {
+      if (!isEpipeError(error)) capturedError = error;
+    };
+    if (hasEvents) stdout.on("error", onError);
+    try {
+      stdout.write(payload);
+    } catch (error) {
+      if (!isEpipeError(error)) throw error;
+      return;
+    } finally {
+      if (hasEvents) stdout.off("error", onError);
+    }
+    if (capturedError !== undefined) throw capturedError;
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let sawErrorEvent = false;
+    const cleanup = (): void => {
+      if (!hasEvents) return;
+      stdout.off("error", onError);
+      stdout.off("close", onClose);
+    };
+    const settleOk = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const settleErr = (error: unknown, fromCallback: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (isEpipeError(error)) {
+        if (fromCallback && !sawErrorEvent && hasEvents) {
+          setImmediate(() => {
+            cleanup();
+            resolve();
+          });
+          return;
+        }
+        cleanup();
+        resolve();
+        return;
+      }
+      cleanup();
+      reject(error);
+    };
+    const onError = (error: unknown): void => {
+      sawErrorEvent = true;
+      settleErr(error, false);
+    };
+    const onClose = (): void => settleOk();
+
+    if (hasEvents) {
+      stdout.on("error", onError);
+      stdout.on("close", onClose);
+    }
+    try {
+      stdout.write(payload, (error) => {
+        if (error) settleErr(error, true);
+        else settleOk();
+      });
+    } catch (error) {
+      settleErr(error, false);
+    }
+  });
+}
+
 export async function attempts(
   argv: readonly string[],
   deps?: { memory?: MemoryQueries; now?: number; cwd?: string },
@@ -251,7 +345,7 @@ export async function attempts(
   const cwd = deps?.cwd ?? process.cwd();
   const memory = deps?.memory ?? createMemoryQueries();
   const snapshot = loadDurableMemorySnapshot(memory, now);
-  if (snapshot === undefined) {
+  if (snapshot === undefined || snapshot.coverage.reason === "read-race") {
     say("Memory cannot be read.");
     return 1;
   }
@@ -314,20 +408,22 @@ export async function attempts(
     entries = matched;
   }
 
+  const sanitizedEntries = entries.map(sanitizeProblemEntry);
+
   if (parsed.json) {
-    process.stdout.write(
+    await writeStdoutQuietEpipe(
       `${JSON.stringify({
         v: 1,
         coverage: baseSet.coverage,
         ungroupedLegacy: baseSet.ungroupedLegacy,
-        entries,
+        entries: sanitizedEntries,
       })}\n`,
     );
     return 0;
   }
 
   const filteredSet: ProblemSet = {
-    entries,
+    entries: sanitizedEntries,
     coverage: baseSet.coverage,
     ungroupedLegacy: baseSet.ungroupedLegacy,
   };

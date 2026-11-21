@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,10 +11,11 @@ import {
   formatAttemptOutcome,
   parseAttemptsArgs,
   renderProblemsText,
+  sanitizeProblemEntry,
 } from "../commands/attempts.js";
-import type { Attempt, AttemptOutcome, ProblemEntry, ProblemSet } from "../core/attempts.js";
+import { buildProblems, type Attempt, type AttemptOutcome, type ProblemEntry, type ProblemSet } from "../core/attempts.js";
 import { commandIdentity } from "../core/fingerprint.js";
-import { createMemoryQueries, type MemoryQueries } from "../core/memory-query.js";
+import { createMemoryQueries, loadDurableMemorySnapshot, type MemoryQueries } from "../core/memory-query.js";
 import { MEMORY_FORMAT_VERSION, type MemoryCoverage } from "../core/memory-read.js";
 import { validateOutputLine } from "../ui/phrases.js";
 import { causalWordViolations } from "./causal-words.js";
@@ -274,8 +276,27 @@ test("exit 2 on bad args", async (t) => {
   }
 });
 
-test("exit 1 when memory cannot be read", async () => {
-  const throwingMemory = {
+test("exit 1 when memory cannot be read", async (t) => {
+  const home = freshHome(t);
+  // A directory at memory.jsonl is a portable unreadable memory fixture that
+  // exercises the real durable reader (read-race) via createMemoryQueries().
+  mkdirSync(join(home, "memory.jsonl"), { recursive: true });
+
+  const textOut = await captureOutput(() =>
+    attempts([], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+  );
+  assert.equal(textOut.code, 1);
+  assert.equal(textOut.stdout, "");
+  assert.equal(textOut.stderr, "rocky: Memory cannot be read.\n");
+
+  const jsonOut = await captureOutput(() =>
+    attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+  );
+  assert.equal(jsonOut.code, 1);
+  assert.equal(jsonOut.stdout, "");
+  assert.equal(jsonOut.stderr, "rocky: Memory cannot be read.\n");
+
+  const nonDurable = {
     recall() { throw new Error("boom"); },
     recentFailures() { throw new Error("boom"); },
     stats() { throw new Error("boom"); },
@@ -285,13 +306,12 @@ test("exit 1 when memory cannot be read", async () => {
     coverage() { throw new Error("boom"); },
   } as unknown as MemoryQueries;
 
-  const out = await captureOutput(() =>
-    attempts([], { memory: throwingMemory, now: NOW, cwd: CWD }),
+  const fallbackOut = await captureOutput(() =>
+    attempts([], { memory: nonDurable, now: NOW, cwd: CWD }),
   );
-
-  assert.equal(out.code, 1);
-  assert.equal(out.stdout, "");
-  assert.equal(out.stderr, "rocky: Memory cannot be read.\n");
+  assert.equal(fallbackOut.code, 1);
+  assert.equal(fallbackOut.stdout, "");
+  assert.equal(fallbackOut.stderr, "rocky: Memory cannot be read.\n");
 });
 
 test("exit 0 on empty memory", async (t) => {
@@ -369,25 +389,126 @@ test("--all-dirs adds elsewhere entries", async (t) => {
   assert.match(allDirs.stderr, /SyntaxError: elsewhere {2}\(in \/work\/other\)/);
 });
 
-test("hostile cmd renders safe", async (t) => {
+test("hostile cmd, signature, and changes render safe in both stderr and JSON without mutating buildProblems", async (t) => {
   const home = freshHome(t);
   const t1 = Date.UTC(2026, 10, 12, 13, 20);
   const t2 = Date.UTC(2026, 10, 12, 13, 25);
-  const hostileCmd = "npm\u001b[31m test \u202eevil";
+  const cmdSecret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+  const sigSecret = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
+  const fileSecret = "ghp_zyxwvutsrqponmlkjihgfedcba0987654321";
+  const hostileCmd = `npm\u001b[31m \u200btest \u202eevil ${cmdSecret}`;
+  const hostileSig = `Error:\u001b[31m \u200bbad \u202esig ${sigSecret}`;
+  const hostileFile = `src/\u001b[31m\u200b\u202e${fileSecret}.ts`;
   const lines = [
-    failureRecord({ id: "h1", ts: t1, cmd: hostileCmd, fingerprint: "3f2a9c1e44d0b7a1" }),
-    failureRecord({ id: "h2", ts: t2, cmd: hostileCmd, fingerprint: "3f2a9c1e44d0b7a1" }),
+    failureRecord({ id: "h1", ts: t1, cmd: hostileCmd, signature: [hostileSig], fingerprint: "3f2a9c1e44d0b7a1" }),
+    rationaleRecord({ id: "r1", ts: t1 + 1000, failureId: "h1", files: [hostileFile] }),
+    failureRecord({ id: "h2", ts: t2, cmd: hostileCmd, signature: [hostileSig], fingerprint: "3f2a9c1e44d0b7a1" }),
   ];
   writeFileSync(join(home, "memory.jsonl"), lines.map((line) => `${JSON.stringify(line)}\n`).join(""), "utf8");
 
-  const out = await captureOutput(() =>
-    attempts([], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+  const memory = createMemoryQueries();
+  const snapshot = loadDurableMemorySnapshot(memory, NOW);
+  assert.ok(snapshot !== undefined);
+  const built = buildProblems(snapshot.records, snapshot.coverage, { now: NOW, cwd: CWD });
+  const originalEntry = built.entries[0]!;
+  const sanitizedCopy = sanitizeProblemEntry(originalEntry);
+  assert.notEqual(sanitizedCopy, originalEntry);
+  assert.equal(originalEntry.attempts[0]!.cmd, hostileCmd);
+  assert.equal(originalEntry.signature[0], hostileSig);
+  assert.equal(
+    originalEntry.attempts[0]!.changes.state === "testimony"
+      ? originalEntry.attempts[0]!.changes.files[0]
+      : undefined,
+    hostileFile,
   );
 
-  assert.equal(out.code, 0);
-  assert.equal(out.stderr.includes("\u001b"), false);
-  assert.equal(out.stderr.includes("\u202e"), false);
-  assert.match(out.stderr, /npm test evil/);
+  // Also check observed changes sanitization without mutating input.
+  const observedEntry: ProblemEntry = {
+    ...originalEntry,
+    attempts: [
+      {
+        ...originalEntry.attempts[0]!,
+        changes: { state: "observed", files: [hostileFile], more: 0, cardId: "c1", partial: false },
+      },
+    ],
+  };
+  const sanitizedObserved = sanitizeProblemEntry(observedEntry);
+  assert.equal(
+    observedEntry.attempts[0]!.changes.state === "observed" ? observedEntry.attempts[0]!.changes.files[0] : undefined,
+    hostileFile,
+  );
+  assert.equal(
+    sanitizedObserved.attempts[0]!.changes.state === "observed" ? sanitizedObserved.attempts[0]!.changes.files[0] : undefined,
+    "src/[redacted github token].ts",
+  );
+
+  const textOut = await captureOutput(() =>
+    attempts([], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+  );
+  assert.equal(textOut.code, 0);
+  for (const forbidden of ["\u001b", "\u202e", "\u200b", "ghp_", cmdSecret, sigSecret, fileSecret]) {
+    assert.equal(textOut.stderr.includes(forbidden), false, `stderr leaked ${JSON.stringify(forbidden)}`);
+  }
+  assert.match(textOut.stderr, /Error: bad sig \[redacted github token\]/);
+  assert.match(textOut.stderr, /npm test evil/);
+  assert.match(textOut.stderr, /said: edited src\/\[redacted github token\]\.ts/);
+
+  const jsonOut = await captureOutput(() =>
+    attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+  );
+  assert.equal(jsonOut.code, 0);
+  assert.equal(jsonOut.stderr, "");
+  for (const forbidden of ["\u001b", "\u202e", "\u200b", "ghp_", cmdSecret, sigSecret, fileSecret]) {
+    assert.equal(jsonOut.stdout.includes(forbidden), false, `json stdout leaked ${JSON.stringify(forbidden)}`);
+  }
+  const parsed = JSON.parse(jsonOut.stdout) as { entries: ProblemEntry[] };
+  assert.equal(parsed.entries.length, 1);
+  assert.equal(parsed.entries[0]!.signature[0], "Error: bad sig [redacted github token]");
+  assert.equal(parsed.entries[0]!.attempts[0]!.cmd, "npm test evil [redacted github token]");
+  assert.deepEqual(
+    parsed.entries[0]!.attempts[0]!.changes.state === "testimony"
+      ? parsed.entries[0]!.attempts[0]!.changes.files
+      : [],
+    ["src/[redacted github token].ts"],
+  );
+});
+
+test("--json handles stdout EPIPE quietly while preserving other write errors", async (t) => {
+  const home = freshHome(t);
+  seedDefaultListingMemory(home);
+
+  const origDescriptor = Object.getOwnPropertyDescriptor(process, "stdout");
+  const installFakeStdout = (errorCode: string) => {
+    const output = new EventEmitter() as EventEmitter & {
+      write: (chunk: string, callback?: (error?: Error) => void) => boolean;
+    };
+    output.write = (_chunk: string, callback?: (error?: Error) => void) => {
+      setImmediate(() => {
+        const err = Object.assign(new Error(`write ${errorCode}`), { code: errorCode });
+        output.emit("error", err);
+        callback?.(err);
+      });
+      return true;
+    };
+    Object.defineProperty(process, "stdout", { value: output, configurable: true, enumerable: true });
+    return output;
+  };
+
+  try {
+    const epipeOut = installFakeStdout("EPIPE");
+    const epipeCode = await attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD });
+    assert.equal(epipeCode, 0);
+    assert.equal(epipeOut.listenerCount("error"), 0);
+
+    const eioOut = installFakeStdout("EIO");
+    await assert.rejects(
+      () => attempts(["--json"], { memory: createMemoryQueries(), now: NOW, cwd: CWD }),
+      (error: NodeJS.ErrnoException) => error.code === "EIO",
+    );
+    assert.equal(eioOut.listenerCount("error"), 0);
+  } finally {
+    if (origDescriptor) Object.defineProperty(process, "stdout", origDescriptor);
+  }
 });
 
 test("no causal words in any rendered string", () => {
