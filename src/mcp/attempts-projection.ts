@@ -17,6 +17,7 @@ const MAX_CHANGES_FILES = 8;
 const MAX_STATED_CODE_POINTS = 240;
 
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/u;
+const HEX_16_RE = /^[0-9a-f]{16}$/u;
 const WINDOWS_DRIVE_ABS_RE = /^[A-Za-z]:[\\/]/u;
 const WINDOWS_DRIVE_PREFIX_RE = /^[A-Za-z]:/u;
 const UNC_PREFIX_RE = /^(?:\\\\|\/\/)/u;
@@ -73,6 +74,27 @@ function sliceCodePoints(
   return chars.slice(0, maxCodePoints).join("");
 }
 
+function isContainedPosixRelative(rel: string): boolean {
+  return (
+    rel.length > 0 &&
+    !rel.startsWith("..") &&
+    !posix.isAbsolute(rel) &&
+    Buffer.byteLength(rel, "utf8") <= MAX_FIELD_BYTES
+  );
+}
+
+function projectHexOrOpaqueId(
+  value: string,
+  exposure: Exposure,
+  path: string,
+  truncation: Truncation,
+): string {
+  if (HEX_16_RE.test(value)) return value;
+  return exposure === "sanitized"
+    ? projectOpaqueId(value, path, truncation, true)
+    : value;
+}
+
 function sanitizeFileInsideCwd(cwd: string, filePath: string): string | undefined {
   if (cwd.length === 0 || filePath.length === 0 || filePath.trim().length === 0) return undefined;
   if (filePath.length > MAX_FIELD_BYTES * 2 || CONTROL_CHARS_RE.test(filePath)) return undefined;
@@ -108,19 +130,20 @@ function sanitizeFileInsideCwd(cwd: string, filePath: string): string | undefine
     ) {
       return undefined;
     }
-    const normalized = filePath.replaceAll("\\", "/");
     const resolvedCwd = posix.resolve(cwd);
-    const resolvedFile = posix.resolve(resolvedCwd, normalized);
-    const rel = posix.relative(resolvedCwd, resolvedFile);
-    if (
-      rel.length === 0 ||
-      rel.startsWith("..") ||
-      posix.isAbsolute(rel) ||
-      Buffer.byteLength(rel, "utf8") > MAX_FIELD_BYTES
-    ) {
+    const origRel = posix.relative(resolvedCwd, posix.resolve(resolvedCwd, filePath));
+    if (!isContainedPosixRelative(origRel)) {
       return undefined;
     }
-    return rel;
+    if (!filePath.includes("\\")) {
+      return origRel;
+    }
+    const normalized = filePath.replaceAll("\\", "/");
+    const normRel = posix.relative(resolvedCwd, posix.resolve(resolvedCwd, normalized));
+    if (!isContainedPosixRelative(normRel)) {
+      return undefined;
+    }
+    return normRel;
   }
 
   return undefined;
@@ -130,8 +153,6 @@ function projectChanges(
   changes: Attempt["changes"],
   cwd: string,
   exposure: Exposure,
-  attemptPath: string,
-  truncation: Truncation,
 ): ProjectedAttempt["changes"] {
   if (changes.state === "unknown") {
     return { state: "unknown", files: [], more: 0 };
@@ -143,7 +164,7 @@ function projectChanges(
   if (exposure === "raw") {
     for (const file of changes.files) {
       if (files.length < MAX_CHANGES_FILES) {
-        files.push(projectText(file, exposure, `${attemptPath}.changes.files[${files.length}]`, truncation));
+        files.push(file);
       } else {
         more += 1;
       }
@@ -184,14 +205,19 @@ function projectAttempt(
     ts: attempt.ts,
     observedCommand: projectText(attempt.cmd, exposure, `${attemptPath}.observedCommand`, truncation),
     outcome: attempt.outcome,
-    changes: projectChanges(attempt.changes, cwd, exposure, attemptPath, truncation),
+    changes: projectChanges(attempt.changes, cwd, exposure),
   };
 
   if (attempt.outcomeTs !== undefined) {
     projected.outcomeTs = attempt.outcomeTs;
   }
   if (attempt.nextFingerprint !== undefined) {
-    projected.nextFingerprint = attempt.nextFingerprint;
+    projected.nextFingerprint = projectHexOrOpaqueId(
+      attempt.nextFingerprint,
+      exposure,
+      `${attemptPath}.nextFingerprint`,
+      truncation,
+    );
   }
   if (attempt.stated !== undefined) {
     const statedPath = `${attemptPath}.stated.text`;
@@ -233,8 +259,8 @@ export function projectProblemEntries(
     );
 
     const projected: ProjectedProblemEntry = {
-      problemId: entry.problemId,
-      fingerprint: entry.fingerprint,
+      problemId: projectHexOrOpaqueId(entry.problemId, exposure, `${entryPath}.problemId`, truncation),
+      fingerprint: projectHexOrOpaqueId(entry.fingerprint, exposure, `${entryPath}.fingerprint`, truncation),
       signature,
       cwdScope: entry.cwdScope ?? "elsewhere",
       firstSeen: entry.firstSeenTs,

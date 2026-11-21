@@ -181,6 +181,30 @@ test("sanitized keeps only files inside the failure directory", () => {
   assert.equal(winJson.includes(".ssh"), false);
   assert.equal(winJson.includes("passwd"), false);
   assert.equal(winJson.includes("drive.ts"), false);
+
+  // POSIX sibling directory whose name contains a literal backslash must not
+  // be rewritten into cwd before containment is checked (holds on every OS).
+  const posixSiblingFailure = makeFailure({ id: "failure-posix-sibling", ts: NOW - 4 * MINUTE, cwd: "/work/app" });
+  const posixSiblingRationale = makeRationale({
+    id: "rationale-posix-sibling",
+    ts: NOW - 3 * MINUTE,
+    cwd: "/work/app",
+    links: { failureId: posixSiblingFailure.id },
+    files: ["src/ok.ts", "/work/app\\archive/notes.txt"],
+  });
+  const posixSiblingSet = buildProblems([posixSiblingFailure, posixSiblingRationale], completeCoverage(2), {
+    now: NOW,
+    cwd: "/work/app",
+  });
+  const posixSiblingProjected = projectProblemEntries(posixSiblingSet.entries, "sanitized", 10, { fields: [] });
+  assert.deepEqual(posixSiblingProjected[0]!.attempts[0]!.changes, {
+    state: "testimony",
+    files: ["src/ok.ts"],
+    more: 1,
+  });
+  const posixSiblingJson = JSON.stringify(posixSiblingProjected);
+  assert.equal(posixSiblingJson.includes("notes.txt"), false);
+  assert.equal(posixSiblingJson.includes("archive"), false);
 });
 
 test("files cap at 8 with overflow in more", () => {
@@ -324,6 +348,19 @@ test("raw carries cwd and stored file strings", () => {
     files: ["src/a.ts", "../secret", "/etc/passwd", "./b/c.ts"],
     more: 0,
   });
+
+  // Two-space filename must round-trip verbatim under raw without whitespace collapse.
+  const spaceFailure = makeFailure({ id: "failure-raw-space", ts: NOW - 3 * MINUTE, cwd });
+  const spaceRationale = makeRationale({
+    id: "rationale-raw-space",
+    ts: NOW - 2 * MINUTE,
+    cwd,
+    links: { failureId: spaceFailure.id },
+    files: ["src/a  b.ts"],
+  });
+  const spaceSet = buildProblems([spaceFailure, spaceRationale], completeCoverage(2), { now: NOW, cwd });
+  const spaceProjected = projectProblemEntries(spaceSet.entries, "raw", 10, { fields: [] });
+  assert.deepEqual(spaceProjected[0]!.attempts[0]!.changes.files, ["src/a  b.ts"]);
 });
 
 test("attempts keep the newest N and count the rest", () => {
@@ -459,4 +496,165 @@ test("no causal words in projected text", () => {
     ...collectStrings(raw),
   ];
   assert.deepEqual(causalWordViolations(allStrings), []);
+});
+
+test("non-16-hex fingerprint, nextFingerprint, and problemId are projected safely", () => {
+  // Legacy failures without fingerprintV produce `legacy:<record id>` canonical fingerprints.
+  const legacyFirst: FailureRecord = {
+    ...makeFailure({
+      id: "api-token-legacy-1",
+      ts: NOW - 20 * MINUTE,
+      cmd: "npm test",
+      fingerprint: "legacy-fp-1",
+    }),
+    fingerprintV: undefined,
+  };
+  const legacySecond: FailureRecord = {
+    ...makeFailure({
+      id: "secret-legacy-2",
+      ts: NOW - 18 * MINUTE,
+      cmd: "npm test",
+      fingerprint: "legacy-fp-2",
+      signature: ["error: second legacy failure"],
+    }),
+    fingerprintV: undefined,
+  };
+  const legacySet = buildProblems([legacyFirst, legacySecond], completeCoverage(2), {
+    now: NOW,
+    cwd: "/workspace/app",
+  });
+
+  const legacySanitized = projectProblemEntries(legacySet.entries, "sanitized", 10, { fields: [] });
+  const legacySanitizedJson = JSON.stringify(legacySanitized);
+  assert.equal(legacySanitizedJson.includes("api-token-legacy-1"), false);
+  assert.equal(legacySanitizedJson.includes("secret-legacy-2"), false);
+  assert.equal(legacySanitizedJson.includes("legacy:"), false);
+  for (const entry of legacySanitized) {
+    assert.equal(entry.fingerprint, "[redacted]");
+  }
+  const legacyFirstSanitized = legacySanitized.find((e) => e.attempts[0]!.outcome === "different_failure");
+  assert.ok(legacyFirstSanitized !== undefined);
+  assert.equal(legacyFirstSanitized.attempts[0]!.nextFingerprint, "[redacted]");
+
+  const legacyRaw = projectProblemEntries(legacySet.entries, "raw", 10, { fields: [] });
+  const legacyRawJson = JSON.stringify(legacyRaw);
+  assert.equal(legacyRawJson.includes("legacy:api-token-legacy-1"), true);
+  assert.equal(legacyRawJson.includes("legacy:secret-legacy-2"), true);
+  const legacyFirstRaw = legacyRaw.find((e) => e.fingerprint === "legacy:api-token-legacy-1");
+  assert.ok(legacyFirstRaw !== undefined);
+  assert.equal(legacyFirstRaw.attempts[0]!.nextFingerprint, "legacy:secret-legacy-2");
+
+  // Non-hex path-like v2 fingerprints and non-hex problemId must be redacted in sanitized and preserved in raw.
+  const pathFirst = makeFailure({
+    id: "failure-path-1",
+    ts: NOW - 15 * MINUTE,
+    cmd: "npm test",
+    fingerprint: "/home/alice/private/fp-one",
+    fingerprintV: 2,
+  });
+  const pathSecond = makeFailure({
+    id: "failure-path-2",
+    ts: NOW - 13 * MINUTE,
+    cmd: "npm test",
+    fingerprint: "/home/alice/private/fp-two",
+    fingerprintV: 2,
+    signature: ["error: second path failure"],
+  });
+  const pathSet = buildProblems([pathFirst, pathSecond], completeCoverage(2), {
+    now: NOW,
+    cwd: "/workspace/app",
+  });
+  const mutatedEntries: ProblemEntry[] = pathSet.entries.map((entry, idx) => ({
+    ...entry,
+    problemId: idx === 0 ? "/home/alice/private/problem-id" : entry.problemId,
+  }));
+
+  const pathSanitized = projectProblemEntries(mutatedEntries, "sanitized", 10, { fields: [] });
+  const pathSanitizedJson = JSON.stringify(pathSanitized);
+  assert.equal(pathSanitizedJson.includes("/home/alice/private/fp-one"), false);
+  assert.equal(pathSanitizedJson.includes("/home/alice/private/fp-two"), false);
+  assert.equal(pathSanitizedJson.includes("/home/alice/private/problem-id"), false);
+  assert.equal(pathSanitized[0]!.problemId, "[redacted]");
+  for (const entry of pathSanitized) {
+    assert.equal(entry.fingerprint, "[redacted]");
+  }
+  const pathFirstSanitized = pathSanitized.find((e) => e.attempts[0]!.outcome === "different_failure");
+  assert.ok(pathFirstSanitized !== undefined);
+  assert.equal(pathFirstSanitized.attempts[0]!.nextFingerprint, "[redacted]");
+
+  const pathRaw = projectProblemEntries(mutatedEntries, "raw", 10, { fields: [] });
+  const pathRawJson = JSON.stringify(pathRaw);
+  assert.equal(pathRawJson.includes("/home/alice/private/fp-one"), true);
+  assert.equal(pathRawJson.includes("/home/alice/private/fp-two"), true);
+  assert.equal(pathRawJson.includes("/home/alice/private/problem-id"), true);
+  assert.equal(pathRaw[0]!.problemId, "/home/alice/private/problem-id");
+  const pathFirstRaw = pathRaw.find((e) => e.fingerprint === "/home/alice/private/fp-one");
+  assert.ok(pathFirstRaw !== undefined);
+  assert.equal(pathFirstRaw.attempts[0]!.nextFingerprint, "/home/alice/private/fp-two");
+});
+
+function collectRockyAuthoredStrings(value: unknown, path: readonly string[] = [], out: string[] = []): string[] {
+  if (typeof value === "string") {
+    const parent = path[path.length - 1];
+    const grandparent = path[path.length - 2];
+    const isQuotedEvidence =
+      parent === "observedCommand" ||
+      (grandparent === "stated" && parent === "text") ||
+      parent === "signature";
+    if (!isQuotedEvidence) {
+      out.push(value);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectRockyAuthoredStrings(item, path, out);
+    }
+    return out;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, child] of Object.entries(value)) {
+      out.push(key);
+      collectRockyAuthoredStrings(child, [...path, key], out);
+    }
+  }
+  return out;
+}
+
+test("quoted testimony preserves causal words while Rocky-authored text stays clean", () => {
+  // Scoping: the causal-word rule binds Rocky-authored text (notice, field names,
+  // enum values such as outcome, and any text Rocky composes). Quoted user/agent
+  // evidence — stated.text (marked testimony: true), observedCommand, and
+  // signature[] — passes through redacted without rewording.
+  const f1 = makeFailure({
+    id: "failure-quote-1",
+    ts: NOW - 10 * MINUTE,
+    cmd: "npm test -- --grep because",
+    signature: ["error: failed because timeout expired"],
+  });
+  const r1 = makeRationale({
+    id: "rationale-quote-1",
+    ts: NOW - 9 * MINUTE,
+    links: { failureId: f1.id },
+    excerpt: "retry because tests failed",
+    files: ["src/retry.ts"],
+  });
+  const set = buildProblems([f1, r1], completeCoverage(2), { now: NOW, cwd: "/workspace/app" });
+
+  const sanitized = projectProblemEntries(set.entries, "sanitized", 10, { fields: [] });
+  const raw = projectProblemEntries(set.entries, "raw", 10, { fields: [] });
+
+  for (const projected of [sanitized, raw]) {
+    const stated = projected[0]!.attempts[0]!.stated;
+    assert.ok(stated !== undefined);
+    assert.equal(stated.text, "retry because tests failed");
+    assert.equal(stated.testimony, true);
+    assert.equal(causalWordViolations([stated.text]).length > 0, true);
+
+    const rockyAuthored = [
+      ATTEMPT_HISTORY_NOTICE,
+      ...collectRockyAuthoredStrings(projected),
+    ];
+    assert.deepEqual(causalWordViolations(rockyAuthored), []);
+  }
 });
