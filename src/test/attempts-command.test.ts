@@ -760,16 +760,30 @@ test("--json keeps a single persistent stdout error listener and handles EPIPE/E
         });
         process.exitCode = undefined;
         installWritableStdout("EIO", mode);
-        const code = await attempts(["--json"], {
-          memory: createMemoryQueries(),
-          now: NOW,
-          cwd: CWD,
-          exit: (exitCode) => {
-            exitObservations.push({ code: exitCode, stderrAtExit: slowStderrOut });
-          },
+        let resolveExit!: () => void;
+        let rejectExit!: (error: unknown) => void;
+        const exitCalled = new Promise<void>((resolve, reject) => {
+          resolveExit = resolve;
+          rejectExit = reject;
         });
-        assert.equal(code, 0, `${mode} slowStderr return`);
-        await waitTicks(80);
+        const exitTimeout = setTimeout(() => {
+          rejectExit(new Error(`${mode} slowStderr exit timed out after 5000ms`));
+        }, 5000);
+        try {
+          const code = await attempts(["--json"], {
+            memory: createMemoryQueries(),
+            now: NOW,
+            cwd: CWD,
+            exit: (exitCode) => {
+              exitObservations.push({ code: exitCode, stderrAtExit: slowStderrOut });
+              resolveExit();
+            },
+          });
+          assert.equal(code, 0, `${mode} slowStderr return`);
+          await exitCalled;
+        } finally {
+          clearTimeout(exitTimeout);
+        }
         assert.deepEqual(
           exitObservations,
           [{ code: 1, stderrAtExit: "rocky: Cannot write attempts output.\n" }],
