@@ -115,9 +115,21 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
   }
 }
 
+const POWERSHELL_FILESYSTEM_PREFIX = "Microsoft.PowerShell.Core\\FileSystem::";
+
+function isUsableHookCwd(cwd: string): boolean {
+  if (process.platform === "win32") {
+    const rest = cwd.slice(0, POWERSHELL_FILESYSTEM_PREFIX.length).toLowerCase() === POWERSHELL_FILESYSTEM_PREFIX.toLowerCase()
+      ? cwd.slice(POWERSHELL_FILESYSTEM_PREFIX.length)
+      : cwd;
+    return isAbsolute(rest);
+  }
+  return isAbsolute(cwd);
+}
+
 /** A command failed in the hooked shell. Record it; speak only if memory has something to say. */
 export function hookFail(cmd: string, exitCode: number, cwd: string): number {
-  if (!Number.isSafeInteger(exitCode) || !isAbsolute(cwd)) return 0;
+  if (!Number.isSafeInteger(exitCode) || !isUsableHookCwd(cwd)) return 0;
   if (CANCEL_CODES.has(exitCode)) return 0;
   try {
     drainGuardPending();
@@ -225,7 +237,7 @@ export function isTypoSymptom(cmd: string, exitCode: number): boolean {
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
 export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): number {
-  if (!isAbsolute(cwd)) return 0;
+  if (!isUsableHookCwd(cwd)) return 0;
   try {
     drainGuardPending();
   } catch {
