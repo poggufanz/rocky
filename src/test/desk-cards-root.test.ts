@@ -1,15 +1,18 @@
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { canonicalPath } from "../core/memory-read.js";
 import {
   cardsForRoot,
+  cardsForRootForTest,
   findCardById,
   makeCardsFor,
+  makeCardsForForTest,
   resolveGitRootForCwd,
   toolTextAllowed,
+  type CardsReadSyncHook,
   type StoredBlock,
   type StoredCard,
   type StoredFlowStep,
@@ -360,4 +363,68 @@ test("makeCardsFor caches per git root across subdirectories, respects toolText,
   const outsideSecond = cardsFor(outsideDir);
   assert.equal(outsideSecond, outsideFirst);
   assert.equal(outsideFirst.cards[0]?.card_id, "card-none");
+});
+
+test("cardsForRoot and makeCardsFor discard parsed cards on mid-read EIO or post-read mutation", (t) => {
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const { repoRoot } = makeRepo(temp, "read-err-repo");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const logPath = cardsFilePath(canonicalRoot, home);
+  const line1 = `${JSON.stringify(makeCard("card-first", canonicalRoot, [makeBlock(1, "src/a.ts")]))}\n`;
+  const line2 = `${JSON.stringify(makeCard("card-second", canonicalRoot, [makeBlock(1, "src/b.ts")]))}\n`;
+  mkdirSync(dirname(logPath), { recursive: true });
+  writeFileSync(logPath, line1 + line2, "utf8");
+  const firstLineBytes = Buffer.byteLength(line1, "utf8");
+
+  let eioCalls = 0;
+  const eioAfterFirstLine: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+    eioCalls += 1;
+    if (eioCalls === 1) {
+      return readSync(fd, buffer, offset, Math.min(length, firstLineBytes), position);
+    }
+    const err = new Error("EIO: read error") as NodeJS.ErrnoException;
+    err.code = "EIO";
+    throw err;
+  };
+  assert.deepEqual(cardsForRootForTest(repoRoot, { home, toolText: true }, eioAfterFirstLine), {
+    cards: [],
+    complete: false,
+  });
+
+  eioCalls = 0;
+  const cachedLoader = makeCardsForForTest({ home, toolText: true }, eioAfterFirstLine);
+  assert.deepEqual(cachedLoader(repoRoot), { cards: [], complete: false });
+
+  let mutated = false;
+  const mutateDuringRead: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+    const count = readSync(fd, buffer, offset, length, position);
+    if (!mutated) {
+      mutated = true;
+      appendFileSync(logPath, "\n", "utf8");
+    }
+    return count;
+  };
+  assert.deepEqual(cardsForRootForTest(repoRoot, { home, toolText: true }, mutateDuringRead), {
+    cards: [],
+    complete: false,
+  });
+});
+
+test("cardsForRoot retains valid parsed cards when line-cap is hit", (t) => {
+  const temp = makeTempDir(t);
+  const home = join(temp, "home");
+  const { repoRoot } = makeRepo(temp, "line-cap-repo");
+  const canonicalRoot = canonicalPath(repoRoot);
+  const logPath = cardsFilePath(canonicalRoot, home);
+  const validLine = JSON.stringify(makeCard("card-valid", canonicalRoot, [makeBlock(1, "src/ok.ts")]));
+  const oversizedLine = `{"padding":"${"x".repeat(1024 * 1024 + 64)}"}`;
+  writeJsonl(logPath, [validLine, oversizedLine]);
+
+  const result = cardsForRoot(repoRoot, { home, toolText: true });
+  assert.equal(result.complete, false);
+  assert.deepEqual(
+    result.cards.map((c) => c.card_id),
+    ["card-valid"],
+  );
 });

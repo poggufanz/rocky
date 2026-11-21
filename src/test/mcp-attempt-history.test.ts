@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,6 +24,7 @@ import {
   type RationaleRecord,
 } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { makeCardsForForTest, type CardsReadSyncHook } from "../desk/cards-read.js";
 import type { StoredCard } from "../desk/cards-record.js";
 import { cardsFilePath } from "../listening/cards-path.js";
 import {
@@ -1615,90 +1616,44 @@ function makeStoredCard(overrides: Partial<StoredCard> & { card_id: string; root
   };
 }
 
-test("sanitized attempt_history joins cards for observed edits and redacted bash-description and card-quote testimony", async () => {
-  const now = Date.now();
-  const fp = "a1a2a3a4b1b2b3b4";
-  const repoRoot = join(process.cwd(), "virtual-join-repo");
-  const pkgDir = join(repoRoot, "pkg");
-  const cardId = "11111111222222223333333344444444";
-
+function buildJoinCardFixture(now: number, fp: string, repoRoot: string, pkgDir: string, cardId: string): {
+  records: MemoryRecord[];
+  card: StoredCard;
+} {
   const t1 = now - 20 * MINUTE;
   const t2 = now - 15 * MINUTE;
   const t3 = now - 10 * MINUTE;
-
-  const f1 = makeFailure({
-    id: "join-f1",
-    ts: t1,
-    cwd: pkgDir,
-    cmd: "npm test",
-    fingerprint: fp,
-    signature: ["TypeError: retryBudget undefined"],
-  });
-  const f2 = makeFailure({
-    id: "join-f2",
-    ts: t2,
-    cwd: pkgDir,
-    cmd: "npm test",
-    fingerprint: fp,
-    signature: ["TypeError: retryBudget undefined"],
-  });
-  const fix = makeFix({
-    id: "join-fix",
-    ts: t3,
-    cwd: pkgDir,
-    cmd: "npm test",
-    failureIds: [f2.id],
-  });
-
+  const f1 = makeFailure({ id: "join-f1", ts: t1, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["TypeError: retryBudget undefined"] });
+  const f2 = makeFailure({ id: "join-f2", ts: t2, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["TypeError: retryBudget undefined"] });
+  const fix = makeFix({ id: "join-fix", ts: t3, cwd: pkgDir, cmd: "npm test", failureIds: [f2.id] });
   const card = makeStoredCard({
     card_id: cardId,
     root: canonicalPath(repoRoot),
     started_ms: t1 - 5_000,
     ended_ms: t3 + 5_000,
     blocks: [
-      {
-        seq: 1,
-        path: "shared/x.ts",
-        labels: [],
-        importance: "medium",
-        quote: { text: "fallback quote for first edit", shared: false },
-      },
-      {
-        seq: 2,
-        path: "/outside/secret.ts",
-        labels: [],
-        importance: "low",
-      },
-      {
-        seq: 3,
-        path: "pkg/src/retry.ts",
-        labels: [],
-        importance: "medium",
-        quote: { text: "check https://internal.example.com with Bearer secretquotevalue999", shared: false },
-      },
+      { seq: 1, path: "shared/x.ts", labels: [], importance: "medium", quote: { text: "fallback quote for first edit", shared: false } },
+      { seq: 2, path: "/outside/secret.ts", labels: [], importance: "low" },
+      { seq: 3, path: "pkg/src/retry.ts", labels: [], importance: "medium", quote: { text: "check https://internal.example.com with Bearer secretquotevalue999", shared: false } },
     ],
     flow: [
       { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t1 - 100, end_ms: t1, cwd: pkgDir, tool_use_id: "tu-f1" },
       { kind: "edit", text: "Edit shared/x.ts", ok: true, dur_ms: 50, seqs: [1, 2], start_ms: t1 + 10_000, end_ms: t1 + 10_050 },
-      {
-        kind: "cmd",
-        text: "npm test",
-        ok: false,
-        dur_ms: 100,
-        seqs: [],
-        exit_code: 1,
-        start_ms: t2 - 100,
-        end_ms: t2,
-        cwd: pkgDir,
-        tool_use_id: "tu-f2",
-        desc: "Re-run tests against https://internal.example.com with Bearer supersecrettoken123",
-      },
+      { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t2 - 100, end_ms: t2, cwd: pkgDir, tool_use_id: "tu-f2", desc: "Re-run tests against https://internal.example.com with Bearer supersecrettoken123" },
       { kind: "edit", text: "Edit pkg/src/retry.ts", ok: true, dur_ms: 50, seqs: [3], start_ms: t2 + 10_000, end_ms: t2 + 10_050 },
       { kind: "cmd", text: "npm test", ok: true, dur_ms: 100, seqs: [], start_ms: t3 - 100, end_ms: t3, cwd: pkgDir, tool_use_id: "tu-pass" },
     ],
   });
+  return { records: [f1, f2, fix], card };
+}
 
-  await withDurableMemory([f1, f2, fix], async (memory) => {
+test("sanitized attempt_history joins cards for observed edits and redacted bash-description and card-quote testimony", async () => {
+  const fp = "a1a2a3a4b1b2b3b4";
+  const repoRoot = join(process.cwd(), "virtual-join-repo");
+  const cardId = "11111111222222223333333344444444";
+  const { records, card } = buildJoinCardFixture(Date.now(), fp, repoRoot, join(repoRoot, "pkg"), cardId);
+
+  await withDurableMemory(records, async (memory) => {
     const reg = createToolRegistry({
       exposure: "sanitized",
       memory,
@@ -1710,32 +1665,22 @@ test("sanitized attempt_history joins cards for observed edits and redacted bash
     assert.equal(body.entries.length, 1);
 
     const [a1, a2] = body.entries[0]!.attempts;
-    assert.deepEqual(a1!.changes, {
-      state: "observed",
-      files: ["shared/x.ts"],
-      more: 1,
-    });
+    assert.deepEqual(a1!.changes, { state: "observed", files: ["shared/x.ts"], more: 1 });
     assert.equal("cardId" in a1!.changes, false);
-    assert.ok(a1!.stated !== undefined);
-    assert.equal(a1!.stated.source, "bash-description");
-    assert.equal(a1!.stated.testimony, true);
-    assert.equal("recordId" in a1!.stated, false);
-    assert.equal(a1!.stated.text.includes("internal.example.com"), false);
-    assert.equal(a1!.stated.text.includes("supersecrettoken123"), false);
-    assert.equal(a1!.stated.text.includes("[redacted]"), true);
+    assert.equal(a1!.stated?.source, "bash-description");
+    assert.equal(a1!.stated?.testimony, true);
+    assert.equal("recordId" in a1!.stated!, false);
+    assert.equal(a1!.stated!.text.includes("internal.example.com"), false);
+    assert.equal(a1!.stated!.text.includes("supersecrettoken123"), false);
+    assert.equal(a1!.stated!.text.includes("[redacted]"), true);
 
-    assert.deepEqual(a2!.changes, {
-      state: "observed",
-      files: ["pkg/src/retry.ts"],
-      more: 0,
-    });
-    assert.ok(a2!.stated !== undefined);
-    assert.equal(a2!.stated.source, "card-quote");
-    assert.equal(a2!.stated.testimony, true);
-    assert.equal("recordId" in a2!.stated, false);
-    assert.equal(a2!.stated.text.includes("internal.example.com"), false);
-    assert.equal(a2!.stated.text.includes("secretquotevalue999"), false);
-    assert.equal(a2!.stated.text.includes("[redacted]"), true);
+    assert.deepEqual(a2!.changes, { state: "observed", files: ["pkg/src/retry.ts"], more: 0 });
+    assert.equal(a2!.stated?.source, "card-quote");
+    assert.equal(a2!.stated?.testimony, true);
+    assert.equal("recordId" in a2!.stated!, false);
+    assert.equal(a2!.stated!.text.includes("internal.example.com"), false);
+    assert.equal(a2!.stated!.text.includes("secretquotevalue999"), false);
+    assert.equal(a2!.stated!.text.includes("[redacted]"), true);
 
     const json = JSON.stringify(body);
     assert.equal(json.includes("secret.ts"), false);
@@ -1743,13 +1688,44 @@ test("sanitized attempt_history joins cards for observed edits and redacted bash
   });
 });
 
-test("attempt_history strips bash-description and card-quote under desk/tool-text-off while keeping observed files and rationale", async () => {
-  const now = Date.now();
-  const fp = "c1c2c3c4d1d2d3d4";
+function buildToolTextOffFixture(now: number, fp: string, repoRoot: string, pkgDir: string): {
+  records: MemoryRecord[];
+  card: StoredCard;
+} {
   const t1 = now - 30 * MINUTE;
   const t2 = now - 20 * MINUTE;
   const t3 = now - 10 * MINUTE;
   const t4 = now - 5 * MINUTE;
+  const f1 = makeFailure({ id: "tto-f1", ts: t1, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["Error: tool text test"] });
+  const f2 = makeFailure({ id: "tto-f2", ts: t2, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["Error: tool text test"] });
+  const f3 = makeFailure({ id: "tto-f3", ts: t3, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["Error: tool text test"] });
+  const r3 = makeRationale({ id: "tto-r3", ts: t3 + 1_000, cwd: pkgDir, links: { failureId: f3.id }, excerpt: "adjust retry window in config" });
+  const fix = makeFix({ id: "tto-fix", ts: t4, cwd: pkgDir, cmd: "npm test", failureIds: [f3.id] });
+  const card = makeStoredCard({
+    card_id: "aaaa1111bbbb2222cccc3333dddd4444",
+    root: canonicalPath(repoRoot),
+    started_ms: t1 - 5_000,
+    ended_ms: t4 + 5_000,
+    blocks: [
+      { seq: 1, path: "src/a.ts", labels: [], importance: "medium", quote: { text: "first edit quote", shared: false } },
+      { seq: 2, path: "src/b.ts", labels: [], importance: "medium", quote: { text: "second edit quote", shared: false } },
+      { seq: 3, path: "src/c.ts", labels: [], importance: "medium", quote: { text: "third edit quote", shared: false } },
+    ],
+    flow: [
+      { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t1 - 100, end_ms: t1, cwd: pkgDir, tool_use_id: "tu-1" },
+      { kind: "edit", text: "Edit src/a.ts", ok: true, dur_ms: 50, seqs: [1], start_ms: t1 + 5_000, end_ms: t1 + 5_050 },
+      { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t2 - 100, end_ms: t2, cwd: pkgDir, tool_use_id: "tu-2", desc: "Retry after updating a.ts" },
+      { kind: "edit", text: "Edit src/b.ts", ok: true, dur_ms: 50, seqs: [2], start_ms: t2 + 5_000, end_ms: t2 + 5_050 },
+      { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t3 - 100, end_ms: t3, cwd: pkgDir, tool_use_id: "tu-3" },
+      { kind: "edit", text: "Edit src/c.ts", ok: true, dur_ms: 50, seqs: [3], start_ms: t3 + 5_000, end_ms: t3 + 5_050 },
+      { kind: "cmd", text: "npm test", ok: true, dur_ms: 100, seqs: [], start_ms: t4 - 100, end_ms: t4, cwd: pkgDir, tool_use_id: "tu-4", desc: "Verify final pass" },
+    ],
+  });
+  return { records: [f1, f2, f3, r3, fix], card };
+}
+
+test("attempt_history strips bash-description and card-quote under desk/tool-text-off while keeping observed files and rationale", async () => {
+  const fp = "c1c2c3c4d1d2d3d4";
 
   await withDurableMemory([], async (_unused, rawTempRoot) => {
     const tempRoot = realpathSync.native(rawTempRoot);
@@ -1757,74 +1733,32 @@ test("attempt_history strips bash-description and card-quote under desk/tool-tex
     const pkgDir = join(repoRoot, "pkg");
     mkdirSync(join(repoRoot, ".git"), { recursive: true });
     mkdirSync(pkgDir, { recursive: true });
+    const { records, card } = buildToolTextOffFixture(Date.now(), fp, repoRoot, pkgDir);
 
-    const f1 = makeFailure({ id: "tto-f1", ts: t1, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["Error: tool text test"] });
-    const f2 = makeFailure({ id: "tto-f2", ts: t2, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["Error: tool text test"] });
-    const f3 = makeFailure({ id: "tto-f3", ts: t3, cwd: pkgDir, cmd: "npm test", fingerprint: fp, signature: ["Error: tool text test"] });
-    const r3 = makeRationale({
-      id: "tto-r3",
-      ts: t3 + 1_000,
-      cwd: pkgDir,
-      links: { failureId: f3.id },
-      excerpt: "adjust retry window in config",
-    });
-    const fix = makeFix({ id: "tto-fix", ts: t4, cwd: pkgDir, cmd: "npm test", failureIds: [f3.id] });
-
-    const card = makeStoredCard({
-      card_id: "aaaa1111bbbb2222cccc3333dddd4444",
-      root: canonicalPath(repoRoot),
-      started_ms: t1 - 5_000,
-      ended_ms: t4 + 5_000,
-      blocks: [
-        { seq: 1, path: "src/a.ts", labels: [], importance: "medium", quote: { text: "first edit quote", shared: false } },
-        { seq: 2, path: "src/b.ts", labels: [], importance: "medium", quote: { text: "second edit quote", shared: false } },
-        { seq: 3, path: "src/c.ts", labels: [], importance: "medium", quote: { text: "third edit quote", shared: false } },
-      ],
-      flow: [
-        { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t1 - 100, end_ms: t1, cwd: pkgDir, tool_use_id: "tu-1" },
-        { kind: "edit", text: "Edit src/a.ts", ok: true, dur_ms: 50, seqs: [1], start_ms: t1 + 5_000, end_ms: t1 + 5_050 },
-        { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t2 - 100, end_ms: t2, cwd: pkgDir, tool_use_id: "tu-2", desc: "Retry after updating a.ts" },
-        { kind: "edit", text: "Edit src/b.ts", ok: true, dur_ms: 50, seqs: [2], start_ms: t2 + 5_000, end_ms: t2 + 5_050 },
-        { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t3 - 100, end_ms: t3, cwd: pkgDir, tool_use_id: "tu-3" },
-        { kind: "edit", text: "Edit src/c.ts", ok: true, dur_ms: 50, seqs: [3], start_ms: t3 + 5_000, end_ms: t3 + 5_050 },
-        { kind: "cmd", text: "npm test", ok: true, dur_ms: 100, seqs: [], start_ms: t4 - 100, end_ms: t4, cwd: pkgDir, tool_use_id: "tu-4", desc: "Verify final pass" },
-      ],
-    });
-
-    await withDurableMemory([f1, f2, f3, r3, fix], async (memory) => {
+    await withDurableMemory(records, async (memory) => {
       const home = process.env.ROCKY_HOME!;
-      const logPath = cardsFilePath(canonicalPath(repoRoot), home);
       mkdirSync(join(home, "desk", "cards"), { recursive: true });
-      writeFileSync(logPath, `${JSON.stringify(card)}\n`, "utf8");
+      writeFileSync(cardsFilePath(canonicalPath(repoRoot), home), `${JSON.stringify(card)}\n`, "utf8");
 
-      const reg = createToolRegistry({
-        exposure: "sanitized",
-        memory,
-        recallWithAi: disabledRecallWithAi,
-      });
+      const reg = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
       const signal = new AbortController().signal;
 
       const before = await reg.call("attempt_history", { fingerprint: fp }, signal);
       const beforeAttempts = (before.structuredContent as { entries: ProjectedProblemEntry[] }).entries[0]!.attempts;
-      assert.equal(beforeAttempts[0]!.changes.state, "observed");
-      assert.deepEqual(beforeAttempts[0]!.changes.files, ["src/a.ts"]);
-      assert.equal(beforeAttempts[0]!.stated?.source, "bash-description");
-      assert.equal(beforeAttempts[1]!.changes.state, "observed");
-      assert.deepEqual(beforeAttempts[1]!.changes.files, ["src/b.ts"]);
-      assert.equal(beforeAttempts[1]!.stated?.source, "card-quote");
-      assert.equal(beforeAttempts[2]!.changes.state, "observed");
-      assert.deepEqual(beforeAttempts[2]!.changes.files, ["src/c.ts"]);
-      assert.equal(beforeAttempts[2]!.stated?.source, "rationale");
+      assert.deepEqual(beforeAttempts.map((a) => a.changes.files), [["src/a.ts"], ["src/b.ts"], ["src/c.ts"]]);
+      assert.deepEqual(beforeAttempts.map((a) => a.stated?.source), ["bash-description", "card-quote", "rationale"]);
 
       writeFileSync(join(home, "desk", "tool-text-off"), "", "utf8");
 
       const after = await reg.call("attempt_history", { fingerprint: fp }, signal);
       const afterAttempts = (after.structuredContent as { entries: ProjectedProblemEntry[] }).entries[0]!.attempts;
-      assert.deepEqual(afterAttempts[0]!.changes, { state: "observed", files: ["src/a.ts"], more: 0 });
+      assert.deepEqual(afterAttempts.map((a) => a.changes), [
+        { state: "observed", files: ["src/a.ts"], more: 0 },
+        { state: "observed", files: ["src/b.ts"], more: 0 },
+        { state: "observed", files: ["src/c.ts"], more: 0 },
+      ]);
       assert.equal(afterAttempts[0]!.stated, undefined);
-      assert.deepEqual(afterAttempts[1]!.changes, { state: "observed", files: ["src/b.ts"], more: 0 });
       assert.equal(afterAttempts[1]!.stated, undefined);
-      assert.deepEqual(afterAttempts[2]!.changes, { state: "observed", files: ["src/c.ts"], more: 0 });
       assert.deepEqual(afterAttempts[2]!.stated, {
         text: "adjust retry window in config",
         source: "rationale",
@@ -1992,6 +1926,141 @@ test("recall attemptsSummary stays byte-identical when joinable cards exist", as
         possiblePass: 0,
         latestOutcome: "passed",
       });
+    });
+  });
+});
+
+function buildMultiAttemptSeries(
+  prefix: string,
+  cwd: string,
+  fp: string,
+  startTs: number,
+  count: number,
+  editedFile: string,
+): { records: MemoryRecord[]; card: StoredCard } {
+  const records: MemoryRecord[] = [];
+  const flow: NonNullable<StoredCard["flow"]> = [];
+  for (let i = 0; i < count; i += 1) {
+    const ts = startTs + i * 2 * MINUTE;
+    const f = makeFailure({ id: `${prefix}-f${i}`, ts, cwd, cmd: "npm test", fingerprint: fp, signature: ["Error: tailJoinLimit"] });
+    records.push(f);
+    flow.push({ kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: ts - 100, end_ms: ts, cwd, tool_use_id: `${prefix}-tu-${i}` });
+  }
+  const passTs = startTs + count * 2 * MINUTE;
+  const lastFailureId = `${prefix}-f${count - 1}`;
+  records.push(makeFix({ id: `${prefix}-fix`, ts: passTs, cwd, cmd: "npm test", failureIds: [lastFailureId] }));
+  flow.push({ kind: "edit", text: `Edit ${editedFile}`, ok: true, dur_ms: 50, seqs: [1], start_ms: passTs - MINUTE, end_ms: passTs - MINUTE + 50 });
+  flow.push({ kind: "cmd", text: "npm test", ok: true, dur_ms: 100, seqs: [], start_ms: passTs - 100, end_ms: passTs, cwd, tool_use_id: `${prefix}-tu-pass` });
+  const card = makeStoredCard({
+    card_id: `${prefix}-card-1111222233334444`,
+    root: canonicalPath(cwd),
+    started_ms: startTs - 5_000,
+    ended_ms: passTs + 5_000,
+    blocks: [{ seq: 1, path: editedFile, labels: [], importance: "medium" }],
+    flow,
+  });
+  return { records, card };
+}
+
+test("attempt_history joins only the retained tail of attempts while preserving counts and attemptsOmitted", async () => {
+  const now = Date.now();
+  const dirA = join(process.cwd(), "virtual-tail-a");
+  const dirB = join(process.cwd(), "virtual-tail-b");
+  const seriesA = buildMultiAttemptSeries("a", dirA, "1010101020202020", now - 30 * MINUTE, 4, "src/a-fix.ts");
+  const seriesB = buildMultiAttemptSeries("b", dirB, "3030303040404040", now - 20 * MINUTE, 3, "src/b-fix.ts");
+
+  await withDurableMemory([...seriesA.records, ...seriesB.records], async (memory) => {
+    const signal = new AbortController().signal;
+    const baseReg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+      cardsFor: () => ({ cards: [], complete: true }),
+    });
+    const baseEntries = ((await baseReg.call("attempt_history", { query: "tailJoinLimit", limit: 2, attempts: 1 }, signal))
+      .structuredContent as { entries: ProjectedProblemEntry[] }).entries;
+
+    const seenCwds: string[] = [];
+    const spyReg = createToolRegistry({
+      exposure: "sanitized",
+      memory,
+      recallWithAi: disabledRecallWithAi,
+      cardsFor: (cwd) => {
+        seenCwds.push(cwd);
+        return { cards: cwd === dirA ? [seriesA.card] : [seriesB.card], complete: true };
+      },
+    });
+    const entries = ((await spyReg.call("attempt_history", { query: "tailJoinLimit", limit: 2, attempts: 1 }, signal))
+      .structuredContent as { entries: ProjectedProblemEntry[] }).entries;
+
+    assert.equal(entries.length, 2);
+    assert.equal(seenCwds.length, 2, "must join only 1 retained attempt per entry");
+    assert.deepEqual(seenCwds.sort(), [dirA, dirB].sort());
+    assert.deepEqual(entries.map((e) => e.counts), baseEntries.map((e) => e.counts));
+    assert.deepEqual(entries.map((e) => e.attemptsOmitted), baseEntries.map((e) => e.attemptsOmitted));
+    assert.deepEqual(entries.map((e) => e.attemptsOmitted).sort((x, y) => x - y), [2, 3]);
+    for (const entry of entries) {
+      assert.equal(entry.attempts.length, 1);
+      assert.equal(entry.attempts[0]!.changes.state, "observed");
+    }
+  });
+});
+
+test("attempt_history keeps original changes when card log fails mid-read after parsing a matching card", async () => {
+  const now = Date.now();
+  const fp = "5566778899aabbcc";
+  const t1 = now - 10 * MINUTE;
+  const t2 = now - 5 * MINUTE;
+
+  await withDurableMemory([], async (_unused, rawTempRoot) => {
+    const tempRoot = realpathSync.native(rawTempRoot);
+    const repoRoot = join(tempRoot, "mid-read-repo");
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    const f1 = makeFailure({ id: "mr-f1", ts: t1, cwd: repoRoot, cmd: "npm test", fingerprint: fp, signature: ["Error: midRead"] });
+    const r1 = makeRationale({ id: "mr-r1", ts: t1 + 1_000, cwd: repoRoot, links: { failureId: f1.id }, files: ["src/ok.ts"], excerpt: "keep testimony" });
+    const fix = makeFix({ id: "mr-fix", ts: t2, cwd: repoRoot, cmd: "npm test", failureIds: [f1.id] });
+    const matchingCard = makeStoredCard({
+      card_id: "aaaa0000bbbb1111cccc2222dddd3333",
+      root: canonicalPath(repoRoot),
+      started_ms: t1 - 5_000,
+      ended_ms: t2 + 5_000,
+      blocks: [{ seq: 1, path: "src/from-card.ts", labels: [], importance: "high" }],
+      flow: [
+        { kind: "cmd", text: "npm test", ok: false, dur_ms: 100, seqs: [], exit_code: 1, start_ms: t1 - 100, end_ms: t1, cwd: repoRoot, tool_use_id: "tu-mr1" },
+        { kind: "edit", text: "Edit src/from-card.ts", ok: true, dur_ms: 50, seqs: [1], start_ms: t1 + 5_000, end_ms: t1 + 5_050 },
+        { kind: "cmd", text: "npm test", ok: true, dur_ms: 100, seqs: [], start_ms: t2 - 100, end_ms: t2, cwd: repoRoot, tool_use_id: "tu-mr2", desc: "from card" },
+      ],
+    });
+    const secondCard = makeStoredCard({ card_id: "eeee0000ffff11112222333344445555", root: canonicalPath(repoRoot), started_ms: t2 + 6_000 });
+
+    await withDurableMemory([f1, r1, fix], async (memory) => {
+      const home = process.env.ROCKY_HOME!;
+      const logPath = cardsFilePath(canonicalPath(repoRoot), home);
+      const line1 = `${JSON.stringify(matchingCard)}\n`;
+      const line2 = `${JSON.stringify(secondCard)}\n`;
+      mkdirSync(join(home, "desk", "cards"), { recursive: true });
+      writeFileSync(logPath, line1 + line2, "utf8");
+      const firstLineBytes = Buffer.byteLength(line1, "utf8");
+
+      let calls = 0;
+      const eioAfterFirstLine: CardsReadSyncHook = (fd, buffer, offset, length, position) => {
+        calls += 1;
+        if (calls === 1) return readSync(fd, buffer, offset, Math.min(length, firstLineBytes), position);
+        const err = new Error("EIO: read error") as NodeJS.ErrnoException;
+        err.code = "EIO";
+        throw err;
+      };
+      const reg = createToolRegistry({
+        exposure: "sanitized",
+        memory,
+        recallWithAi: disabledRecallWithAi,
+        cardsFor: makeCardsForForTest({ home, toolText: true }, eioAfterFirstLine),
+      });
+      const res = await reg.call("attempt_history", { fingerprint: fp }, new AbortController().signal);
+      assert.equal(res.isError, undefined);
+      const attempt = (res.structuredContent as { entries: ProjectedProblemEntry[] }).entries[0]!.attempts[0]!;
+      assert.deepEqual(attempt.changes, { state: "testimony", files: ["src/ok.ts"], more: 0 });
+      assert.equal(attempt.stated?.source, "rationale");
     });
   });
 });

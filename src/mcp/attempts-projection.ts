@@ -75,10 +75,14 @@ function sliceCodePoints(
   return chars.slice(0, maxCodePoints).join("");
 }
 
+function isParentEscape(rel: string): boolean {
+  return rel === ".." || rel.startsWith("../") || rel.startsWith("..\\");
+}
+
 function isContainedPosixRelative(rel: string): boolean {
   return (
     rel.length > 0 &&
-    !rel.startsWith("..") &&
+    !isParentEscape(rel) &&
     !posix.isAbsolute(rel) &&
     Buffer.byteLength(rel, "utf8") <= MAX_FIELD_BYTES
   );
@@ -141,7 +145,7 @@ function sanitizeWindowsTestimonyFile(
   if (rel.length === 0 || win32.isAbsolute(rel)) return undefined;
   const posixRel = rel.replaceAll("\\", "/");
   if (
-    posixRel.startsWith("..") ||
+    isParentEscape(posixRel) ||
     posix.isAbsolute(posixRel) ||
     WINDOWS_DRIVE_PREFIX_RE.test(posixRel) ||
     Buffer.byteLength(posixRel, "utf8") > MAX_FIELD_BYTES

@@ -1850,6 +1850,22 @@ function makeRootForCwd(): (cwd: string) => string | undefined {
   };
 }
 
+function sliceEntryAttempts(
+  entries: readonly ProblemEntry[],
+  maxAttempts: number,
+): { sliced: ProblemEntry[]; omittedByEntry: number[] } {
+  const keepCount = Number.isSafeInteger(maxAttempts) && maxAttempts >= 0
+    ? maxAttempts
+    : Math.max(0, Math.floor(Number.isFinite(maxAttempts) ? maxAttempts : 0));
+  const omittedByEntry: number[] = [];
+  const sliced = entries.map((entry) => {
+    const start = Math.max(0, entry.attempts.length - keepCount);
+    omittedByEntry.push(start);
+    return start === 0 ? entry : { ...entry, attempts: entry.attempts.slice(start) };
+  });
+  return { sliced, omittedByEntry };
+}
+
 interface StatsFlightResult {
   stats: Record<string, unknown>;
   coverage: MemoryCoverage | undefined;
@@ -2103,16 +2119,17 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 allDirs: input.cwd === undefined,
                 limit: input.limit,
               });
-              let joinedEntries = selection.entries;
+              const { sliced, omittedByEntry } = sliceEntryAttempts(selection.entries, input.attempts);
+              let joinedEntries = sliced;
               try {
                 joinedEntries = joinAttemptCards(
-                  selection.entries,
+                  sliced,
                   snapshot.records,
                   attemptCardsFor(options.cardsFor),
                   { platform: process.platform },
                 ).entries;
               } catch {
-                joinedEntries = selection.entries;
+                joinedEntries = sliced;
               }
               const truncation: Truncation = { fields: [] };
               const entries = projectProblemEntries(
@@ -2121,7 +2138,10 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 input.attempts,
                 truncation,
                 makeRootForCwd(),
-              );
+              ).map((entry, index) => ({
+                ...entry,
+                attemptsOmitted: entry.attemptsOmitted + (omittedByEntry[index] ?? 0),
+              }));
               const payload: Record<string, unknown> = {
                 exposure: options.exposure,
                 entries,

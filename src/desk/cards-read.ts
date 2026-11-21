@@ -693,11 +693,19 @@ function stripCardToolText(card: StoredCard): StoredCard {
   return copy;
 }
 
+function isHardReadFailure(coverage: CardsReadCoverage): boolean {
+  if (coverage.complete) return false;
+  if (coverage.reason === "read-race") return true;
+  if (coverage.reason === "file-size-cap" || coverage.reason === "line-cap") return false;
+  return coverage.skipped === 0;
+}
+
 function readProbedLog(
   logPath: string | undefined,
   status: "missing" | "non-regular" | "race" | "ready",
   lstat: ReturnType<typeof lstatSync> | undefined,
   covAcc: CoverageAccumulator,
+  readBytes: CardsReadSyncHook = readSync,
 ): Map<string, StoredCard> {
   if (status === "missing") return new Map();
   if (status === "non-regular") {
@@ -708,9 +716,9 @@ function readProbedLog(
     addCoverage(covAcc, { complete: false, reason: "read-race", skipped: 0 });
     return new Map();
   }
-  const parsed = readAndParseCardsLog(logPath, lstat, MAX_TOTAL_CARDS_BYTES);
+  const parsed = readAndParseCardsLog(logPath, lstat, MAX_TOTAL_CARDS_BYTES, readBytes);
   addCoverage(covAcc, parsed.coverage);
-  return parsed.cardsById;
+  return isHardReadFailure(parsed.coverage) ? new Map() : parsed.cardsById;
 }
 
 /** @internal Resolve the git root for a directory `cwd` without trimming or collapsing Windows drive roots. */
@@ -725,22 +733,39 @@ export function resolveGitRootForCwd(
   return /^[a-zA-Z]:$/.test(rootRaw) ? `${rootRaw}/` : rootRaw;
 }
 
-/** Cards logged for the repo that contains `cwd` (or `_none.jsonl` outside a repo). */
-export function cardsForRoot(cwd: string, options: { home: string; toolText: boolean }): CardsForRoot {
+function cardsForRootInternal(
+  cwd: string,
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook,
+): CardsForRoot {
   const rootRaw = resolveGitRootForCwd(cwd, existsSync);
   const covAcc: CoverageAccumulator = { complete: true, skipped: 0 };
   let cardsById: Map<string, StoredCard>;
   if (rootRaw !== undefined) {
     const pick = pickExistingLogPath(buildRootSpellings(rootRaw), options.home);
-    cardsById = readProbedLog(pick.logPath, pick.status, pick.lstat, covAcc);
+    cardsById = readProbedLog(pick.logPath, pick.status, pick.lstat, covAcc, readBytes);
   } else {
     const nonePath = join(options.home, "desk", "cards", "_none.jsonl");
     const probe = inspectLogPath(nonePath);
-    cardsById = readProbedLog(nonePath, probe.status, probe.lstat, covAcc);
+    cardsById = readProbedLog(nonePath, probe.status, probe.lstat, covAcc, readBytes);
   }
   const ordered = [...cardsById.values()].sort(compareCards);
   const cards = options.toolText ? ordered : ordered.map(stripCardToolText);
   return { cards, complete: finalizeCoverage(covAcc).complete };
+}
+
+/** Cards logged for the repo that contains `cwd` (or `_none.jsonl` outside a repo). */
+export function cardsForRoot(cwd: string, options: { home: string; toolText: boolean }): CardsForRoot {
+  return cardsForRootInternal(cwd, options, readSync);
+}
+
+/** @internal Test-only entry point for injecting `readSync` faults into `cardsForRoot`. */
+export function cardsForRootForTest(
+  cwd: string,
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook = readSync,
+): CardsForRoot {
+  return cardsForRootInternal(cwd, options, readBytes);
 }
 
 /** Highest revision of `cardId` across all card logs, bounded like `cardsForFile`. */
@@ -772,8 +797,10 @@ export function findCardById(cardId: string, options: { home: string; toolText: 
   return options.toolText ? best : stripCardToolText(best);
 }
 
-/** Cached per-repo card loader keyed by git root (or `cwd` outside a repo). */
-export function makeCardsFor(options: { home: string; toolText: boolean }): (cwd: string) => CardsForRoot {
+function makeCardsForInternal(
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook,
+): (cwd: string) => CardsForRoot {
   const rootCache = new Map<string, CardsForRoot>();
   return (cwd: string): CardsForRoot => {
     let key: string;
@@ -785,7 +812,7 @@ export function makeCardsFor(options: { home: string; toolText: boolean }): (cwd
     let hit = rootCache.get(key);
     if (hit === undefined) {
       try {
-        hit = cardsForRoot(cwd, { home: options.home, toolText: options.toolText });
+        hit = cardsForRootInternal(cwd, { home: options.home, toolText: options.toolText }, readBytes);
       } catch {
         hit = { cards: [], complete: false };
       }
@@ -793,4 +820,17 @@ export function makeCardsFor(options: { home: string; toolText: boolean }): (cwd
     }
     return hit;
   };
+}
+
+/** Cached per-repo card loader keyed by git root (or `cwd` outside a repo). */
+export function makeCardsFor(options: { home: string; toolText: boolean }): (cwd: string) => CardsForRoot {
+  return makeCardsForInternal(options, readSync);
+}
+
+/** @internal Test-only entry point for injecting `readSync` faults into `makeCardsFor`. */
+export function makeCardsForForTest(
+  options: { home: string; toolText: boolean },
+  readBytes: CardsReadSyncHook = readSync,
+): (cwd: string) => CardsForRoot {
+  return makeCardsForInternal(options, readBytes);
 }
