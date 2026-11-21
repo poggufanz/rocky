@@ -193,7 +193,7 @@ export interface ProjectedWhyPossible {
 }
 
 type SourceHit = Pick<RecallHit, "failure" | "fix"> | Pick<RecentFailureHit, "failure" | "fix">;
-type Truncation = { fields: string[] };
+export type Truncation = { fields: string[] };
 
 export function strictestExposure(a: Exposure, b: Exposure): Exposure {
   return a === "raw" && b === "raw" ? "raw" : "sanitized";
@@ -351,7 +351,7 @@ function projectStringArray(
   return output;
 }
 
-function projectOpaqueId(value: string, path: string, truncation: Truncation, sanitize = false): string {
+export function projectOpaqueId(value: string, path: string, truncation: Truncation, sanitize = false): string {
   const boundedInput = boundProjectionInput(value);
   if (boundedInput.length !== value.length) truncation.fields.push(path);
   const safe = sanitize && safeOpaqueIdentifier(boundedInput)

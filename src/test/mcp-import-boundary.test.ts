@@ -136,6 +136,9 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
   const allowed = new Set([
     "commands/mcp.ts",
     "commands/cli-args.ts",
+    // Audited pure attempt-history grouping and selection: reads caller-supplied
+    // records only, never touches the filesystem or writers.
+    "core/attempts.ts",
     "core/config-read.ts",
     // Audited pure keyword matcher and static explanation table: their only
     // import is core/fingerprint.ts and neither touches the filesystem. Both
@@ -180,6 +183,7 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "ai/port.ts",
     "ai/recall-ai.ts",
     "ai/schema.ts",
+    "mcp/attempts-projection.ts",
     "mcp/privacy.ts",
     "mcp/protocol.ts",
     "mcp/server.ts",
