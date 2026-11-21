@@ -136,8 +136,9 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
   const allowed = new Set([
     "commands/mcp.ts",
     "commands/cli-args.ts",
-    // Audited pure attempt-history grouping and selection: reads caller-supplied
-    // records only, never touches the filesystem or writers.
+    // Audited pure attempt-history grouping, card joining, and selection: reads
+    // caller-supplied records and cards only, never touches the filesystem or writers.
+    "core/attempt-cards.ts",
     "core/attempts.ts",
     // Audited pure lexical block-path helpers: zero imports, no filesystem access.
     "core/block-paths.ts",

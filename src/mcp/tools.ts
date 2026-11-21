@@ -1,19 +1,21 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { Exposure } from "../core/config-read.js";
 import { hasCanonicalMemoryQueries, hasDurableMemoryQueries, loadDurableMemorySnapshot, loadDurableMemorySnapshotOrThrow, queryRecall, queryStats, whyFilePathRelation } from "../core/memory-query.js";
 import type { DurableMemorySnapshot, KnowledgeCoverageSummary, KnowledgeSearchQuery, MemoryQueries, RecallHit, RecallQuery, RecentFailuresQuery, StatsQuery, WhyFileEvidence, WhyFilePathRelation } from "../core/memory-query.js";
 import type { RecallAiOutcome, RecallWithAiPort } from "../ai/port.js";
 import { rationalesForFile } from "../core/dictionary.js";
+import { joinAttemptCards, type CardJoin } from "../core/attempt-cards.js";
 import { buildProblems, selectProblemEntries, type ProblemEntry } from "../core/attempts.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { teachLookup } from "../core/teach.js";
 import { teachFromCards } from "../core/teach-cards.js";
 import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
 import { gapRungFor, renderCardTeach, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
 import { ATTEMPT_HISTORY_NOTICE, projectProblemEntries, type ProjectedProblemEntry } from "./attempts-projection.js";
 import { projectExplain } from "./privacy.js";
-import { cardsForFile, type CardsForFile } from "../desk/cards-read.js";
+import { cardsForFile, makeCardsFor, resolveGitRootForCwd, toolTextAllowed, type CardsForFile } from "../desk/cards-read.js";
 import { readListeningTail } from "../listening/event-log-read.js";
 import { projectGraph } from "../listening/graph-store.js";
 import { isRepoCaptureAllowed } from "../listening/repo-consent-read.js";
@@ -115,6 +117,7 @@ export interface CreateToolRegistryOptions {
   recallWithAi: RecallWithAiPort;
   cards?: (path: string, limit: number) => CardsForFile;
   buildProblems?: typeof buildProblems;
+  cardsFor?: (cwd: string) => CardJoin;
 }
 
 const ANNOTATIONS = {
@@ -1812,6 +1815,41 @@ function deterministicAiFallback(payload: object, aiStatus: "unavailable" | "inv
   return { ...source, aiStatus, items, rankedCandidateIds: items.map((item) => item.candidateId), truncated: true };
 }
 
+function attemptCardsFor(injected?: (cwd: string) => CardJoin): (cwd: string) => CardJoin {
+  let loader = injected;
+  if (loader === undefined) {
+    try {
+      const home = resolveRockyPaths().home;
+      loader = makeCardsFor({ home, toolText: toolTextAllowed(home) });
+    } catch {
+      return () => ({ cards: [], complete: false });
+    }
+  }
+  return (cwd: string): CardJoin => {
+    try {
+      const loaded = loader(cwd);
+      return Array.isArray(loaded?.cards) ? loaded : { cards: [], complete: false };
+    } catch {
+      return { cards: [], complete: false };
+    }
+  };
+}
+
+function makeRootForCwd(): (cwd: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  return (cwd: string): string | undefined => {
+    if (cache.has(cwd)) return cache.get(cwd);
+    let root: string | undefined;
+    try {
+      root = resolveGitRootForCwd(cwd, existsSync);
+    } catch {
+      root = undefined;
+    }
+    cache.set(cwd, root);
+    return root;
+  };
+}
+
 interface StatsFlightResult {
   stats: Record<string, unknown>;
   coverage: MemoryCoverage | undefined;
@@ -2065,8 +2103,25 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
                 allDirs: input.cwd === undefined,
                 limit: input.limit,
               });
+              let joinedEntries = selection.entries;
+              try {
+                joinedEntries = joinAttemptCards(
+                  selection.entries,
+                  snapshot.records,
+                  attemptCardsFor(options.cardsFor),
+                  { platform: process.platform },
+                ).entries;
+              } catch {
+                joinedEntries = selection.entries;
+              }
               const truncation: Truncation = { fields: [] };
-              const entries = projectProblemEntries(selection.entries, options.exposure, input.attempts, truncation);
+              const entries = projectProblemEntries(
+                joinedEntries,
+                options.exposure,
+                input.attempts,
+                truncation,
+                makeRootForCwd(),
+              );
               const payload: Record<string, unknown> = {
                 exposure: options.exposure,
                 entries,

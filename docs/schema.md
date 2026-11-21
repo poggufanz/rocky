@@ -740,12 +740,22 @@ lines per side (files over `1 MiB` receive `too_large` instead).
 
 #### `FlowStep`
 
-`{ "kind": "cmd" \| "edit", "text": string, "ok": bool, "dur_ms": u64, "seqs": u32[], "exit_code"?: i32, "error"?: string }`
+`{ "kind": "cmd" \| "edit", "text": string, "ok": bool, "dur_ms": u64, "seqs": u32[], "exit_code"?: i32, "error"?: string, "start_ms"?: u64, "end_ms"?: u64, "cwd"?: string, "tool_use_id"?: string, "desc"?: string }`
 
 `exit_code` (integer, may be negative) and `error` (bounded, redacted single error
 line) are optional and omitted when absent. Only failed command (`kind: "cmd"`)
 steps carry them, with `error` absent when `desk/tool-text-off` suppressed
 `error_head` or no non-empty error line remained.
+
+Five optional join and provenance fields are additive within `v: 1`
+(`#[serde(default, skip_serializing_if = "Option::is_none")]`), so old cards
+written without them stay valid and round-trip cleanly:
+
+- `start_ms` (`u64`): `PreToolUse` timestamp in epoch milliseconds; omitted when absent.
+- `end_ms` (`u64`): `PostToolUse` or `PostToolUseFailure` timestamp in epoch milliseconds; omitted when no end timestamp was recorded.
+- `cwd` (`string`): `PreToolUse` working directory; omitted when absent or when it canonically equals the card `root`.
+- `tool_use_id` (`string`): tool call identifier; omitted when absent or empty.
+- `desc` (`string`): bounded, redacted `Bash`/`PowerShell` tool `description`; only on `kind: "cmd"` steps, omitted when absent or when `desk/tool-text-off` exists at capture time (readers also strip `desc` and block `quote` when `desk/tool-text-off` exists at read time).
 
 #### `Sequence`
 
