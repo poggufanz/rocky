@@ -276,14 +276,14 @@ With no query, Rocky lists up to 10 recurring errors in the current working dire
 ```text
 rocky: 3 repeated errors in C:\work\app (newest 10000 records, from 2026-10-02)
 3f2a9c1e44d0b7a1  TypeError: token undefined
-  2026-11-12 13:20  npm test          failed same way     edited src/auth.ts
-  2026-11-12 13:55  npm test          other error         edited src/token.ts
-  2026-11-12 14:03  npm test          passed              edited src/session.ts
+  2026-11-12 13:20  npm test          failed same way     said: edited src/auth.ts
+  2026-11-12 13:55  npm test          other error         said: edited src/token.ts
+  2026-11-12 14:03  npm test          passed              said: edited src/session.ts
   2026-11-15 09:10  npm test -- auth  no later run        changes unknown
 rocky: Rocky records order, not cause.
 ```
 
-Each attempt reports one outcome relative to the next run within eight hours (`passed`, `possible pass`, `failed same way`, `other error`, `no later run`, or `unknown`) and observed or stated file changes (`edited ...`, `said: edited ...`, or `changes unknown`). Rocky records order, not cause.
+Each attempt reports one outcome relative to the next run within eight hours (`passed`, `possible pass`, `failed same way`, `other error`, `no later run`, or `unknown`) and stated file changes when recorded (`said: edited ...` or `changes unknown`). Text output hides attempts older than 30 days; `--json` keeps them. Rocky records order, not cause.
 
 Exit codes: `0` when entries or an empty-memory notice are printed, `1` when memory cannot be read, and `2` on invalid options or an out-of-range `--limit`.
 
