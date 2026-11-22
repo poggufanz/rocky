@@ -52,7 +52,7 @@ CLI hook lanes (`rocky hook <subcommand>`):
 - `hook gate-event <vendor>` — advisory `PreToolUse` endpoint; prints `{}` or an `additionalContext` note, never denies, exits `0`.
 - `hook listen-event <harnessId> --surface <surface>` — one-shot Listening event ingress; static argv, stdin JSON (`64 KiB` cap), fail-open, empty stdout.
 - `hook session-start claude-code` — private Claude Code `SessionStart` endpoint; reads stdin JSON (up to `1 MiB`), checks `hook_event_name === "SessionStart"`, validates `session_id` against `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` and `$CLAUDE_ENV_FILE` (non-empty absolute path free of control characters, regular file when present), and appends `export ROCKY_AGENT_SESSION='<session_id>'\n` (prepending `\n` when the existing file is non-empty without a trailing LF). Never creates missing parent directories, never denies, always prints `{}` and exits `0` on valid invocation (invalid vendor or extra arguments exit `2`).
-- `hook tool-result claude-code` — private Claude Code `PostToolUse` / `PostToolUseFailure` endpoint for `Bash` and `PowerShell` tool calls; reads stdin JSON (up to `1 MiB`, dropping over-cap input or stream read errors), waits at most `1 s` for the memory lock, and skips interrupts, background calls, commands wrapped in `rocky run` or `rocky watch`, and undecidable command forms. On `PostToolUseFailure`, receives the tool `error` text (combined stdout and stderr), requires a leading `Exit code <N>` line with a non-zero signed 32-bit integer, skips when an `origin: "hook"` failure for the same reliable command identity and `cwd` was recorded within `5 s`, and writes an `origin: "agent"` `failure` record storing only the same bounded, redacted excerpt, normalized signature, and fingerprint as `rocky run` plus `agent: { vendor: "claude-code", session, agentId?, toolUseId? }`. On `PostToolUse`, when `~/.rocky/pending` exists, calls `resolveFixOnSuccess` with the success's `agent` stamp under the shared session compatibility rule above (unstamped failures remain eligible; differing `session` values or two differing `agentId` values do not link). Always prints `{}` and exits `0` on valid invocation (invalid vendor or extra arguments exit `2`).
+- `hook tool-result claude-code` — private Claude Code `PostToolUse` / `PostToolUseFailure` endpoint for `Bash` and `PowerShell` tool calls; reads stdin JSON (up to `1 MiB`, dropping over-cap input or stream read errors), waits at most `1 s` for the memory lock, and skips interrupts, background calls, commands wrapped in `rocky run` or `rocky watch`, and undecidable command forms. On `PostToolUseFailure`, receives the tool `error` text (combined stdout and stderr), requires a leading `Exit code <N>` line with a non-zero signed 32-bit integer, skips when an `origin: "hook"` failure for the same reliable command identity and `cwd` was recorded within `5 s`, and writes an `origin: "agent"` `failure` record storing only the same bounded, redacted excerpt, normalized signature, and fingerprint as `rocky run` plus `agent: { vendor: "claude-code", session, agentId?, toolUseId? }`. When a prior-attempts note is eligible and delivered on `PostToolUseFailure`, stdout prints `{"hookSpecificOutput":{"hookEventName":"PostToolUseFailure","additionalContext":"rocky: ..."}}` (under `2 KiB`), otherwise `{}`. On `PostToolUse`, when `~/.rocky/pending` exists, calls `resolveFixOnSuccess` with the success's `agent` stamp under the shared session compatibility rule above (unstamped failures remain eligible; differing `session` values or two differing `agentId` values do not link), printing `{}`. Always exits `0` on valid invocation (invalid vendor or extra arguments exit `2`).
 
 ## Adapter priority
 
@@ -79,6 +79,56 @@ error line is already among them).
 Aggregates, rankings, and any recomputed views are never written back into
 evidence files. Raw history is the asset; intelligence is a replaceable
 layer.
+
+### Prior-attempts note derived state (non-evidence)
+
+Three files under `<ROCKY_HOME>` support the prior-attempts note and its field
+measurement. They are derived operational files — never evidence and never
+written to `memory.jsonl`:
+
+- `<ROCKY_HOME>/advisories.jsonl` — append-only JSONL exposure log for eligible
+  prior-attempts moments across all arms and for skipped tool-result hook calls.
+  Capped at `8 MiB` (roughly 20,000 rows); appends stop silently once a write
+  would pass the cap. Stores hashed identifiers (`cwdHash` and a 16-hex `sha256`
+  hash of the problem key in `key`), never a raw directory path.
+- `<ROCKY_HOME>/gate-state/<session>.attempts.json` — per-session dedup state
+  for once-per-`(session, key)` note delivery. Written atomically via a sibling
+  `.<pid>.tmp` file and rename, holding `{ "v": 1, "shown": { "<key>": <epoch_ms> } }`,
+  capped at `500` newest keys (`256 KiB` read cap).
+- `<ROCKY_HOME>/gate-state/no-session.cooldown.json` — same `{ "v": 1, "shown": { "<key>": <epoch_ms> } }`
+  atomic format (`500`-key cap), enforcing a 30-minute per-key cooldown when no
+  session identifier is present.
+
+### Exposure log row (`advisories.jsonl`)
+
+One JSON object per line. Eligible moments write `kind: "note"`:
+
+```json
+{"v":1,"ts":1795300000000,"session":"sess-04","lane":"tool-result","kind":"note","arm":"shown","key":"a1b2c3d4e5f60718","cwdHash":"0123456789abcdef","anchorFailureId":"fail-01","latencyMs":42,"delivered":true,"bytes":312}
+```
+
+Skipped `PostToolUseFailure` invocations in the tool-result lane write
+`kind: "skip"` with an extra `reason` field:
+
+```json
+{"v":1,"ts":1795300000500,"session":"sess-04","lane":"tool-result","kind":"skip","arm":null,"key":null,"cwdHash":"0123456789abcdef","anchorFailureId":null,"latencyMs":3,"delivered":false,"bytes":0,"reason":"lock_busy"}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `v` | integer | Schema version (`1`). |
+| `ts` | number | Epoch milliseconds when the row was recorded. |
+| `session` | string \| null | Session identifier when present; `null` when absent. |
+| `lane` | `"run"` \| `"watch"` \| `"hookfail"` \| `"tool-result"` | Lane that evaluated the failure moment. |
+| `kind` | `"note"` \| `"skip"` | `"note"` for an eligible prior-attempts moment; `"skip"` for a skipped tool-result failure call. |
+| `arm` | `"shown"` \| `"held"` \| `"unassigned"` \| `"human"` \| null | Assigned arm on `"note"` rows; `null` on `"skip"` rows. |
+| `key` | string \| null | 16-hex `sha256` prefix of the problem key identifying the recurring error (`exposureKeyHash`; never contains a directory path); `null` on `"skip"` rows. |
+| `cwdHash` | string | 16-hex `sha256` prefix of the canonical working directory identity; never a path. |
+| `anchorFailureId` | string \| null | Failure record id written for the moment (or `null` when unavailable or on `"skip"` rows). |
+| `latencyMs` | number | Elapsed evaluation latency in milliseconds. |
+| `delivered` | boolean | `true` when the prior-attempts note was emitted; for the tool-result hook, `delivered` means the hook produced the context response before the final stdout write. Once-per-key delivery is best-effort (fail-open state I/O, 500-key eviction, and a lock-free claim race on parallel identical failures). |
+| `bytes` | number | Rendered note size in UTF-8 bytes when `delivered` is `true`, and `0` otherwise. |
+| `reason` | string (optional) | Present on `kind: "skip"` rows only (`"interrupt"`, `"background"`, `"no-exit-header"`, `"wrapped"`, `"undecidable"`, `"lock_busy"`, `"coverage"`, or `"hook-duplicate"`); omitted on `kind: "note"` rows. |
 
 ## Memory coverage
 

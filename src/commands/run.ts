@@ -23,8 +23,9 @@ import {
   type FailureRecord,
   type MemoryRecord,
 } from "../core/memory.js";
-import { CLOCK_SKEW_MS, linkBasisRank, loadMemoryChecked, tailReadable, type AgentStamp } from "../core/memory-read.js";
+import { CLOCK_SKEW_MS, linkBasisRank, loadMemoryChecked, tailReadable, type AgentStamp, type MemoryCoverage } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix, LINK_WINDOW_MS, possibleFixesForFailure, type PossibleFix } from "../core/memory-query.js";
+import { prepareLaneOneNote, type PreparedLaneOneNote } from "./attempt-note-lane.js";
 import { ago, detail, gapSpan, isVerbose, phrase, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
 
@@ -55,7 +56,7 @@ export async function run(cmd: string, processRunner: (cmd: string) => Promise<E
 }
 
 /** An unreadable memory file is reported, not thrown — callers get `undefined` and carry on. */
-function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolean; linesSkipped: boolean } | undefined {
+function readMemory(): { records: MemoryRecord[]; coverage: MemoryCoverage; historyMayStartEarlier: boolean; linesSkipped: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
     const coverageDetail = (): string => {
@@ -74,6 +75,7 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
     }
     return {
       records: loaded.records,
+      coverage: loaded.coverage,
       historyMayStartEarlier: loaded.coverage.window === "tail",
       linesSkipped: loaded.coverage.skipped > 0,
     };
@@ -87,10 +89,10 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
 /**
  * Reports what memory holds for this fingerprint: a prior sighting and its
  * fix (naming the fix's own directory when it differs from linked failure cwd), or that
- * this is new. Shared by `run`'s onFailure and `watch`'s failure path — `run`,
- * `watch`, and `_hookfail` are the three paths that must carry the
- * cross-directory admission, and this is the one place `run` and `watch`
- * can't drift on it.
+ * this is new. Shared by `run`'s onFailure and `watch`'s failure path so those
+ * two paths cannot drift on the cross-directory admission. `_hookfail` has its
+ * own tty speech branch and shares the prior-attempts note door
+ * (`prepareLaneOneNote`), not `speakFailureMemory`.
  */
 export function speakFailureMemory(
   memory: MemoryRecord[],
@@ -225,19 +227,47 @@ export function cmdExeHint(stderr: string, platform: NodeJS.Platform, defaultShe
 }
 
 function onFailure(cmd: string, result: ExecResult, agent?: AgentStamp): void {
+  const cwd = process.cwd();
   const memory = readMemory();
+  let preparedNote: PreparedLaneOneNote | undefined;
+  let noteDelivered = false;
   if (memory !== undefined) {
+    const fingerprints = fingerprintCandidates(result.stderr, cmd, result.code);
+    const now = Date.now();
+    try {
+      preparedNote = prepareLaneOneNote({
+        lane: "run",
+        records: memory.records,
+        coverage: memory.coverage,
+        fingerprints,
+        cwd,
+        now,
+        env: process.env,
+        home: resolveRockyPaths().home,
+      });
+    } catch {
+      preparedNote = undefined;
+    }
     // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
     // at MAX_LINE_BYTES), not the full stderr stream — fingerprinting now
     // sees the last 200 lines, not everything the command wrote.
     speakFailureMemory(
       memory.records,
-      fingerprintCandidates(result.stderr, cmd, result.code),
+      fingerprints,
       cmd,
       result.code,
-      process.cwd(),
+      cwd,
       { historyMayStartEarlier: memory.historyMayStartEarlier, linesSkipped: memory.linesSkipped },
+      now,
     );
+    if (preparedNote?.text !== undefined) {
+      try {
+        say(preparedNote.text);
+        noteDelivered = true;
+      } catch {
+        // Fail open: note output must never disrupt a wrapped command.
+      }
+    }
   }
 
   // About the shell, not the history, so it is said even when memory is unreadable.
@@ -245,7 +275,17 @@ function onFailure(cmd: string, result: ExecResult, agent?: AgentStamp): void {
   const hint = cmdExeHint(result.stderr, process.platform, true);
   if (hint !== undefined) say(hint);
 
-  recordFailure(cmd, result.code, result.stderr, agent);
+  let recordedId: string | null = null;
+  try {
+    const rec = recordFailure(cmd, result.code, result.stderr, agent);
+    recordedId = rec.id;
+  } finally {
+    try {
+      preparedNote?.finish(recordedId, noteDelivered);
+    } catch {
+      // Fail open: exposure logging must never disrupt a wrapped command.
+    }
+  }
 }
 
 /**

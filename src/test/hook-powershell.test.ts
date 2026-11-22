@@ -1837,7 +1837,7 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   const repeatCmd = "Get-Item ./__rocky_speech_repeat__ -ErrorAction SilentlyContinue 2>$null";
 
   const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
-    env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
+    env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim, ROCKY_ATTEMPT_ADVISORY: "off" },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });

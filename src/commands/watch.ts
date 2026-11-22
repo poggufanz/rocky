@@ -16,10 +16,11 @@ import { describeMemoryCoverage } from "../core/coverage.js";
 import { CANCEL_CODES, runProcess, type ExecOptions, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { recordWatchFailure, type MemoryRecord } from "../core/memory.js";
-import { loadMemoryChecked, tailReadable } from "../core/memory-read.js";
+import { loadMemoryChecked, tailReadable, type MemoryCoverage } from "../core/memory-read.js";
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
 import { watchLogName, writeWatchLog } from "../core/watch-log.js";
+import { prepareLaneOneNote, type PreparedLaneOneNote } from "./attempt-note-lane.js";
 import { cmdExeHint, linkFixOnSuccess, speakFailureMemory } from "./run.js";
 import { detail, isVerbose, phrase, say, writeRockyStderr } from "../ui/rocky.js";
 import { safeTerminalBlock, safeTerminalLine } from "../ui/sanitize.js";
@@ -153,10 +154,11 @@ function unrefTimer(timer: WatchTimer): void {
 
 /**
  * Equivalent of `run.ts`'s read guard, adapted for `--quiet`: reading still
- * always happens (fix-linking on success needs it regardless of quiet), but
- * the unreadable-memory disclosure is a commentary line, so it's silenced.
+ * always happens (exposure evaluation needs the pre-append snapshot even when
+ * `--quiet` suppresses commentary), while all stderr disclosures stay silent
+ * under `--quiet`.
  */
-function readMemory(quiet: boolean): { records: MemoryRecord[]; historyMayStartEarlier: boolean; linesSkipped: boolean } | undefined {
+function readMemory(quiet: boolean): { records: MemoryRecord[]; coverage: MemoryCoverage; historyMayStartEarlier: boolean; linesSkipped: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
     const coverageDiagnostic = (): string => {
@@ -166,21 +168,18 @@ function readMemory(quiet: boolean): { records: MemoryRecord[]; historyMayStartE
         : `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
     };
     if (!tailReadable(loaded.coverage)) {
-      const diagnostic = coverageDiagnostic();
-      if (quiet) writeRockyStderr(`${diagnostic}\n`);
-      else {
+      if (!quiet) {
         say("Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.");
-        detail(`    ${diagnostic}`);
+        detail(`    ${coverageDiagnostic()}`);
       }
       return undefined;
     }
-    if (loaded.coverage.skipped > 0) {
-      const diagnostic = coverageDiagnostic();
-      if (quiet) writeRockyStderr(`${diagnostic}\n`);
-      else detail(`    ${diagnostic}`);
+    if (loaded.coverage.skipped > 0 && !quiet) {
+      detail(`    ${coverageDiagnostic()}`);
     }
     return {
       records: loaded.records,
+      coverage: loaded.coverage,
       historyMayStartEarlier: loaded.coverage.window === "tail",
       linesSkipped: loaded.coverage.skipped > 0,
     };
@@ -230,32 +229,69 @@ function onWatchSuccess(cmd: string, cwd: string, quiet: boolean, result: ExecRe
  * failure must not cost it.
  */
 function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecResult): string | undefined {
-  if (!quiet) {
-    say(outcomeLine(false, result.durationMs));
-    const memory = readMemory(false);
-    if (memory !== undefined) {
+  let preparedNote: PreparedLaneOneNote | undefined;
+  let noteDelivered = false;
+  if (!quiet) say(outcomeLine(false, result.durationMs));
+  const memory = readMemory(quiet);
+  if (memory !== undefined) {
+    const fingerprints = fingerprintCandidates(result.stderr, cmd, result.code);
+    const now = Date.now();
+    try {
+      preparedNote = prepareLaneOneNote({
+        lane: "watch",
+        records: memory.records,
+        coverage: memory.coverage,
+        fingerprints,
+        cwd,
+        now,
+        env: process.env,
+        home: resolveRockyPaths().home,
+        quiet,
+      });
+    } catch {
+      preparedNote = undefined;
+    }
+    if (!quiet) {
       speakFailureMemory(
         memory.records,
-        fingerprintCandidates(result.stderr, cmd, result.code),
+        fingerprints,
         cmd,
         result.code,
         cwd,
         { historyMayStartEarlier: memory.historyMayStartEarlier, linesSkipped: memory.linesSkipped },
+        now,
       );
+      if (preparedNote?.text !== undefined) {
+        try {
+          say(preparedNote.text);
+          noteDelivered = true;
+        } catch {
+          // Fail open: note output must never disrupt a watched command.
+        }
+      }
     }
+  }
+  if (!quiet) {
     // Same disclosure as `run`. It sits in this non-quiet block because `--quiet`
     // prints plain facts only. `watch` never overrides runProcess's default `shell: true`.
     const hint = cmdExeHint(result.stderr, process.platform, true);
     if (hint !== undefined) say(hint);
   }
 
+  let recordedId: string | null = null;
   try {
-    recordWatchFailure(cmd, result.code, result.stderr, cwd);
+    const rec = recordWatchFailure(cmd, result.code, result.stderr, cwd);
+    recordedId = rec.id;
   } catch {
     if (!quiet) {
       say("Could not write to memory, so this run is not recorded.");
       detail(`    memory: ${resolveRockyPaths().memory}`);
     }
+  }
+  try {
+    preparedNote?.finish(recordedId, noteDelivered);
+  } catch {
+    // Fail open: exposure logging must never disrupt a watched command.
   }
 
   const logPath = writeWatchLog(resolveRockyPaths().watchDir, watchLogName(Date.now(), cmd), result.tail);

@@ -42,11 +42,11 @@ function staticSpecifiers(path: string): string[] {
   return specifiers;
 }
 
-/** Every file `index.js` loads before it reads argv, each mapped to the module that first imported it. */
-function startupClosure(): ImportedBy {
-  assert.ok(existsSync(entry), `compiled entry is missing: ${entry}`);
-  const importedBy = new Map<string, string | undefined>([[moduleKey(entry), undefined]]);
-  const pending = [entry];
+/** Every file `entryPath` loads statically, each mapped to the module that first imported it. */
+function staticClosure(entryPath: string): ImportedBy {
+  assert.ok(existsSync(entryPath), `compiled module is missing: ${entryPath}`);
+  const importedBy = new Map<string, string | undefined>([[moduleKey(entryPath), undefined]]);
+  const pending = [entryPath];
   while (pending.length > 0) {
     const path = pending.shift()!;
     for (const specifier of staticSpecifiers(path)) {
@@ -59,6 +59,12 @@ function startupClosure(): ImportedBy {
       pending.push(target);
     }
   }
+  return importedBy;
+}
+
+/** Every file `index.js` loads before it reads argv, each mapped to the module that first imported it. */
+function startupClosure(): ImportedBy {
+  const importedBy = staticClosure(entry);
   assert.ok(importedBy.size > 1, "the startup walk found no static import; the walker is broken");
   return importedBy;
 }
@@ -137,7 +143,7 @@ test("hook gate-event allows and exits 0 when the gate module cannot load", (t) 
   assert.equal(result.stdout, "{}");
 });
 
-test("hook session-start keeps a minimal import closure of node:fs, node:path, and agent-session", () => {
+test("hook session-start keeps a minimal import closure of node builtins and agent-session", () => {
   const hookModule = join(compiledRoot, "commands", "session-start-hook.js");
   assert.ok(existsSync(hookModule), `compiled module is missing: ${hookModule}`);
   const hookImports = staticSpecifiers(hookModule).sort();
@@ -145,7 +151,7 @@ test("hook session-start keeps a minimal import closure of node:fs, node:path, a
 
   const agentSessionModule = join(compiledRoot, "core", "agent-session.js");
   assert.ok(existsSync(agentSessionModule), `compiled module is missing: ${agentSessionModule}`);
-  assert.deepEqual(staticSpecifiers(agentSessionModule), []);
+  assert.deepEqual(staticSpecifiers(agentSessionModule), ["node:crypto"]);
 });
 
 test("hook session-start prints {} and exits 0 when the session-start module cannot load", (t) => {
@@ -171,4 +177,18 @@ test("hook tool-result prints {} and exits 0 when the tool-result module cannot 
   const result = runInstalledEntry(root, ["hook", "tool-result", "claude-code"], "{}");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "{}");
+});
+
+test("core/attempt-note imports no commands/ module", () => {
+  const noteModule = join(compiledRoot, "core", "attempt-note.js");
+  const closure = staticClosure(noteModule);
+  const commandModules = [...closure.keys()]
+    .filter((file) => file.startsWith("commands/"))
+    .sort()
+    .map((file) => importChain(closure, file));
+  assert.deepEqual(
+    commandModules,
+    [],
+    "core/attempt-note must not import commands/ modules",
+  );
 });

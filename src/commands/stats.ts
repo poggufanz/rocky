@@ -5,6 +5,7 @@ import { countReclaimTombstones, drainGuardPending, memoryPath, type MemoryRecor
 import { isOperationalMemoryRecord, loadMemoryChecked, type MemoryCoverage } from "../core/memory-read.js";
 import { queryStats } from "../core/memory-query.js";
 import { CYCLES_TOP, FAILURE_CYCLE_COUNT } from "../core/failure-cycle.js";
+import { formatUtcDate, formatUtcDateTime } from "../core/utc-format.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { detail, isVerbose, say } from "../ui/rocky.js";
 
@@ -70,21 +71,6 @@ function statsCycles(): number {
   }
   speakCoverage(coverage, records.length);
   return 0;
-}
-
-export function formatUtcDate(ts: number): string {
-  const d = new Date(ts);
-  const year = String(d.getUTCFullYear()).padStart(4, "0");
-  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-export function formatUtcDateTime(ts: number): string {
-  const d = new Date(ts);
-  const hours = String(d.getUTCHours()).padStart(2, "0");
-  const minutes = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${formatUtcDate(ts)} ${hours}:${minutes}`;
 }
 
 export function memoryAgeDays(timestamps: readonly number[], now: number): number {

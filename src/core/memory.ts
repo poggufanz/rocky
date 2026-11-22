@@ -1193,16 +1193,21 @@ export interface AgentFailureInput {
   agent: AgentStamp;
 }
 
-export type AgentFailureResult =
-  | { status: "written"; record: FailureRecord }
+export type AgentFailureResult<N> =
+  | { status: "written"; record: FailureRecord; observed: N }
   | { status: "skipped"; reason: "hook-duplicate" | "coverage" };
 
 export const HOOK_DUPLICATE_WINDOW_MS = 5_000;
 
-export function recordAgentFailure(
+export function recordAgentFailure<N>(
   input: AgentFailureInput,
-  options: { lockWaitMs: number; now?: number; monotonicNow?: () => number },
-): AgentFailureResult {
+  options: {
+    lockWaitMs: number;
+    now?: number;
+    monotonicNow?: () => number;
+    observe: (snapshot: { records: readonly MemoryRecord[]; coverage: MemoryCoverage; fingerprint: string }) => N;
+  },
+): AgentFailureResult<N> {
   if (!Number.isSafeInteger(input.exitCode)) throw new RangeError("exitCode must be a safe integer");
   const cmd = boundCommand(input.cmd);
   const identity = commandIdentity(cmd);
@@ -1214,7 +1219,7 @@ export function recordAgentFailure(
     agent: input.agent,
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
-  return withMemoryTransaction<AgentFailureResult>((transaction) => {
+  return withMemoryTransaction<AgentFailureResult<N>>((transaction) => {
     if (!windowCovered(transaction.coverage, ts, HOOK_DUPLICATE_WINDOW_MS)) {
       return { status: "skipped", reason: "coverage" };
     }
@@ -1232,9 +1237,14 @@ export function recordAgentFailure(
       });
       if (duplicate) return { status: "skipped", reason: "hook-duplicate" };
     }
+    const observed = options.observe({
+      records: transaction.records,
+      coverage: transaction.coverage,
+      fingerprint: rec.fingerprint,
+    });
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
-    return { status: "written", record: rec };
+    return { status: "written", record: rec, observed };
   }, resolveRockyPaths(), { now: ts, lockWaitMs: options.lockWaitMs, monotonicNow: options.monotonicNow });
 }
 

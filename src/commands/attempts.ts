@@ -20,9 +20,9 @@ import {
 } from "../core/memory-read.js";
 import { sanitizeTestimony } from "../core/redact.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
+import { formatUtcDate, formatUtcDateTime } from "../core/utc-format.js";
 import { detail, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
-import { formatUtcDate, formatUtcDateTime } from "./stats.js";
 
 const DEFAULT_LIMIT = 10;
 const MIN_LIMIT = 1;

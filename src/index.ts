@@ -535,14 +535,15 @@ function runSessionStart(): Promise<number> {
   });
 }
 
-/** `rocky hook tool-result claude-code`: read stdin, record unwrapped agent failure or fix, print {}, always exit 0. */
+/** `rocky hook tool-result claude-code`: read stdin, record unwrapped agent failure or fix, print {} or hook context, always exit 0. */
 function runToolResult(): Promise<number> {
+  const startedAt = performance.now();
   return runJsonStdinHook({
     load: async () => {
       const { TOOL_RESULT_STDIN_CAP_BYTES, toolResultHook } = await import("./commands/tool-result-hook.js");
       return {
         maxBytes: TOOL_RESULT_STDIN_CAP_BYTES,
-        handle: toolResultHook,
+        handle: (bytes) => toolResultHook(bytes, startedAt),
       };
     },
     onReadError: "drop",

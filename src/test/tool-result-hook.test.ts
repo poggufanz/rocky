@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadMemoryChecked } from "../core/memory-read.js";
+import { cwdHash, exposureKeyHash, type ExposureRow } from "../core/attempt-note-state.js";
+import { commandIdentity, fingerprint, FINGERPRINT_ALGORITHM_VERSION, signatureLines } from "../core/fingerprint.js";
+import { boundCommand, MAX_COMMAND_BYTES } from "../core/memory.js";
+import { canonicalPath, cwdIdentityKey, loadMemoryChecked } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
+import { cardsFilePath } from "../listening/cards-path.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -36,11 +41,18 @@ function spawnHook(
   rockyHome: string,
   cwd: string = packageRoot,
   timeout: number = PROCESS_TIMEOUT_MS,
+  extraEnv: Record<string, string | undefined> = {},
 ): SpawnSyncReturns<string> {
   const env: NodeJS.ProcessEnv = { ...process.env, ROCKY_HOME: rockyHome };
   delete env.ROCKY_TEST_SEAMS;
+  delete env.ROCKY_ATTEMPT_ARM;
+  delete env.ROCKY_ATTEMPT_ADVISORY;
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
   return spawnSync(process.execPath, [entry, ...args], {
     cwd,
     env,
@@ -50,6 +62,54 @@ function spawnHook(
     maxBuffer: 2 * 1024 * 1024,
     windowsHide: true,
   });
+}
+
+function readExposureRows(rockyHome: string): ExposureRow[] {
+  const logPath = join(rockyHome, "advisories.jsonl");
+  if (!existsSync(logPath)) return [];
+  const text = readFileSync(logPath, "utf8").trim();
+  if (text.length === 0) return [];
+  return text.split("\n").map((line) => JSON.parse(line) as ExposureRow);
+}
+
+function seedAgentFailures(
+  memoryPath: string,
+  cwd: string,
+  cmd: string,
+  body: string,
+  count: number,
+  options: { exitCode?: number; session?: string; origin?: "agent" | "hook" } = {},
+): string {
+  const exitCode = options.exitCode ?? 1;
+  const session = options.session ?? "seed-session";
+  const origin = options.origin ?? "agent";
+  const fp = fingerprint(body, cmd, exitCode);
+  const identity = commandIdentity(cmd);
+  const now = Date.now();
+  const lines: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const rec = {
+      kind: "failure",
+      id: `seed-fail-${i + 1}`,
+      ts: now - (count - i) * 60_000,
+      cwd,
+      cmd,
+      exitCode,
+      fingerprint: fp,
+      fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+      signature: signatureLines(body),
+      excerpt: body.trim(),
+      origin,
+      ...(origin === "agent" ? { agent: { vendor: "claude-code", session } } : {}),
+      commandIdentity: identity.value,
+      identityV: identity.version,
+      identityReliable: identity.reliable,
+      platform: process.platform,
+    };
+    lines.push(JSON.stringify(rec));
+  }
+  writeFileSync(memoryPath, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+  return fp;
 }
 
 function failurePayload(overrides: Record<string, unknown> = {}): string {
@@ -300,6 +360,7 @@ test("process: malformed JSON, oversized stdin (1 MiB + 1), and unknown event pr
     assert.equal(result.status, 0, `${entryCase.name}: ${result.stderr}`);
     assert.equal(result.stdout, "{}", entryCase.name);
     assert.equal(existsSync(paths.memory), false, `${entryCase.name}: memory must stay absent`);
+    assert.deepEqual(readExposureRows(rockyHome), [], `${entryCase.name}: exposure log must stay empty`);
   }
 });
 
@@ -391,4 +452,562 @@ test("process: rejects unknown vendor and extra args with exit 2", (t) => {
     assert.equal(result.status, 2, `${args.join(" ")}: ${result.stderr}`);
     assert.match(result.stderr, /usage: rocky hook /);
   }
+});
+
+test("process: shown arm returns additionalContext once per session and key", (t) => {
+  const { rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const body = "Error: Cannot find module 'express'\n";
+  const fp = seedAgentFailures(paths.memory, workDir, "npm test", body, 2);
+  const env = { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "shown" };
+
+  const first = spawnHook(
+    ["hook", "tool-result", "claude-code"],
+    failurePayload({ cwd: workDir, session_id: "s-shown", tool_use_id: "toolu_1" }),
+    rockyHome,
+    workDir,
+    PROCESS_TIMEOUT_MS,
+    env,
+  );
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stderr, "");
+  assert.ok(Buffer.byteLength(first.stdout, "utf8") < 2048);
+
+  const parsedFirst = JSON.parse(first.stdout) as {
+    hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+  };
+  assert.equal(parsedFirst.hookSpecificOutput?.hookEventName, "PostToolUseFailure");
+  const context = parsedFirst.hookSpecificOutput?.additionalContext ?? "";
+  assert.ok(
+    context.startsWith("rocky: Same error recorded 2 times before"),
+    `unexpected additionalContext: ${context}`,
+  );
+  assert.ok(
+    context.endsWith(`Rocky records order, not cause. More: rocky attempts ${fp}`),
+    `missing footer in additionalContext: ${context}`,
+  );
+
+  const second = spawnHook(
+    ["hook", "tool-result", "claude-code"],
+    failurePayload({ cwd: workDir, session_id: "s-shown", tool_use_id: "toolu_2" }),
+    rockyHome,
+    workDir,
+    PROCESS_TIMEOUT_MS,
+    env,
+  );
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.stderr, "");
+  assert.equal(second.stdout, "{}");
+
+  const rawExposureLines = readFileSync(join(rockyHome, "advisories.jsonl"), "utf8")
+    .split("\n")
+    .filter((line) => line.length > 0);
+  const rows = readExposureRows(rockyHome);
+  assert.equal(rows.length, 2);
+  assert.equal(rawExposureLines.length, 2);
+  const expectedProblemKey = `output:${fp}:${process.platform === "win32" ? cwdIdentityKey(workDir, "win32") : workDir}`;
+  const expectedKeyHash = exposureKeyHash(expectedProblemKey);
+  assert.equal(expectedKeyHash, createHash("sha256").update(expectedProblemKey, "utf8").digest("hex").slice(0, 16));
+  const forbiddenSegments = [workDir, workDir.replace(/\\/g, "/"), basename(dirname(workDir)), basename(workDir)];
+  for (const rawLine of rawExposureLines) {
+    const lower = rawLine.toLowerCase();
+    for (const segment of forbiddenSegments) {
+      assert.equal(lower.includes(segment.toLowerCase()), false, `path segment "${segment}" leaked in ${rawLine}`);
+    }
+  }
+  const loaded = loadMemoryChecked(paths.memory);
+  const recordedIds = loaded.records.filter((r) => r.kind === "failure").map((r) => r.id);
+  assert.equal(recordedIds.length, 4);
+
+  const [row1, row2] = rows as [ExposureRow, ExposureRow];
+  assert.equal(row1.v, 1);
+  assert.equal(row1.lane, "tool-result");
+  assert.equal(row1.kind, "note");
+  assert.equal(row1.arm, "shown");
+  assert.equal(row1.session, "s-shown");
+  assert.match(row1.key!, /^[0-9a-f]{16}$/u);
+  assert.equal(row1.key, expectedKeyHash);
+  assert.equal(row1.cwdHash, cwdHash(workDir));
+  assert.equal(row1.anchorFailureId, recordedIds[2]);
+  assert.equal(row1.delivered, true);
+  assert.equal(row1.bytes, Buffer.byteLength(context, "utf8"));
+  assert.ok(row1.latencyMs >= 0);
+
+  assert.equal(row2.v, 1);
+  assert.equal(row2.lane, "tool-result");
+  assert.equal(row2.kind, "note");
+  assert.equal(row2.arm, "shown");
+  assert.equal(row2.session, "s-shown");
+  assert.equal(row2.key, row1.key);
+  assert.equal(row2.cwdHash, cwdHash(workDir));
+  assert.equal(row2.anchorFailureId, recordedIds[3]);
+  assert.equal(row2.delivered, false);
+  assert.equal(row2.bytes, 0);
+  assert.ok(row2.latencyMs >= 0);
+
+  // Dedup state continues to use the unhashed problem key.
+  const dedupState = JSON.parse(readFileSync(join(rockyHome, "gate-state", "s-shown.attempts.json"), "utf8")) as {
+    v: number;
+    shown: Record<string, number>;
+  };
+  assert.equal(expectedProblemKey in dedupState.shown, true);
+});
+
+test("process: silent failure with command longer than writer bound matches seeded agent failures", (t) => {
+  const { rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const longCmd = `npm test -- ${"x".repeat(MAX_COMMAND_BYTES + 200)}`;
+  const boundedCmd = boundCommand(longCmd);
+  assert.ok(Buffer.byteLength(longCmd, "utf8") > MAX_COMMAND_BYTES);
+  assert.notEqual(boundedCmd, longCmd);
+  assert.notEqual(fingerprint("", boundedCmd, 1), fingerprint("", longCmd, 1));
+
+  const fp = seedAgentFailures(paths.memory, workDir, boundedCmd, "", 2);
+  const env = { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "shown" };
+
+  const result = spawnHook(
+    ["hook", "tool-result", "claude-code"],
+    failurePayload({
+      cwd: workDir,
+      session_id: "s-long-silent",
+      tool_use_id: "toolu_long_1",
+      tool_input: { command: longCmd },
+      error: "Exit code 1\n",
+    }),
+    rockyHome,
+    workDir,
+    PROCESS_TIMEOUT_MS,
+    env,
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.ok(Buffer.byteLength(result.stdout, "utf8") < 2048);
+
+  const parsed = JSON.parse(result.stdout) as {
+    hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+  };
+  assert.equal(parsed.hookSpecificOutput?.hookEventName, "PostToolUseFailure");
+  const context = parsed.hookSpecificOutput?.additionalContext ?? "";
+  assert.ok(
+    context.startsWith("rocky: Same error recorded 2 times before"),
+    `unexpected additionalContext: ${context}`,
+  );
+  assert.ok(
+    context.endsWith(`Rocky records order, not cause. More: rocky attempts ${fp}`),
+    `missing footer in additionalContext: ${context}`,
+  );
+
+  const rows = readExposureRows(rockyHome);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.v, 1);
+  assert.equal(row.lane, "tool-result");
+  assert.equal(row.kind, "note");
+  assert.equal(row.arm, "shown");
+  assert.equal(row.session, "s-long-silent");
+  assert.equal(row.cwdHash, cwdHash(workDir));
+  assert.equal(row.delivered, true);
+  assert.equal(row.bytes, Buffer.byteLength(context, "utf8"));
+});
+
+test("process: held arm prints {} and logs delivered:false", (t) => {
+  const { rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const body = "Error: Cannot find module 'express'\n";
+  seedAgentFailures(paths.memory, workDir, "npm test", body, 2);
+  const env = { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "held" };
+
+  const result = spawnHook(
+    ["hook", "tool-result", "claude-code"],
+    failurePayload({ cwd: workDir, session_id: "s-held" }),
+    rockyHome,
+    workDir,
+    PROCESS_TIMEOUT_MS,
+    env,
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, "{}");
+
+  const rows = readExposureRows(rockyHome);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.lane, "tool-result");
+  assert.equal(row.kind, "note");
+  assert.equal(row.arm, "held");
+  assert.equal(row.session, "s-held");
+  assert.equal(row.cwdHash, cwdHash(workDir));
+  assert.equal(row.delivered, false);
+  assert.equal(row.bytes, 0);
+  assert.equal(existsSync(join(rockyHome, "gate-state", "s-held.attempts.json")), false);
+});
+
+test("process: toggle off suppresses additionalContext and exposure rows including skips", (t) => {
+  const { rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const body = "Error: Cannot find module 'express'\n";
+  seedAgentFailures(paths.memory, workDir, "npm test", body, 2);
+  const env = { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "shown", ROCKY_ATTEMPT_ADVISORY: "off" };
+
+  const failResult = spawnHook(
+    ["hook", "tool-result", "claude-code"],
+    failurePayload({ cwd: workDir, session_id: "s-off" }),
+    rockyHome,
+    workDir,
+    PROCESS_TIMEOUT_MS,
+    env,
+  );
+  assert.equal(failResult.status, 0, failResult.stderr);
+  assert.equal(failResult.stdout, "{}");
+  assert.equal(loadMemoryChecked(paths.memory).records.length, 3);
+  assert.deepEqual(readExposureRows(rockyHome), []);
+
+  const skipResult = spawnHook(
+    ["hook", "tool-result", "claude-code"],
+    failurePayload({ cwd: workDir, session_id: "s-off", tool_input: { command: 'rocky run "npm test"' } }),
+    rockyHome,
+    workDir,
+    PROCESS_TIMEOUT_MS,
+    env,
+  );
+  assert.equal(skipResult.status, 0, skipResult.stderr);
+  assert.equal(skipResult.stdout, "{}");
+  assert.deepEqual(readExposureRows(rockyHome), []);
+});
+
+test("process: skips log kind skip with reason", (t) => {
+  const cases: ReadonlyArray<{
+    name: string;
+    expectedReason: string;
+    setup?: (rockyHome: string, workDir: string) => void;
+    payload: (workDir: string) => string;
+  }> = [
+    {
+      name: "wrapped",
+      expectedReason: "wrapped",
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip", tool_input: { command: 'rocky run "npm test"' } }),
+    },
+    {
+      name: "undecidable",
+      expectedReason: "undecidable",
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip", tool_input: { command: 'echo hi && rocky run "npm test"' } }),
+    },
+    {
+      name: "interrupt",
+      expectedReason: "interrupt",
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip", is_interrupt: true }),
+    },
+    {
+      name: "background",
+      expectedReason: "background",
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip", tool_input: { command: "npm test", run_in_background: true } }),
+    },
+    {
+      name: "no-exit-header",
+      expectedReason: "no-exit-header",
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip", error: "Command timed out after 120000ms" }),
+    },
+    {
+      name: "hook-duplicate",
+      expectedReason: "hook-duplicate",
+      setup: (rockyHome, workDir) => {
+        const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+        const identity = commandIdentity("npm test");
+        const rec = {
+          kind: "failure",
+          id: "hook-dup-1",
+          ts: Date.now(),
+          cwd: workDir,
+          cmd: "npm test",
+          exitCode: 1,
+          fingerprint: "0123456789abcdef",
+          fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+          signature: ["error"],
+          excerpt: "error",
+          origin: "hook",
+          commandIdentity: identity.value,
+          identityV: identity.version,
+          identityReliable: identity.reliable,
+          platform: process.platform,
+        };
+        writeFileSync(paths.memory, `${JSON.stringify(rec)}\n`, { mode: 0o600 });
+      },
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip" }),
+    },
+    {
+      name: "coverage",
+      expectedReason: "coverage",
+      setup: (rockyHome) => {
+        const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+        writeFileSync(paths.memory, "{corrupt-1\n{corrupt-2\n", { mode: 0o600 });
+      },
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip" }),
+    },
+    {
+      name: "lock_busy",
+      expectedReason: "lock_busy",
+      setup: (rockyHome) => {
+        const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+        writeFileSync(`${paths.memory}.triple.lock`, "", { mode: 0o600 });
+      },
+      payload: (cwd) => failurePayload({ cwd, session_id: "s-skip" }),
+    },
+  ];
+
+  for (const entryCase of cases) {
+    const { rockyHome, workDir } = makeSandbox(t);
+    entryCase.setup?.(rockyHome, workDir);
+
+    const result = spawnHook(
+      ["hook", "tool-result", "claude-code"],
+      entryCase.payload(workDir),
+      rockyHome,
+      workDir,
+    );
+    assert.equal(result.status, 0, `${entryCase.name}: ${result.stderr}`);
+    assert.equal(result.stdout, "{}", entryCase.name);
+
+    const rows = readExposureRows(rockyHome);
+    assert.equal(rows.length, 1, `${entryCase.name}: expected 1 skip row`);
+    const row = rows[0]!;
+    assert.equal(row.v, 1, entryCase.name);
+    assert.equal(row.lane, "tool-result", entryCase.name);
+    assert.equal(row.kind, "skip", entryCase.name);
+    assert.equal(row.reason, entryCase.expectedReason, entryCase.name);
+    assert.equal(row.arm, null, entryCase.name);
+    assert.equal(row.key, null, entryCase.name);
+    assert.equal(row.anchorFailureId, null, entryCase.name);
+    assert.equal(row.delivered, false, entryCase.name);
+    assert.equal(row.bytes, 0, entryCase.name);
+    assert.equal(row.session, "s-skip", entryCase.name);
+    assert.equal(row.cwdHash, cwdHash(workDir), entryCase.name);
+    assert.ok(row.latencyMs >= 0, entryCase.name);
+  }
+});
+
+test("process: pass payloads never log exposure", (t) => {
+  const { rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  seedAgentFailures(paths.memory, workDir, "npm test", "Error: Cannot find module 'express'\n", 1, { session: "s-pass" });
+  writeFileSync(paths.pending, "", { mode: 0o600 });
+
+  for (const payload of [
+    passPayload({ cwd: workDir, session_id: "s-pass" }),
+    passPayload({ cwd: workDir, session_id: "s-pass", tool_input: { command: 'rocky run "npm test"' } }),
+    passPayload({ cwd: workDir, session_id: "s-pass", tool_response: { stdout: "", stderr: "", interrupted: true } }),
+  ]) {
+    const result = spawnHook(
+      ["hook", "tool-result", "claude-code"],
+      payload,
+      rockyHome,
+      workDir,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "{}");
+  }
+
+  assert.deepEqual(readExposureRows(rockyHome), []);
+});
+
+test("process: stdout is valid JSON under 2 KiB in every case", (t) => {
+  const { rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const body = "Error: Cannot find module 'express'\n";
+  seedAgentFailures(paths.memory, workDir, "npm test", body, 10);
+
+  const runs: ReadonlyArray<{ stdin: string; env?: Record<string, string | undefined> }> = [
+    { stdin: failurePayload({ cwd: workDir, session_id: "s-size-1" }), env: { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "shown" } },
+    { stdin: failurePayload({ cwd: workDir, session_id: "s-size-1" }), env: { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "shown" } },
+    { stdin: failurePayload({ cwd: workDir, session_id: "s-size-2" }), env: { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "held" } },
+    { stdin: failurePayload({ cwd: workDir, session_id: "s-size-3", is_interrupt: true }) },
+    { stdin: passPayload({ cwd: workDir, session_id: "s-size-1" }) },
+    { stdin: "{broken" },
+  ];
+
+  for (const runCase of runs) {
+    const result = spawnHook(
+      ["hook", "tool-result", "claude-code"],
+      runCase.stdin,
+      rockyHome,
+      workDir,
+      PROCESS_TIMEOUT_MS,
+      runCase.env ?? {},
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(Buffer.byteLength(result.stdout, "utf8") < 2048, `stdout exceeded 2 KiB: ${result.stdout.length}`);
+    assert.doesNotThrow(() => JSON.parse(result.stdout));
+  }
+});
+
+test("process: tool-result hook reads the desk card log after releasing the memory lock", (t) => {
+  const { root, rockyHome, workDir: rawWorkDir } = makeSandbox(t);
+  const workDir = realpathSync.native(rawWorkDir);
+  mkdirSync(join(workDir, ".git"), { recursive: true });
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const body = "Error: Cannot find module 'express'\n";
+  const now = Date.now();
+  const t1 = now - 120_000;
+  const t2 = now - 60_000;
+  const fp = fingerprint(body, "npm test", 1);
+  const identity = commandIdentity("npm test");
+
+  const seededFailures = [
+    {
+      kind: "failure",
+      id: "seed-lock-1",
+      ts: t1,
+      cwd: workDir,
+      cmd: "npm test",
+      exitCode: 1,
+      fingerprint: fp,
+      fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+      signature: signatureLines(body),
+      excerpt: body.trim(),
+      origin: "agent",
+      agent: { vendor: "claude-code", session: "seed-lock-session", toolUseId: "tu-lock-1" },
+      commandIdentity: identity.value,
+      identityV: identity.version,
+      identityReliable: identity.reliable,
+      platform: process.platform,
+    },
+    {
+      kind: "failure",
+      id: "seed-lock-2",
+      ts: t2,
+      cwd: workDir,
+      cmd: "npm test",
+      exitCode: 1,
+      fingerprint: fp,
+      fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+      signature: signatureLines(body),
+      excerpt: body.trim(),
+      origin: "agent",
+      agent: { vendor: "claude-code", session: "seed-lock-session", toolUseId: "tu-lock-2" },
+      commandIdentity: identity.value,
+      identityV: identity.version,
+      identityReliable: identity.reliable,
+      platform: process.platform,
+    },
+  ];
+  writeFileSync(paths.memory, `${seededFailures.map((r) => JSON.stringify(r)).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+
+  const cardLogPath = cardsFilePath(canonicalPath(workDir), rockyHome);
+  mkdirSync(dirname(cardLogPath), { recursive: true });
+  const card = {
+    v: 1,
+    card_id: "card-lock-1",
+    rev: 1,
+    root: workDir,
+    session_id: "seed-lock-session",
+    agent_id: "",
+    started_ms: t1 - 5_000,
+    ended_ms: t2 + 5_000,
+    prompt: "fix express import",
+    blocks: [
+      { seq: 1, path: "src/lock-check.ts", labels: [{ id: "body_changed" }], importance: "medium" },
+    ],
+    flow: [
+      {
+        kind: "cmd",
+        text: "npm test",
+        ok: false,
+        dur_ms: 500,
+        seqs: [],
+        exit_code: 1,
+        start_ms: t1 - 500,
+        end_ms: t1,
+        cwd: workDir,
+        tool_use_id: "tu-lock-1",
+      },
+      {
+        kind: "edit",
+        text: "edit",
+        ok: true,
+        dur_ms: 500,
+        seqs: [1],
+        start_ms: t1 + 10_000,
+        end_ms: t1 + 10_500,
+      },
+    ],
+    flow_more: 0,
+    coverage: { state: "full", reasons: [] },
+  };
+  writeFileSync(cardLogPath, `${JSON.stringify(card)}\n`, "utf8");
+
+  const lockPath = `${paths.memory}.triple.lock`;
+  const reportPath = join(root, "card-lock-report.json");
+  const preloadPath = join(root, "observe-card-lock.mjs");
+  writeFileSync(
+    preloadPath,
+    [
+      'import fs from "node:fs";',
+      'import { syncBuiltinESMExports } from "node:module";',
+      'const targetCardPath = (process.env.ROCKY_TEST_CARD_PATH ?? "").toLowerCase();',
+      'const lockPath = process.env.ROCKY_TEST_LOCK_PATH ?? "";',
+      'const reportPath = process.env.ROCKY_TEST_REPORT_PATH ?? "";',
+      "const events = [];",
+      "const origOpenSync = fs.openSync;",
+      "fs.openSync = function patchedOpenSync(path, ...rest) {",
+      "  if (String(path).toLowerCase() === targetCardPath) {",
+      "    events.push({ lockExists: fs.existsSync(lockPath) });",
+      '    fs.writeFileSync(reportPath, JSON.stringify(events), "utf8");',
+      "  }",
+      "  return origOpenSync.call(this, path, ...rest);",
+      "};",
+      "syncBuiltinESMExports();",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ROCKY_HOME: rockyHome,
+    ROCKY_TEST_SEAMS: "1",
+    ROCKY_ATTEMPT_ARM: "shown",
+    ROCKY_TEST_CARD_PATH: cardLogPath,
+    ROCKY_TEST_LOCK_PATH: lockPath,
+    ROCKY_TEST_REPORT_PATH: reportPath,
+  };
+  delete env.ROCKY_ATTEMPT_ADVISORY;
+  delete env.NODE_OPTIONS;
+  delete env.NODE_TEST_CONTEXT;
+
+  const result = spawnSync(
+    process.execPath,
+    ["--import", pathToFileURL(preloadPath).href, entry, "hook", "tool-result", "claude-code"],
+    {
+      cwd: workDir,
+      env,
+      input: failurePayload({ cwd: workDir, session_id: "s-lock-check", tool_use_id: "tu-lock-3" }),
+      encoding: "utf8",
+      timeout: PROCESS_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const parsed = JSON.parse(result.stdout) as {
+    hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+  };
+  const context = parsed.hookSpecificOutput?.additionalContext ?? "";
+  assert.ok(
+    context.startsWith("rocky: Same error recorded 2 times before in this directory"),
+    `expected pre-append count of 2 in additionalContext, got: ${context}`,
+  );
+  assert.ok(
+    context.includes("src/lock-check.ts"),
+    `expected card-observed file in additionalContext, got: ${context}`,
+  );
+
+  assert.equal(existsSync(reportPath), true, "expected preload to observe the card log openSync call");
+  const events = JSON.parse(readFileSync(reportPath, "utf8")) as Array<{ lockExists: boolean }>;
+  assert.ok(events.length >= 1, "expected at least one card log read");
+  assert.equal(
+    events.some((event) => event.lockExists),
+    false,
+    `card log was opened while memory triple lock was still held: ${JSON.stringify(events)}`,
+  );
 });

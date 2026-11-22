@@ -406,7 +406,9 @@ test("the elsewhere-admission lines follow the output rules", () => {
 test("hookFail speaks the full-record hint with the quoted command last, and plainly", () => {
   const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-hint-"));
   const hintCwd = mkdtempSync(join(tmpdir(), "rocky-hook-hint-cwd-"));
+  const prevAdvisory = process.env.ROCKY_ATTEMPT_ADVISORY;
   process.env.ROCKY_HOME = isolatedHome;
+  process.env.ROCKY_ATTEMPT_ADVISORY = "off";
   try {
     const failure = {
       kind: "failure", id: "hint-failure", ts: Date.now() - 1000, cwd: hintCwd, cmd: "hint-test-cmd",
@@ -423,6 +425,8 @@ test("hookFail speaks the full-record hint with the quoted command last, and pla
     assertPlainSpeech(tty);
   } finally {
     process.env.ROCKY_HOME = home;
+    if (prevAdvisory === undefined) delete process.env.ROCKY_ATTEMPT_ADVISORY;
+    else process.env.ROCKY_ATTEMPT_ADVISORY = prevAdvisory;
   }
 });
 
