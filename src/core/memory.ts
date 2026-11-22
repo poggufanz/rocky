@@ -637,13 +637,13 @@ function tripleLockTicketQueue(path: string, ticket: TripleLockTicket, now = Dat
   return { head: ticket.name, position: 0 };
 }
 
-function acquireTripleLock(paths: RockyPaths): TripleLock {
+function acquireTripleLock(paths: RockyPaths, lockWaitMs = TRIPLE_LOCK_WAIT_MS): TripleLock {
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
   const wallStarted = Date.now();
   const monotonicStarted = performance.now();
   const ticket = createTripleLockTicket(path);
   try {
-    return acquireTripleLockQueued(path, ticket, wallStarted, monotonicStarted);
+    return acquireTripleLockQueued(path, ticket, wallStarted, monotonicStarted, lockWaitMs);
   } finally {
     removeTripleLockTicket(ticket);
   }
@@ -663,6 +663,7 @@ function acquireTripleLockQueued(
   ticket: TripleLockTicket | undefined,
   started: number,
   startedMonotonic: number,
+  lockWaitMs: number,
 ): TripleLock {
   let wallStarted = started;
   let monotonicStarted = startedMonotonic;
@@ -675,7 +676,7 @@ function acquireTripleLockQueued(
   let deferReference = performance.now();
   for (;;) {
     // The deadline bounds time WITHOUT progress, not time in queue: a stuck or
-    // starved lock still fails in TRIPLE_LOCK_WAIT_MS, while honest ownership
+    // starved lock still fails in lockWaitMs, while honest ownership
     // turnover among queued writers must never convert into spurious busy
     // errors just because the queue is long.
     const identity = tripleLockPathIdentity(path);
@@ -701,10 +702,10 @@ function acquireTripleLockQueued(
         const stalled = performance.now() - deferReference > TRIPLE_LOCK_HEAD_STALL_MS;
         if (!stalled) {
           const nonHeadRemaining = Math.min(
-            TRIPLE_LOCK_WAIT_MS - (Date.now() - wallStarted),
-            TRIPLE_LOCK_WAIT_MS - (performance.now() - monotonicStarted),
+            lockWaitMs - (Date.now() - wallStarted),
+            lockWaitMs - (performance.now() - monotonicStarted),
           );
-          if (nonHeadRemaining <= 0) {
+          if (!(nonHeadRemaining > 0)) {
             throw new Error("Rocky triple lock is busy");
           }
           const nonHeadCap = Math.min(250, 25 + queue.position * 5);
@@ -763,10 +764,10 @@ function acquireTripleLockQueued(
         waitMs = initialWaitMs;
       }
     }
-    const wallRemaining = TRIPLE_LOCK_WAIT_MS - (Date.now() - wallStarted);
-    const monotonicRemaining = TRIPLE_LOCK_WAIT_MS - (performance.now() - monotonicStarted);
+    const wallRemaining = lockWaitMs - (Date.now() - wallStarted);
+    const monotonicRemaining = lockWaitMs - (performance.now() - monotonicStarted);
     const remaining = Math.min(wallRemaining, monotonicRemaining);
-    if (remaining <= 0) {
+    if (!(remaining > 0)) {
       throw new Error("Rocky triple lock is busy");
     }
     Atomics.wait(signal, 0, 0, Math.min(waitMs, remaining));
@@ -956,6 +957,7 @@ export interface MemoryTransaction {
 
 export interface MemoryTransactionOptions {
   now?: number;
+  lockWaitMs?: number;
 }
 
 export function withMemoryTransaction<T>(
@@ -971,7 +973,7 @@ export function withMemoryTransaction<T>(
     tombstoneSweepDone = true;
     sweepReclaimTombstones(dirname(paths.memory));
   }
-  const lock = acquireTripleLock(paths);
+  const lock = acquireTripleLock(paths, options.lockWaitMs ?? TRIPLE_LOCK_WAIT_MS);
   const now = options.now ?? Date.now();
   const initial = loadMemoryChecked(paths.memory, now);
   let records = initial.records;
@@ -1148,6 +1150,56 @@ export function recordWatchFailure(rawCmd: string, exitCode: number, stderr: str
   return rec;
 }
 
+export interface AgentFailureInput {
+  cmd: string;
+  exitCode: number;
+  body: string;
+  cwd: string;
+  agent: AgentStamp;
+}
+
+export type AgentFailureResult =
+  | { status: "written"; record: FailureRecord }
+  | { status: "skipped"; reason: "hook-duplicate" };
+
+export const HOOK_DUPLICATE_WINDOW_MS = 5_000;
+
+export function recordAgentFailure(
+  input: AgentFailureInput,
+  options: { lockWaitMs: number; now?: number },
+): AgentFailureResult {
+  if (!Number.isSafeInteger(input.exitCode)) throw new RangeError("exitCode must be a safe integer");
+  const cmd = boundCommand(input.cmd);
+  const identity = commandIdentity(cmd);
+  const ts = options.now ?? Date.now();
+  const rec: FailureRecord = {
+    kind: "failure", id: randomUUID(), ts, cwd: input.cwd, cmd, exitCode: input.exitCode,
+    fingerprint: fingerprint(input.body, cmd, input.exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: signatureLines(input.body), excerpt: failureExcerpt(input.body), origin: "agent",
+    agent: input.agent,
+    commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
+  };
+  return withMemoryTransaction<AgentFailureResult>((transaction) => {
+    if (identity.reliable) {
+      const minTs = ts - HOOK_DUPLICATE_WINDOW_MS;
+      const maxTs = ts + HOOK_DUPLICATE_WINDOW_MS;
+      const duplicate = transaction.records.some((record) => {
+        if (record.kind !== "failure" || record.origin !== "hook") return false;
+        if (record.ts < minTs || record.ts > maxTs) return false;
+        if (!sameCwd(record.cwd, input.cwd, process.platform)) return false;
+        const existing = record.commandIdentity !== undefined && record.identityReliable !== undefined
+          ? { value: record.commandIdentity, reliable: record.identityReliable }
+          : commandIdentity(record.cmd, { platform: record.platform ?? process.platform });
+        return existing.reliable && existing.value === identity.value;
+      });
+      if (duplicate) return { status: "skipped", reason: "hook-duplicate" };
+    }
+    transaction.append(rec);
+    touchPendingUnlocked(transaction.paths);
+    return { status: "written", record: rec };
+  }, resolveRockyPaths(), { now: ts, lockWaitMs: options.lockWaitMs });
+}
+
 /**
  * One success does not meaningfully fix thousands of failures, and a record
  * past `MAX_MEMORY_LINE_BYTES` is skipped by every later read — so it would be
@@ -1247,6 +1299,7 @@ export interface ResolveFixOptions {
   now?: number;
   windowMs?: number;
   agent?: AgentStamp;
+  lockWaitMs?: number;
 }
 
 export interface ResolveFixResult extends WrittenFixRecords {
@@ -1359,7 +1412,7 @@ export function resolveFixOnSuccess(
       confirmedResolved: written.fix?.failureIds.length ?? 0,
       possibleAssociated: written.association?.candidateFailureIds.length ?? 0,
     };
-  }, paths, { now: options.now });
+  }, paths, { now: options.now, lockWaitMs: options.lockWaitMs });
 }
 
 /** Lines of stderr tail an excerpt always keeps; the decisive line is the one extra. */
