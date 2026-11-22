@@ -4,7 +4,7 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
-The prior-attempts note's problem grouping no longer recomputes a command hash for every remembered failure; it reads the key family from each stored signature instead. Measured on a 9,998-record real memory, single-fingerprint grouping dropped from 170–190 ms to about 14 ms and building the note dropped to about 12–19 ms; memory load is unchanged.
+The prior-attempts note's problem grouping no longer recomputes a command hash for every remembered failure: current-format failure records with a stored signature are classified from that signature; shell-hook records are classified as command failures directly; older records, or records without a signature array, still recompute the command hash. Measured on a 9,998-record real memory, single-fingerprint grouping dropped from 170–190 ms to about 14 ms and building the note dropped to about 12–19 ms; memory load is unchanged.
 
 A failure with no error-signal lines whose command carries a secret or exceeds 1,200 bytes now matches its earlier occurrence in `rocky run`, `rocky watch`, and the shell hook. Those lookups now use the same bounded, redacted command form written to memory instead of the raw command.
 

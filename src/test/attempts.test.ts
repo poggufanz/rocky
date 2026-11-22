@@ -693,7 +693,7 @@ test("selectProblemEntries fingerprint and query modes", () => {
   assert.equal(byTextAllDirs.entries.length, 3);
 });
 
-test("buildProblems families come from the stored signature without recomputing command fingerprints", () => {
+test("buildProblems picks the key family from a v2 record's stored signature", () => {
   const nonCmdFps = ["aaaa111100000001", "aaaa111100000002", "aaaa111100000003"];
   const outputFailures = nonCmdFps.map((fp, i) => {
     const cmd = `npm run check-${i}`;
@@ -755,7 +755,7 @@ test("v2 record with non-empty signature is output even when its fingerprint equ
   assert.equal(result.entries[0]!.keyStrength, "output");
 });
 
-test("v1 record without signature keeps the recompute rule", () => {
+test("v1 record keeps the command-hash recompute rule", () => {
   const cmd = "npm test";
   const cmdFp = commandFingerprint(cmd, 1);
   const otherFp = "cccc333300000005";
