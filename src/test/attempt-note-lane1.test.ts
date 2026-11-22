@@ -254,7 +254,7 @@ test('run prints the note after "Same error as before" in arm shown, once per se
   assert.equal(rows[1]!.arm, "shown");
   assert.equal(rows[1]!.session, "s1");
   assert.equal(rows[1]!.delivered, false);
-  assert.ok(rows[1]!.bytes > 0, "bytes must reflect computed note even when suppressed by dedup");
+  assert.equal(rows[1]!.bytes, 0, "bytes must be 0 when suppressed by dedup");
   assert.equal(rows[1]!.anchorFailureId, ids[2]);
   assert.equal(rows[1]!.key, rows[0]!.key);
 
@@ -291,7 +291,7 @@ test("run in arm held prints the old line and no note, and logs delivered:false"
   assert.equal(rows[0]!.arm, "held");
   assert.equal(rows[0]!.session, "s1");
   assert.equal(rows[0]!.delivered, false);
-  assert.ok(rows[0]!.bytes > 0, "held arm must record computed note bytes");
+  assert.equal(rows[0]!.bytes, 0, "held arm must record 0 bytes");
   assert.equal(rows[0]!.anchorFailureId, ids[1]);
 });
 
@@ -314,7 +314,7 @@ test('run with no session and CLAUDECODE=1 is unassigned: no note, one exposure 
   assert.equal(rows[0]!.arm, "unassigned");
   assert.equal(rows[0]!.session, null);
   assert.equal(rows[0]!.delivered, false);
-  assert.ok(rows[0]!.bytes > 0);
+  assert.equal(rows[0]!.bytes, 0);
   assert.equal(rows[0]!.anchorFailureId, ids[1]);
 });
 
@@ -422,11 +422,12 @@ test("_hookfail speaks the note through the tty path", (t) => {
       assert.equal(first.result, 0);
       assertRockyLinesClean(first.tty);
       const hintIdx = first.tty.indexOf("rocky: Same error again.");
-      const noteLine = first.tty
+      const noteLines = first.tty
         .split(/\r?\n/)
-        .find((line) => line.startsWith("rocky: Same error recorded "));
+        .filter((line) => line.startsWith("rocky: Same error recorded "));
       assert.ok(hintIdx >= 0, `expected hook hint in: ${first.tty}`);
-      assert.ok(noteLine !== undefined, `expected note line in: ${first.tty}`);
+      assert.equal(noteLines.length, 1, `expected exactly 1 note line in: ${first.tty}`);
+      const noteLine = noteLines[0]!;
       assert.ok(first.tty.indexOf(noteLine) > hintIdx, `expected note after hint in: ${first.tty}`);
       assert.ok(noteLine.endsWith(`Rocky records order, not cause. More: rocky attempts ${fp}`), noteLine);
 
@@ -451,8 +452,40 @@ test("_hookfail speaks the note through the tty path", (t) => {
       assert.equal(rows[1]!.arm, "human");
       assert.equal(rows[1]!.session, null);
       assert.equal(rows[1]!.delivered, false);
-      assert.ok(rows[1]!.bytes > 0);
+      assert.equal(rows[1]!.bytes, 0);
       assert.equal(rows[1]!.anchorFailureId, ids[2]);
+    },
+  );
+});
+
+test("_hookfail stays silent and skips note and exposure on repeated exit-127 typos", (t) => {
+  const { home, cwd } = makeSandbox(t, "rocky-lane1-hookfail-typo-");
+  const cmd = "gti status";
+
+  withEnv(
+    {
+      ROCKY_HOME: home,
+      ROCKY_AGENT_SESSION: undefined,
+      ROCKY_TEST_SEAMS: undefined,
+      ROCKY_ATTEMPT_ARM: undefined,
+      ROCKY_ATTEMPT_ADVISORY: undefined,
+      CLAUDECODE: undefined,
+    },
+    () => {
+      const first = captureTty(() => hookFail(cmd, 127, cwd));
+      assert.equal(first.result, 0);
+      assert.equal(first.tty, "");
+
+      const second = captureTty(() => hookFail(cmd, 127, cwd));
+      assert.equal(second.result, 0);
+      assert.equal(second.tty, "");
+      assert.equal(second.tty.includes("Same error recorded"), false, second.tty);
+      assert.equal(second.tty.includes("Rocky records order, not cause."), false, second.tty);
+
+      assert.equal(readMemoryIds(home).length, 2);
+      assert.deepEqual(readExposureRows(home), []);
+      assert.equal(existsSync(join(home, "advisories.jsonl")), false);
+      assert.equal(existsSync(join(home, "gate-state")), false);
     },
   );
 });
@@ -548,7 +581,7 @@ test("_hookfail with no speech destination logs delivered:false", (t) => {
       assert.equal(rows[0]!.arm, "human");
       assert.equal(rows[0]!.session, null);
       assert.equal(rows[0]!.delivered, false);
-      assert.ok(rows[0]!.bytes > 0);
+      assert.equal(rows[0]!.bytes, 0);
       assert.equal(rows[0]!.anchorFailureId, ids[1]);
       assert.equal(rows[0]!.cwdHash, cwdHash(cwd));
     },
@@ -602,7 +635,7 @@ test("run logs delivered:false when printing the note throws", async (t) => {
       assert.equal(rows[0]!.arm, "shown");
       assert.equal(rows[0]!.session, "say-throw-s1");
       assert.equal(rows[0]!.delivered, false);
-      assert.ok(rows[0]!.bytes > 0);
+      assert.equal(rows[0]!.bytes, 0);
       assert.equal(rows[0]!.anchorFailureId, ids[1]);
     },
   );
@@ -648,7 +681,7 @@ test("quiet watch logs eligible failure with delivered:false and leaves the sess
       assert.equal(rowsAfterWatch[0]!.arm, "shown");
       assert.equal(rowsAfterWatch[0]!.session, session);
       assert.equal(rowsAfterWatch[0]!.delivered, false);
-      assert.ok(rowsAfterWatch[0]!.bytes > 0);
+      assert.equal(rowsAfterWatch[0]!.bytes, 0);
       assert.equal(rowsAfterWatch[0]!.anchorFailureId, idsAfterWatch[1]);
       assert.equal(rowsAfterWatch[0]!.cwdHash, cwdHash(cwd));
     },

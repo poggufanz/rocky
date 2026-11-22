@@ -27,6 +27,7 @@ const TOTAL_RECORDS = 10_000;
 const BACKGROUND_FINGERPRINTS = 200;
 const BACKGROUND_CWDS = 20;
 const EXTRA_CARDS = 45;
+const NEAR_CAP_CARD_LOG_TARGET_BYTES = 15_500_000;
 const LANE1_WARMUPS = 1;
 const LANE1_IN_PROCESS_RUNS = 20;
 const LANE1_PROCESS_RUNS = 5;
@@ -118,7 +119,8 @@ function makeBlock(seq, path) {
   };
 }
 
-function seedFixture(rockyHome, repoDir, targetCmd, now) {
+function seedFixture(rockyHome, repoDir, targetCmd, now, options = {}) {
+  const targetCardLogBytes = options.targetCardLogBytes ?? 0;
   mkdirSync(rockyHome, { recursive: true });
   mkdirSync(join(repoDir, ".git"), { recursive: true });
 
@@ -367,46 +369,7 @@ function seedFixture(rockyHome, repoDir, targetCmd, now) {
 
   // Populate the repo's desk change-card log with cards joined to the target
   // attempts plus realistic background cards for the same repo.
-  const cards = [];
-  for (let i = 0; i < EXTRA_CARDS; i += 1) {
-    const start = baseTs - (EXTRA_CARDS - i) * 120_000;
-    cards.push(
-      makeCard(`bench-bg-card-${String(i + 1).padStart(4, "0")}`, repoDir, {
-        session_id: `bg-session-${i % 5}`,
-        started_ms: start,
-        ended_ms: start + 45_000,
-        prompt: `update module ${i}`,
-        blocks: [
-          makeBlock(1, `src/module-${i % 12}.ts`),
-          makeBlock(2, `src/test/module-${i % 12}.test.ts`),
-        ],
-        flow: [
-          {
-            kind: "edit",
-            text: "edit",
-            ok: true,
-            dur_ms: 800,
-            seqs: [1, 2],
-            start_ms: start + 5_000,
-            end_ms: start + 5_800,
-          },
-          {
-            kind: "cmd",
-            text: `npm run check-${i % 10}`,
-            ok: true,
-            dur_ms: 1_500,
-            seqs: [],
-            exit_code: 0,
-            start_ms: start + 10_000,
-            end_ms: start + 11_500,
-            cwd: repoDir,
-          },
-        ],
-      }),
-    );
-  }
-
-  cards.push(
+  const targetCards = [
     makeCard("bench-target-card-1", repoDir, {
       session_id: "bench-seed-s1",
       started_ms: t1 - 5_000,
@@ -494,11 +457,79 @@ function seedFixture(rockyHome, repoDir, targetCmd, now) {
         },
       ],
     }),
-  );
+  ];
+  const targetCardLines = targetCards.map((card) => JSON.stringify(card));
+  const targetCardBytes = targetCardLines.reduce((sum, line) => sum + Buffer.byteLength(line, "utf8") + 1, 0);
+
+  const cardLines = [];
+  let cardBytes = targetCardBytes;
+  const makeBackgroundCardLine = (index, padBlocks) => {
+    const start = baseTs - (index + 1) * 120_000;
+    const blocks = [
+      makeBlock(1, `src/module-${index % 12}.ts`),
+      makeBlock(2, `src/test/module-${index % 12}.test.ts`),
+    ];
+    for (let b = 3; b <= padBlocks; b += 1) {
+      blocks.push(makeBlock(b, `src/features/area-${index % 20}/component-${b}.ts`));
+    }
+    return JSON.stringify(
+      makeCard(`bench-bg-card-${String(index + 1).padStart(5, "0")}`, repoDir, {
+        session_id: `bg-session-${index % 5}`,
+        started_ms: start,
+        ended_ms: start + 45_000,
+        prompt: `update module ${index}`,
+        blocks,
+        flow: [
+          {
+            kind: "edit",
+            text: "edit",
+            ok: true,
+            dur_ms: 800,
+            seqs: [1, 2],
+            start_ms: start + 5_000,
+            end_ms: start + 5_800,
+          },
+          {
+            kind: "cmd",
+            text: `npm run check-${index % 10}`,
+            ok: true,
+            dur_ms: 1_500,
+            seqs: [],
+            exit_code: 0,
+            start_ms: start + 10_000,
+            end_ms: start + 11_500,
+            cwd: repoDir,
+          },
+        ],
+      }),
+    );
+  };
+
+  if (targetCardLogBytes > 0) {
+    let idx = 0;
+    while (cardBytes < targetCardLogBytes) {
+      const line = makeBackgroundCardLine(idx, 20);
+      const lineBytes = Buffer.byteLength(line, "utf8") + 1;
+      if (cardBytes + lineBytes >= 16 * 1024 * 1024) break;
+      cardLines.push(line);
+      cardBytes += lineBytes;
+      idx += 1;
+    }
+  } else {
+    for (let i = 0; i < EXTRA_CARDS; i += 1) {
+      const line = makeBackgroundCardLine(i, 2);
+      cardLines.push(line);
+      cardBytes += Buffer.byteLength(line, "utf8") + 1;
+    }
+  }
+
+  for (const line of targetCardLines) {
+    cardLines.push(line);
+  }
 
   const cardLogPath = cardsFilePath(canonicalPath(repoDir), rockyHome);
   mkdirSync(dirname(cardLogPath), { recursive: true });
-  writeFileSync(cardLogPath, `${cards.map((card) => JSON.stringify(card)).join("\n")}\n`, "utf8");
+  writeFileSync(cardLogPath, `${cardLines.join("\n")}\n`, "utf8");
 
   return {
     recordsCount: records.length,
@@ -506,8 +537,8 @@ function seedFixture(rockyHome, repoDir, targetCmd, now) {
     memoryContent,
     memoryBytes: Buffer.byteLength(memoryContent, "utf8"),
     cardLogPath,
-    cardsCount: cards.length,
-    cardLogBytes: Buffer.byteLength(readFileSync(cardLogPath, "utf8"), "utf8"),
+    cardsCount: cardLines.length,
+    cardLogBytes: cardBytes,
     targetFp,
   };
 }
@@ -628,112 +659,167 @@ try {
   const lane1ProcRows = readAdvisories(lane1ProcHome).filter((row) => row.lane === "run" && row.kind === "note");
   const lane1ProcReportedMs = lane1ProcRows.map((row) => row.latencyMs);
 
-  // 2. Lane 2: 50 spawns of `node dist/index.js hook tool-result claude-code`
-  const lane2Home = join(root, "home-lane2");
+  // 2. Lane 2: 50 spawns + in-process recordAgentFailure/note timing for both
+  //    the standard card log (~30 KiB) and a card log near the 16 MiB cap.
   const lane2Cmd = "npm test";
-  const lane2Fixture = seedFixture(lane2Home, repoDir, lane2Cmd, now);
-  const lane2Sessions = shownSessions(LANE2_SPAWNS, "bench-l2");
-  const lane2WallMs = [];
-  let lane2Delivered = 0;
-  let sampleLane2Context = "";
 
-  for (let i = 0; i < LANE2_SPAWNS; i += 1) {
-    resetMemoryFile(lane2Home, lane2Fixture);
-    const payload = JSON.stringify({
-      hook_event_name: "PostToolUseFailure",
-      tool_name: "Bash",
-      tool_input: { command: lane2Cmd },
-      error: `Exit code ${TARGET_EXIT_CODE}\n${TARGET_STDERR}\n`,
-      session_id: lane2Sessions[i],
-      tool_use_id: `tu-bench-l2-${i + 1}`,
-      cwd: repoDir,
-    });
-    const started = performance.now();
-    const result = spawnSync(process.execPath, [cliEntry, "hook", "tool-result", "claude-code"], {
-      cwd: repoDir,
-      env: cleanEnv(lane2Home),
-      input: payload,
-      encoding: "utf8",
-      timeout: PROCESS_TIMEOUT_MS,
-      windowsHide: true,
-    });
-    const elapsedMs = performance.now() - started;
-    if (result.status !== 0) {
-      throw new Error(`hook tool-result exited ${result.status} on spawn ${i}: ${result.stderr}`);
-    }
-    const parsed = JSON.parse(result.stdout.trim());
-    const context = parsed?.hookSpecificOutput?.additionalContext;
-    if (parsed?.hookSpecificOutput?.hookEventName === "PostToolUseFailure" && typeof context === "string") {
-      if (!context.includes("src/session.ts") || !context.includes("src/auth.ts")) {
-        throw new Error(`Lane-2 additionalContext did not join the populated card log on spawn ${i}: ${context}`);
-      }
-      lane2Delivered += 1;
-      sampleLane2Context = context;
-    }
-    lane2WallMs.push(elapsedMs);
-  }
-  if (lane2Delivered !== LANE2_SPAWNS) {
-    throw new Error(`Expected ${LANE2_SPAWNS} delivered lane-2 notes, got ${lane2Delivered}`);
-  }
-  const lane2Rows = readAdvisories(lane2Home).filter((row) => row.lane === "tool-result" && row.kind === "note");
-  const lane2ReportedMs = lane2Rows.map((row) => row.latencyMs);
+  function measureLane2Variant(variantName, targetCardLogBytes) {
+    const lane2Home = join(root, `home-lane2-${variantName}`);
+    const lane2Fixture = seedFixture(lane2Home, repoDir, lane2Cmd, now, { targetCardLogBytes });
+    const lane2Sessions = shownSessions(LANE2_SPAWNS, `bench-l2-${variantName}`);
+    const lane2WallMs = [];
+    let lane2Delivered = 0;
+    let sampleLane2Context = "";
 
-  // 3. Lane 2 in-process timings without product instrumentation:
-  //    - recordAgentFailureTotal: full recordAgentFailure duration (an upper bound on lock hold)
-  //    - observeInsideLock: the observe callback, which runs inside the memory lock
-  const inProcessHome = join(root, "home-in-process");
-  const inProcessFixture = seedFixture(inProcessHome, repoDir, lane2Cmd, now);
-  const recordAgentFailureTotalMs = [];
-  const observeInsideLockMs = [];
-
-  try {
-    process.env.ROCKY_HOME = inProcessHome;
-    for (let i = 0; i < IN_PROCESS_AGENT_FAILURE_WARMUPS + IN_PROCESS_AGENT_FAILURE_RUNS; i += 1) {
-      resetMemoryFile(inProcessHome, inProcessFixture);
-      let observeElapsed = 0;
+    for (let i = 0; i < LANE2_SPAWNS; i += 1) {
+      resetMemoryFile(lane2Home, lane2Fixture);
+      const payload = JSON.stringify({
+        hook_event_name: "PostToolUseFailure",
+        tool_name: "Bash",
+        tool_input: { command: lane2Cmd },
+        error: `Exit code ${TARGET_EXIT_CODE}\n${TARGET_STDERR}\n`,
+        session_id: lane2Sessions[i],
+        tool_use_id: `tu-bench-l2-${variantName}-${i + 1}`,
+        cwd: repoDir,
+      });
       const started = performance.now();
-      const outcome = recordAgentFailure(
-        {
-          cmd: lane2Cmd,
-          exitCode: TARGET_EXIT_CODE,
-          body: `${TARGET_STDERR}\n`,
-          cwd: repoDir,
-          agent: { vendor: "claude-code", session: `bench-inproc-${i}`, toolUseId: `tu-inproc-${i}` },
-        },
-        {
-          lockWaitMs: 1_000,
-          now: now + i + 1,
-          observe: ({ records, coverage, fingerprint: fp }) => {
-            const obsStarted = performance.now();
-            const cardsFor = makeCardsFor({ home: inProcessHome, toolText: toolTextAllowed(inProcessHome) });
-            const note = priorAttemptsNote(
-              records,
-              coverage,
-              { fingerprints: [fp], cwd: repoDir },
-              { now: now + i + 1, cardsFor, platform: process.platform },
-            );
-            observeElapsed = performance.now() - obsStarted;
-            return note;
-          },
-        },
-      );
-      const totalElapsed = performance.now() - started;
-      if (
-        outcome.status !== "written" ||
-        outcome.observed === undefined ||
-        !outcome.observed.text.includes("src/session.ts")
-      ) {
-        throw new Error(`In-process recordAgentFailure did not write and observe a joined note on iteration ${i}`);
+      const result = spawnSync(process.execPath, [cliEntry, "hook", "tool-result", "claude-code"], {
+        cwd: repoDir,
+        env: cleanEnv(lane2Home),
+        input: payload,
+        encoding: "utf8",
+        timeout: PROCESS_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      const elapsedMs = performance.now() - started;
+      if (result.status !== 0) {
+        throw new Error(`hook tool-result (${variantName}) exited ${result.status} on spawn ${i}: ${result.stderr}`);
       }
-      if (i >= IN_PROCESS_AGENT_FAILURE_WARMUPS) {
-        recordAgentFailureTotalMs.push(totalElapsed);
-        observeInsideLockMs.push(observeElapsed);
+      const parsed = JSON.parse(result.stdout.trim());
+      const context = parsed?.hookSpecificOutput?.additionalContext;
+      if (parsed?.hookSpecificOutput?.hookEventName === "PostToolUseFailure" && typeof context === "string") {
+        if (!context.includes("src/session.ts") || !context.includes("src/auth.ts")) {
+          throw new Error(`Lane-2 (${variantName}) additionalContext did not join the populated card log on spawn ${i}: ${context}`);
+        }
+        lane2Delivered += 1;
+        sampleLane2Context = context;
       }
+      lane2WallMs.push(elapsedMs);
     }
-  } finally {
-    if (prevRockyHome === undefined) delete process.env.ROCKY_HOME;
-    else process.env.ROCKY_HOME = prevRockyHome;
+    if (lane2Delivered !== LANE2_SPAWNS) {
+      throw new Error(`Expected ${LANE2_SPAWNS} delivered lane-2 (${variantName}) notes, got ${lane2Delivered}`);
+    }
+    const lane2Rows = readAdvisories(lane2Home).filter((row) => row.lane === "tool-result" && row.kind === "note");
+    const lane2ReportedMs = lane2Rows.map((row) => row.latencyMs);
+
+    // In-process timings mirroring tool-result-hook.ts:
+    // - observe captures only the pre-append snapshot inside the lock
+    // - recordAgentFailureTotal bounds lock hold (never reads the card log)
+    // - noteBuildAfterLock computes the note and reads the card log outside the lock
+    const inProcessHome = join(root, `home-in-process-${variantName}`);
+    const inProcessFixture = seedFixture(inProcessHome, repoDir, lane2Cmd, now, { targetCardLogBytes });
+    const recordAgentFailureTotalMs = [];
+    const observeInsideLockMs = [];
+    const noteBuildAfterLockMs = [];
+
+    try {
+      process.env.ROCKY_HOME = inProcessHome;
+      for (let i = 0; i < IN_PROCESS_AGENT_FAILURE_WARMUPS + IN_PROCESS_AGENT_FAILURE_RUNS; i += 1) {
+        resetMemoryFile(inProcessHome, inProcessFixture);
+        let observeElapsed = 0;
+        const started = performance.now();
+        const outcome = recordAgentFailure(
+          {
+            cmd: lane2Cmd,
+            exitCode: TARGET_EXIT_CODE,
+            body: `${TARGET_STDERR}\n`,
+            cwd: repoDir,
+            agent: { vendor: "claude-code", session: `bench-inproc-${variantName}-${i}`, toolUseId: `tu-inproc-${variantName}-${i}` },
+          },
+          {
+            lockWaitMs: 1_000,
+            now: now + i + 1,
+            observe: (snapshot) => {
+              const obsStarted = performance.now();
+              const captured = {
+                records: snapshot.records,
+                coverage: snapshot.coverage,
+                fingerprint: snapshot.fingerprint,
+              };
+              observeElapsed = performance.now() - obsStarted;
+              return captured;
+            },
+          },
+        );
+        const totalElapsed = performance.now() - started;
+        if (outcome.status !== "written") {
+          throw new Error(`In-process recordAgentFailure (${variantName}) did not write on iteration ${i}`);
+        }
+        const noteStarted = performance.now();
+        const cardsFor = makeCardsFor({ home: inProcessHome, toolText: toolTextAllowed(inProcessHome) });
+        const note = priorAttemptsNote(
+          outcome.observed.records,
+          outcome.observed.coverage,
+          { fingerprints: [outcome.observed.fingerprint], cwd: repoDir },
+          { now: now + i + 1, cardsFor, platform: process.platform },
+        );
+        const noteElapsed = performance.now() - noteStarted;
+        if (note === undefined || !note.text.includes("src/session.ts") || !note.text.includes("src/auth.ts")) {
+          throw new Error(`In-process note build (${variantName}) did not join cards on iteration ${i}`);
+        }
+        if (i >= IN_PROCESS_AGENT_FAILURE_WARMUPS) {
+          recordAgentFailureTotalMs.push(totalElapsed);
+          observeInsideLockMs.push(observeElapsed);
+          noteBuildAfterLockMs.push(noteElapsed);
+        }
+      }
+    } finally {
+      if (prevRockyHome === undefined) delete process.env.ROCKY_HOME;
+      else process.env.ROCKY_HOME = prevRockyHome;
+    }
+
+    return {
+      fixture: {
+        records: lane2Fixture.recordsCount,
+        priorAttemptsForTarget: 5,
+        memoryBytes: lane2Fixture.memoryBytes,
+        cardsInRepoLog: lane2Fixture.cardsCount,
+        cardLogBytes: lane2Fixture.cardLogBytes,
+        targetFingerprint: lane2Fixture.targetFp,
+      },
+      targetP95Ms: TARGET_LANE2_P95_MS,
+      targetEnforced: false,
+      spawns: LANE2_SPAWNS,
+      delivered: lane2Delivered,
+      wallMs: summarize(lane2WallMs),
+      hookReportedLatencyMs: summarize(lane2ReportedMs),
+      sampleAdditionalContext: sampleLane2Context,
+      recordAgentFailureTotal: {
+        label: "recordAgentFailure total, an upper bound on lock hold (no card read inside lock)",
+        measuredInProcess: true,
+        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+        ms: summarize(recordAgentFailureTotalMs),
+      },
+      observeInsideLock: {
+        label: "observe callback, captures pre-append snapshot inside the lock",
+        measuredInProcess: true,
+        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+        ms: summarize(observeInsideLockMs),
+      },
+      noteBuildAfterLock: {
+        label: "priorAttemptsNote + card log read, runs after lock release",
+        measuredInProcess: true,
+        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+        ms: summarize(noteBuildAfterLockMs),
+      },
+    };
   }
+
+  const lane2Standard = measureLane2Variant("standard", 0);
+  const lane2NearCap = measureLane2Variant("near-16mib", NEAR_CAP_CARD_LOG_TARGET_BYTES);
 
   const report = {
     command: "node scripts/benchmark-attempt-note.mjs",
@@ -744,14 +830,7 @@ try {
       arch: process.arch,
       cpus: os.cpus().length,
     },
-    fixture: {
-      records: lane2Fixture.recordsCount,
-      priorAttemptsForTarget: 5,
-      memoryBytes: lane2Fixture.memoryBytes,
-      cardsInRepoLog: lane2Fixture.cardsCount,
-      cardLogBytes: lane2Fixture.cardLogBytes,
-      targetFingerprint: lane2Fixture.targetFp,
-    },
+    fixture: lane2Standard.fixture,
     lane1PrepareNote: {
       targetMs: TARGET_LANE1_MS,
       targetEnforced: false,
@@ -761,29 +840,8 @@ try {
       noteBytes: sampleLane1Bytes,
       sampleNote: sampleLane1Text,
     },
-    lane2ToolResultHook: {
-      targetP95Ms: TARGET_LANE2_P95_MS,
-      targetEnforced: false,
-      spawns: LANE2_SPAWNS,
-      delivered: lane2Delivered,
-      wallMs: summarize(lane2WallMs),
-      hookReportedLatencyMs: summarize(lane2ReportedMs),
-      sampleAdditionalContext: sampleLane2Context,
-      recordAgentFailureTotal: {
-        label: "recordAgentFailure total, an upper bound on lock hold",
-        measuredInProcess: true,
-        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
-        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
-        ms: summarize(recordAgentFailureTotalMs),
-      },
-      observeInsideLock: {
-        label: "observe callback, runs inside the lock",
-        measuredInProcess: true,
-        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
-        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
-        ms: summarize(observeInsideLockMs),
-      },
-    },
+    lane2ToolResultHook: lane2Standard,
+    lane2ToolResultHookNear16MiBCardLog: lane2NearCap,
   };
 
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

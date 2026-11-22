@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import type { AttemptNote } from "../core/attempt-note.js";
+import type { MemoryCoverage, MemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { parseToolResultPayload, TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
 
@@ -12,6 +13,12 @@ const MAX_HOOK_STDOUT_BYTES = 2 * 1024;
 const DECODER = new TextDecoder("utf-8");
 
 type AttemptNoteStateModule = typeof import("../core/attempt-note-state.js");
+
+interface ObservedFailureSnapshot {
+  records: readonly MemoryRecord[];
+  coverage: MemoryCoverage;
+  fingerprint: string;
+}
 
 function elapsedMs(startedAt: number): number {
   return Math.max(0, Math.round(performance.now() - startedAt));
@@ -120,30 +127,9 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
     }
     const enabled = stateMod !== undefined && stateMod.noteAdvisoryEnabled(process.env);
 
-    let noteDeps: {
-      priorAttemptsNote: typeof import("../core/attempt-note.js").priorAttemptsNote;
-      makeCardsFor: typeof import("../desk/cards-read.js").makeCardsFor;
-      toolTextAllowed: typeof import("../desk/cards-read.js").toolTextAllowed;
-    } | undefined;
-    if (enabled) {
-      try {
-        const [noteMod, cardsMod] = await Promise.all([
-          import("../core/attempt-note.js"),
-          import("../desk/cards-read.js"),
-        ]);
-        noteDeps = {
-          priorAttemptsNote: noteMod.priorAttemptsNote,
-          makeCardsFor: cardsMod.makeCardsFor,
-          toolTextAllowed: cardsMod.toolTextAllowed,
-        };
-      } catch {
-        noteDeps = undefined;
-      }
-    }
-
     let result;
     try {
-      result = recordAgentFailure<AttemptNote | undefined>(
+      result = recordAgentFailure<ObservedFailureSnapshot | undefined>(
         {
           cmd: event.cmd,
           exitCode: event.exitCode,
@@ -154,23 +140,7 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
         {
           lockWaitMs: TOOL_RESULT_LOCK_WAIT_MS,
           now,
-          observe: ({ records, coverage, fingerprint }) => {
-            if (noteDeps === undefined) return undefined;
-            try {
-              const cardsFor = noteDeps.makeCardsFor({
-                home,
-                toolText: noteDeps.toolTextAllowed(home),
-              });
-              return noteDeps.priorAttemptsNote(
-                records,
-                coverage,
-                { fingerprints: [fingerprint], cwd: event.cwd },
-                { now, cardsFor, platform: process.platform },
-              );
-            } catch {
-              return undefined;
-            }
-          },
+          observe: (snapshot) => (enabled ? snapshot : undefined),
         },
       );
     } catch (error) {
@@ -199,8 +169,32 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
       return EMPTY_RESPONSE;
     }
 
-    const note = result.observed;
-    if (!enabled || stateMod === undefined || note === undefined) {
+    const snapshot = result.observed;
+    if (!enabled || stateMod === undefined || snapshot === undefined) {
+      return EMPTY_RESPONSE;
+    }
+
+    let note: AttemptNote | undefined;
+    try {
+      const [noteMod, cardsMod] = await Promise.all([
+        import("../core/attempt-note.js"),
+        import("../desk/cards-read.js"),
+      ]);
+      const cardsFor = cardsMod.makeCardsFor({
+        home,
+        toolText: cardsMod.toolTextAllowed(home),
+      });
+      note = noteMod.priorAttemptsNote(
+        snapshot.records,
+        snapshot.coverage,
+        { fingerprints: [snapshot.fingerprint], cwd: event.cwd },
+        { now, cardsFor, platform: process.platform },
+      );
+    } catch {
+      note = undefined;
+    }
+
+    if (note === undefined) {
       return EMPTY_RESPONSE;
     }
 
@@ -223,7 +217,7 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
       anchorFailureId: result.record.id,
       latencyMs: elapsedMs(started),
       delivered,
-      bytes: note.bytes,
+      bytes: delivered ? note.bytes : 0,
     });
 
     return stdout;

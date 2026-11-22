@@ -329,6 +329,7 @@ test("appendExposure hashes non-null problem keys and omits cwd path segments", 
     ts: 1_795_300_002_000,
     anchorFailureId: "fail-11",
     delivered: false,
+    bytes: 0,
   };
   const differentRow: ExposureRow = {
     ...firstRow,

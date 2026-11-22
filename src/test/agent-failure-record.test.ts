@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
+import { priorAttemptsNote } from "../core/attempt-note.js";
 import { fingerprint, signatureLines } from "../core/fingerprint.js";
 import {
   boundCommand,
@@ -93,6 +94,47 @@ test("recordAgentFailure runs observe on the snapshot before append", (t) => {
   assert.deepEqual(observedIds, [first.record.id]);
   assert.equal(observedIds.includes(second.record.id), false);
   assert.deepEqual(second.observed, { priorCount: 1, firstId: first.record.id });
+
+  const loaded = loadMemoryChecked(paths.memory, 1_010_000);
+  assert.equal(loaded.records.length, 2);
+  assert.deepEqual(loaded.records.map((r) => r.id), [first.record.id, second.record.id]);
+});
+
+test("recordAgentFailure snapshot captured in observe stays pre-append after the transaction", (t) => {
+  const paths = freshPaths(t);
+  const cwd = paths.home;
+  const first = recordAgentFailure(
+    { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
+    { lockWaitMs: 1_000, now: 1_000_000, observe: noopObserve },
+  );
+  assert.equal(first.status, "written");
+
+  const second = recordAgentFailure(
+    { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
+    {
+      lockWaitMs: 1_000,
+      now: 1_010_000,
+      observe: (snapshot) => snapshot,
+    },
+  );
+  assert.equal(second.status, "written");
+
+  const { records, coverage, fingerprint: snapshotFp } = second.observed;
+  assert.deepEqual(records.map((r) => r.id), [first.record.id]);
+  assert.equal(records.some((r) => r.id === second.record.id), false);
+  assert.equal(snapshotFp, second.record.fingerprint);
+
+  const note = priorAttemptsNote(
+    records,
+    coverage,
+    { fingerprints: [snapshotFp], cwd },
+    { now: 1_010_000, cardsFor: undefined, platform: process.platform },
+  );
+  assert.ok(note !== undefined);
+  assert.ok(
+    note.text.startsWith("rocky: Same error recorded 1 time before in this directory"),
+    `expected pre-append count of 1, got: ${note.text}`,
+  );
 
   const loaded = loadMemoryChecked(paths.memory, 1_010_000);
   assert.equal(loaded.records.length, 2);

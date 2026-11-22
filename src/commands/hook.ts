@@ -149,7 +149,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   const now = Date.now();
   const fp = commandFingerprintCandidates(cmd, exitCode);
   let preparedNote: PreparedLaneOneNote | undefined;
-  if (memory !== undefined) {
+  if (memory !== undefined && !isTypoSymptom(cmd, exitCode)) {
     try {
       preparedNote = prepareLaneOneNote({
         lane: "hookfail",

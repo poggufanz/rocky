@@ -86,6 +86,7 @@ export function prepareLaneOneNote(input: LaneOneNoteInput): PreparedLaneOneNote
         if (finished) return;
         finished = true;
         try {
+          const actuallyDelivered = text !== undefined && delivered;
           appendExposure(input.home, {
             v: 1,
             ts: input.now,
@@ -97,8 +98,8 @@ export function prepareLaneOneNote(input: LaneOneNoteInput): PreparedLaneOneNote
             cwdHash: cwdHash(input.cwd),
             anchorFailureId,
             latencyMs,
-            delivered: text !== undefined && delivered,
-            bytes: note.bytes,
+            delivered: actuallyDelivered,
+            bytes: actuallyDelivered ? note.bytes : 0,
           });
         } catch {
           // Fail open: exposure logging must never disrupt a command or hook.

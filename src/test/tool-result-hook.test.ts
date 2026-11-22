@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,9 +10,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { cwdHash, exposureKeyHash, type ExposureRow } from "../core/attempt-note-state.js";
 import { commandIdentity, fingerprint, FINGERPRINT_ALGORITHM_VERSION, signatureLines } from "../core/fingerprint.js";
 import { boundCommand, MAX_COMMAND_BYTES } from "../core/memory.js";
-import { cwdIdentityKey, loadMemoryChecked } from "../core/memory-read.js";
+import { canonicalPath, cwdIdentityKey, loadMemoryChecked } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
+import { cardsFilePath } from "../listening/cards-path.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -541,7 +542,7 @@ test("process: shown arm returns additionalContext once per session and key", (t
   assert.equal(row2.cwdHash, cwdHash(workDir));
   assert.equal(row2.anchorFailureId, recordedIds[3]);
   assert.equal(row2.delivered, false);
-  assert.ok(row2.bytes > 0);
+  assert.equal(row2.bytes, 0);
   assert.ok(row2.latencyMs >= 0);
 
   // Dedup state continues to use the unhashed problem key.
@@ -638,7 +639,7 @@ test("process: held arm prints {} and logs delivered:false", (t) => {
   assert.equal(row.session, "s-held");
   assert.equal(row.cwdHash, cwdHash(workDir));
   assert.equal(row.delivered, false);
-  assert.ok(row.bytes > 0);
+  assert.equal(row.bytes, 0);
   assert.equal(existsSync(join(rockyHome, "gate-state", "s-held.attempts.json")), false);
 });
 
@@ -837,4 +838,176 @@ test("process: stdout is valid JSON under 2 KiB in every case", (t) => {
     assert.ok(Buffer.byteLength(result.stdout, "utf8") < 2048, `stdout exceeded 2 KiB: ${result.stdout.length}`);
     assert.doesNotThrow(() => JSON.parse(result.stdout));
   }
+});
+
+test("process: tool-result hook reads the desk card log after releasing the memory lock", (t) => {
+  const { root, rockyHome, workDir: rawWorkDir } = makeSandbox(t);
+  const workDir = realpathSync.native(rawWorkDir);
+  mkdirSync(join(workDir, ".git"), { recursive: true });
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const body = "Error: Cannot find module 'express'\n";
+  const now = Date.now();
+  const t1 = now - 120_000;
+  const t2 = now - 60_000;
+  const fp = fingerprint(body, "npm test", 1);
+  const identity = commandIdentity("npm test");
+
+  const seededFailures = [
+    {
+      kind: "failure",
+      id: "seed-lock-1",
+      ts: t1,
+      cwd: workDir,
+      cmd: "npm test",
+      exitCode: 1,
+      fingerprint: fp,
+      fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+      signature: signatureLines(body),
+      excerpt: body.trim(),
+      origin: "agent",
+      agent: { vendor: "claude-code", session: "seed-lock-session", toolUseId: "tu-lock-1" },
+      commandIdentity: identity.value,
+      identityV: identity.version,
+      identityReliable: identity.reliable,
+      platform: process.platform,
+    },
+    {
+      kind: "failure",
+      id: "seed-lock-2",
+      ts: t2,
+      cwd: workDir,
+      cmd: "npm test",
+      exitCode: 1,
+      fingerprint: fp,
+      fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+      signature: signatureLines(body),
+      excerpt: body.trim(),
+      origin: "agent",
+      agent: { vendor: "claude-code", session: "seed-lock-session", toolUseId: "tu-lock-2" },
+      commandIdentity: identity.value,
+      identityV: identity.version,
+      identityReliable: identity.reliable,
+      platform: process.platform,
+    },
+  ];
+  writeFileSync(paths.memory, `${seededFailures.map((r) => JSON.stringify(r)).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+
+  const cardLogPath = cardsFilePath(canonicalPath(workDir), rockyHome);
+  mkdirSync(dirname(cardLogPath), { recursive: true });
+  const card = {
+    v: 1,
+    card_id: "card-lock-1",
+    rev: 1,
+    root: workDir,
+    session_id: "seed-lock-session",
+    agent_id: "",
+    started_ms: t1 - 5_000,
+    ended_ms: t2 + 5_000,
+    prompt: "fix express import",
+    blocks: [
+      { seq: 1, path: "src/lock-check.ts", labels: [{ id: "body_changed" }], importance: "medium" },
+    ],
+    flow: [
+      {
+        kind: "cmd",
+        text: "npm test",
+        ok: false,
+        dur_ms: 500,
+        seqs: [],
+        exit_code: 1,
+        start_ms: t1 - 500,
+        end_ms: t1,
+        cwd: workDir,
+        tool_use_id: "tu-lock-1",
+      },
+      {
+        kind: "edit",
+        text: "edit",
+        ok: true,
+        dur_ms: 500,
+        seqs: [1],
+        start_ms: t1 + 10_000,
+        end_ms: t1 + 10_500,
+      },
+    ],
+    flow_more: 0,
+    coverage: { state: "full", reasons: [] },
+  };
+  writeFileSync(cardLogPath, `${JSON.stringify(card)}\n`, "utf8");
+
+  const lockPath = `${paths.memory}.triple.lock`;
+  const reportPath = join(root, "card-lock-report.json");
+  const preloadPath = join(root, "observe-card-lock.mjs");
+  writeFileSync(
+    preloadPath,
+    [
+      'import fs from "node:fs";',
+      'import { syncBuiltinESMExports } from "node:module";',
+      'const targetCardPath = (process.env.ROCKY_TEST_CARD_PATH ?? "").toLowerCase();',
+      'const lockPath = process.env.ROCKY_TEST_LOCK_PATH ?? "";',
+      'const reportPath = process.env.ROCKY_TEST_REPORT_PATH ?? "";',
+      "const events = [];",
+      "const origOpenSync = fs.openSync;",
+      "fs.openSync = function patchedOpenSync(path, ...rest) {",
+      "  if (String(path).toLowerCase() === targetCardPath) {",
+      "    events.push({ lockExists: fs.existsSync(lockPath) });",
+      '    fs.writeFileSync(reportPath, JSON.stringify(events), "utf8");',
+      "  }",
+      "  return origOpenSync.call(this, path, ...rest);",
+      "};",
+      "syncBuiltinESMExports();",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ROCKY_HOME: rockyHome,
+    ROCKY_TEST_SEAMS: "1",
+    ROCKY_ATTEMPT_ARM: "shown",
+    ROCKY_TEST_CARD_PATH: cardLogPath,
+    ROCKY_TEST_LOCK_PATH: lockPath,
+    ROCKY_TEST_REPORT_PATH: reportPath,
+  };
+  delete env.ROCKY_ATTEMPT_ADVISORY;
+  delete env.NODE_OPTIONS;
+  delete env.NODE_TEST_CONTEXT;
+
+  const result = spawnSync(
+    process.execPath,
+    ["--import", pathToFileURL(preloadPath).href, entry, "hook", "tool-result", "claude-code"],
+    {
+      cwd: workDir,
+      env,
+      input: failurePayload({ cwd: workDir, session_id: "s-lock-check", tool_use_id: "tu-lock-3" }),
+      encoding: "utf8",
+      timeout: PROCESS_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const parsed = JSON.parse(result.stdout) as {
+    hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+  };
+  const context = parsed.hookSpecificOutput?.additionalContext ?? "";
+  assert.ok(
+    context.startsWith("rocky: Same error recorded 2 times before in this directory"),
+    `expected pre-append count of 2 in additionalContext, got: ${context}`,
+  );
+  assert.ok(
+    context.includes("src/lock-check.ts"),
+    `expected card-observed file in additionalContext, got: ${context}`,
+  );
+
+  assert.equal(existsSync(reportPath), true, "expected preload to observe the card log openSync call");
+  const events = JSON.parse(readFileSync(reportPath, "utf8")) as Array<{ lockExists: boolean }>;
+  assert.ok(events.length >= 1, "expected at least one card log read");
+  assert.equal(
+    events.some((event) => event.lockExists),
+    false,
+    `card log was opened while memory triple lock was still held: ${JSON.stringify(events)}`,
+  );
 });

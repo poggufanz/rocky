@@ -126,8 +126,8 @@ Skipped `PostToolUseFailure` invocations in the tool-result lane write
 | `cwdHash` | string | 16-hex `sha256` prefix of the canonical working directory identity; never a path. |
 | `anchorFailureId` | string \| null | Failure record id written for the moment (or `null` when unavailable or on `"skip"` rows). |
 | `latencyMs` | number | Elapsed evaluation latency in milliseconds. |
-| `delivered` | boolean | `true` only when the prior-attempts note was emitted on the surface. |
-| `bytes` | number | Rendered note size in UTF-8 bytes on `"note"` rows (`0` on `"skip"` rows). |
+| `delivered` | boolean | `true` when the prior-attempts note was emitted; for the tool-result hook, `delivered` means the hook produced the context response before the final stdout write. Once-per-key delivery is best-effort (fail-open state I/O, 500-key eviction, and a lock-free claim race on parallel identical failures). |
+| `bytes` | number | Rendered note size in UTF-8 bytes when `delivered` is `true`, and `0` otherwise. |
 | `reason` | string (optional) | Present on `kind: "skip"` rows only (`"interrupt"`, `"background"`, `"no-exit-header"`, `"wrapped"`, `"undecidable"`, `"lock_busy"`, `"coverage"`, or `"hook-duplicate"`); omitted on `kind: "note"` rows. |
 
 ## Memory coverage
