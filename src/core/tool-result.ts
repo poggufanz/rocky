@@ -44,27 +44,33 @@ function isRockyBinary(token: string): boolean {
   return ROCKY_BASENAMES.has(win32.basename(token).toLowerCase());
 }
 
+function findClosingQuote(input: string, start: number): number {
+  const quote = input[start];
+  let j = start + 1;
+  if (quote === "'") {
+    while (j < input.length && input[j] !== "'") j++;
+  } else {
+    while (j < input.length && input[j] !== '"') {
+      if (input[j] === "\\" && j + 1 < input.length && (input[j + 1] === '"' || input[j + 1] === "\\")) {
+        j += 2;
+      } else {
+        j++;
+      }
+    }
+  }
+  return j < input.length ? j : -1;
+}
+
 function blankQuotedSpans(input: string): string {
   let out = "";
   let i = 0;
   while (i < input.length) {
     const ch = input[i];
     if (ch === "'" || ch === '"') {
-      let j = i + 1;
-      if (ch === "'") {
-        while (j < input.length && input[j] !== "'") j++;
-      } else {
-        while (j < input.length && input[j] !== '"') {
-          if (input[j] === "\\" && j + 1 < input.length && (input[j + 1] === '"' || input[j + 1] === "\\")) {
-            j += 2;
-          } else {
-            j++;
-          }
-        }
-      }
-      if (j < input.length) {
-        out += " ".repeat(j - i + 1);
-        i = j + 1;
+      const end = findClosingQuote(input, i);
+      if (end !== -1) {
+        out += " ".repeat(end - i + 1);
+        i = end + 1;
         continue;
       }
     }
@@ -72,6 +78,39 @@ function blankQuotedSpans(input: string): string {
     i++;
   }
   return out;
+}
+
+function splitTopLevelSegments(input: string): string[] {
+  const segments: string[] = [];
+  let segStart = 0;
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === "'" || ch === '"') {
+      const end = findClosingQuote(input, i);
+      if (end !== -1) {
+        i = end + 1;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if ((ch === "&" && input[i + 1] === "&") || (ch === "|" && input[i + 1] === "|")) {
+      segments.push(input.slice(segStart, i));
+      i += 2;
+      segStart = i;
+      continue;
+    }
+    if (ch === ";" || ch === "|" || ch === "(" || ch === ")" || ch === "\n" || ch === "\r") {
+      segments.push(input.slice(segStart, i));
+      i++;
+      segStart = i;
+      continue;
+    }
+    i++;
+  }
+  segments.push(input.slice(segStart));
+  return segments;
 }
 
 function stripLeadingPrefixes(input: string): string {
@@ -96,18 +135,26 @@ function extractHeadToken(input: string): { token: string; rest: string } | unde
   return { token: match[1], rest: input.slice(match[0].length) };
 }
 
+function matchRockyHead(input: string): string | undefined {
+  const stripped = stripLeadingPrefixes(input);
+  const head = extractHeadToken(stripped);
+  if (!head || !isRockyBinary(head.token)) return undefined;
+  const subMatch = ROCKY_SUBCOMMAND.exec(head.rest);
+  if (!subMatch) return undefined;
+  return head.rest.slice(subMatch[0].length);
+}
+
 export function classifyRockyWrap(command: string): RockyWrap {
   const trimmed = command.trim();
   if (trimmed.length === 0) return "plain";
 
-  const stripped = stripLeadingPrefixes(trimmed);
-  const head = extractHeadToken(stripped);
-  if (head && isRockyBinary(head.token)) {
-    const subMatch = ROCKY_SUBCOMMAND.exec(head.rest);
-    if (subMatch) {
-      const rest = head.rest.slice(subMatch[0].length);
-      return TOP_LEVEL_SHELL_OP.test(blankQuotedSpans(rest)) ? "undecidable" : "wrapped";
-    }
+  const headRest = matchRockyHead(trimmed);
+  if (headRest !== undefined) {
+    return TOP_LEVEL_SHELL_OP.test(blankQuotedSpans(headRest)) ? "undecidable" : "wrapped";
+  }
+
+  for (const segment of splitTopLevelSegments(trimmed)) {
+    if (matchRockyHead(segment) !== undefined) return "undecidable";
   }
 
   return ROCKY_IN_TEXT.test(blankQuotedSpans(trimmed)) ? "undecidable" : "plain";
