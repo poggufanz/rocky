@@ -21,9 +21,9 @@ existing kind.
 
 | Kind | File | Since | Status | Payload |
 |------|------|-------|--------|---------|
-| `failure` | `memory.jsonl` | v0.1 | active | `cwd, cmd, exitCode, fingerprint, fingerprintV, signature[], excerpt, origin? (run\|hook\|watch\|agent), agent?{vendor,session,agentId?,toolUseId?}, resolvedBy?, commandIdentity?, identityV?, identityReliable?, platform?` (no writer emits `origin: "agent"` or `agent` yet) |
-| `fix` | `memory.jsonl` | v0.1 | active | `cwd, cmd, failureIds[], candidateFailureIds?, links?, agent?{vendor,session,agentId?,toolUseId?}, commandIdentity?, identityV?, identityReliable?, platform?` (no writer emits `agent` yet) |
-| `association` | `memory.jsonl` | v0.5 | active | like `fix` (including `agent?`), weak-evidence links only |
+| `failure` | `memory.jsonl` | v0.1 | active | `cwd, cmd, exitCode, fingerprint, fingerprintV, signature[], excerpt, origin? (run\|hook\|watch\|agent), agent?{vendor,session,agentId?,toolUseId?}, resolvedBy?, commandIdentity?, identityV?, identityReliable?, platform?` (`rocky run` writes `agent: { vendor: "claude-code", session }` when `ROCKY_AGENT_SESSION` is valid; no writer emits `origin: "agent"`, `agentId`, or `toolUseId` yet) |
+| `fix` | `memory.jsonl` | v0.1 | active | `cwd, cmd, failureIds[], candidateFailureIds?, links?, agent?{vendor,session,agentId?,toolUseId?}, commandIdentity?, identityV?, identityReliable?, platform?` (`rocky run` writes `agent: { vendor: "claude-code", session }` when `ROCKY_AGENT_SESSION` is valid) |
+| `association` | `memory.jsonl` | v0.5 | active | like `fix` (including `agent?`, written by `rocky run` under the same rule), weak-evidence links only |
 | `note` | `memory.jsonl` | v0.5 | active | `cwd, cmd, file, line, subject, answer` |
 | `triple` | `memory.jsonl` | v0.5 | active | intent/mechanism/rationale triple, `schemaV: 1`, agent-hook origin |
 | `journal` | `journal.jsonl` | v0.6 | active | `note` (single line, ≤500 chars) |
@@ -33,6 +33,20 @@ existing kind.
 | `rationale` | `memory.jsonl` | v0.7 | active | `cwd, agent, rationale_fidelity (raw\|summary\|none), source (log-thinking\|log-response\|notify\|human\|mcp, or any ^[a-z][a-z-]{0,31}$ source, read as testimony), excerpt, expectedCommand? (≤200 code points), pointer?{logPath,sessionId,turnRef}, links?{tripleId,fixId,failureId}, files?[]` (bounded paths from notify `--files` (v0.7.5+) or `rocky why --add --files`, which writes the same field, max 8 entries of 512 chars; the PreToolUse gate reads them as file-linked evidence. `why --add` with `--files` writes no `links`; without it, `links` may name the newest failure or fix heard in that directory within 8 hours. No writer emits `source: "mcp"` or `expectedCommand` yet) |
 | `alias` | `memory.jsonl` | v0.7 | active | `alias, concept, action (add\|retract)` |
 | `explain` | `memory.jsonl` | v0.7.x teach | active | `cwd, path (bounded 512 chars), source (agent:<harness>), code (bounded excerpt: why this code shape), business (bounded excerpt: business concern), snippet? (written hunk, ≤2048 bytes, redacted), contentHash? (sha256/32 of normalized snippet). Witness testimony from the writing AI, captured at edit time via PostToolUse pending-snippet + notify join. Hearsay, never ground truth. Ladder/assembled answers are NEVER stored as this kind. |
+
+## Agent session stamp and hook lanes
+
+`failure`, `fix`, and `association` records carry an optional `agent` object shaped `{ vendor: "claude-code" | "codex" | "generic", session: string, agentId?: string, toolUseId?: string }`. Only `rocky run` writes it: when `ROCKY_AGENT_SESSION` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, `rocky run` writes `agent: { vendor: "claude-code", session }`. When the variable is unset or invalid, `rocky run` omits `agent` silently without guessing or transforming the value. `rocky watch` and the shell hook (`_hookfail`, `_hooksuccess`) stay unstamped.
+
+Rocky links a failure to a later pass only when both come from the same agent session, or when either one has no session stamp. Rocky records order, not cause. When both records carry `agent` and `session` differs (or both carry `agentId` and `agentId` differs), new `fix` and `association` records are filtered out at write time, and the memory loader applies the rule to confirmed links from `fix` records (association lookup matches stored IDs). Unstamped records stay eligible to link with stamped or unstamped records.
+
+CLI hook lanes (`rocky hook <subcommand>`):
+
+- `hook install|uninstall|status` — Bash (`.bashrc`) and PowerShell (`$PROFILE`) shell hook lifecycle.
+- `hook agent-event claude-code|codex|generic` — fail-open passive agent capture and universal notify lane (`--rationale`, `--explain-code`, `--explain-business`, `--files`); stdout is `{}`.
+- `hook gate-event <vendor>` — advisory `PreToolUse` endpoint; prints `{}` or an `additionalContext` note, never denies, exits `0`.
+- `hook listen-event <harnessId> --surface <surface>` — one-shot Listening event ingress; static argv, stdin JSON (`64 KiB` cap), fail-open, empty stdout.
+- `hook session-start claude-code` — private Claude Code `SessionStart` endpoint; reads stdin JSON (up to `1 MiB`), checks `hook_event_name === "SessionStart"`, validates `session_id` against `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` and `$CLAUDE_ENV_FILE` (non-empty absolute path free of control characters, regular file when present), and appends `export ROCKY_AGENT_SESSION='<session_id>'\n` (prepending `\n` when the existing file is non-empty without a trailing LF). Never creates missing parent directories, never denies, always prints `{}` and exits `0` on valid invocation (invalid vendor or extra arguments exit `2`).
 
 ## Adapter priority
 

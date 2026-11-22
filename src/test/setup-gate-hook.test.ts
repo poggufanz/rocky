@@ -18,6 +18,7 @@ import {
   removeClaudeHooks,
   rockyGateHookCommand,
   rockyHookCommand,
+  rockySessionStartHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
 import { createPlatformServices } from "../setup/platform.js";
@@ -26,13 +27,14 @@ import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
 
 const GATE_MATCHER = "Edit|Write|MultiEdit";
 
-function fixture(t: test.TestContext): { root: string; settings: string; command: string; gateCommand: string } {
+function fixture(t: test.TestContext): { root: string; settings: string; command: string; sessionCommand: string; gateCommand: string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-gate-hook-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
     root,
     settings: join(root, "nested", "claude-settings.json"),
     command: rockyHookCommand("claude-code", process.execPath, process.execPath),
+    sessionCommand: rockySessionStartHookCommand(process.execPath, process.execPath),
     gateCommand: rockyGateHookCommand(process.execPath, process.execPath),
   };
 }
@@ -85,19 +87,20 @@ test("rockyGateHookCommand is absolute, quoted, and targets gate-event claude-co
 // --- mergeClaudeHooks / removeClaudeHooks (unit level) -------------------
 
 test("mergeClaudeHooks adds PreToolUse gate entry only when a gate command is given", () => {
-  const withGate = mergeClaudeHooks({}, "CMD", "GATE-CMD");
+  const withGate = mergeClaudeHooks({}, "CMD", "SESSION-CMD", "GATE-CMD");
   const hooks = withGate.hooks as Record<string, unknown[]>;
   assert.deepEqual(hooks.PreToolUse, [{ matcher: GATE_MATCHER, hooks: [{ type: "command", command: "GATE-CMD" }] }]);
 
-  const withoutGate = mergeClaudeHooks({}, "CMD");
+  const withoutGate = mergeClaudeHooks({}, "CMD", "SESSION-CMD");
   assert.equal((withoutGate.hooks as Record<string, unknown>).PreToolUse, undefined);
 });
 
 test("mergeClaudeHooks strips a stale owned PreToolUse entry when gate is toggled off on rerun", () => {
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
-  const installed = mergeClaudeHooks({}, command, gateCommand);
-  const toggledOff = mergeClaudeHooks(installed, command);
+  const installed = mergeClaudeHooks({}, command, sessionCommand, gateCommand);
+  const toggledOff = mergeClaudeHooks(installed, command, sessionCommand);
   assert.equal((toggledOff.hooks as Record<string, unknown>).PreToolUse, undefined);
 });
 
@@ -107,7 +110,7 @@ test("mergeClaudeHooks preserves foreign PreToolUse hooks alongside the gate ent
       PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const merged = mergeClaudeHooks(structuredClone(foreign), "CMD", "GATE-CMD");
+  const merged = mergeClaudeHooks(structuredClone(foreign), "CMD", "SESSION-CMD", "GATE-CMD");
   const preToolUse = (merged.hooks as Record<string, unknown[]>).PreToolUse;
   assert.equal(preToolUse.length, 2);
   assert.deepEqual(preToolUse[0], foreign.hooks.PreToolUse[0]);
@@ -121,8 +124,9 @@ test("removeClaudeHooks strips the owned PreToolUse gate entry and leaves foreig
     },
   };
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
+  const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
-  const merged = mergeClaudeHooks(structuredClone(foreign), command, gateCommand);
+  const merged = mergeClaudeHooks(structuredClone(foreign), command, sessionCommand, gateCommand);
   assert.deepEqual(removeClaudeHooks(merged), foreign);
 });
 
@@ -133,6 +137,7 @@ test("installClaudeAgentHooks writes the PreToolUse gate entry when a gate comma
   mkdirSync(dirname(value.settings), { recursive: true });
   const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
     command: value.command,
+    sessionCommand: value.sessionCommand,
     gateCommand: value.gateCommand,
     confirmation: { async confirm() { return true; } },
   });
@@ -151,6 +156,7 @@ test("installClaudeAgentHooks omits the PreToolUse gate entry by default (no gat
   mkdirSync(dirname(value.settings), { recursive: true });
   const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
     command: value.command,
+    sessionCommand: value.sessionCommand,
     confirmation: { async confirm() { return true; } },
   });
   assert.equal(result.status, "written");
@@ -166,10 +172,10 @@ test("uninstallClaudeAgentHooks removes the PreToolUse entry it owns and leaves 
       PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const withGate = mergeClaudeHooks(structuredClone(foreign), value.command, value.gateCommand);
+  const withGate = mergeClaudeHooks(structuredClone(foreign), value.command, value.sessionCommand, value.gateCommand);
   writeFileSync(value.settings, `${JSON.stringify(withGate)}\n`);
 
-  const result = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command });
+  const result = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand });
   assert.equal(result.status, "written");
   assert.deepEqual(readSettings(value.settings), foreign);
 });
@@ -179,10 +185,10 @@ test("uninstallClaudeAgentHooks removes the PreToolUse entry it owns and leaves 
 test("agentHooksStatus reports installed when the gate entry is present and canonical", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
-  const withGate = mergeClaudeHooks({}, value.command, value.gateCommand);
+  const withGate = mergeClaudeHooks({}, value.command, value.sessionCommand, value.gateCommand);
   writeFileSync(value.settings, `${JSON.stringify(withGate)}\n`);
   assert.deepEqual(
-    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, gateCommand: value.gateCommand }),
+    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand, gateCommand: value.gateCommand }),
     { claudeCode: "installed" },
   );
 });
@@ -190,10 +196,10 @@ test("agentHooksStatus reports installed when the gate entry is present and cano
 test("agentHooksStatus reports installed when the gate entry is absent (rationale gate opted out)", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
-  const withoutGate = mergeClaudeHooks({}, value.command);
+  const withoutGate = mergeClaudeHooks({}, value.command, value.sessionCommand);
   writeFileSync(value.settings, `${JSON.stringify(withoutGate)}\n`);
   assert.deepEqual(
-    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, gateCommand: value.gateCommand }),
+    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand, gateCommand: value.gateCommand }),
     { claudeCode: "installed" },
   );
 });
@@ -201,7 +207,7 @@ test("agentHooksStatus reports installed when the gate entry is absent (rational
 test("agentHooksStatus reports absent when the owned PreToolUse group is duplicated or stale", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
-  const withGate = mergeClaudeHooks({}, value.command, value.gateCommand);
+  const withGate = mergeClaudeHooks({}, value.command, value.sessionCommand, value.gateCommand);
   const duplicated = {
     ...withGate,
     hooks: {
@@ -214,7 +220,7 @@ test("agentHooksStatus reports absent when the owned PreToolUse group is duplica
   };
   writeFileSync(value.settings, `${JSON.stringify(duplicated)}\n`);
   assert.deepEqual(
-    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, gateCommand: value.gateCommand }),
+    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand, gateCommand: value.gateCommand }),
     { claudeCode: "absent" },
   );
 
@@ -230,7 +236,7 @@ test("agentHooksStatus reports absent when the owned PreToolUse group is duplica
   };
   writeFileSync(value.settings, `${JSON.stringify(stale)}\n`);
   assert.deepEqual(
-    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, gateCommand: value.gateCommand }),
+    agentHooksStatus({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand, gateCommand: value.gateCommand }),
     { claudeCode: "absent" },
   );
 });

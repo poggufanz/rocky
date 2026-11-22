@@ -21,6 +21,7 @@ interface ExpectedEntry {
   changes?: Array<"observed" | "testimony" | "unknown">;
   historyMayStartEarlier?: boolean;
   crossSession?: boolean;
+  sessionScoped?: boolean[];
 }
 
 interface GoldenFixture {
@@ -113,6 +114,13 @@ for (const file of fixtureFiles) {
           actual.attempts.some((attempt) => attempt.crossSession === true),
           expected.crossSession,
           `${file} entry[${index}].crossSession`,
+        );
+      }
+      if (expected.sessionScoped !== undefined) {
+        assert.deepEqual(
+          actual.attempts.map((a) => a.sessionScoped),
+          expected.sessionScoped,
+          `${file} entry[${index}].sessionScoped`,
         );
       }
     }

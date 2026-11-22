@@ -40,7 +40,7 @@ import {
 import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, tailReadable, windowCovered } from "./memory-read.js";
-import type { AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, KnownRationaleSource, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
+import type { AgentStamp, AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, KnownRationaleSource, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
 import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
 import { flattenControls, redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
@@ -1111,7 +1111,7 @@ export function withMemoryTransaction<T>(
   }
 }
 
-export function recordFailure(rawCmd: string, exitCode: number, stderr: string): FailureRecord {
+export function recordFailure(rawCmd: string, exitCode: number, stderr: string, agent?: AgentStamp): FailureRecord {
   if (!Number.isSafeInteger(exitCode)) throw new RangeError("exitCode must be a safe integer");
   const cmd = boundCommand(rawCmd);
   const identity = commandIdentity(cmd);
@@ -1120,6 +1120,7 @@ export function recordFailure(rawCmd: string, exitCode: number, stderr: string):
     kind: "failure", id: randomUUID(), ts, cwd: process.cwd(), cmd, exitCode,
     fingerprint: fingerprint(stderr, cmd, exitCode), fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
     signature: signatureLines(stderr), excerpt: failureExcerpt(stderr),
+    ...(agent === undefined ? {} : { agent }),
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   withMemoryTransaction((transaction) => {
@@ -1169,6 +1170,7 @@ function appendFixRecordsUnlocked(
   cwd: string,
   now: number,
   windowMs: number,
+  agent?: AgentStamp,
 ): WrittenFixRecords {
   // Fix attribution proves absence/resolution across the link window. A
   // skipped, raced, or insufficiently deep tail read may still accept new
@@ -1185,6 +1187,7 @@ function appendFixRecordsUnlocked(
   const possible = chosen.filter((link) => link.confidence === "possible");
   const metadata = {
     ts: now, cwd, cmd: storedCmd,
+    ...(agent === undefined ? {} : { agent }),
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   } as const;
 
@@ -1243,6 +1246,7 @@ export interface ResolveFixOptions {
   /** Stable test/selected-window clock. Normal callers capture `Date.now()` after locking. */
   now?: number;
   windowMs?: number;
+  agent?: AgentStamp;
 }
 
 export interface ResolveFixResult extends WrittenFixRecords {
@@ -1324,7 +1328,7 @@ export function resolveFixOnSuccess(
         },
       };
     }
-    const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs });
+    const links = recentUnresolvedFailures(transaction.records, cmd, { cwd, now, windowMs, agent: options.agent });
     if (links.length === 0) {
       // A prior process may have durably appended its FixRecord and died
       // before pending reconciliation.  Only a loader-confirmed resolution
@@ -1337,7 +1341,7 @@ export function resolveFixOnSuccess(
       return { confirmedResolved: 0, possibleAssociated: 0 };
     }
 
-    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now, windowMs);
+    const written = appendFixRecordsUnlocked(transaction, cmd, links, cwd, now, windowMs, options.agent);
     if (written.fix) {
       // The append was preflighted against the bounded snapshot. A hostile
       // external replacement can still race the reload; retain pending and

@@ -15,6 +15,7 @@ import { isAgentEnvelopeText } from "./envelope.js";
 import {
   boundTripleRecord,
   canonicalPath,
+  differentAgentSession,
   getMemoryFingerprintIndex,
   isOperationalMemoryRecord,
   linkBasisRank,
@@ -23,7 +24,7 @@ import {
   pathIdentityHash,
   sameCwd,
 } from "./memory-read.js";
-import type { FailureRecord, FixRecord, GuardRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
+import type { AgentStamp, FailureRecord, FixRecord, GuardRecord, LinkBasis, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleFidelity, TripleRecord } from "./memory-read.js";
 
 export interface RecallQuery { query: string; limit?: number; cwd?: string; now?: number }
 /**
@@ -60,7 +61,7 @@ export interface MemoryStats {
   /** Guard stops by rule pattern, top entries. */
   guardByRule?: Record<string, number>;
 }
-export interface LinkQuery { cwd: string; now?: number; windowMs?: number }
+export interface LinkQuery { cwd: string; now?: number; windowMs?: number; agent: AgentStamp | undefined }
 export interface KnowledgeSearchQuery { query: string; kind?: "failure" | "fix" | "triple" | "note" | "rationale" | "explain"; limit?: number; now?: number }
 export interface KnowledgeSearchHit {
   id: string;
@@ -1473,7 +1474,8 @@ export function recentUnresolvedFailures(
     .filter((record): record is FailureRecord =>
       record.kind === "failure" && !record.resolvedBy && record.ts >= cutoff &&
       record.ts <= now &&
-      sameCwd(record.cwd, input.cwd, process.platform) && recordBase(record) === base
+      sameCwd(record.cwd, input.cwd, process.platform) && recordBase(record) === base &&
+      !differentAgentSession(record.agent, input.agent)
     )
     .map((failure) => {
       const priorIdentity = identityForFailure(failure);

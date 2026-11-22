@@ -69,11 +69,14 @@ rocky hook agent-event <vendor> --explain-code "<why this code shape>" --explain
 
 ## Step 3 — Claude Code, manual hooks *(human approval)*
 
-Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if absent; append to arrays that already exist). When `CLAUDE_CONFIG_DIR` is set, merge into `$CLAUDE_CONFIG_DIR/settings.json` instead; `rocky setup --agent-hooks` does the same, prints the path it used, and refuses an empty or non-canonical value. Capture needs the hook payload field `prompt_id` — current Claude Code versions send it; without it Rocky records nothing and never merges turns.
+Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if absent; append to arrays that already exist). When `CLAUDE_CONFIG_DIR` is set, merge into `$CLAUDE_CONFIG_DIR/settings.json` instead; `rocky setup --agent-hooks` does the same, prints the path it used, and refuses an empty or non-canonical value. Passive turn capture (`agent-event`) needs the hook payload field `prompt_id` — current Claude Code versions send it; without it Rocky records nothing and never merges turns (`SessionStart` checks `hook_event_name` and `session_id` without requiring `prompt_id`).
 
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "rocky hook session-start claude-code" } ] }
+    ],
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "rocky hook agent-event claude-code" } ] }
     ],
@@ -92,7 +95,7 @@ Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if ab
 }
 ```
 
-The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional advisory hook — it prints `{}` or an `additionalContext` note (prompt clarity or failure-cycle) and never denies an edit; omit that block to skip it. When desk hooks are installed in the same settings file, setup removes the three `agent-event` entries and keeps the `PreToolUse` entry; removing desk hooks does not put them back (run `rocky setup --agent-hooks` if needed).
+The `SessionStart` entry runs synchronously (omit `"async"`): when `session_id` and `$CLAUDE_ENV_FILE` are valid, it attempts to append `export ROCKY_AGENT_SESSION='<session_id>'` to `$CLAUDE_ENV_FILE`, prints `{}`, and exits `0`. Assisted setup recognizes `SessionStart` ownership only in its canonical quoted absolute form (`"<node-path>" "<entry-path>" hook session-start claude-code`), not the bare `rocky hook session-start claude-code` entry shown above; if you add the bare entry manually, remove it yourself when switching to assisted setup (which otherwise adds a second `SessionStart` entry) or when running assisted uninstall (which leaves the bare entry in place). `rocky run` reads `ROCKY_AGENT_SESSION` to stamp its failure, fix, and association records. Rocky links a failure to a later pass only when both come from the same agent session, or when either one has no session stamp. Rocky records order, not cause. The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional advisory hook — it prints `{}` or an `additionalContext` note (prompt clarity or failure-cycle) and never denies an edit; omit that block to skip it. When desk hooks are installed in the same settings file, setup removes the three `agent-event` entries and keeps the `SessionStart` and `PreToolUse` entries; removing desk hooks does not put the `agent-event` entries back (run `rocky setup --agent-hooks` if needed).
 
 ## Step 4 — Codex, manual config *(human approval)*
 

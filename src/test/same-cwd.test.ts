@@ -98,14 +98,14 @@ function seedMemory(records: readonly object[]): { home: string; path: string } 
 }
 
 test("a success recorded under another spelling of the directory links, confirmed, only where spellings may widen", () => {
-  const links = recentUnresolvedFailures([failureAt(GIT_BASH)], "node fail.js", { cwd: NATIVE, now: NOW });
+  const links = recentUnresolvedFailures([failureAt(GIT_BASH)], "node fail.js", { cwd: NATIVE, now: NOW, agent: undefined });
   assert.equal(links.length, WIDENS ? 1 : 0);
   if (WIDENS) {
     assert.equal(links[0].confidence, "confirmed");
     assert.equal(links[0].basis, "identity");
   }
   assert.deepEqual(
-    recentUnresolvedFailures([failureAt(GIT_BASH)], "node fail.js", { cwd: OTHER, now: NOW }),
+    recentUnresolvedFailures([failureAt(GIT_BASH)], "node fail.js", { cwd: OTHER, now: NOW, agent: undefined }),
     [],
     "a different directory never links",
   );
@@ -148,7 +148,7 @@ test("crash recovery clears pending for a resolution recorded under other spelli
 
 test("a directory that merely shares a name prefix never links", () => {
   const sibling = failureAt("C:\\Users\\x\\p-other");
-  assert.deepEqual(recentUnresolvedFailures([sibling], "node fail.js", { cwd: NATIVE, now: NOW }), []);
+  assert.deepEqual(recentUnresolvedFailures([sibling], "node fail.js", { cwd: NATIVE, now: NOW, agent: undefined }), []);
 });
 
 // --- scope filters and provenance --------------------------------------------

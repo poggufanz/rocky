@@ -856,6 +856,13 @@ function parseAgentStamp(value: unknown): AgentStamp | undefined {
   };
 }
 
+export function differentAgentSession(a: AgentStamp | undefined, b: AgentStamp | undefined): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (a.session !== b.session) return true;
+  if (a.agentId !== undefined && b.agentId !== undefined && a.agentId !== b.agentId) return true;
+  return false;
+}
+
 function parseExpectedCommand(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_EXPECTED_COMMAND_CODE_POINTS * 2) return undefined;
   if (STAMP_CONTROL_CHARS.test(value)) return undefined;
@@ -1489,6 +1496,7 @@ export function resolveMemoryRecords(records: MemoryRecord[], now: number): void
       // resolution state or clear a local pending marker. "Same directory" is
       // by identity, not spelling: the lanes record `C:/p` and `C:\p`.
       if (!sameCwd(failure.cwd, record.cwd, process.platform)) continue;
+      if (differentAgentSession(failure.agent, record.agent)) continue;
       const failureIdentity = failure.identityV === 1 && failure.commandIdentity !== undefined
         ? validateStoredIdentity(failure.cmd, failure.commandIdentity, failure.identityReliable, failure.platform)
         : commandIdentity(failure.cmd, { platform: failure.platform ?? "unknown" });

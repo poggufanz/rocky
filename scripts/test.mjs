@@ -17,12 +17,13 @@ class CommandFailed extends Error {
 
 function run(file, args) {
   // An inherited CLAUDE_CONFIG_DIR would aim settings writes at a real
-  // profile. Node drops undefined values from the child environment, and tests
-  // that need the variable set it in their own env objects.
+  // profile, and an inherited ROCKY_AGENT_SESSION would stamp test records.
+  // Node drops undefined values from the child environment, and tests that
+  // need either variable set it in their own env objects.
   const result = spawnSync(file, args, {
     cwd: packageRoot,
     stdio: "inherit",
-    env: { ...process.env, CLAUDE_CONFIG_DIR: undefined },
+    env: { ...process.env, CLAUDE_CONFIG_DIR: undefined, ROCKY_AGENT_SESSION: undefined },
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new CommandFailed(result.status ?? 1);

@@ -4,6 +4,7 @@ import { buildProblems, selectProblemEntries, type AttemptOutcome } from "../cor
 import { commandFingerprint, commandIdentity, fingerprint, legacyFingerprint } from "../core/fingerprint.js";
 import {
   MEMORY_FORMAT_VERSION,
+  resolveMemoryRecords,
   type AgentStamp,
   type FailureRecord,
   type FixRecord,
@@ -92,11 +93,12 @@ test("open window is no_later_run", () => {
   assert.equal(attempt.unknownReason, undefined);
 });
 
-test("resolvedBy wins over session skip and marks crossSession", () => {
+test("unstamped fix resolves stamped failure without marking crossSession", () => {
   const s1: AgentStamp = { vendor: "claude-code", session: "s1" };
-  const s2: AgentStamp = { vendor: "claude-code", session: "s2" };
-  const fix = makeFix({ id: "x1", ts: NOW - 30_000, failureIds: ["f1"], agent: s2 });
-  const failure = makeFailure({ id: "f1", ts: NOW - 60_000, agent: s1, resolvedBy: fix.id });
+  const fix = makeFix({ id: "x1", ts: NOW - 30_000, failureIds: ["f1"] });
+  const failure = makeFailure({ id: "f1", ts: NOW - 60_000, agent: s1 });
+  resolveMemoryRecords([failure, fix], NOW);
+  assert.equal(failure.resolvedBy, "x1");
   const result = buildProblems([failure, fix], completeCoverage(2), { now: NOW });
   assert.equal(result.entries.length, 1);
   const attempt = result.entries[0]!.attempts[0]!;
@@ -105,7 +107,24 @@ test("resolvedBy wins over session skip and marks crossSession", () => {
   assert.equal(attempt.outcomeTs, fix.ts);
   assert.equal(attempt.sessionScoped, true);
   assert.deepEqual(attempt.session, { vendor: "claude-code" });
-  assert.equal(attempt.crossSession, true);
+  assert.equal(attempt.crossSession, undefined);
+});
+
+test("rejected cross-session fix leaves resolvedBy unset for later same-session fix", () => {
+  const s1: AgentStamp = { vendor: "claude-code", session: "s1" };
+  const s2: AgentStamp = { vendor: "claude-code", session: "s2" };
+  const failure = makeFailure({ id: "f1", ts: NOW - 90_000, agent: s1 });
+  const crossFix = makeFix({ id: "x1", ts: NOW - 60_000, failureIds: ["f1"], agent: s2 });
+  const sameFix = makeFix({ id: "x2", ts: NOW - 30_000, failureIds: ["f1"], agent: s1 });
+  resolveMemoryRecords([failure, crossFix, sameFix], NOW);
+  assert.equal(failure.resolvedBy, "x2");
+  const result = buildProblems([failure, crossFix, sameFix], completeCoverage(3), { now: NOW });
+  assert.equal(result.entries.length, 1);
+  const attempt = result.entries[0]!.attempts[0]!;
+  assert.equal(attempt.outcome, "passed");
+  assert.equal(attempt.outcomeRecordId, "x2");
+  assert.equal(attempt.outcomeTs, sameFix.ts);
+  assert.equal(attempt.crossSession, undefined);
 });
 
 test("stamped records in different sessions are skipped", () => {
@@ -384,7 +403,7 @@ test("one pass record id counts as passed once for newest linked failure at same
 
   const s1: AgentStamp = { vendor: "claude-code", session: "s1" };
   const s2: AgentStamp = { vendor: "claude-code", session: "s2" };
-  const crossFix = makeFix({ id: "x2", ts: NOW - 30_000, failureIds: ["f3", "f4"], agent: s2 });
+  const crossFix = makeFix({ id: "x2", ts: NOW - 30_000, failureIds: ["f3", "f4"] });
   const f3 = makeFailure({ id: "f3", ts: NOW - 70_000, resolvedBy: crossFix.id, agent: s1 });
   const f4 = makeFailure({ id: "f4", ts: NOW - 60_000, resolvedBy: crossFix.id, agent: s2 });
 
@@ -406,7 +425,7 @@ test("one pass record id counts as passed once for newest linked failure at same
   assert.equal(crossEntry.counts.same_failure, 1);
   assert.equal(crossEntry.counts.attempts, 2);
 
-  const sameSessionFix = makeFix({ id: "x3", ts: NOW - 30_000, failureIds: ["f5", "f6"], agent: s2 });
+  const sameSessionFix = makeFix({ id: "x3", ts: NOW - 30_000, failureIds: ["f5", "f6"] });
   const f5 = makeFailure({ id: "f5", ts: NOW - 60_000, resolvedBy: sameSessionFix.id, agent: s1 });
   const f6 = makeFailure({ id: "f6", ts: NOW - 60_000, resolvedBy: sameSessionFix.id, agent: s1 });
 
@@ -424,7 +443,8 @@ test("one pass record id counts as passed once for newest linked failure at same
   assert.equal("crossSession" in sameSessionEntry.attempts[0]!, false);
   assert.equal(sameSessionEntry.attempts[1]!.failureId, "f6");
   assert.equal(sameSessionEntry.attempts[1]!.outcomeRecordId, "x3");
-  assert.equal(sameSessionEntry.attempts[1]!.crossSession, true);
+  assert.equal(sameSessionEntry.attempts[1]!.crossSession, undefined);
+  assert.equal("crossSession" in sameSessionEntry.attempts[1]!, false);
   assert.equal(sameSessionEntry.counts.passed, 1);
   assert.equal(sameSessionEntry.counts.same_failure, 1);
   assert.equal(sameSessionEntry.counts.attempts, 2);

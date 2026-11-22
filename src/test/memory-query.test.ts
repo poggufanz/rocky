@@ -356,7 +356,7 @@ test("query fix index observes same-array mutation on each call", () => {
 test("link query uses injected cwd and clock without changing process cwd", () => {
   const before = process.cwd();
   const hits = recentUnresolvedFailures([failureB], "npm test", {
-    cwd: "/work/b", now: 500, windowMs: 1000,
+    cwd: "/work/b", now: 500, windowMs: 1000, agent: undefined,
   });
   assert.deepEqual(hits.map((hit) => hit.failure.id), ["f2"]);
   assert.deepEqual(hits.map((hit) => hit.basis), ["identity"]);
@@ -380,19 +380,19 @@ test("recentUnresolvedFailures grades exact identity vs program basis", () => {
   const now = setupFail.ts + 2 * 60 * 1000; // 2 minutes later
 
   // same complete identity -> confirmed link
-  const signatureHit = recentUnresolvedFailures([setupFail], "rocky setup", { cwd: "/work/c", now });
+  const signatureHit = recentUnresolvedFailures([setupFail], "rocky setup", { cwd: "/work/c", now, agent: undefined });
   assert.deepEqual(signatureHit.map((h) => ({ id: h.failure.id, basis: h.basis, confidence: h.confidence })), [
     { id: "s1", basis: "identity", confidence: "confirmed" },
   ]);
 
   // same base program, different signature -> weak link
-  const programHit = recentUnresolvedFailures([yesFail], "rocky --help", { cwd: "/work/c", now });
+  const programHit = recentUnresolvedFailures([yesFail], "rocky --help", { cwd: "/work/c", now, agent: undefined });
   assert.deepEqual(programHit.map((h) => ({ id: h.failure.id, basis: h.basis, confidence: h.confidence })), [
     { id: "s2", basis: "program", confidence: "possible" },
   ]);
 
   // flagship case: npm run build -> npm rebuild sharp must still link (program basis)
-  const npmHit = recentUnresolvedFailures([buildFail], "npm rebuild sharp", { cwd: "/work/c", now });
+  const npmHit = recentUnresolvedFailures([buildFail], "npm rebuild sharp", { cwd: "/work/c", now, agent: undefined });
   assert.deepEqual(npmHit.map((h) => ({ id: h.failure.id, basis: h.basis, confidence: h.confidence })), [
     { id: "s3", basis: "program", confidence: "possible" },
   ]);
@@ -424,7 +424,7 @@ test("same-program candidates stay possible and never become confirmed resolutio
     commandIdentity: "[\"npm\",\"run\",\"broken-alpha\"]", identityV: 1, identityReliable: true, platform: "linux",
   };
   const links = recentUnresolvedFailures([failure], "npm run unrelated-beta", {
-    cwd: "/work/weak", now: 200,
+    cwd: "/work/weak", now: 200, agent: undefined,
   });
 
   assert.deepEqual(links.map((link) => link.basis), ["program"]);
@@ -437,7 +437,7 @@ test("different wrapper effects cannot become confirmed links", () => {
     exitCode: 1, fingerprint: "fp-wrapper", signature: ["synthetic failure"], excerpt: "synthetic failure",
   };
   for (const command of ["sudo -u alice npm test", "npm test", "env -C /work/b npm test"]) {
-    const links = recentUnresolvedFailures([failure], command, { cwd: "/work/wrapper", now: 200 });
+    const links = recentUnresolvedFailures([failure], command, { cwd: "/work/wrapper", now: 200, agent: undefined });
     assert.ok(links.every((link) => link.confidence === "possible"));
   }
 });
@@ -448,7 +448,7 @@ test("identical unparsed expansions remain possible rather than confirmed", () =
       kind: "failure", id: `ambiguous-${cmd}`, ts: 100, cwd: "/work/ambiguous", cmd,
       exitCode: 1, fingerprint: "fp-ambiguous", signature: ["synthetic failure"], excerpt: "synthetic failure",
     };
-    const links = recentUnresolvedFailures([failure], cmd, { cwd: "/work/ambiguous", now: 200 });
+    const links = recentUnresolvedFailures([failure], cmd, { cwd: "/work/ambiguous", now: 200, agent: undefined });
     assert.deepEqual(links.map((link) => link.confidence), ["possible"]);
   }
 });
@@ -460,16 +460,16 @@ test("exact identity is confirmed while cwd and selected-window isolation remain
     commandIdentity: "[\"node\",\"script.mjs\",\"mode-a\"]", identityV: 1, identityReliable: true, platform: "linux",
   };
   const exact = recentUnresolvedFailures([failure], "node script.mjs mode-a", {
-    cwd: "/work/exact", now: 200, windowMs: 200,
+    cwd: "/work/exact", now: 200, windowMs: 200, agent: undefined,
   });
   assert.deepEqual(exact.map((link) => ({ basis: link.basis, confidence: link.confidence })), [
     { basis: "identity", confidence: "confirmed" },
   ]);
   assert.deepEqual(recentUnresolvedFailures([failure], "node script.mjs mode-a", {
-    cwd: "/work/other", now: 200, windowMs: 200,
+    cwd: "/work/other", now: 200, windowMs: 200, agent: undefined,
   }), []);
   assert.deepEqual(recentUnresolvedFailures([failure], "node script.mjs mode-a", {
-    cwd: "/work/exact", now: 301, windowMs: 200,
+    cwd: "/work/exact", now: 301, windowMs: 200, agent: undefined,
   }), []);
 });
 
@@ -480,9 +480,9 @@ test("recentUnresolvedFailures narrows to an 8h window by default, widens with w
   };
   const now = 9 * 60 * 60 * 1000; // 9 hours later
 
-  assert.deepEqual(recentUnresolvedFailures([nineHoursAgo], "npm test", { cwd: "/work/d", now }), []);
+  assert.deepEqual(recentUnresolvedFailures([nineHoursAgo], "npm test", { cwd: "/work/d", now, agent: undefined }), []);
   assert.deepEqual(
-    recentUnresolvedFailures([nineHoursAgo], "npm test", { cwd: "/work/d", now, windowMs: 1000 * 60 * 60 * 24 })
+    recentUnresolvedFailures([nineHoursAgo], "npm test", { cwd: "/work/d", now, windowMs: 1000 * 60 * 60 * 24, agent: undefined })
       .map((h) => h.failure.id),
     ["o1"],
   );
@@ -502,7 +502,7 @@ test("recentUnresolvedFailures excludes future failures but includes failure exa
   };
   const future: FailureRecord = { ...atNow, id: "future", ts: now + 1 };
   const hits = recentUnresolvedFailures([atNow, future], "npm test", {
-    cwd: "/work/b", now, windowMs: LINK_WINDOW_MS,
+    cwd: "/work/b", now, windowMs: LINK_WINDOW_MS, agent: undefined,
   });
   assert.deepEqual(hits.map((hit) => hit.failure.id), ["at-now"]);
 });
@@ -521,9 +521,9 @@ test("recentUnresolvedFailures excludes other cwds, resolved failures, and other
     exitCode: 1, fingerprint: "fp-n3", signature: ["boom"], excerpt: "boom",
   };
 
-  assert.deepEqual(recentUnresolvedFailures([otherCwd], "npm test", { cwd: "/work/f", now: 1000 }), []);
-  assert.deepEqual(recentUnresolvedFailures([resolved], "npm test", { cwd: "/work/f", now: 1000 }), []);
-  assert.deepEqual(recentUnresolvedFailures([otherProgram], "npm test", { cwd: "/work/f", now: 1000 }), []);
+  assert.deepEqual(recentUnresolvedFailures([otherCwd], "npm test", { cwd: "/work/f", now: 1000, agent: undefined }), []);
+  assert.deepEqual(recentUnresolvedFailures([resolved], "npm test", { cwd: "/work/f", now: 1000, agent: undefined }), []);
+  assert.deepEqual(recentUnresolvedFailures([otherProgram], "npm test", { cwd: "/work/f", now: 1000, agent: undefined }), []);
 });
 
 test("createMemoryQueries reloads memory for every query", () => {

@@ -1,0 +1,96 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "F3",
+      "ts": 1699999850000,
+      "cwd": "/app2",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000019",
+      "fingerprintV": 2,
+      "signature": ["error: assertion failed"],
+      "excerpt": "Error: assertion failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1",
+        "agentId": "a1"
+      }
+    },
+    {
+      "kind": "fix",
+      "id": "X2",
+      "ts": 1699999880000,
+      "cwd": "/app2",
+      "cmd": "npm test",
+      "failureIds": ["F3"],
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1",
+        "agentId": "a2"
+      }
+    },
+    {
+      "kind": "failure",
+      "id": "F1",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000019",
+      "fingerprintV": 2,
+      "signature": ["error: assertion failed"],
+      "excerpt": "Error: assertion failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1"
+      }
+    },
+    {
+      "kind": "fix",
+      "id": "X1",
+      "ts": 1699999970000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "failureIds": ["F1"],
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s2"
+      }
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"],
+        "crossSession": false
+      },
+      {
+        "cwd": "/app2",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"]
+      }
+    ]
+  }
+}

@@ -45,6 +45,7 @@ import {
   printCodexAgentHooks,
   rockyGateHookCommand,
   rockyHookCommand,
+  rockySessionStartHookCommand,
   uninstallClaudeAgentHooks,
   type AgentHooksTarget,
 } from "../setup/agent-hooks.js";
@@ -625,11 +626,13 @@ async function runAgentHooksAction(
     const entryPath = resolveInstalledPath(entryCandidate);
     const command = rockyHookCommand("claude-code", nodePath, entryPath);
     const codexCommand = rockyHookCommand("codex", nodePath, entryPath);
+    const sessionCommand = rockySessionStartHookCommand(nodePath, entryPath);
     const gateCommand = rockyGateHookCommand(nodePath, entryPath);
     const target = resolveClaudeSettingsTarget(dependencies);
     if (target === undefined) return 1;
     const options = {
       command,
+      sessionCommand,
       // Install treats this as an explicit on/off switch (--no-rationale-gate
       // omits it); uninstall ignores it; status always validates against the
       // canonical gate command regardless of this run's install choice,

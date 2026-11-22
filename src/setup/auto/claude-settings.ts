@@ -9,6 +9,7 @@ import {
   removeClaudeHooks,
   rockyGateHookCommand,
   rockyHookCommand,
+  rockySessionStartHookCommand,
   writeMutation,
   type AgentHooksOperationResult,
   type CurrentConfig,
@@ -93,6 +94,7 @@ function buildAgentSide(
   const merged = mergeClaudeHooks(
     value,
     rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
+    rockySessionStartHookCommand(paths.nodePath, paths.entryPath),
     gateCommand,
   );
   return retire ? removeAgentEventHooks(merged) : merged;
@@ -223,6 +225,7 @@ export function claudeSettingsSnippets(paths: Paths, keptGate: boolean): string[
   if (deskCommand === undefined) {
     snippets.push(JSON.stringify(rockyHookCommand("claude-code", paths.nodePath, paths.entryPath)));
   }
+  snippets.push(JSON.stringify(rockySessionStartHookCommand(paths.nodePath, paths.entryPath)));
   if (keptGate) snippets.push(JSON.stringify(rockyGateHookCommand(paths.nodePath, paths.entryPath)));
   if (deskCommand !== undefined) snippets.push(JSON.stringify(deskCommand));
   return snippets;

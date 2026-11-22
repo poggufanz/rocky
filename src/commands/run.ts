@@ -10,6 +10,7 @@
  * evidence remains a possible association.
  */
 
+import { agentStampFromEnv } from "../core/agent-session.js";
 import { commandIdentity, fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
@@ -22,7 +23,7 @@ import {
   type FailureRecord,
   type MemoryRecord,
 } from "../core/memory.js";
-import { CLOCK_SKEW_MS, linkBasisRank, loadMemoryChecked, tailReadable } from "../core/memory-read.js";
+import { CLOCK_SKEW_MS, linkBasisRank, loadMemoryChecked, tailReadable, type AgentStamp } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix, LINK_WINDOW_MS, possibleFixesForFailure, type PossibleFix } from "../core/memory-query.js";
 import { ago, detail, gapSpan, isVerbose, phrase, say } from "../ui/rocky.js";
 import { safeTerminalLine } from "../ui/sanitize.js";
@@ -33,6 +34,7 @@ export async function run(cmd: string, processRunner: (cmd: string) => Promise<E
     return 2;
   }
 
+  const agent = agentStampFromEnv(process.env);
   const result = await processRunner(cmd);
 
   // Memory is bookkeeping. It must never change what the wrapped command did,
@@ -40,9 +42,9 @@ export async function run(cmd: string, processRunner: (cmd: string) => Promise<E
   if (result.started) {
     try {
       if (result.code === 0) {
-        onSuccess(cmd);
+        onSuccess(cmd, agent);
       } else if (!CANCEL_CODES.has(result.code)) {
-        onFailure(cmd, result);
+        onFailure(cmd, result, agent);
       }
     } catch {
       say("Could not write to memory, so this run is not recorded.");
@@ -222,7 +224,7 @@ export function cmdExeHint(stderr: string, platform: NodeJS.Platform, defaultShe
   return CMD_EXE_REJECTION.test(stderr) ? phrase("cmd-exe-parsed") : undefined;
 }
 
-function onFailure(cmd: string, result: ExecResult): void {
+function onFailure(cmd: string, result: ExecResult, agent?: AgentStamp): void {
   const memory = readMemory();
   if (memory !== undefined) {
     // result.stderr is the bounded tail (last TAIL_LINES lines, each capped
@@ -243,7 +245,7 @@ function onFailure(cmd: string, result: ExecResult): void {
   const hint = cmdExeHint(result.stderr, process.platform, true);
   if (hint !== undefined) say(hint);
 
-  recordFailure(cmd, result.code, result.stderr);
+  recordFailure(cmd, result.code, result.stderr, agent);
 }
 
 /**
@@ -281,6 +283,6 @@ export function linkFixOnSuccess(
   return result;
 }
 
-function onSuccess(cmd: string): void {
-  linkFixOnSuccess(cmd, process.cwd());
+function onSuccess(cmd: string, agent?: AgentStamp): void {
+  linkFixOnSuccess(cmd, process.cwd(), false, { agent });
 }
