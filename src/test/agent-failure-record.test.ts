@@ -283,3 +283,43 @@ test("recordAgentFailure refuses incomplete memory coverage and leaves memory an
   assert.equal(readFileSync(paths.memory, "utf8"), seeded);
   assert.equal(existsSync(paths.pending), false);
 });
+
+test("recordAgentFailure refuses a free lock when lockWaitMs is zero", (t) => {
+  const paths = freshPaths(t);
+
+  assert.throws(
+    () => recordAgentFailure(
+      { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
+      { lockWaitMs: 0 },
+    ),
+    /triple lock is busy/u,
+  );
+  assert.equal(existsSync(paths.memory), false);
+  assert.equal(existsSync(paths.pending), false);
+});
+
+test("recordAgentFailure checks the absolute deadline before the first lock acquisition", (t) => {
+  const paths = freshPaths(t);
+  const originalNow = performance.now.bind(performance);
+  let calls = 0;
+  performance.now = () => {
+    calls += 1;
+    // Calls 1..3 cover startedMonotonic, deferReference, and top-of-loop within
+    // the 50 ms budget; call 4 simulates ticket/queue setup exhausting the
+    // budget before the first tryTripleLock on an otherwise free lock.
+    return calls <= 3 ? 1_000 + calls * 10 : 1_100;
+  };
+  t.after(() => {
+    performance.now = originalNow;
+  });
+
+  assert.throws(
+    () => recordAgentFailure(
+      { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
+      { lockWaitMs: 50 },
+    ),
+    /triple lock is busy/u,
+  );
+  assert.equal(existsSync(paths.memory), false);
+  assert.equal(existsSync(paths.pending), false);
+});

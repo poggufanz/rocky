@@ -644,6 +644,9 @@ function acquireTripleLock(
   lockWaitMs: number,
   deadlineMode: TripleLockDeadlineMode,
 ): TripleLock {
+  if (deadlineMode === "absolute" && !(lockWaitMs > 0)) {
+    throw new Error("Rocky triple lock is busy");
+  }
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
   const wallStarted = Date.now();
   const monotonicStarted = performance.now();
@@ -691,8 +694,8 @@ function acquireTripleLockQueued(
   let observedHead: string | undefined;
   let observedIdentity: string | undefined;
   let deferReference = performance.now();
-  for (let attempt = 0; ; attempt++) {
-    if (deadlineMode === "absolute" && attempt > 0 && !(remainingWaitMs() > 0)) {
+  for (;;) {
+    if (deadlineMode === "absolute" && !(remainingWaitMs() > 0)) {
       throw new Error("Rocky triple lock is busy");
     }
     // In progress mode, the deadline bounds time WITHOUT progress, not time in
@@ -738,7 +741,7 @@ function acquireTripleLockQueued(
         waitMs = Math.min(waitMs, initialWaitMs);
       }
     }
-    if (deadlineMode === "absolute" && attempt > 0 && !(remainingWaitMs() > 0)) {
+    if (deadlineMode === "absolute" && !(remainingWaitMs() > 0)) {
       throw new Error("Rocky triple lock is busy");
     }
     const lock = tryTripleLock(path);
