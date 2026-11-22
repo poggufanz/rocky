@@ -74,6 +74,9 @@ Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if ab
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "rocky hook session-start claude-code" } ] }
+    ],
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "rocky hook agent-event claude-code" } ] }
     ],
@@ -92,7 +95,7 @@ Merge these into `~/.claude/settings.json` under `"hooks"` (create the key if ab
 }
 ```
 
-The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional advisory hook — it prints `{}` or an `additionalContext` note (prompt clarity or failure-cycle) and never denies an edit; omit that block to skip it. When desk hooks are installed in the same settings file, setup removes the three `agent-event` entries and keeps the `PreToolUse` entry; removing desk hooks does not put them back (run `rocky setup --agent-hooks` if needed).
+The `SessionStart` entry runs synchronously (omit `"async"`): it appends `export ROCKY_AGENT_SESSION='<session_id>'` to `$CLAUDE_ENV_FILE` when `session_id` and `$CLAUDE_ENV_FILE` are valid, prints `{}`, and exits `0`. `rocky run` reads `ROCKY_AGENT_SESSION` to stamp its failure, fix, and association records. Rocky links a failure to a later pass only when both come from the same agent session, or when either one has no session stamp. Rocky records order, not cause. The three `agent-event` entries capture intent, mechanism, and rationale passively. The `PreToolUse` entry is the optional advisory hook — it prints `{}` or an `additionalContext` note (prompt clarity or failure-cycle) and never denies an edit; omit that block to skip it. When desk hooks are installed in the same settings file, setup removes the three `agent-event` entries and keeps the `SessionStart` and `PreToolUse` entries; removing desk hooks does not put the `agent-event` entries back (run `rocky setup --agent-hooks` if needed).
 
 ## Step 4 — Codex, manual config *(human approval)*
 
