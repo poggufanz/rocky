@@ -31,8 +31,8 @@ const LANE1_WARMUPS = 1;
 const LANE1_IN_PROCESS_RUNS = 20;
 const LANE1_PROCESS_RUNS = 5;
 const LANE2_SPAWNS = 50;
-const LOCK_HOLD_WARMUPS = 1;
-const LOCK_HOLD_RUNS = 20;
+const IN_PROCESS_AGENT_FAILURE_WARMUPS = 1;
+const IN_PROCESS_AGENT_FAILURE_RUNS = 20;
 const TARGET_LANE1_MS = 10;
 const TARGET_LANE2_P95_MS = 300;
 const PROCESS_TIMEOUT_MS = 30_000;
@@ -678,21 +678,18 @@ try {
   const lane2Rows = readAdvisories(lane2Home).filter((row) => row.lane === "tool-result" && row.kind === "note");
   const lane2ReportedMs = lane2Rows.map((row) => row.latencyMs);
 
-  // 3. Lane 2 in-process memory lock hold proxy: recordAgentFailure + observe callback
-  // The spawned child acquires and unlinks memory.jsonl.triple.lock synchronously inside
-  // withMemoryTransaction without external instrumentation, so lock acquisition-to-release
-  // duration cannot be measured from outside the child process without changing product code.
-  // Measure recordAgentFailure with the identical observe callback in-process against a fresh
-  // 10,000-record + populated-card-log ROCKY_HOME.
-  const lockHome = join(root, "home-lock");
-  const lockFixture = seedFixture(lockHome, repoDir, lane2Cmd, now);
-  const lockHoldTotalMs = [];
-  const lockObserveMs = [];
+  // 3. Lane 2 in-process timings without product instrumentation:
+  //    - recordAgentFailureTotal: full recordAgentFailure duration (an upper bound on lock hold)
+  //    - observeInsideLock: the observe callback, which runs inside the memory lock
+  const inProcessHome = join(root, "home-in-process");
+  const inProcessFixture = seedFixture(inProcessHome, repoDir, lane2Cmd, now);
+  const recordAgentFailureTotalMs = [];
+  const observeInsideLockMs = [];
 
   try {
-    process.env.ROCKY_HOME = lockHome;
-    for (let i = 0; i < LOCK_HOLD_WARMUPS + LOCK_HOLD_RUNS; i += 1) {
-      resetMemoryFile(lockHome, lockFixture);
+    process.env.ROCKY_HOME = inProcessHome;
+    for (let i = 0; i < IN_PROCESS_AGENT_FAILURE_WARMUPS + IN_PROCESS_AGENT_FAILURE_RUNS; i += 1) {
+      resetMemoryFile(inProcessHome, inProcessFixture);
       let observeElapsed = 0;
       const started = performance.now();
       const outcome = recordAgentFailure(
@@ -701,14 +698,14 @@ try {
           exitCode: TARGET_EXIT_CODE,
           body: `${TARGET_STDERR}\n`,
           cwd: repoDir,
-          agent: { vendor: "claude-code", session: `bench-lock-${i}`, toolUseId: `tu-lock-${i}` },
+          agent: { vendor: "claude-code", session: `bench-inproc-${i}`, toolUseId: `tu-inproc-${i}` },
         },
         {
           lockWaitMs: 1_000,
           now: now + i + 1,
           observe: ({ records, coverage, fingerprint: fp }) => {
             const obsStarted = performance.now();
-            const cardsFor = makeCardsFor({ home: lockHome, toolText: toolTextAllowed(lockHome) });
+            const cardsFor = makeCardsFor({ home: inProcessHome, toolText: toolTextAllowed(inProcessHome) });
             const note = priorAttemptsNote(
               records,
               coverage,
@@ -728,9 +725,9 @@ try {
       ) {
         throw new Error(`In-process recordAgentFailure did not write and observe a joined note on iteration ${i}`);
       }
-      if (i >= LOCK_HOLD_WARMUPS) {
-        lockHoldTotalMs.push(totalElapsed);
-        lockObserveMs.push(observeElapsed);
+      if (i >= IN_PROCESS_AGENT_FAILURE_WARMUPS) {
+        recordAgentFailureTotalMs.push(totalElapsed);
+        observeInsideLockMs.push(observeElapsed);
       }
     }
   } finally {
@@ -772,14 +769,19 @@ try {
       wallMs: summarize(lane2WallMs),
       hookReportedLatencyMs: summarize(lane2ReportedMs),
       sampleAdditionalContext: sampleLane2Context,
-      memoryLockHold: {
+      recordAgentFailureTotal: {
+        label: "recordAgentFailure total, an upper bound on lock hold",
         measuredInProcess: true,
-        reason:
-          "withMemoryTransaction acquires and unlinks memory.jsonl.triple.lock synchronously inside the child process with no external timing hook, so measuring lock hold across spawned children is not possible without changing product code; measured recordAgentFailure with the identical observe callback in-process instead.",
-        warmups: LOCK_HOLD_WARMUPS,
-        runs: LOCK_HOLD_RUNS,
-        recordAgentFailureMs: summarize(lockHoldTotalMs),
-        observeCallbackMs: summarize(lockObserveMs),
+        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+        ms: summarize(recordAgentFailureTotalMs),
+      },
+      observeInsideLock: {
+        label: "observe callback, runs inside the lock",
+        measuredInProcess: true,
+        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+        ms: summarize(observeInsideLockMs),
       },
     },
   };

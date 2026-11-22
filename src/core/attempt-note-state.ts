@@ -8,7 +8,8 @@
  *   and a 30-minute per-key cooldown under `gate-state/no-session.cooldown.json`
  *   when no session is present.
  * - Append-only exposure log at `<ROCKY_HOME>/advisories.jsonl`, capped at
- *   `ADVISORY_LOG_MAX_BYTES` (8 MiB), storing only a hashed cwd.
+ *   `ADVISORY_LOG_MAX_BYTES` (8 MiB), storing only hashed directory and
+ *   problem-key identifiers.
  *
  * All I/O paths are strictly fail-open so note bookkeeping never throws or
  * interferes with a wrapped command or hook.
@@ -190,8 +191,14 @@ export function cwdHash(cwd: string): string {
   return createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 16);
 }
 
+/** 16-hex sha256 prefix of a problem key; never contains the directory path. */
+export function exposureKeyHash(key: string): string {
+  return createHash("sha256").update(key, "utf8").digest("hex").slice(0, 16);
+}
+
 /**
  * Append one JSON exposure row to `<home>/advisories.jsonl`.
+ * Replaces a non-null `row.key` with `exposureKeyHash(row.key)` before serializing.
  * Stops silently once writing would pass `ADVISORY_LOG_MAX_BYTES`. Never throws.
  */
 export function appendExposure(home: string, row: ExposureRow): void {
@@ -199,7 +206,9 @@ export function appendExposure(home: string, row: ExposureRow): void {
     const resolvedHome = resolveHomeOrUndefined(home);
     if (resolvedHome === undefined) return;
     const logFile = join(resolvedHome, "advisories.jsonl");
-    const line = `${JSON.stringify(row)}\n`;
+    const serializedRow: ExposureRow =
+      row.key === null ? row : { ...row, key: exposureKeyHash(row.key) };
+    const line = `${JSON.stringify(serializedRow)}\n`;
     const lineBytes = Buffer.byteLength(line, "utf8");
     if (lineBytes > ADVISORY_LOG_MAX_BYTES) return;
 

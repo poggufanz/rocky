@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -10,14 +11,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { hookFail } from "../commands/hook.js";
 import { run } from "../commands/run.js";
 import { watch } from "../commands/watch.js";
-import { cwdHash, type ExposureRow } from "../core/attempt-note-state.js";
+import { cwdHash, exposureKeyHash, type ExposureRow } from "../core/attempt-note-state.js";
 import { commandFingerprint, commandIdentity, fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
+import { cwdIdentityKey } from "../core/memory-read.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { flushHookSpeech } from "../ui/rocky.js";
 import { validateOutputLine } from "../ui/phrases.js";
@@ -218,8 +220,22 @@ test('run prints the note after "Same error as before" in arm shown, once per se
 
   const ids = readMemoryIds(home);
   assert.equal(ids.length, 3);
+  const rawExposureLines = readFileSync(join(home, "advisories.jsonl"), "utf8")
+    .split("\n")
+    .filter((line) => line.length > 0);
   const rows = readExposureRows(home);
   assert.equal(rows.length, 2);
+  assert.equal(rawExposureLines.length, 2);
+  const expectedProblemKey = `output:${fp}:${process.platform === "win32" ? cwdIdentityKey(cwd, "win32") : cwd}`;
+  const expectedKeyHash = exposureKeyHash(expectedProblemKey);
+  assert.equal(expectedKeyHash, createHash("sha256").update(expectedProblemKey, "utf8").digest("hex").slice(0, 16));
+  const forbiddenSegments = [cwd, cwd.replace(/\\/g, "/"), basename(dirname(cwd)), basename(cwd)];
+  for (const rawLine of rawExposureLines) {
+    const lower = rawLine.toLowerCase();
+    for (const segment of forbiddenSegments) {
+      assert.equal(lower.includes(segment.toLowerCase()), false, `path segment "${segment}" leaked in ${rawLine}`);
+    }
+  }
   assert.equal(rows[0]!.v, 1);
   assert.equal(rows[0]!.lane, "run");
   assert.equal(rows[0]!.kind, "note");
@@ -229,7 +245,8 @@ test('run prints the note after "Same error as before" in arm shown, once per se
   assert.equal(rows[0]!.bytes, Buffer.byteLength(noteLine, "utf8"));
   assert.equal(rows[0]!.anchorFailureId, ids[1]);
   assert.equal(rows[0]!.cwdHash, cwdHash(cwd));
-  assert.ok(rows[0]!.key !== null && rows[0]!.key.length > 0);
+  assert.match(rows[0]!.key!, /^[0-9a-f]{16}$/u);
+  assert.equal(rows[0]!.key, expectedKeyHash);
   assert.ok(rows[0]!.latencyMs >= 0);
 
   assert.equal(rows[1]!.lane, "run");
@@ -240,6 +257,13 @@ test('run prints the note after "Same error as before" in arm shown, once per se
   assert.ok(rows[1]!.bytes > 0, "bytes must reflect computed note even when suppressed by dedup");
   assert.equal(rows[1]!.anchorFailureId, ids[2]);
   assert.equal(rows[1]!.key, rows[0]!.key);
+
+  // Dedup state continues to use the unhashed problem key.
+  const dedupState = JSON.parse(readFileSync(join(home, "gate-state", "s1.attempts.json"), "utf8")) as {
+    v: number;
+    shown: Record<string, number>;
+  };
+  assert.equal(expectedProblemKey in dedupState.shown, true);
 });
 
 test("run in arm held prints the old line and no note, and logs delivered:false", (t) => {

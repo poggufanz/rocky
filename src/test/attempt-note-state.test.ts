@@ -18,6 +18,7 @@ import {
   attemptArm,
   claimNoteSlot,
   cwdHash,
+  exposureKeyHash,
   noteAdvisoryEnabled,
   type ExposureRow,
 } from "../core/attempt-note-state.js";
@@ -269,14 +270,17 @@ test("appendExposure writes one JSON line per row and stops at ADVISORY_LOG_MAX_
     reason: "lock_busy",
   };
 
+  const expectedKeyHash = exposureKeyHash(noteRow.key!);
+  assert.equal(expectedKeyHash, createHash("sha256").update(noteRow.key!, "utf8").digest("hex").slice(0, 16));
   appendExposure(home.dir(), noteRow);
   appendExposure(home.dir(), skipRow);
 
   const logFile = join(home.dir(), "advisories.jsonl");
   const lines = readFileSync(logFile, "utf8").split("\n").filter((line) => line.length > 0);
   assert.equal(lines.length, 2);
-  assert.deepEqual(JSON.parse(lines[0]!), noteRow);
+  assert.deepEqual(JSON.parse(lines[0]!), { ...noteRow, key: expectedKeyHash });
   assert.deepEqual(JSON.parse(lines[1]!), skipRow);
+  assert.equal(noteRow.key, "output:3f2a9c1e44d0b7a1:0123456789abcdef", "appendExposure must not mutate caller row");
 
   // Pre-fill to the byte cap: further appends stop without throwing.
   const cappedHome = join(home.dir(), "capped");
@@ -292,6 +296,88 @@ test("appendExposure writes one JSON line per row and stops at ADVISORY_LOG_MAX_
   const brokenHome = join(home.dir(), "broken-log");
   mkdirSync(join(brokenHome, "advisories.jsonl"), { recursive: true });
   assert.doesNotThrow(() => appendExposure(brokenHome, noteRow));
+});
+
+test("appendExposure hashes non-null problem keys and omits cwd path segments", () => {
+  const sampleCwd = process.platform === "win32"
+    ? "C:\\Users\\Alice\\secret-project\\nested-dir"
+    : "/home/alice/secret-project/nested-dir";
+  const problemKey = `output:3f2a9c1e44d0b7a1:${sampleCwd}`;
+  const otherProblemKey = `output:aaaaaaaaaaaaaaaa:${sampleCwd}`;
+  const expectedHash = createHash("sha256").update(problemKey, "utf8").digest("hex").slice(0, 16);
+  assert.equal(exposureKeyHash(problemKey), expectedHash);
+  assert.equal(exposureKeyHash(problemKey), exposureKeyHash(problemKey));
+  assert.match(exposureKeyHash(problemKey), /^[0-9a-f]{16}$/u);
+  assert.notEqual(exposureKeyHash(otherProblemKey), expectedHash);
+
+  const firstRow: ExposureRow = {
+    v: 1,
+    ts: 1_795_300_001_000,
+    session: SHOWN_SESSION,
+    lane: "run",
+    kind: "note",
+    arm: "shown",
+    key: problemKey,
+    cwdHash: cwdHash(sampleCwd),
+    anchorFailureId: "fail-10",
+    latencyMs: 12,
+    delivered: true,
+    bytes: 280,
+  };
+  const secondRow: ExposureRow = {
+    ...firstRow,
+    ts: 1_795_300_002_000,
+    anchorFailureId: "fail-11",
+    delivered: false,
+  };
+  const differentRow: ExposureRow = {
+    ...firstRow,
+    ts: 1_795_300_003_000,
+    key: otherProblemKey,
+    anchorFailureId: "fail-12",
+  };
+  const skipRow: ExposureRow = {
+    v: 1,
+    ts: 1_795_300_004_000,
+    session: SHOWN_SESSION,
+    lane: "tool-result",
+    kind: "skip",
+    arm: null,
+    key: null,
+    cwdHash: cwdHash(sampleCwd),
+    anchorFailureId: null,
+    latencyMs: 2,
+    delivered: false,
+    bytes: 0,
+    reason: "wrapped",
+  };
+
+  appendExposure(home.dir(), firstRow);
+  appendExposure(home.dir(), secondRow);
+  appendExposure(home.dir(), differentRow);
+  appendExposure(home.dir(), skipRow);
+
+  const logFile = join(home.dir(), "advisories.jsonl");
+  const rawLines = readFileSync(logFile, "utf8").split("\n").filter((line) => line.length > 0);
+  assert.equal(rawLines.length, 4);
+
+  const pathSegments = sampleCwd.split(/[\\/]+/).filter((seg) => seg.length > 0 && !/^[A-Za-z]:$/u.test(seg));
+  for (const rawLine of rawLines) {
+    const lower = rawLine.toLowerCase();
+    assert.equal(lower.includes(sampleCwd.toLowerCase()), false, `cwd leaked in ${rawLine}`);
+    assert.equal(lower.includes(sampleCwd.replace(/\\/g, "/").toLowerCase()), false, `cwd leaked in ${rawLine}`);
+    for (const segment of pathSegments) {
+      assert.equal(lower.includes(segment.toLowerCase()), false, `segment "${segment}" leaked in ${rawLine}`);
+    }
+  }
+
+  const parsed = rawLines.map((line) => JSON.parse(line) as ExposureRow);
+  assert.match(parsed[0]!.key!, /^[0-9a-f]{16}$/u);
+  assert.equal(parsed[0]!.key, expectedHash);
+  assert.equal(parsed[1]!.key, parsed[0]!.key);
+  assert.match(parsed[2]!.key!, /^[0-9a-f]{16}$/u);
+  assert.notEqual(parsed[2]!.key, parsed[0]!.key);
+  assert.equal(parsed[3]!.key, null);
 });
 
 test("cwdHash never contains the path and uses cwdIdentityKey", () => {

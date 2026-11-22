@@ -89,8 +89,8 @@ written to `memory.jsonl`:
 - `<ROCKY_HOME>/advisories.jsonl` — append-only JSONL exposure log for eligible
   prior-attempts moments across all arms and for skipped tool-result hook calls.
   Capped at `8 MiB` (roughly 20,000 rows); appends stop silently once a write
-  would pass the cap. Stores a hashed directory identity (`cwdHash`), never a
-  raw directory path.
+  would pass the cap. Stores hashed identifiers (`cwdHash` and a 16-hex `sha256`
+  hash of the problem key in `key`), never a raw directory path.
 - `<ROCKY_HOME>/gate-state/<session>.attempts.json` — per-session dedup state
   for once-per-`(session, key)` note delivery. Written atomically via a sibling
   `.<pid>.tmp` file and rename, holding `{ "v": 1, "shown": { "<key>": <epoch_ms> } }`,
@@ -104,7 +104,7 @@ written to `memory.jsonl`:
 One JSON object per line. Eligible moments write `kind: "note"`:
 
 ```json
-{"v":1,"ts":1795300000000,"session":"sess-04","lane":"tool-result","kind":"note","arm":"shown","key":"output:3f2a9c1e44d0b7a1:0123456789abcdef","cwdHash":"0123456789abcdef","anchorFailureId":"fail-01","latencyMs":42,"delivered":true,"bytes":312}
+{"v":1,"ts":1795300000000,"session":"sess-04","lane":"tool-result","kind":"note","arm":"shown","key":"a1b2c3d4e5f60718","cwdHash":"0123456789abcdef","anchorFailureId":"fail-01","latencyMs":42,"delivered":true,"bytes":312}
 ```
 
 Skipped `PostToolUseFailure` invocations in the tool-result lane write
@@ -122,7 +122,7 @@ Skipped `PostToolUseFailure` invocations in the tool-result lane write
 | `lane` | `"run"` \| `"watch"` \| `"hookfail"` \| `"tool-result"` | Lane that evaluated the failure moment. |
 | `kind` | `"note"` \| `"skip"` | `"note"` for an eligible prior-attempts moment; `"skip"` for a skipped tool-result failure call. |
 | `arm` | `"shown"` \| `"held"` \| `"unassigned"` \| `"human"` \| null | Assigned arm on `"note"` rows; `null` on `"skip"` rows. |
-| `key` | string \| null | Problem key identifying the recurring error; `null` on `"skip"` rows. |
+| `key` | string \| null | 16-hex `sha256` prefix of the problem key identifying the recurring error (`exposureKeyHash`; never contains a directory path); `null` on `"skip"` rows. |
 | `cwdHash` | string | 16-hex `sha256` prefix of the canonical working directory identity; never a path. |
 | `anchorFailureId` | string \| null | Failure record id written for the moment (or `null` when unavailable or on `"skip"` rows). |
 | `latencyMs` | number | Elapsed evaluation latency in milliseconds. |

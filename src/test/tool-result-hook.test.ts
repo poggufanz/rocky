@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cwdHash, type ExposureRow } from "../core/attempt-note-state.js";
+import { cwdHash, exposureKeyHash, type ExposureRow } from "../core/attempt-note-state.js";
 import { commandIdentity, fingerprint, FINGERPRINT_ALGORITHM_VERSION, signatureLines } from "../core/fingerprint.js";
 import { boundCommand, MAX_COMMAND_BYTES } from "../core/memory.js";
-import { loadMemoryChecked } from "../core/memory-read.js";
+import { cwdIdentityKey, loadMemoryChecked } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
 
@@ -497,8 +498,22 @@ test("process: shown arm returns additionalContext once per session and key", (t
   assert.equal(second.stderr, "");
   assert.equal(second.stdout, "{}");
 
+  const rawExposureLines = readFileSync(join(rockyHome, "advisories.jsonl"), "utf8")
+    .split("\n")
+    .filter((line) => line.length > 0);
   const rows = readExposureRows(rockyHome);
   assert.equal(rows.length, 2);
+  assert.equal(rawExposureLines.length, 2);
+  const expectedProblemKey = `output:${fp}:${process.platform === "win32" ? cwdIdentityKey(workDir, "win32") : workDir}`;
+  const expectedKeyHash = exposureKeyHash(expectedProblemKey);
+  assert.equal(expectedKeyHash, createHash("sha256").update(expectedProblemKey, "utf8").digest("hex").slice(0, 16));
+  const forbiddenSegments = [workDir, workDir.replace(/\\/g, "/"), basename(dirname(workDir)), basename(workDir)];
+  for (const rawLine of rawExposureLines) {
+    const lower = rawLine.toLowerCase();
+    for (const segment of forbiddenSegments) {
+      assert.equal(lower.includes(segment.toLowerCase()), false, `path segment "${segment}" leaked in ${rawLine}`);
+    }
+  }
   const loaded = loadMemoryChecked(paths.memory);
   const recordedIds = loaded.records.filter((r) => r.kind === "failure").map((r) => r.id);
   assert.equal(recordedIds.length, 4);
@@ -509,6 +524,8 @@ test("process: shown arm returns additionalContext once per session and key", (t
   assert.equal(row1.kind, "note");
   assert.equal(row1.arm, "shown");
   assert.equal(row1.session, "s-shown");
+  assert.match(row1.key!, /^[0-9a-f]{16}$/u);
+  assert.equal(row1.key, expectedKeyHash);
   assert.equal(row1.cwdHash, cwdHash(workDir));
   assert.equal(row1.anchorFailureId, recordedIds[2]);
   assert.equal(row1.delivered, true);
@@ -526,6 +543,13 @@ test("process: shown arm returns additionalContext once per session and key", (t
   assert.equal(row2.delivered, false);
   assert.ok(row2.bytes > 0);
   assert.ok(row2.latencyMs >= 0);
+
+  // Dedup state continues to use the unhashed problem key.
+  const dedupState = JSON.parse(readFileSync(join(rockyHome, "gate-state", "s-shown.attempts.json"), "utf8")) as {
+    v: number;
+    shown: Record<string, number>;
+  };
+  assert.equal(expectedProblemKey in dedupState.shown, true);
 });
 
 test("process: silent failure with command longer than writer bound matches seeded agent failures", (t) => {
