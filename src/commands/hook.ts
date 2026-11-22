@@ -177,6 +177,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
   if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
 
+  let noteDelivered = false;
   try {
     const previous = findByFingerprint(memory.records, fp, now);
     if (previous.length === 0) return 0; // first time: the hook stays quiet
@@ -220,7 +221,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
     if (preparedNote?.text !== undefined) {
       try {
-        sayTty(preparedNote.text);
+        noteDelivered = sayTty(preparedNote.text);
       } catch {
         // Fail open: note output must never disrupt the hooked shell.
       }
@@ -228,7 +229,7 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     return 0;
   } finally {
     try {
-      preparedNote?.finish(recordedId);
+      preparedNote?.finish(recordedId, noteDelivered);
     } catch {
       // Fail open: exposure logging must never disrupt the hooked shell.
     }

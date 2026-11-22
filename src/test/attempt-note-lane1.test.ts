@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { hookFail } from "../commands/hook.js";
+import { run } from "../commands/run.js";
 import { watch } from "../commands/watch.js";
 import { cwdHash, type ExposureRow } from "../core/attempt-note-state.js";
 import { commandFingerprint, commandIdentity, fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
@@ -475,4 +476,183 @@ test("watch prints the note on a repeated failure", async (t) => {
       assert.equal(rows[0]!.cwdHash, cwdHash(cwd));
     },
   );
+});
+
+test("_hookfail with no speech destination logs delivered:false", (t) => {
+  const { home, cwd } = makeSandbox(t, "rocky-lane1-hookfail-notty-");
+  const cmd = "hookfail-notty-cmd";
+  const fp = commandFingerprint(cmd, 1);
+  const identity = commandIdentity(cmd);
+  const seeded = {
+    kind: "failure",
+    id: "hook-notty-seed-1",
+    ts: Date.now() - 60_000,
+    cwd,
+    cmd,
+    exitCode: 1,
+    fingerprint: fp,
+    fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
+    signature: [cmd],
+    excerpt: "exit 1",
+    origin: "hook",
+    commandIdentity: identity.value,
+    identityV: identity.version,
+    identityReliable: identity.reliable,
+    platform: process.platform,
+  };
+  writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(seeded)}\n`, "utf8");
+
+  withEnv(
+    {
+      ROCKY_HOME: home,
+      ROCKY_HOOK_SPEECH_FILE: undefined,
+      ROCKY_AGENT_SESSION: undefined,
+      ROCKY_TEST_SEAMS: undefined,
+      ROCKY_ATTEMPT_ARM: undefined,
+      ROCKY_ATTEMPT_ADVISORY: undefined,
+      CLAUDECODE: undefined,
+    },
+    () => {
+      const code = hookFail(cmd, 1, cwd);
+      assert.equal(code, 0);
+
+      const ids = readMemoryIds(home);
+      const rows = readExposureRows(home);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.lane, "hookfail");
+      assert.equal(rows[0]!.kind, "note");
+      assert.equal(rows[0]!.arm, "human");
+      assert.equal(rows[0]!.session, null);
+      assert.equal(rows[0]!.delivered, false);
+      assert.ok(rows[0]!.bytes > 0);
+      assert.equal(rows[0]!.anchorFailureId, ids[1]);
+      assert.equal(rows[0]!.cwdHash, cwdHash(cwd));
+    },
+  );
+});
+
+test("run logs delivered:false when printing the note throws", async (t) => {
+  const { home } = makeSandbox(t, "rocky-lane1-run-say-throws-");
+  const cwd = process.cwd();
+  const marker = "TypeError: lane1 say throws sentinel";
+  const cmd = "synthetic-say-throws-cmd";
+  seedRunFailure(home, cwd, cmd, marker, 7);
+
+  await withEnv(
+    {
+      ROCKY_HOME: home,
+      ROCKY_TEST_SEAMS: "1",
+      ROCKY_ATTEMPT_ARM: "shown",
+      ROCKY_AGENT_SESSION: "say-throw-s1",
+      ROCKY_ATTEMPT_ADVISORY: undefined,
+      CLAUDECODE: undefined,
+    },
+    async () => {
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        if (String(chunk).includes("Same error recorded")) {
+          throw new Error("simulated stderr failure");
+        }
+        return true;
+      }) as typeof process.stderr.write;
+
+      let code: number;
+      try {
+        code = await run(cmd, async () => ({
+          started: true,
+          code: 7,
+          stderr: `${marker}\n`,
+          tail: [marker],
+          durationMs: 5,
+        }));
+      } finally {
+        process.stderr.write = originalWrite;
+      }
+
+      assert.equal(code, 7);
+      const ids = readMemoryIds(home);
+      const rows = readExposureRows(home);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.lane, "run");
+      assert.equal(rows[0]!.kind, "note");
+      assert.equal(rows[0]!.arm, "shown");
+      assert.equal(rows[0]!.session, "say-throw-s1");
+      assert.equal(rows[0]!.delivered, false);
+      assert.ok(rows[0]!.bytes > 0);
+      assert.equal(rows[0]!.anchorFailureId, ids[1]);
+    },
+  );
+});
+
+test("quiet watch logs eligible failure with delivered:false and leaves the session slot unclaimed", async (t) => {
+  const { home, cwd: scriptDir } = makeSandbox(t, "rocky-lane1-quiet-watch-");
+  const cwd = process.cwd();
+  const marker = "TypeError: lane1 quiet watch sentinel";
+  const cmd = failingNodeCmd(scriptDir, marker, 1);
+  const fp = seedRunFailure(home, cwd, cmd, marker, 1);
+  const session = "quiet-watch-s1";
+
+  await withEnv(
+    {
+      ROCKY_HOME: home,
+      ROCKY_TEST_SEAMS: "1",
+      ROCKY_ATTEMPT_ARM: "shown",
+      ROCKY_AGENT_SESSION: session,
+      ROCKY_ATTEMPT_ADVISORY: undefined,
+      CLAUDECODE: undefined,
+    },
+    async () => {
+      const quietRun = await captureStderr(() =>
+        watch(["--quiet", cmd], {
+          notify: () => {
+            throw new Error("quiet watch must not notify");
+          },
+        }),
+      );
+      assert.equal(quietRun.result, 1);
+      assert.doesNotMatch(quietRun.stderr, /^rocky: /m);
+      assert.equal(quietRun.stderr.includes("Same error recorded"), false, quietRun.stderr);
+      assert.equal(quietRun.stderr.includes("Rocky records order, not cause."), false, quietRun.stderr);
+      assert.match(quietRun.stderr, /exit: 1/);
+      assert.equal(existsSync(join(home, "gate-state")), false, "quiet watch must not claim the dedup slot");
+
+      const idsAfterWatch = readMemoryIds(home);
+      const rowsAfterWatch = readExposureRows(home);
+      assert.equal(rowsAfterWatch.length, 1);
+      assert.equal(rowsAfterWatch[0]!.lane, "watch");
+      assert.equal(rowsAfterWatch[0]!.kind, "note");
+      assert.equal(rowsAfterWatch[0]!.arm, "shown");
+      assert.equal(rowsAfterWatch[0]!.session, session);
+      assert.equal(rowsAfterWatch[0]!.delivered, false);
+      assert.ok(rowsAfterWatch[0]!.bytes > 0);
+      assert.equal(rowsAfterWatch[0]!.anchorFailureId, idsAfterWatch[1]);
+      assert.equal(rowsAfterWatch[0]!.cwdHash, cwdHash(cwd));
+    },
+  );
+
+  const runEnv = baseChildEnv(home, {
+    ROCKY_TEST_SEAMS: "1",
+    ROCKY_ATTEMPT_ARM: "shown",
+    ROCKY_AGENT_SESSION: session,
+  });
+  const laterRun = runCliProcess(cwd, runEnv, cmd);
+  assert.equal(laterRun.status, 1, laterRun.stderr);
+  assertRockyLinesClean(laterRun.stderr);
+  const noteLine = laterRun.stderr
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("rocky: Same error recorded "));
+  assert.ok(noteLine !== undefined, `expected note on later non-quiet run, got: ${laterRun.stderr}`);
+  assert.ok(noteLine.endsWith(`Rocky records order, not cause. More: rocky attempts ${fp}`), noteLine);
+
+  const idsAfterRun = readMemoryIds(home);
+  const rowsAfterRun = readExposureRows(home);
+  assert.equal(rowsAfterRun.length, 2);
+  assert.equal(rowsAfterRun[1]!.lane, "run");
+  assert.equal(rowsAfterRun[1]!.kind, "note");
+  assert.equal(rowsAfterRun[1]!.arm, "shown");
+  assert.equal(rowsAfterRun[1]!.session, session);
+  assert.equal(rowsAfterRun[1]!.delivered, true);
+  assert.equal(rowsAfterRun[1]!.bytes, Buffer.byteLength(noteLine, "utf8"));
+  assert.equal(rowsAfterRun[1]!.anchorFailureId, idsAfterRun[2]);
+  assert.equal(rowsAfterRun[1]!.key, rowsAfterRun[0]!.key);
 });

@@ -154,8 +154,9 @@ function unrefTimer(timer: WatchTimer): void {
 
 /**
  * Equivalent of `run.ts`'s read guard, adapted for `--quiet`: reading still
- * always happens (fix-linking on success needs it regardless of quiet), but
- * the unreadable-memory disclosure is a commentary line, so it's silenced.
+ * always happens (exposure evaluation needs the pre-append snapshot even when
+ * `--quiet` suppresses commentary), while all stderr disclosures stay silent
+ * under `--quiet`.
  */
 function readMemory(quiet: boolean): { records: MemoryRecord[]; coverage: MemoryCoverage; historyMayStartEarlier: boolean; linesSkipped: boolean } | undefined {
   try {
@@ -167,18 +168,14 @@ function readMemory(quiet: boolean): { records: MemoryRecord[]; coverage: Memory
         : `memory coverage incomplete: version ${loaded.coverage.version}; scanned ${loaded.coverage.scanned}; skipped ${loaded.coverage.skipped}; truncated ${loaded.coverage.truncated}${loaded.coverage.reason === undefined ? "" : `; reason ${loaded.coverage.reason}`}`;
     };
     if (!tailReadable(loaded.coverage)) {
-      const diagnostic = coverageDiagnostic();
-      if (quiet) writeRockyStderr(`${diagnostic}\n`);
-      else {
+      if (!quiet) {
         say("Memory coverage is incomplete, so no earlier fix is claimed. Check the memory file.");
-        detail(`    ${diagnostic}`);
+        detail(`    ${coverageDiagnostic()}`);
       }
       return undefined;
     }
-    if (loaded.coverage.skipped > 0) {
-      const diagnostic = coverageDiagnostic();
-      if (quiet) writeRockyStderr(`${diagnostic}\n`);
-      else detail(`    ${diagnostic}`);
+    if (loaded.coverage.skipped > 0 && !quiet) {
+      detail(`    ${coverageDiagnostic()}`);
     }
     return {
       records: loaded.records,
@@ -233,26 +230,28 @@ function onWatchSuccess(cmd: string, cwd: string, quiet: boolean, result: ExecRe
  */
 function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecResult): string | undefined {
   let preparedNote: PreparedLaneOneNote | undefined;
-  if (!quiet) {
-    say(outcomeLine(false, result.durationMs));
-    const memory = readMemory(false);
-    if (memory !== undefined) {
-      const fingerprints = fingerprintCandidates(result.stderr, cmd, result.code);
-      const now = Date.now();
-      try {
-        preparedNote = prepareLaneOneNote({
-          lane: "watch",
-          records: memory.records,
-          coverage: memory.coverage,
-          fingerprints,
-          cwd,
-          now,
-          env: process.env,
-          home: resolveRockyPaths().home,
-        });
-      } catch {
-        preparedNote = undefined;
-      }
+  let noteDelivered = false;
+  if (!quiet) say(outcomeLine(false, result.durationMs));
+  const memory = readMemory(quiet);
+  if (memory !== undefined) {
+    const fingerprints = fingerprintCandidates(result.stderr, cmd, result.code);
+    const now = Date.now();
+    try {
+      preparedNote = prepareLaneOneNote({
+        lane: "watch",
+        records: memory.records,
+        coverage: memory.coverage,
+        fingerprints,
+        cwd,
+        now,
+        env: process.env,
+        home: resolveRockyPaths().home,
+        quiet,
+      });
+    } catch {
+      preparedNote = undefined;
+    }
+    if (!quiet) {
       speakFailureMemory(
         memory.records,
         fingerprints,
@@ -265,11 +264,14 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
       if (preparedNote?.text !== undefined) {
         try {
           say(preparedNote.text);
+          noteDelivered = true;
         } catch {
           // Fail open: note output must never disrupt a watched command.
         }
       }
     }
+  }
+  if (!quiet) {
     // Same disclosure as `run`. It sits in this non-quiet block because `--quiet`
     // prints plain facts only. `watch` never overrides runProcess's default `shell: true`.
     const hint = cmdExeHint(result.stderr, process.platform, true);
@@ -287,7 +289,7 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
     }
   }
   try {
-    preparedNote?.finish(recordedId);
+    preparedNote?.finish(recordedId, noteDelivered);
   } catch {
     // Fail open: exposure logging must never disrupt a watched command.
   }

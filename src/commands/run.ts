@@ -230,6 +230,7 @@ function onFailure(cmd: string, result: ExecResult, agent?: AgentStamp): void {
   const cwd = process.cwd();
   const memory = readMemory();
   let preparedNote: PreparedLaneOneNote | undefined;
+  let noteDelivered = false;
   if (memory !== undefined) {
     const fingerprints = fingerprintCandidates(result.stderr, cmd, result.code);
     const now = Date.now();
@@ -262,6 +263,7 @@ function onFailure(cmd: string, result: ExecResult, agent?: AgentStamp): void {
     if (preparedNote?.text !== undefined) {
       try {
         say(preparedNote.text);
+        noteDelivered = true;
       } catch {
         // Fail open: note output must never disrupt a wrapped command.
       }
@@ -279,7 +281,7 @@ function onFailure(cmd: string, result: ExecResult, agent?: AgentStamp): void {
     recordedId = rec.id;
   } finally {
     try {
-      preparedNote?.finish(recordedId);
+      preparedNote?.finish(recordedId, noteDelivered);
     } catch {
       // Fail open: exposure logging must never disrupt a wrapped command.
     }

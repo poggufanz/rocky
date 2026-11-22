@@ -112,18 +112,21 @@ export function ago(ts: number): string {
  */
 let hookSpeechBuffer: string[] = [];
 
-function speakTty(line: string): void {
+function speakTty(line: string): boolean {
   if (process.env.ROCKY_HOOK_SPEECH_FILE) {
     hookSpeechBuffer.push(line);
+    return true;
   }
+  return false;
 }
 
 /**
  * Speak directly to the terminal from a background process (hook handlers
  * are spawned disowned with stderr discarded). No tty — no words; never throw.
+ * Returns true when a speech destination accepted the line.
  */
-export function sayTty(msg: string): void {
-  speakTty(`${OUTPUT_PREFIX} ${safeTerminalLine(msg)}\n`);
+export function sayTty(msg: string): boolean {
+  return speakTty(`${OUTPUT_PREFIX} ${safeTerminalLine(msg)}\n`);
 }
 
 export function detailTty(msg: string): void {

@@ -5,8 +5,9 @@
  * Computes the note from an already-loaded memory snapshot before the new
  * failure is appended, decides arm assignment and once-per-session / cooldown
  * delivery, strips the `rocky: ` prefix so callers can pass the line directly
- * to `say()` / `sayTty()`, and returns a `finish(anchorFailureId)` callback
- * that appends the exposure row after the failure record is written.
+ * to `say()` / `sayTty()`, and returns a `finish(anchorFailureId, delivered)`
+ * callback that appends the exposure row after the failure record is written
+ * using the caller's actual output delivery result.
  *
  * Strictly fail-open: every error is swallowed so note or exposure bookkeeping
  * never alters a wrapped command's exit code, output, or hook outcome.
@@ -35,18 +36,19 @@ export interface LaneOneNoteInput {
   now: number;
   env: NodeJS.ProcessEnv;
   home: string;
+  quiet?: boolean;
 }
 
 export interface PreparedLaneOneNote {
   text: string | undefined;
-  finish(anchorFailureId: string | null): void;
+  finish(anchorFailureId: string | null, delivered: boolean): void;
 }
 
 const PREFIX_WITH_SPACE = `${OUTPUT_PREFIX} `;
 
 const NOOP_PREPARED: PreparedLaneOneNote = {
   text: undefined,
-  finish(): void {},
+  finish(_anchorFailureId: string | null, _delivered: boolean): void {},
 };
 
 function stripOutputPrefix(text: string): string {
@@ -72,15 +74,15 @@ export function prepareLaneOneNote(input: LaneOneNoteInput): PreparedLaneOneNote
 
     const session = agentStampFromEnv(input.env)?.session;
     const arm = attemptArm(session, input.env);
-    const wouldShow = arm === "shown" || arm === "human";
-    const delivered = wouldShow && claimNoteSlot(input.home, session, note.key, input.now);
-    const text = delivered ? stripOutputPrefix(note.text) : undefined;
+    const wouldShow = !input.quiet && (arm === "shown" || arm === "human");
+    const claimed = wouldShow && claimNoteSlot(input.home, session, note.key, input.now);
+    const text = claimed ? stripOutputPrefix(note.text) : undefined;
     const latencyMs = Math.max(0, Math.round(performance.now() - started));
 
     let finished = false;
     return {
       text,
-      finish(anchorFailureId: string | null): void {
+      finish(anchorFailureId: string | null, delivered: boolean): void {
         if (finished) return;
         finished = true;
         try {
@@ -95,7 +97,7 @@ export function prepareLaneOneNote(input: LaneOneNoteInput): PreparedLaneOneNote
             cwdHash: cwdHash(input.cwd),
             anchorFailureId,
             latencyMs,
-            delivered,
+            delivered: text !== undefined && delivered,
             bytes: note.bytes,
           });
         } catch {
