@@ -10,6 +10,7 @@ import {
   rockyGateHookCommand,
   rockyHookCommand,
   rockySessionStartHookCommand,
+  rockyToolResultHookCommand,
   writeMutation,
   type AgentHooksOperationResult,
   type CurrentConfig,
@@ -91,12 +92,12 @@ function buildAgentSide(
   gateCommand: string | undefined,
   retire: boolean,
 ): Record<string, unknown> {
-  const merged = mergeClaudeHooks(
-    value,
-    rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
-    rockySessionStartHookCommand(paths.nodePath, paths.entryPath),
-    gateCommand,
-  );
+  const merged = mergeClaudeHooks(value, {
+    agent: rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
+    session: rockySessionStartHookCommand(paths.nodePath, paths.entryPath),
+    toolResult: rockyToolResultHookCommand(paths.nodePath, paths.entryPath),
+    gate: gateCommand,
+  });
   return retire ? removeAgentEventHooks(merged) : merged;
 }
 
@@ -226,6 +227,7 @@ export function claudeSettingsSnippets(paths: Paths, keptGate: boolean): string[
     snippets.push(JSON.stringify(rockyHookCommand("claude-code", paths.nodePath, paths.entryPath)));
   }
   snippets.push(JSON.stringify(rockySessionStartHookCommand(paths.nodePath, paths.entryPath)));
+  snippets.push(JSON.stringify(rockyToolResultHookCommand(paths.nodePath, paths.entryPath)));
   if (keptGate) snippets.push(JSON.stringify(rockyGateHookCommand(paths.nodePath, paths.entryPath)));
   if (deskCommand !== undefined) snippets.push(JSON.stringify(deskCommand));
   return snippets;
