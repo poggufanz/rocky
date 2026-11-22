@@ -1,0 +1,100 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "H1",
+      "ts": 1699999820000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "c658a60f1314ed8f",
+      "fingerprintV": 2,
+      "signature": ["npm test"],
+      "excerpt": "exit 1",
+      "origin": "hook",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "R1",
+      "ts": 1699999880000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "42e1f0ac4152f647",
+      "fingerprintV": 2,
+      "signature": ["error: cannot find module 'express'"],
+      "excerpt": "Error: Cannot find module 'express'",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "A1",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "42e1f0ac4152f647",
+      "fingerprintV": 2,
+      "signature": ["error: cannot find module 'express'"],
+      "excerpt": "> app@1.0.0 test\nError: Cannot find module 'express'",
+      "origin": "agent",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1"
+      },
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "failure",
+      "id": "A2",
+      "ts": 1699999970000,
+      "cwd": "/app",
+      "cmd": "make",
+      "exitCode": 2,
+      "fingerprint": "30dc119fa8c0e095",
+      "fingerprintV": 2,
+      "signature": [],
+      "excerpt": "",
+      "origin": "agent",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1"
+      },
+      "commandIdentity": "[\"make\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "command",
+        "outcomes": ["no_later_run"]
+      },
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["same_failure", "no_later_run"]
+      },
+      {
+        "cwd": "/app",
+        "keyStrength": "command",
+        "outcomes": ["different_failure"]
+      }
+    ]
+  }
+}
