@@ -12,7 +12,6 @@ import {
   commandIdentity,
   fingerprint,
   FINGERPRINT_ALGORITHM_VERSION,
-  fingerprintSignature,
   signatureLines,
 } from "../dist/core/fingerprint.js";
 import { recordAgentFailure } from "../dist/core/memory.js";
@@ -20,6 +19,7 @@ import { canonicalPath, cwdIdentityKey, loadMemoryChecked } from "../dist/core/m
 import { quoteShellPath } from "../dist/core/shell-quote.js";
 import { makeCardsFor, toolTextAllowed } from "../dist/desk/cards-read.js";
 import { cardsFilePath } from "../dist/listening/cards-path.js";
+import { assertDatasetMix, generateRealisticRecords } from "./benchmark-attempt-fixtures.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cliEntry = join(packageRoot, "dist", "index.js");
@@ -45,131 +45,6 @@ const THIRTY_DAYS_MS = 30 * 86_400_000;
 
 const TARGET_STDERR = "Error: benchmark token missing in auth middleware";
 const TARGET_EXIT_CODE = 1;
-
-const SIGNAL_TEMPLATES = [
-  (tag, idx) => `error: family ${tag} check failed in service stage #`,
-  (tag, idx) => `fatal: cannot connect to worker ${tag} on port ${4000 + idx}`,
-  (tag, idx) => `exception: missing config entry for ${tag} pipeline`,
-  (tag, idx) => `failed: invalid checksum while verifying ${tag} artifact`,
-  (tag, idx) => `error: connection refused by upstream ${tag} gateway`,
-  (tag, idx) => `unexpected token while parsing ${tag} manifest`,
-  (tag, idx) => `unable to acquire lock for ${tag} deployment`,
-  (tag, idx) => `traceback: panic in ${tag} handler dispatch`,
-];
-
-const LONG_CMD_PATH_RE = /(?:^|\s)\/(?:[^\s/]+\/)+[^\s/]+/;
-const LONG_CMD_SHA_RE = /\b[0-9a-f]{40}\b/;
-const LONG_CMD_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/;
-const LONG_CMD_PORT_RE = /\b127\.0\.0\.1:\d{4,5}\b/;
-const LONG_CMD_TS_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\b/;
-
-function alphaTag(index) {
-  let n = index;
-  let out = "";
-  for (let i = 0; i < 3; i += 1) {
-    out = String.fromCharCode(97 + (n % 26)) + out;
-    n = Math.floor(n / 26);
-  }
-  return out;
-}
-
-function deterministicHex(seedA, seedB, length) {
-  let state = ((seedA * 2654435761) ^ (seedB * 2246822519) ^ 0x9e3779b9) >>> 0;
-  let out = "";
-  while (out.length < length) {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let z = state;
-    z = Math.imul(z ^ (z >>> 15), z | 1) >>> 0;
-    z ^= (z + Math.imul(z ^ (z >>> 7), z | 61)) >>> 0;
-    z = (z ^ (z >>> 14)) >>> 0;
-    out += z.toString(16).padStart(8, "0");
-  }
-  return out.slice(0, length);
-}
-
-function makeRealisticCommand(fpIdx, seq, ts) {
-  const tag = alphaTag(fpIdx);
-  const port = 4000 + fpIdx;
-  const sha = deterministicHex(fpIdx + 1, seq + 11, 40);
-  const u = deterministicHex(fpIdx + 101, seq + 997, 32);
-  const uuid = `${u.slice(0, 8)}-${u.slice(8, 12)}-4${u.slice(13, 16)}-8${u.slice(17, 20)}-${u.slice(20, 32)}`;
-  const iso = new Date(ts).toISOString();
-  const segments = 1 + ((seq * 7 + fpIdx * 13) % 42);
-  const deepDir = Array.from({ length: segments }, (_, idx) => `seg-${(seq + idx) % 97}-${idx}`).join("/");
-  const entryPath = `/workspace/services/svc-${alphaTag(fpIdx % 25)}/${deepDir}/runner-${seq}.mjs`;
-  const logPath = `/var/log/rocky/runs/${deepDir}/job-${seq}.log`;
-  return (
-    `node ${entryPath} --family fam-${tag} --commit ${sha} --request-id ${uuid} ` +
-    `--endpoint http://127.0.0.1:${port}/api/v1/run --listen 127.0.0.1:${port} ` +
-    `--started-at ${iso} --pid ${10000 + (seq % 50000)} --attempt ${1 + (seq % 99)} ` +
-    `--log ${logPath}`
-  );
-}
-
-function makeSignalSignature(fpIdx) {
-  const tag = alphaTag(fpIdx);
-  const lineCount = 1 + (fpIdx % 8);
-  const lines = [];
-  for (let i = 0; i < lineCount; i += 1) {
-    lines.push(SIGNAL_TEMPLATES[i](tag, fpIdx));
-  }
-  return lines;
-}
-
-function measureDatasetMix(records) {
-  let totalFailures = 0;
-  let emptySignatureFailures = 0;
-  let signalLineFailures = 0;
-  let minSignalLines = Infinity;
-  let maxSignalLines = 0;
-  let longCommandBytesMin = Infinity;
-  let longCommandBytesMax = 0;
-  const distinctLongCommands = new Set();
-  const distinctAllCommands = new Set();
-
-  for (const record of records) {
-    if (record.kind !== "failure") continue;
-    totalFailures += 1;
-    distinctAllCommands.add(record.cmd);
-    const sigLen = record.signature.length;
-    if (sigLen === 0) {
-      emptySignatureFailures += 1;
-    } else if (sigLen >= 1 && sigLen <= 8) {
-      signalLineFailures += 1;
-      if (sigLen < minSignalLines) minSignalLines = sigLen;
-      if (sigLen > maxSignalLines) maxSignalLines = sigLen;
-    }
-    const bytes = Buffer.byteLength(record.cmd, "utf8");
-    if (
-      bytes >= 300 &&
-      bytes <= 1200 &&
-      LONG_CMD_PATH_RE.test(record.cmd) &&
-      LONG_CMD_SHA_RE.test(record.cmd) &&
-      LONG_CMD_UUID_RE.test(record.cmd) &&
-      LONG_CMD_PORT_RE.test(record.cmd) &&
-      LONG_CMD_TS_RE.test(record.cmd)
-    ) {
-      distinctLongCommands.add(record.cmd);
-      if (bytes < longCommandBytesMin) longCommandBytesMin = bytes;
-      if (bytes > longCommandBytesMax) longCommandBytesMax = bytes;
-    }
-  }
-
-  return {
-    totalFailures,
-    distinctCommands: distinctAllCommands.size,
-    distinctLongCommands: distinctLongCommands.size,
-    distinctLongCommandPct: Number(((distinctLongCommands.size / totalFailures) * 100).toFixed(2)),
-    longCommandBytesMin: Number.isFinite(longCommandBytesMin) ? longCommandBytesMin : 0,
-    longCommandBytesMax,
-    emptySignatureFailures,
-    emptySignaturePct: Number(((emptySignatureFailures / totalFailures) * 100).toFixed(2)),
-    signalLineFailures,
-    signalLinePct: Number(((signalLineFailures / totalFailures) * 100).toFixed(2)),
-    minSignalLines: Number.isFinite(minSignalLines) ? minSignalLines : 0,
-    maxSignalLines,
-  };
-}
 
 function parseHomeArg(argv) {
   for (let i = 0; i < argv.length; i += 1) {
@@ -424,128 +299,26 @@ function seedFixture(rockyHome, repoDir, targetCmd, now, options = {}) {
   const cwds = Array.from({ length: BACKGROUND_CWDS }, (_, index) =>
     index === 0 ? repoDir : join(dirname(repoDir), `other-project-${index}`),
   );
-  const shortCmds = Array.from({ length: 10 }, (_, index) => {
-    const cmd = `npm run check-${index}`;
-    const identity = commandIdentity(cmd, { platform: process.platform });
-    return { cmd, commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable };
-  });
-  const families = Array.from({ length: BACKGROUND_FINGERPRINTS }, (_, index) => {
-    const isCommandFamily = index % 10 < 3;
-    const usesLongCmd = index % 10 < 7;
-    const signature = isCommandFamily ? [] : makeSignalSignature(index);
-    const sampleCmd = usesLongCmd ? makeRealisticCommand(index, 0, now) : shortCmds[index % shortCmds.length].cmd;
-    return {
-      fp: fingerprintSignature(signature, sampleCmd, 1),
-      signature,
-      usesLongCmd,
-      isCommandFamily,
-      excerpt: isCommandFamily ? "" : `Error: benchmark background family ${alphaTag(index)}`,
-    };
-  });
-
   // Span ~14 hours before baseTs so oldestTs always covers the 8h+10m window in tail mode.
-  let ts = baseTs - 50_000_000;
-  const records = [];
-  const lastFailureByKey = new Map();
-  let seq = 0;
-
-  while (records.length < backgroundCount) {
-    ts += 4_500;
-    const slot = Math.floor(seq / BACKGROUND_FINGERPRINTS) % 10;
-    const fpIdx = seq % BACKGROUND_FINGERPRINTS;
-    const cwdIdx = (Math.floor(fpIdx / 10) + Math.floor(seq / (BACKGROUND_FINGERPRINTS * 10))) % BACKGROUND_CWDS;
-    const cwd = cwds[cwdIdx];
-    const family = families[fpIdx];
-    const key = `${cwdIdx}:${fpIdx}`;
-    const prior = lastFailureByKey.get(key);
-
-    if (slot === 7 && prior !== undefined) {
-      records.push({
-        kind: "fix",
-        id: `bg-fix-${seq}`,
-        ts,
-        cwd,
-        cmd: prior.cmd,
-        failureIds: [prior.id],
-        links: [{ id: prior.id, basis: "identity", confidence: "confirmed" }],
-        commandIdentity: prior.commandIdentity,
-        identityV: prior.identityV,
-        identityReliable: prior.identityReliable,
-        platform: process.platform,
-      });
-      lastFailureByKey.delete(key);
-    } else if (slot === 9 && prior !== undefined) {
-      const assocCmd = `${shortCmds[fpIdx % shortCmds.length].cmd} -- --filter unit`;
-      const assocId = commandIdentity(assocCmd, { platform: process.platform });
-      records.push({
-        kind: "association",
-        id: `bg-assoc-${seq}`,
-        ts,
-        cwd,
-        cmd: assocCmd,
-        candidateFailureIds: [prior.id],
-        links: [{ id: prior.id, basis: "program", confidence: "possible" }],
-        commandIdentity: assocId.value,
-        identityV: assocId.version,
-        identityReliable: assocId.reliable,
-        platform: process.platform,
-      });
-      lastFailureByKey.delete(key);
-    } else {
-      let cmd;
-      let identityValue;
-      let identityV;
-      let identityReliable;
-      if (family.usesLongCmd) {
-        cmd = makeRealisticCommand(fpIdx, seq, ts);
-        const identity = commandIdentity(cmd, { platform: process.platform });
-        identityValue = identity.value;
-        identityV = identity.version;
-        identityReliable = identity.reliable;
-      } else {
-        const shortMeta = shortCmds[fpIdx % shortCmds.length];
-        cmd = shortMeta.cmd;
-        identityValue = shortMeta.commandIdentity;
-        identityV = shortMeta.identityV;
-        identityReliable = shortMeta.identityReliable;
-      }
-      const failure = {
-        kind: "failure",
-        id: `bg-fail-${seq}`,
-        ts,
-        cwd,
-        cmd,
-        exitCode: 1,
-        fingerprint: family.fp,
-        fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
-        signature: family.signature,
-        excerpt: family.excerpt,
-        origin: "run",
-        commandIdentity: identityValue,
-        identityV,
-        identityReliable,
-        platform: process.platform,
-      };
-      records.push(failure);
-      lastFailureByKey.set(key, failure);
-    }
-    seq += 1;
-  }
+  const { records } = generateRealisticRecords({
+    recordCount: backgroundCount,
+    fingerprintCount: BACKGROUND_FINGERPRINTS,
+    cwds,
+    platform: process.platform,
+    startTs: baseTs - 50_000_000,
+    stepMs: 4_500,
+    sampleTs: now,
+    idPrefix: "bg-",
+    excerptPrefix: "Error: benchmark background family",
+    patchResolvedBy: false,
+    includeFixLinks: true,
+  });
 
   for (const record of targetRecords) {
     records.push(record);
   }
 
-  const datasetMix = measureDatasetMix(records);
-  if (datasetMix.distinctLongCommandPct < 60) {
-    throw new Error(`Expected >=60% distinct 300-1200B commands, got ${datasetMix.distinctLongCommandPct}%`);
-  }
-  if (datasetMix.emptySignaturePct < 29 || datasetMix.emptySignaturePct > 31) {
-    throw new Error(`Expected ~30% empty-signature failures, got ${datasetMix.emptySignaturePct}%`);
-  }
-  if (datasetMix.emptySignatureFailures + datasetMix.signalLineFailures !== datasetMix.totalFailures) {
-    throw new Error("Unexpected signature lengths outside 0 or 1..8");
-  }
+  const datasetMix = assertDatasetMix(records);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
   const memoryContent = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
@@ -752,7 +525,11 @@ function writeFailingScript(repoDir) {
   return `${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(scriptPath, process.platform)}`;
 }
 
-function pickNewestRecurringFailure(records, now) {
+function resolveProbeNow(recordTs, now) {
+  return now - recordTs <= THIRTY_DAYS_MS ? now : recordTs;
+}
+
+function listRecurringFailuresNewestFirst(records, now) {
   const seenIds = new Set();
   const byKey = new Map();
   for (let order = 0; order < records.length; order += 1) {
@@ -768,20 +545,47 @@ function pickNewestRecurringFailure(records, now) {
     else group.push({ record, order });
   }
 
-  let best;
+  const candidates = [];
   for (const group of byKey.values()) {
     if (group.length < 2) continue;
     group.sort((a, b) => (a.record.ts - b.record.ts) || (a.order - b.order));
     const newest = group[group.length - 1];
-    if (
-      best === undefined ||
-      newest.record.ts > best.record.ts ||
-      (newest.record.ts === best.record.ts && newest.order > best.order)
-    ) {
-      best = { record: newest.record, order: newest.order, siblingCount: group.length };
+    candidates.push({ record: newest.record, order: newest.order, siblingCount: group.length });
+  }
+  candidates.sort((a, b) => (b.record.ts - a.record.ts) || (b.order - a.order));
+  return candidates;
+}
+
+function pickProbeTarget(records, coverage, now) {
+  const candidates = listRecurringFailuresNewestFirst(records, now);
+  if (candidates.length === 0) return undefined;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    const probeNow = resolveProbeNow(candidate.record.ts, now);
+    const probeNote = priorAttemptsNote(
+      records,
+      coverage,
+      { fingerprints: [candidate.record.fingerprint], cwd: candidate.record.cwd },
+      { now: probeNow, cardsFor: undefined, platform: process.platform },
+    );
+    if (probeNote !== undefined) {
+      return {
+        ...candidate,
+        probeNow,
+        noteProducingCandidateFound: true,
+        skippedNonNoteCandidates: i,
+      };
     }
   }
-  return best;
+
+  const fallback = candidates[0];
+  return {
+    ...fallback,
+    probeNow: resolveProbeNow(fallback.record.ts, now),
+    noteProducingCandidateFound: false,
+    skippedNonNoteCandidates: candidates.length,
+  };
 }
 
 function runHomeProbe(rawHomeDir) {
@@ -796,12 +600,12 @@ function runHomeProbe(rawHomeDir) {
   const loaded = loadMemoryChecked(memoryPath, now);
   const loadMemoryCheckedMs = Number((performance.now() - loadStarted).toFixed(3));
 
-  const target = pickNewestRecurringFailure(loaded.records, now);
+  const target = pickProbeTarget(loaded.records, loaded.coverage, now);
   if (target === undefined) {
     throw new Error(`No failure with an earlier same-fingerprint, same-cwd sibling found in ${memoryPath}`);
   }
 
-  const probeNow = now - target.record.ts <= THIRTY_DAYS_MS ? now : target.record.ts;
+  const probeNow = target.probeNow;
   const targetFp = target.record.fingerprint;
   const targetCwd = target.record.cwd;
   const failureCount = loaded.records.filter((record) => record.kind === "failure").length;
@@ -840,6 +644,7 @@ function runHomeProbe(rawHomeDir) {
   }
   const noteWithoutCardsSamples = [];
   let noteWithoutCards;
+  let noteWithoutCardsReturnedCount = 0;
   for (let i = 0; i < PROBE_RUNS; i += 1) {
     const started = performance.now();
     noteWithoutCards = priorAttemptsNote(
@@ -849,6 +654,7 @@ function runHomeProbe(rawHomeDir) {
       { now: probeNow, cardsFor: undefined, platform: process.platform },
     );
     noteWithoutCardsSamples.push(performance.now() - started);
+    if (noteWithoutCards !== undefined) noteWithoutCardsReturnedCount += 1;
   }
 
   for (let i = 0; i < PROBE_WARMUPS; i += 1) {
@@ -862,6 +668,7 @@ function runHomeProbe(rawHomeDir) {
   }
   const noteWithCardsSamples = [];
   let noteWithCards;
+  let noteWithCardsReturnedCount = 0;
   for (let i = 0; i < PROBE_RUNS; i += 1) {
     const started = performance.now();
     const cardsFor = makeCardsFor({ home: homeDir, toolText: toolTextAllowed(homeDir) });
@@ -872,11 +679,23 @@ function runHomeProbe(rawHomeDir) {
       { now: probeNow, cardsFor, platform: process.platform },
     );
     noteWithCardsSamples.push(performance.now() - started);
+    if (noteWithCards !== undefined) noteWithCardsReturnedCount += 1;
   }
 
   const buildSingleSummary = summarize(buildSingleSamples);
-  const noteWithoutCardsSummary = summarize(noteWithoutCardsSamples);
-  const noteWithCardsSummary = summarize(noteWithCardsSamples);
+  const withoutCardsAvailable = noteWithoutCardsReturnedCount === PROBE_RUNS;
+  const withCardsAvailable = noteWithCardsReturnedCount === PROBE_RUNS;
+  const noteWithoutCardsSummary = withoutCardsAvailable ? summarize(noteWithoutCardsSamples) : undefined;
+  const noteWithCardsSummary = withCardsAvailable ? summarize(noteWithCardsSamples) : undefined;
+  const bothVariantsReturnedNote = withoutCardsAvailable && withCardsAvailable;
+  const withoutCardsPassed =
+    bothVariantsReturnedNote && noteWithoutCardsSummary.p50 <= TARGET_REAL_NOTE_MS;
+  const withCardsPassed =
+    bothVariantsReturnedNote && noteWithCardsSummary.p50 <= TARGET_REAL_NOTE_MS;
+  const passed = withoutCardsPassed && withCardsPassed;
+
+  const noNoteCandidateNotice =
+    "No recurring failure in this memory file produced a prior-attempts note (for example, every recent attempt in each recurring group may have passed).";
 
   const report = {
     command: `node scripts/benchmark-attempt-note.mjs --home ${rawHomeDir}`,
@@ -910,6 +729,9 @@ function runHomeProbe(rawHomeDir) {
       keyStrength: targetEntry?.keyStrength ?? null,
       entryAttempts: targetEntry?.attempts.length ?? 0,
       probeNowSource: probeNow === now ? "now" : "target.ts",
+      noteProducingCandidateFound: target.noteProducingCandidateFound,
+      skippedNonNoteCandidates: target.skippedNonNoteCandidates,
+      ...(target.noteProducingCandidateFound ? {} : { selectionNotice: noNoteCandidateNotice }),
     },
     warmups: PROBE_WARMUPS,
     runs: PROBE_RUNS,
@@ -918,22 +740,61 @@ function runHomeProbe(rawHomeDir) {
       ...buildSingleSummary,
       entries: singleEntryCount,
     },
-    priorAttemptsNoteWithoutCardsMs: {
-      ...noteWithoutCardsSummary,
-      noteReturned: noteWithoutCards !== undefined,
-      noteBytes: noteWithoutCards?.bytes ?? 0,
-    },
-    priorAttemptsNoteWithCardsMs: {
-      ...noteWithCardsSummary,
-      noteReturned: noteWithCards !== undefined,
-      noteBytes: noteWithCards?.bytes ?? 0,
-    },
-    budget: {
-      priorAttemptsNoteBudgetMs: TARGET_REAL_NOTE_MS,
-      withoutCardsPassed: noteWithoutCardsSummary.p50 <= TARGET_REAL_NOTE_MS,
-      withCardsPassed: noteWithCardsSummary.p50 <= TARGET_REAL_NOTE_MS,
-    },
+    priorAttemptsNoteWithoutCardsMs: withoutCardsAvailable
+      ? {
+          ...noteWithoutCardsSummary,
+          available: true,
+          noteReturned: true,
+          noteBytes: noteWithoutCards.bytes,
+        }
+      : {
+          available: false,
+          noteReturned: false,
+          noteBytes: 0,
+          reason: target.noteProducingCandidateFound
+            ? "measurement unavailable: priorAttemptsNote (without cardsFor) produced no note"
+            : `measurement unavailable: no note produced. ${noNoteCandidateNotice}`,
+        },
+    priorAttemptsNoteWithCardsMs: withCardsAvailable
+      ? {
+          ...noteWithCardsSummary,
+          available: true,
+          noteReturned: true,
+          noteBytes: noteWithCards.bytes,
+        }
+      : {
+          available: false,
+          noteReturned: false,
+          noteBytes: 0,
+          reason: target.noteProducingCandidateFound
+            ? "measurement unavailable: priorAttemptsNote (with cardsFor) produced no note"
+            : `measurement unavailable: no note produced. ${noNoteCandidateNotice}`,
+        },
+    budget: bothVariantsReturnedNote
+      ? {
+          priorAttemptsNoteBudgetMs: TARGET_REAL_NOTE_MS,
+          withoutCardsPassed,
+          withCardsPassed,
+          passed,
+        }
+      : {
+          priorAttemptsNoteBudgetMs: TARGET_REAL_NOTE_MS,
+          status: "unavailable",
+          withoutCardsPassed: false,
+          withCardsPassed: false,
+          passed: false,
+          reason: target.noteProducingCandidateFound
+            ? `no pass reported: measurement unavailable because no note was produced (withoutCards: ${withoutCardsAvailable}, withCards: ${withCardsAvailable})`
+            : `no pass reported: measurement unavailable because no note was produced. ${noNoteCandidateNotice}`,
+        },
   };
+
+  if (!bothVariantsReturnedNote) {
+    const detail = target.noteProducingCandidateFound
+      ? `priorAttemptsNote produced no note in one or both variants (withoutCards: ${withoutCardsAvailable}, withCards: ${withCardsAvailable})`
+      : noNoteCandidateNotice;
+    process.stderr.write(`benchmark-attempt-note --home: measurement unavailable; no pass reported (${detail})\n`);
+  }
 
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
