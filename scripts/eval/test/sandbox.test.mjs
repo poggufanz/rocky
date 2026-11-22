@@ -166,7 +166,7 @@ describe("sandbox", () => {
     }
   });
 
-  test("exports provisional model, flags, and packArm", () => {
+  test("exports frozen model, flags, and packArm", () => {
     assert.equal(MODEL, "claude-sonnet-5-5");
     assert.deepEqual(CLAUDE_FLAGS, [
       "-p",
@@ -177,10 +177,32 @@ describe("sandbox", () => {
       "30",
       "--model",
       MODEL,
+      "--effort",
+      "high",
       "--allowedTools",
       "Bash,PowerShell,Edit,Write,Read,Glob,Grep,mcp__rocky__*",
+      "--",
     ]);
     assert.equal(typeof packArm, "function");
+  });
+
+  test("CLAUDE_FLAGS ends with -- so the prompt is never an allowedTools value", () => {
+    assert.equal(CLAUDE_FLAGS.at(-1), "--");
+
+    const allowedToolsIdx = CLAUDE_FLAGS.indexOf("--allowedTools");
+    assert.ok(allowedToolsIdx >= 0, "--allowedTools must be present");
+    assert.ok(allowedToolsIdx < CLAUDE_FLAGS.length - 1, "--allowedTools must precede --");
+
+    const effortIdx = CLAUDE_FLAGS.indexOf("--effort");
+    assert.ok(effortIdx >= 0, "--effort must be present");
+    assert.equal(CLAUDE_FLAGS[effortIdx + 1], "high");
+
+    const modelIdx = CLAUDE_FLAGS.indexOf("--model");
+    assert.ok(modelIdx >= 0, "--model must be present");
+    assert.equal(CLAUDE_FLAGS[modelIdx + 1], MODEL);
+
+    assert.equal(CLAUDE_FLAGS.includes("--setting-sources"), false);
+    assert.equal(CLAUDE_FLAGS.includes("--strict-mcp-config"), false);
   });
 });
 

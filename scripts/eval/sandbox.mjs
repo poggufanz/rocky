@@ -29,7 +29,9 @@ import { fileURLToPath } from "node:url";
  * }} Sandbox
  */
 
-export const MODEL = "claude-sonnet-5-5"; // provisional until harness capture is recorded in README.md
+// Frozen from the harness capture recorded in README.md; the trailing `--`
+// keeps the prompt from being read as an `--allowedTools` value.
+export const MODEL = "claude-sonnet-5-5";
 export const CLAUDE_FLAGS = [
   "-p",
   "--output-format",
@@ -39,9 +41,12 @@ export const CLAUDE_FLAGS = [
   "30",
   "--model",
   MODEL,
+  "--effort",
+  "high",
   "--allowedTools",
   "Bash,PowerShell,Edit,Write,Read,Glob,Grep,mcp__rocky__*",
-]; // provisional until harness capture is recorded in README.md
+  "--",
+];
 
 const VALID_ARMS = new Set(["none", "before", "after"]);
 const SCRUB_ENV_RE = /^(?:CLAUDE|CLAUDECODE|ROCKY_|ANTHROPIC_|CLAUDE_ENV_FILE$|NODE_OPTIONS$)/i;
@@ -502,11 +507,16 @@ export async function createSandbox({
       throw new Error(`Installed rocky shim is missing: ${rockyShim}`);
     }
 
-    const setupMcp = runCommand(
+    const runSetupMcp = () => runCommand(
       rockyShim,
       ["setup", "--harness", "claude-code", "--yes"],
       { cwd: taskDir, env: sandboxEnv, platform, timeout: 60_000 },
     );
+    // The first `claude mcp list` health probe after a fresh install can miss
+    // the cold start of the new package and exit 1 although the registration
+    // was written. Setup is idempotent, so one rerun verifies the same entry.
+    let setupMcp = runSetupMcp();
+    if (setupMcp.status !== 0) setupMcp = runSetupMcp();
     if (setupMcp.status !== 0) {
       throw new Error(
         redactText(
