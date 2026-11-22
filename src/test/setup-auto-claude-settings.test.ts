@@ -18,6 +18,7 @@ import {
   mergeClaudeHooks,
   rockyGateHookCommand,
   rockyHookCommand,
+  rockySessionStartHookCommand,
 } from "../setup/agent-hooks.js";
 import {
   DESK_HOOK_ASYNC,
@@ -87,7 +88,12 @@ test("auto claude settings: an existing gate is kept and its path refreshed", (t
   const oldEntry = join(value.root, "old-index.js");
   writeFileSync(
     value.settings,
-    JSON.stringify(mergeClaudeHooks({}, rockyHookCommand("claude-code", oldNode, oldEntry), rockyGateHookCommand(oldNode, oldEntry))),
+    JSON.stringify(mergeClaudeHooks(
+      {},
+      rockyHookCommand("claude-code", oldNode, oldEntry),
+      rockySessionStartHookCommand(oldNode, oldEntry),
+      rockyGateHookCommand(oldNode, oldEntry),
+    )),
   );
   const reports = applyClaudeSettings(value.settings, value.paths);
   assert.deepEqual(states(reports), [["agent-hooks", "written"]]);
@@ -99,12 +105,19 @@ test("auto claude settings: an existing gate is kept and its path refreshed", (t
     events(value.settings).UserPromptSubmit[0].hooks[0].command,
     rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath),
   );
+  assert.equal(
+    events(value.settings).SessionStart[0].hooks[0].command,
+    rockySessionStartHookCommand(value.paths.nodePath, value.paths.entryPath),
+  );
 });
 
 test("auto claude settings: owned hooks with an old node path inspect as stale", (t) => {
   const value = fixture(t);
-  const oldCommand = rockyHookCommand("claude-code", join(value.root, "old-node.exe"), join(value.root, "old-index.js"));
-  const original = Buffer.from(JSON.stringify(mergeClaudeHooks({}, oldCommand)), "utf8");
+  const oldNode = join(value.root, "old-node.exe");
+  const oldEntry = join(value.root, "old-index.js");
+  const oldCommand = rockyHookCommand("claude-code", oldNode, oldEntry);
+  const oldSession = rockySessionStartHookCommand(oldNode, oldEntry);
+  const original = Buffer.from(JSON.stringify(mergeClaudeHooks({}, oldCommand, oldSession)), "utf8");
   writeFileSync(value.settings, original);
   const reports = inspectClaudeSettings(value.settings, value.paths);
   assert.deepEqual(states(reports), [["agent-hooks", "stale"]]);
@@ -156,7 +169,11 @@ test("auto claude settings: remove recovers a pending transaction before removin
   const value = fixture(t);
   writeFileSync(
     value.settings,
-    JSON.stringify(mergeClaudeHooks({}, rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath))),
+    JSON.stringify(mergeClaudeHooks(
+      {},
+      rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath),
+      rockySessionStartHookCommand(value.paths.nodePath, value.paths.entryPath),
+    )),
   );
   const transaction = join(value.root, `.${basename(value.settings)}.transaction-pending`);
   mkdirSync(transaction);
@@ -202,7 +219,14 @@ test("auto claude settings: unsafe hook path refuses desk hooks only", { skip: p
   assert.deepEqual(states(reports), [["agent-hooks", "written"], ["desk-hooks", "refused"]]);
   assert.match(reports[1]?.detail ?? "", /unsafe/);
   assert.notEqual(events(value.settings).UserPromptSubmit, undefined);
-  assert.equal(events(value.settings).SessionStart, undefined);
+  assert.equal(hasOwnedDeskHooks(readJson(value.settings)), false);
+  assert.equal(events(value.settings).SessionEnd, undefined);
+  assert.deepEqual(events(value.settings).SessionStart, [{
+    hooks: [{
+      type: "command",
+      command: rockySessionStartHookCommand(value.paths.nodePath, value.paths.entryPath),
+    }],
+  }]);
 });
 
 test("auto claude settings: desk hooks land in the same write and inspect ok", (t) => {
@@ -215,9 +239,10 @@ test("auto claude settings: desk hooks land in the same write and inspect ok", (
   assert.equal(JSON.stringify(readJson(value.settings)).includes("hook agent-event claude-code"), false);
   assert.deepEqual(states(inspectClaudeSettings(value.settings, paths)), [["agent-hooks", "ok"], ["desk-hooks", "ok"]]);
   assert.deepEqual(claudeSettingsSnippets(paths, false), [
+    JSON.stringify(rockySessionStartHookCommand(paths.nodePath, paths.entryPath)),
     JSON.stringify(deskHookCommand(paths.deskHookBin as string)),
   ]);
-  assert.equal(claudeSettingsSnippets(paths, true).length, 2);
+  assert.equal(claudeSettingsSnippets(paths, true).length, 3);
 });
 
 test("auto claude settings: desk hooks without a binary inspect as stale", (t) => {
@@ -234,7 +259,12 @@ test("auto claude settings: desk write retires agent-event hooks and refreshes a
   const oldEntry = join(value.root, "old-index.js");
   writeFileSync(
     value.settings,
-    JSON.stringify(mergeClaudeHooks({}, rockyHookCommand("claude-code", oldNode, oldEntry), rockyGateHookCommand(oldNode, oldEntry))),
+    JSON.stringify(mergeClaudeHooks(
+      {},
+      rockyHookCommand("claude-code", oldNode, oldEntry),
+      rockySessionStartHookCommand(oldNode, oldEntry),
+      rockyGateHookCommand(oldNode, oldEntry),
+    )),
   );
   const paths: Paths = { ...value.paths, deskHookBin: hookBin(value.root) };
   const reports = applyClaudeSettings(value.settings, paths);
@@ -270,6 +300,7 @@ test("auto claude settings: remove leaves foreign hooks and drops every owned on
   let merged = mergeClaudeHooks(
     { theme: "x" },
     rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath),
+    rockySessionStartHookCommand(value.paths.nodePath, value.paths.entryPath),
     rockyGateHookCommand(value.paths.nodePath, value.paths.entryPath),
   );
   merged = mergeDeskHooks(merged, deskHookCommand(bin), DESK_HOOK_ASYNC);
@@ -292,14 +323,19 @@ test("auto claude settings: ownership predicates follow command markers, not pat
   const value = fixture(t);
   assert.equal(hasOwnedAgentHooks({}), false);
   assert.equal(hasOwnedAgentHooks({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo mine" }] }] } }), false);
-  const oldCommand = rockyHookCommand("claude-code", join(value.root, "old-node.exe"), join(value.root, "old-index.js"));
-  assert.equal(hasOwnedAgentHooks(mergeClaudeHooks({}, oldCommand)), true, "a stale node path is still owned");
-  const current = mergeClaudeHooks({}, rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath));
+  const oldNode = join(value.root, "old-node.exe");
+  const oldEntry = join(value.root, "old-index.js");
+  const oldCommand = rockyHookCommand("claude-code", oldNode, oldEntry);
+  const oldSession = rockySessionStartHookCommand(oldNode, oldEntry);
+  assert.equal(hasOwnedAgentHooks(mergeClaudeHooks({}, oldCommand, oldSession)), true, "a stale node path is still owned");
+  const sessionCommand = rockySessionStartHookCommand(value.paths.nodePath, value.paths.entryPath);
+  const current = mergeClaudeHooks({}, rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath), sessionCommand);
   assert.equal(hasOwnedAgentHooks(current), true);
   assert.equal(hasOwnedGateGroup(current), false);
   const gated = mergeClaudeHooks(
     {},
     rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath),
+    sessionCommand,
     rockyGateHookCommand(value.paths.nodePath, value.paths.entryPath),
   );
   assert.equal(hasOwnedGateGroup(gated), true);
@@ -314,4 +350,63 @@ test("auto claude settings: no timestamped backup files are created", (t) => {
   const value = fixture(t);
   applyClaudeSettings(value.settings, { ...value.paths, deskHookBin: hookBin(value.root) });
   assert.deepEqual(readdirSync(value.root).filter((name) => name.includes(".backup-")), []);
+});
+
+test("auto claude settings: desk apply retires agent-event hooks and keeps Rocky SessionStart beside desk SessionStart", (t) => {
+  const value = fixture(t);
+  const paths: Paths = { ...value.paths, deskHookBin: hookBin(value.root) };
+  const expectedSession = rockySessionStartHookCommand(paths.nodePath, paths.entryPath);
+  const expectedDesk = deskHookCommand(paths.deskHookBin as string);
+
+  const reports = applyClaudeSettings(value.settings, paths);
+  assert.deepEqual(states(reports), [["agent-hooks", "written"], ["desk-hooks", "written"]]);
+  assert.equal(hasOwnedAgentHooks(readJson(value.settings)), false);
+
+  const sessionGroups = events(value.settings).SessionStart;
+  assert.equal(sessionGroups.length, 2, JSON.stringify(sessionGroups));
+  assert.deepEqual(sessionGroups[0], { hooks: [{ type: "command", command: expectedSession }] });
+  assert.deepEqual(sessionGroups[1], { hooks: [{ type: "command", command: expectedDesk, timeout: 5, async: true }] });
+  assert.deepEqual(states(inspectClaudeSettings(value.settings, paths)), [["agent-hooks", "ok"], ["desk-hooks", "ok"]]);
+});
+
+test("auto claude settings: inspect reports an old three-event install without SessionStart as stale", (t) => {
+  const value = fixture(t);
+  const command = rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath);
+  const oldThreeEvent = {
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{ type: "command", command }] }],
+      PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command }] }],
+      Stop: [{ hooks: [{ type: "command", command }] }],
+    },
+  };
+  writeFileSync(value.settings, `${JSON.stringify(oldThreeEvent)}\n`);
+  assert.deepEqual(states(inspectClaudeSettings(value.settings, value.paths)), [["agent-hooks", "stale"]]);
+});
+
+test("auto claude settings: remove drops both Rocky SessionStart and desk SessionStart while keeping foreign", (t) => {
+  const value = fixture(t);
+  const paths: Paths = { ...value.paths, deskHookBin: hookBin(value.root) };
+  const foreign = { hooks: [{ type: "command", command: "echo foreign-session" }] };
+  writeFileSync(value.settings, `${JSON.stringify({ hooks: { SessionStart: [foreign] } })}\n`);
+
+  applyClaudeSettings(value.settings, paths);
+  assert.equal(events(value.settings).SessionStart.length, 3);
+
+  const removed = removeClaudeSettings(value.settings);
+  assert.deepEqual(states(removed), [["agent-hooks", "written"], ["desk-hooks", "written"]]);
+  assert.deepEqual(events(value.settings), { SessionStart: [foreign] });
+});
+
+test("auto claude settings: claudeSettingsSnippets includes SessionStart whether or not desk is ready", (t) => {
+  const value = fixture(t);
+  const expectedSession = JSON.stringify(
+    rockySessionStartHookCommand(value.paths.nodePath, value.paths.entryPath),
+  );
+  const withoutDesk = claudeSettingsSnippets(value.paths, false);
+  assert.ok(withoutDesk.includes(expectedSession), JSON.stringify(withoutDesk));
+
+  const withDeskPaths: Paths = { ...value.paths, deskHookBin: hookBin(value.root) };
+  const withDesk = claudeSettingsSnippets(withDeskPaths, false);
+  assert.ok(withDesk.includes(expectedSession), JSON.stringify(withDesk));
+  assert.ok(withDesk.includes(JSON.stringify(deskHookCommand(withDeskPaths.deskHookBin as string))), JSON.stringify(withDesk));
 });

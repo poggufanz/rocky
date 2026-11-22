@@ -20,7 +20,7 @@ import {
   type LegacyVoiceSkillServices,
   type SetupDependencies,
 } from "../commands/setup.js";
-import { hasOwnedAgentHooks, mergeClaudeHooks, rockyHookCommand } from "../setup/agent-hooks.js";
+import { hasOwnedAgentHooks, mergeClaudeHooks, rockyHookCommand, rockySessionStartHookCommand } from "../setup/agent-hooks.js";
 import {
   consentApproved,
   consentFile,
@@ -239,7 +239,11 @@ function makeFixture(t: test.TestContext): Fixture {
   writeFileSync(codexConfigPath, `${codexRockyBlock(registration).join("\n")}\n`, "utf8");
 
   const settingsPath = join(claudeDir, "settings.json");
-  const withAgentHooks = mergeClaudeHooks({}, rockyHookCommand("claude-code", process.execPath, process.execPath));
+  const withAgentHooks = mergeClaudeHooks(
+    {},
+    rockyHookCommand("claude-code", process.execPath, process.execPath),
+    rockySessionStartHookCommand(process.execPath, process.execPath),
+  );
   const withBothHooks = mergeDeskHooks(withAgentHooks, deskHookCommand(hookBin, existsSync), DESK_HOOK_ASYNC);
   writeFileSync(settingsPath, `${JSON.stringify(withBothHooks, null, 2)}\n`, "utf8");
 

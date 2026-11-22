@@ -31,6 +31,7 @@ import {
   retainedCopyMatches,
   rockyGateHookCommand,
   rockyHookCommand,
+  rockySessionStartHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
 import { createPlatformServices } from "../setup/platform.js";
@@ -76,8 +77,17 @@ test("rockyHookCommand rejects relative, control, and ephemeral paths", () => {
   assert.throws(() => rockyHookCommand("claude-code", "/usr/bin/node", "/home/a/.npm/_npx/a/index.js"), /ephemeral/);
 });
 
-test("buildClaudeHookEntries emits exact three-event shape", () => {
-  assert.deepEqual(buildClaudeHookEntries("CMD"), {
+test("rockySessionStartHookCommand is absolute, quoted, and targets session-start claude-code", () => {
+  const command = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  assert.equal(command, '"/usr/bin/node" "/opt/rocky/dist/index.js" hook session-start claude-code');
+  assert.throws(() => rockySessionStartHookCommand("node", "/opt/rocky/index.js"), /absolute/);
+  assert.throws(() => rockySessionStartHookCommand("/usr/bin/node\n", "/opt/rocky/index.js"), /unsafe/);
+  assert.throws(() => rockySessionStartHookCommand("/usr/bin/node", "/home/a/.npm/_npx/a/index.js"), /ephemeral/);
+});
+
+test("buildClaudeHookEntries emits exact four-event shape", () => {
+  assert.deepEqual(buildClaudeHookEntries("CMD", "SESSION-CMD"), {
+    SessionStart: [{ hooks: [{ type: "command", command: "SESSION-CMD" }] }],
     UserPromptSubmit: [{ hooks: [{ type: "command", command: "CMD" }] }],
     PostToolUse: [{
       matcher: "Edit|Write|MultiEdit|NotebookEdit",
@@ -88,18 +98,20 @@ test("buildClaudeHookEntries emits exact three-event shape", () => {
 });
 
 test("mergeClaudeHooks is idempotent and preserves foreign hooks", () => {
+  const sessionCommand = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
   const foreign = {
     keep: { answer: 42 },
     hooks: {
       PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const once = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND);
-  const twice = mergeClaudeHooks(structuredClone(once), LEGACY_CLAUDE_HOOK_COMMAND);
+  const once = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
+  const twice = mergeClaudeHooks(structuredClone(once), LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
   assert.deepEqual(twice, once);
   assert.deepEqual((once.hooks as Record<string, unknown[]>).PostToolUse?.[0], foreign.hooks.PostToolUse[0]);
-  assert.deepEqual(mergeClaudeHooks({}, "X"), {
+  assert.deepEqual(mergeClaudeHooks({}, "X", "S"), {
     hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: "S" }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: "X" }] }],
       PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: "X" }] }],
       Stop: [{ hooks: [{ type: "command", command: "X" }] }],
@@ -108,6 +120,7 @@ test("mergeClaudeHooks is idempotent and preserves foreign hooks", () => {
 });
 
 test("mergeClaudeHooks keeps foreign nested hooks in mixed groups", () => {
+  const sessionCommand = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
   const existing = {
     hooks: {
       Stop: [{
@@ -119,7 +132,7 @@ test("mergeClaudeHooks keeps foreign nested hooks in mixed groups", () => {
       }],
     },
   };
-  const merged = mergeClaudeHooks(existing, LEGACY_CLAUDE_HOOK_COMMAND);
+  const merged = mergeClaudeHooks(existing, LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
   assert.deepEqual((merged.hooks as Record<string, unknown[]>).Stop?.[0], {
     name: "foreign-group",
     hooks: [{ type: "command", command: "other-tool" }],
@@ -132,22 +145,36 @@ test("mergeClaudeHooks keeps foreign nested hooks in mixed groups", () => {
 });
 
 test("merge and remove reject malformed hook containers", () => {
-  assert.throws(() => mergeClaudeHooks({ hooks: [] }, "X"), /hooks/);
-  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: {} } }, "X"), /array/);
-  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: [{ hooks: "bad" }] } }, "X"), /array/);
+  assert.throws(() => mergeClaudeHooks({ hooks: [] }, "X", "S"), /hooks/);
+  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: {} } }, "X", "S"), /array/);
+  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: [{ hooks: "bad" }] } }, "X", "S"), /array/);
   assert.throws(() => removeClaudeHooks({ hooks: { Stop: null } }), /array/);
 });
 
 test("removeClaudeHooks strips only Rocky entries and drops empty containers", () => {
+  const sessionCommand = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
   const foreign = {
     root: true,
     hooks: {
       PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const merged = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND);
+  const merged = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
   assert.deepEqual(removeClaudeHooks(merged), foreign);
-  assert.deepEqual(removeClaudeHooks(mergeClaudeHooks({}, LEGACY_CLAUDE_HOOK_COMMAND)), {});
+  assert.deepEqual(removeClaudeHooks(mergeClaudeHooks({}, LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand)), {});
+});
+
+test("removeClaudeHooks preserves noncanonical or foreign session-start commands", () => {
+  const commands = [
+    "rocky hook session-start claude-code",
+    "foreign-tool --label 'hook session-start claude-code'",
+    '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook session-start claude-code',
+    '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook session-start claude-code',
+  ];
+  for (const command of commands) {
+    const foreign = { hooks: { SessionStart: [{ hooks: [{ type: "command", command }] }] } };
+    assert.deepEqual(removeClaudeHooks(foreign), foreign, command);
+  }
 });
 
 test("removeClaudeHooks preserves a foreign command that embeds Rocky marker as an argument", () => {
@@ -177,14 +204,16 @@ test("removeClaudeHooks still strips the exact pre-canonical POSIX bang spelling
   assert.deepEqual(removeClaudeHooks(existing), {});
 });
 
-test("removeAgentEventHooks strips canonical, legacy bang, and bare spellings while keeping gate and foreign", () => {
+test("removeAgentEventHooks strips canonical, legacy bang, and bare spellings while keeping SessionStart, gate, and foreign", () => {
   const canonical = rockyHookCommand("claude-code", "/usr/bin/node", "/opt/rocky/dist/index.js");
   const legacyBang = '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook agent-event claude-code';
+  const sessionCommand = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
   const gateCommand = rockyGateHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
   const unsafeWindows = '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook agent-event claude-code';
   const existing = {
     keep: 1,
     hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: sessionCommand }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: canonical }] }],
       PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: legacyBang }] }],
       Stop: [
@@ -204,6 +233,7 @@ test("removeAgentEventHooks strips canonical, legacy bang, and bare spellings wh
   assert.deepEqual(removeAgentEventHooks(existing), {
     keep: 1,
     hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: sessionCommand }] }],
       Stop: [
         {
           hooks: [
@@ -217,13 +247,14 @@ test("removeAgentEventHooks strips canonical, legacy bang, and bare spellings wh
   });
 });
 
-function fixture(t: test.TestContext): { root: string; settings: string; command: string } {
+function fixture(t: test.TestContext): { root: string; settings: string; command: string; sessionCommand: string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-agent-hooks-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
     root,
     settings: join(root, "nested", "claude-settings.json"),
     command: rockyHookCommand("claude-code", process.execPath, process.execPath),
+    sessionCommand: rockySessionStartHookCommand(process.execPath, process.execPath),
   };
 }
 
@@ -303,7 +334,7 @@ test("missing parent fails before consent or proposed JSON and never mutates fil
   assert.equal(details.length, 0);
   assert.match(result.detail ?? "", /rerun setup/i);
   assert.match(result.detail ?? "", /private directory/i);
-  assert.doesNotMatch(result.detail ?? "", /UserPromptSubmit|PostToolUse|Stop/);
+  assert.doesNotMatch(result.detail ?? "", /SessionStart|UserPromptSubmit|PostToolUse|Stop/);
   assert.equal(existsSync(dirname(value.settings)), false);
   assert.equal(existsSync(value.settings), false);
 });
@@ -318,11 +349,16 @@ test("install preserves foreign settings and is unchanged on repeat", async (t) 
   writeFileSync(value.settings, `${JSON.stringify(existing)}\n`);
   const details: string[] = [];
   const confirmation = { async confirm(): Promise<boolean> { return true; } };
-  const options = { command: value.command, confirmation, detail: (message: string) => details.push(message) };
+  const options = {
+    command: value.command,
+    sessionCommand: value.sessionCommand,
+    confirmation,
+    detail: (message: string) => details.push(message),
+  };
   const first = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(first.status, "written");
   const bytes = readFileSync(value.settings);
-  assert.deepEqual(JSON.parse(details[0] ?? "null"), buildClaudeHookEntries(value.command));
+  assert.deepEqual(JSON.parse(details[0] ?? "null"), buildClaudeHookEntries(value.command, value.sessionCommand));
   const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
   assert.deepEqual(parsed.custom, existing.custom);
   assert.deepEqual((parsed.hooks as Record<string, unknown>).OtherEvent, existing.hooks.OtherEvent);
@@ -341,12 +377,12 @@ test("uninstall removes only owned groups, is idempotent, and leaves foreign roo
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
   const foreign = { custom: "keep", hooks: { PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "foreign" }] }] } };
-  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks(structuredClone(foreign), value.command))}\n`);
-  const first = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command });
+  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks(structuredClone(foreign), value.command, value.sessionCommand))}\n`);
+  const first = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand });
   assert.equal(first.status, "written");
   assert.deepEqual(JSON.parse(readFileSync(value.settings, "utf8")), foreign);
   const bytes = readFileSync(value.settings);
-  const second = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command });
+  const second = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand });
   assert.equal(second.status, "unchanged");
   assert.deepEqual(readFileSync(value.settings), bytes);
 });
@@ -575,21 +611,36 @@ test("status is absent for partial, stale, duplicate, or unknown owned markers",
   mkdirSync(dirname(value.settings), { recursive: true });
   const write = (config: Record<string, unknown>) => writeFileSync(value.settings, `${JSON.stringify(config)}\n`);
   const command = value.command;
-  const complete = mergeClaudeHooks({}, command);
+  const sessionCommand = value.sessionCommand;
+  const statusOptions = { command, sessionCommand };
+  const complete = mergeClaudeHooks({}, command, sessionCommand);
   write(complete);
-  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, { command }), { claudeCode: "installed" });
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "installed" });
   const hooks = complete.hooks as Record<string, unknown[]>;
   hooks.Stop = [...hooks.Stop, ...hooks.Stop];
   write(complete);
-  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, { command }), { claudeCode: "absent" });
-  const stale = mergeClaudeHooks({}, command);
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
+  const stale = mergeClaudeHooks({}, command, sessionCommand);
   (stale.hooks as Record<string, unknown[]>).Stop = [{ hooks: [{ type: "command", command: "old hook agent-event claude-code" }] }];
   write(stale);
-  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, { command }), { claudeCode: "absent" });
-  const unknown = mergeClaudeHooks({}, command);
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
+  const unknown = mergeClaudeHooks({}, command, sessionCommand);
   (unknown.hooks as Record<string, unknown[]>).OtherEvent = [{ hooks: [{ type: "command", command }] }];
   write(unknown);
-  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, { command }), { claudeCode: "absent" });
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
+  const sessionWithMatcher = mergeClaudeHooks({}, command, sessionCommand);
+  (sessionWithMatcher.hooks as Record<string, unknown[]>).SessionStart = [{
+    matcher: "startup",
+    hooks: [{ type: "command", command: sessionCommand }],
+  }];
+  write(sessionWithMatcher);
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
+  const sessionAsync = mergeClaudeHooks({}, command, sessionCommand);
+  (sessionAsync.hooks as Record<string, unknown[]>).SessionStart = [{
+    hooks: [{ type: "command", command: sessionCommand, async: true }],
+  }];
+  write(sessionAsync);
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
   t.after(() => rmSync(value.root, { recursive: true, force: true }));
 });
 
@@ -873,4 +924,89 @@ test("setup status reports Codex manual and uninstall leaves TOML untouched", as
   assert.equal(uninstall.code, 0);
   assert.match(uninstall.stderr, /codex agent hooks: manual/);
   assert.equal(readFileSync(configPath, "utf8"), before);
+});
+
+test("installClaudeAgentHooks writes four events including SessionStart and rerun is unchanged", async (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  const expectedSessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const details: string[] = [];
+  const options = {
+    nodePath: process.execPath,
+    entryPath: process.execPath,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: (message: string) => details.push(message),
+  };
+
+  const first = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
+  assert.equal(first.status, "written");
+  const proposed = JSON.parse(details[0] ?? "null") as Record<string, unknown>;
+  assert.deepEqual(Object.keys(proposed), ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]);
+
+  const parsed = JSON.parse(readFileSync(value.settings, "utf8")) as {
+    hooks: Record<string, Array<{ matcher?: unknown; hooks: Array<Record<string, unknown>> }>>;
+  };
+  assert.deepEqual(Object.keys(parsed.hooks), ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]);
+  assert.equal(parsed.hooks.SessionStart.length, 1);
+  assert.equal(parsed.hooks.SessionStart[0].matcher, undefined);
+  assert.deepEqual(parsed.hooks.SessionStart[0].hooks, [
+    { type: "command", command: expectedSessionCommand },
+  ]);
+
+  const bytes = readFileSync(value.settings);
+  const second = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
+  assert.equal(second.status, "unchanged");
+  assert.deepEqual(readFileSync(value.settings), bytes);
+});
+
+test("uninstallClaudeAgentHooks removes Rocky SessionStart while keeping foreign SessionStart in order", async (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  const foreignBefore = { matcher: "startup", hooks: [{ type: "command", command: "other-before" }] };
+  const foreignAfter = { hooks: [{ type: "command", command: "other-after" }] };
+  writeFileSync(
+    value.settings,
+    `${JSON.stringify({ hooks: { SessionStart: [foreignBefore, foreignAfter] } })}\n`,
+  );
+  const options = {
+    nodePath: process.execPath,
+    entryPath: process.execPath,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+  };
+  const installed = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
+  assert.equal(installed.status, "written");
+  const afterInstall = JSON.parse(readFileSync(value.settings, "utf8")) as { hooks: { SessionStart: unknown[] } };
+  assert.equal(afterInstall.hooks.SessionStart.length, 3);
+
+  const uninstalled = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, options);
+  assert.equal(uninstalled.status, "written");
+  assert.deepEqual(JSON.parse(readFileSync(value.settings, "utf8")), {
+    hooks: { SessionStart: [foreignBefore, foreignAfter] },
+  });
+});
+
+test("agentHooksStatus is installed with four events and absent for an old three-event install", async (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  const options = {
+    nodePath: process.execPath,
+    entryPath: process.execPath,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+    detail: () => undefined,
+  };
+
+  const oldThreeEvent = {
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: value.command }] }],
+      PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: value.command }] }],
+      Stop: [{ hooks: [{ type: "command", command: value.command }] }],
+    },
+  };
+  writeFileSync(value.settings, `${JSON.stringify(oldThreeEvent)}\n`);
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "absent" });
+
+  const upgraded = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
+  assert.equal(upgraded.status, "written");
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
 });
