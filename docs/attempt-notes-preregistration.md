@@ -41,12 +41,14 @@ Episodes in `unassigned` and `human` (no-session episodes) are excluded from the
 
 ## Start, stop, and decision rules
 
-- **Start:** counting begins when the owner's global build contains the prior-attempts note and the controlled run has passed without a veto.
+- **Start:** counting begins when the owner's global build contains the prior-attempts note and the first controlled evaluation run (no Rocky vs old Rocky vs new Rocky) has passed without a veto.
 - **Stop:** 300 primary units or 120 days from start, whichever comes first.
-- **Decision:** compute the Newcombe 90% confidence interval for the difference `shown − held` on primary units:
-  - Lower bound `> 0` → prior-attempts note stays default **ON**.
-  - Upper bound `< 0`, or an owner friction journal entry → prior-attempts note turns default **OFF**.
-  - Inconclusive (interval contains `0` with no owner friction journal entry) → prior-attempts note turns default **OFF**; the CLI (`rocky attempts`) and MCP surfaces stay.
+- **Decision:** apply the owner friction override first, then evaluate the Newcombe 90% confidence interval for the difference `shown − held` on primary units:
+  - **Owner friction override:** if an owner friction journal entry is recorded → prior-attempts note turns default **OFF**, regardless of the interval.
+  - Otherwise, compute the Newcombe 90% confidence interval for `shown − held`:
+    - Lower bound `> 0` → prior-attempts note stays default **ON**.
+    - Upper bound `< 0` → prior-attempts note turns default **OFF**.
+    - Inconclusive (interval contains `0`) → prior-attempts note turns default **OFF**; the CLI (`rocky attempts`) and MCP surfaces stay.
 
 ## Reporting
 
@@ -59,30 +61,34 @@ Episodes in `unassigned` and `human` (no-session episodes) are excluded from the
 The exposure log lives at `~/.rocky/advisories.jsonl` (under `ROCKY_HOME` when set), one JSON object per line.
 
 - **Non-evidence:** `advisories.jsonl` is a derived measurement log and is never written to `memory.jsonl`.
-- **Coverage of events:** records every eligible moment across all arms (`shown`, `held`, `unassigned`, `human`), plus `kind: "skip"` rows emitted by the tool-result hook lane when an invocation is skipped.
+- **Coverage of events:** records `kind: "note"` rows for every eligible moment across all arms (`shown`, `held`, `unassigned`, `human`), plus `kind: "skip"` rows emitted by the tool-result hook lane when an invocation is skipped.
 - **Size cap:** capped at 8 MiB (about 20k rows); writing stops at the cap, and `rocky stats --attempts` discloses when the cap is reached.
 - **Privacy:** uses `cwdHash` (a 16-hex `sha256` prefix) and never writes a raw directory path.
 
-Each row follows this shape:
+Each `"note"` row follows this shape:
 
 ```json
-{"v":1,"ts":1795300000000,"session":"...","lane":"...","kind":"...","arm":"shown","key":"...","cwdHash":"0123456789abcdef","anchorFailureId":"...","latencyMs":42,"delivered":true,"bytes":312}
+{"v":1,"ts":1795300000000,"session":"sess-01","lane":"tool-result","kind":"note","arm":"shown","key":"output:3f2a9c1e44d0b7a1:0123456789abcdef","cwdHash":"0123456789abcdef","anchorFailureId":"fail-01","latencyMs":42,"delivered":true,"bytes":312}
 ```
 
-Skip rows from the tool-result lane carry an extra `reason` field:
+A `"skip"` row from the tool-result lane carries an extra `reason` field and may have `null` for `session`, `arm`, `key`, and `anchorFailureId` (for example when a tool-result skip occurs before a problem key is available):
+
+```json
+{"v":1,"ts":1795300000500,"session":"sess-01","lane":"tool-result","kind":"skip","arm":null,"key":null,"cwdHash":"0123456789abcdef","anchorFailureId":null,"latencyMs":3,"delivered":false,"bytes":0,"reason":"lock_busy"}
+```
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `v` | integer | Schema version (`1`). |
-| `ts` | number | Epoch milliseconds when the row was recorded. |
-| `session` | string \| null | Session identifier when present; `null` or omitted when no session is attached. |
-| `lane` | string | Hook or command delivery lane that evaluated the moment. |
-| `kind` | string | Row category: an eligible prior-attempts moment, or `"skip"` for a skipped tool-result invocation. |
-| `arm` | string | One of `"shown"`, `"held"`, `"unassigned"`, or `"human"`. |
-| `key` | string | Problem key identifying the recurring error. |
-| `cwdHash` | string | 16-hex `sha256` prefix of the working directory identity; never a path. |
-| `anchorFailureId` | string \| null | Failure record id anchoring the eligible moment (used to detect episodes that left the memory tail). |
-| `latencyMs` | number | Elapsed evaluation and render latency in milliseconds (used for lane-2 p95 latency). |
-| `delivered` | boolean | `true` only when the prior-attempts note was emitted. |
-| `bytes` | number | Rendered note size in bytes. |
-| `reason` | string \| omitted | Present on `kind: "skip"` rows to record why the tool-result hook skipped the invocation. |
+| `v` | `integer` | Schema version (`1`). |
+| `ts` | `number` | Epoch milliseconds when the row was recorded. |
+| `session` | `string` \| `null` | Session identifier when present; `null` when missing (never omitted). |
+| `lane` | `"run"` \| `"watch"` \| `"hookfail"` \| `"tool-result"` | Delivery lane that evaluated the moment. |
+| `kind` | `"note"` \| `"skip"` | Row category: `"note"` for an eligible prior-attempts moment, or `"skip"` for a skipped tool-result invocation. |
+| `arm` | `"shown"` \| `"held"` \| `"unassigned"` \| `"human"` \| `null` | Assigned arm on `"note"` rows; `null` on a `"skip"` row when skipped before arm assignment. |
+| `key` | `string` \| `null` | Problem key identifying the recurring error; `null` when a tool-result `"skip"` occurs before a problem key is available. |
+| `cwdHash` | `string` | 16-hex `sha256` prefix of the working directory identity; never a path. |
+| `anchorFailureId` | `string` \| `null` | Failure record id anchoring the eligible moment (used to detect episodes that left the memory tail); `null` when unavailable (such as on a `"skip"` row). |
+| `latencyMs` | `number` | Elapsed evaluation and render latency in milliseconds (used for lane-2 p95 latency). |
+| `delivered` | `boolean` | `true` only when the prior-attempts note was emitted. |
+| `bytes` | `number` | Rendered note size in bytes (`0` when not emitted). |
+| `reason` | `string` (optional) | Present on `kind: "skip"` rows only, recording why the tool-result hook skipped the invocation; omitted on `kind: "note"` rows. |
