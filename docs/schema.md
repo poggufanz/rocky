@@ -38,7 +38,7 @@ existing kind.
 
 `failure`, `fix`, and `association` records carry an optional `agent` object shaped `{ vendor: "claude-code" | "codex" | "generic", session: string, agentId?: string, toolUseId?: string }`. Only `rocky run` writes it: when `ROCKY_AGENT_SESSION` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, `rocky run` writes `agent: { vendor: "claude-code", session }`. When the variable is unset or invalid, `rocky run` omits `agent` silently without guessing or transforming the value. `rocky watch` and the shell hook (`_hookfail`, `_hooksuccess`) stay unstamped.
 
-Rocky links a failure to a later pass only when both come from the same agent session, or when either one has no session stamp. Rocky records order, not cause. When both records carry `agent`, both the link writer (covering `fix` and `association` records) and the memory loader refuse the link if `session` differs, or if both records carry `agentId` and `agentId` differs. Unstamped records stay eligible to link with stamped or unstamped records.
+Rocky links a failure to a later pass only when both come from the same agent session, or when either one has no session stamp. Rocky records order, not cause. When both records carry `agent` and `session` differs (or both carry `agentId` and `agentId` differs), new `fix` and `association` records are filtered out at write time, and the memory loader applies the rule to confirmed links from `fix` records (association lookup matches stored IDs). Unstamped records stay eligible to link with stamped or unstamped records.
 
 CLI hook lanes (`rocky hook <subcommand>`):
 
