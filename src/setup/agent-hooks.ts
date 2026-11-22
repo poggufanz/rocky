@@ -671,6 +671,15 @@ export function hasOwnedAgentHooks(root: Record<string, unknown>): boolean {
   return hasOwnedHookCommand(root, isRockyClaudeHookCommand);
 }
 
+/** True when any event holds any Rocky-owned Claude hook (agent-event, session-start, tool-result, or gate). */
+export function hasOwnedClaudeHooks(root: Record<string, unknown>): boolean {
+  try {
+    return Object.keys(ownedHookGroupsByEvent(root, isRockyHook)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** True when a PreToolUse group holds a Rocky rationale-gate hook, wherever its paths point. */
 export function hasOwnedGateGroup(root: Record<string, unknown>): boolean {
   return hasOwnedHookCommand(root, isRockyGateHookCommand, ["PreToolUse"]);

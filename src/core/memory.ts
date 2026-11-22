@@ -983,6 +983,10 @@ export interface MemoryTransaction {
 
 export interface MemoryTransactionOptions {
   now?: number;
+  /**
+   * When set, enforces an absolute monotonic lock-wait deadline (never reset by
+   * ownership turnover). When omitted, keeps the default 5 s progress-based wait.
+   */
   lockWaitMs?: number;
   /** Injectable monotonic clock for deterministic lock-deadline tests. */
   monotonicNow?: () => number;
@@ -1191,7 +1195,7 @@ export interface AgentFailureInput {
 
 export type AgentFailureResult =
   | { status: "written"; record: FailureRecord }
-  | { status: "skipped"; reason: "hook-duplicate" };
+  | { status: "skipped"; reason: "hook-duplicate" | "coverage" };
 
 export const HOOK_DUPLICATE_WINDOW_MS = 5_000;
 
@@ -1211,8 +1215,8 @@ export function recordAgentFailure(
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   return withMemoryTransaction<AgentFailureResult>((transaction) => {
-    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) {
-      throw new Error("Rocky agent failure requires complete memory coverage");
+    if (!windowCovered(transaction.coverage, ts, HOOK_DUPLICATE_WINDOW_MS)) {
+      return { status: "skipped", reason: "coverage" };
     }
     if (identity.reliable) {
       const minTs = ts - HOOK_DUPLICATE_WINDOW_MS;
@@ -1227,9 +1231,6 @@ export function recordAgentFailure(
         return existing.reliable && existing.value === identity.value;
       });
       if (duplicate) return { status: "skipped", reason: "hook-duplicate" };
-    }
-    if (!transaction.canAppendComplete([rec])) {
-      throw new Error("Rocky agent failure exceeds bounded memory envelope");
     }
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
@@ -1336,6 +1337,10 @@ export interface ResolveFixOptions {
   now?: number;
   windowMs?: number;
   agent?: AgentStamp;
+  /**
+   * When set, enforces an absolute monotonic lock-wait deadline (never reset by
+   * ownership turnover). When omitted, keeps the default 5 s progress-based wait.
+   */
   lockWaitMs?: number;
 }
 

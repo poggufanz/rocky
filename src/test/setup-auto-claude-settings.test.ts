@@ -262,7 +262,7 @@ test("auto claude settings: desk hooks without a binary inspect as stale", (t) =
   const bin = hookBin(value.root);
   applyClaudeSettings(value.settings, { ...value.paths, deskHookBin: bin });
   const reports = inspectClaudeSettings(value.settings, value.paths);
-  assert.deepEqual(states(reports), [["agent-hooks", "missing"], ["desk-hooks", "stale"]]);
+  assert.deepEqual(states(reports), [["agent-hooks", "stale"], ["desk-hooks", "stale"]]);
 });
 
 test("auto claude settings: desk write retires agent-event hooks and refreshes a kept gate", (t) => {
@@ -296,7 +296,7 @@ test("auto claude settings: a missing desk binary brings agent-event hooks back"
   const bin = hookBin(value.root);
   applyClaudeSettings(value.settings, { ...value.paths, deskHookBin: bin });
   assert.equal(hasOwnedAgentHooks(readJson(value.settings)), false);
-  assert.deepEqual(states(inspectClaudeSettings(value.settings, value.paths)), [["agent-hooks", "missing"], ["desk-hooks", "stale"]]);
+  assert.deepEqual(states(inspectClaudeSettings(value.settings, value.paths)), [["agent-hooks", "stale"], ["desk-hooks", "stale"]]);
   const restored = applyClaudeSettings(value.settings, value.paths);
   assert.deepEqual(states(restored), [["agent-hooks", "written"], ["desk-hooks", "stale"]]);
   const expectedCommand = rockyHookCommand("claude-code", value.paths.nodePath, value.paths.entryPath);
@@ -512,6 +512,21 @@ test("auto claude settings: with a desk binary present, apply leaves no agent-ev
     { hooks: [{ type: "command", command: expectedDesk, timeout: 5, async: true }] },
   ]);
   assert.deepEqual(states(inspectClaudeSettings(value.settings, paths)), [["agent-hooks", "ok"], ["desk-hooks", "ok"]]);
+});
+
+test("auto claude settings: a retired desk install with only SessionStart inspects as stale, not missing", (t) => {
+  const value = fixture(t);
+  const bin = hookBin(value.root);
+  const paths: Paths = { ...value.paths, deskHookBin: bin };
+  const session = rockySessionStartHookCommand(paths.nodePath, paths.entryPath);
+  const desk = deskHookCommand(bin);
+  const retiredPreToolResult = mergeDeskHooks(
+    { hooks: { SessionStart: [{ hooks: [{ type: "command", command: session }] }] } },
+    desk,
+    DESK_HOOK_ASYNC,
+  );
+  writeFileSync(value.settings, `${JSON.stringify(retiredPreToolResult)}\n`);
+  assert.deepEqual(states(inspectClaudeSettings(value.settings, paths)), [["agent-hooks", "stale"], ["desk-hooks", "ok"]]);
 });
 
 test("auto claude settings: claudeSettingsSnippets includes the tool-result command", (t) => {

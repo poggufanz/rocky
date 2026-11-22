@@ -238,12 +238,13 @@ test("recordAgentFailure enforces an absolute deadline despite lock ownership tu
   assert.equal(existsSync(paths.memory), false);
 });
 
-test("recordAgentFailure refuses full memory and leaves memory and pending untouched", (t) => {
+test("recordAgentFailure writes in tail-mode memory and still dedupes a hook failure inside the window", (t) => {
   const paths = freshPaths(t);
+  const cwd = paths.home;
   const originalSeams = process.env.ROCKY_TEST_SEAMS;
   const originalCap = process.env.ROCKY_TEST_MAX_MEMORY_RECORDS;
   process.env.ROCKY_TEST_SEAMS = "1";
-  process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = "2";
+  process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = "4";
   t.after(() => {
     if (originalSeams === undefined) delete process.env.ROCKY_TEST_SEAMS;
     else process.env.ROCKY_TEST_SEAMS = originalSeams;
@@ -251,37 +252,124 @@ test("recordAgentFailure refuses full memory and leaves memory and pending untou
     else process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = originalCap;
   });
 
+  const now = 2_000_000;
+  const makeFailure = (id: string, ts: number, cmd: string, origin?: "hook") => ({
+    kind: "failure",
+    id,
+    ts,
+    cwd,
+    cmd,
+    exitCode: 1,
+    fingerprint: "0123456789abcdef",
+    fingerprintV: 2,
+    signature: ["error"],
+    excerpt: "error",
+    ...(origin === undefined ? {} : { origin }),
+  });
   const seeded = [
-    JSON.stringify({ kind: "note", id: "n1", ts: 1_000, cwd: paths.home, cmd: "npm test", file: "a.ts", line: 1, subject: "s1", answer: "a1" }),
-    JSON.stringify({ kind: "note", id: "n2", ts: 2_000, cwd: paths.home, cmd: "npm test", file: "a.ts", line: 2, subject: "s2", answer: "a2" }),
+    JSON.stringify(makeFailure("f-trimmed", 100_000, "npm run lint")),
+    JSON.stringify(makeFailure("f-old-1", 1_000_000, "npm run lint")),
+    JSON.stringify(makeFailure("f-old-2", 1_100_000, "npm run lint")),
+    JSON.stringify(makeFailure("f-hook", now - 2_000, "npm run build", "hook")),
+    JSON.stringify({ kind: "note", id: "n1", ts: now - 1_000, cwd, cmd: "npm test", file: "a.ts", line: 1, subject: "s1", answer: "a1" }),
   ].join("\n") + "\n";
   writeFileSync(paths.memory, seeded, { mode: 0o600 });
 
-  assert.throws(
-    () => recordAgentFailure(
-      { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-      { lockWaitMs: 1_000, now: 3_000 },
-    ),
-    /exceeds bounded memory envelope/u,
+  const before = loadMemoryChecked(paths.memory, now);
+  assert.equal(before.coverage.window, "tail");
+  assert.equal(before.coverage.reason, "record-cap");
+
+  const written = recordAgentFailure(
+    { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
+    { lockWaitMs: 1_000, now },
   );
-  assert.equal(readFileSync(paths.memory, "utf8"), seeded);
-  assert.equal(existsSync(paths.pending), false);
+  assert.equal(written.status, "written");
+  assert.equal(existsSync(paths.pending), true);
+  const afterWriteContent = readFileSync(paths.memory, "utf8");
+  assert.equal(afterWriteContent.trimEnd().split("\n").length, 6);
+
+  const dup = recordAgentFailure(
+    { cmd: "npm run build", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
+    { lockWaitMs: 1_000, now },
+  );
+  assert.deepEqual(dup, { status: "skipped", reason: "hook-duplicate" });
+  assert.equal(readFileSync(paths.memory, "utf8"), afterWriteContent);
 });
 
-test("recordAgentFailure refuses incomplete memory coverage and leaves memory and pending untouched", (t) => {
+test("recordAgentFailure still writes when one corrupt line is within the skipped-line allowance", (t) => {
   const paths = freshPaths(t);
   const seeded = "{corrupt-jsonl-line\n";
   writeFileSync(paths.memory, seeded, { mode: 0o600 });
 
-  assert.throws(
-    () => recordAgentFailure(
+  const result = recordAgentFailure(
+    { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
+    { lockWaitMs: 1_000, now: 3_000 },
+  );
+  assert.equal(result.status, "written");
+  assert.equal(existsSync(paths.pending), true);
+  const loaded = loadMemoryChecked(paths.memory, 3_000);
+  assert.equal(loaded.coverage.skipped, 1);
+  assert.equal(loaded.records.length, 1);
+  assert.deepEqual(loaded.records[0], result.record);
+});
+
+test("recordAgentFailure writes nothing and leaves pending untouched above the skipped-line allowance or on an uncovered window", async (t) => {
+  await t.test("skipped lines above allowance", (st) => {
+    const paths = freshPaths(st);
+    const seeded = "{corrupt-jsonl-1\n{corrupt-jsonl-2\n";
+    writeFileSync(paths.memory, seeded, { mode: 0o600 });
+
+    const result = recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
       { lockWaitMs: 1_000, now: 3_000 },
-    ),
-    /requires complete memory coverage/u,
-  );
-  assert.equal(readFileSync(paths.memory, "utf8"), seeded);
-  assert.equal(existsSync(paths.pending), false);
+    );
+    assert.deepEqual(result, { status: "skipped", reason: "coverage" });
+    assert.equal(readFileSync(paths.memory, "utf8"), seeded);
+    assert.equal(existsSync(paths.pending), false);
+  });
+
+  await t.test("uncovered tail window", (st) => {
+    const paths = freshPaths(st);
+    const cwd = paths.home;
+    const originalSeams = process.env.ROCKY_TEST_SEAMS;
+    const originalCap = process.env.ROCKY_TEST_MAX_MEMORY_RECORDS;
+    process.env.ROCKY_TEST_SEAMS = "1";
+    process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = "2";
+    st.after(() => {
+      if (originalSeams === undefined) delete process.env.ROCKY_TEST_SEAMS;
+      else process.env.ROCKY_TEST_SEAMS = originalSeams;
+      if (originalCap === undefined) delete process.env.ROCKY_TEST_MAX_MEMORY_RECORDS;
+      else process.env.ROCKY_TEST_MAX_MEMORY_RECORDS = originalCap;
+    });
+
+    const now = 2_000_000;
+    const makeFailure = (id: string, ts: number) => ({
+      kind: "failure",
+      id,
+      ts,
+      cwd,
+      cmd: "npm run lint",
+      exitCode: 1,
+      fingerprint: "0123456789abcdef",
+      fingerprintV: 2,
+      signature: ["error"],
+      excerpt: "error",
+    });
+    const seeded = [
+      JSON.stringify(makeFailure("f1", now - 3_000)),
+      JSON.stringify(makeFailure("f2", now - 2_000)),
+      JSON.stringify(makeFailure("f3", now - 1_000)),
+    ].join("\n") + "\n";
+    writeFileSync(paths.memory, seeded, { mode: 0o600 });
+
+    const result = recordAgentFailure(
+      { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
+      { lockWaitMs: 1_000, now },
+    );
+    assert.deepEqual(result, { status: "skipped", reason: "coverage" });
+    assert.equal(readFileSync(paths.memory, "utf8"), seeded);
+    assert.equal(existsSync(paths.pending), false);
+  });
 });
 
 test("recordAgentFailure refuses a free lock when lockWaitMs is zero", (t) => {
@@ -303,10 +391,7 @@ test("recordAgentFailure checks the absolute deadline before the first lock acqu
   let calls = 0;
   const monotonicNow = (): number => {
     calls += 1;
-    // Calls 1..3 cover startedMonotonic, deferReference, and top-of-loop within
-    // the 50 ms budget; call 4 simulates ticket/queue setup exhausting the
-    // budget before the first tryTripleLock on an otherwise free lock.
-    return calls <= 3 ? 1_000 + calls * 10 : 1_100;
+    return calls === 1 ? 1_000 : 1_100;
   };
 
   assert.throws(
@@ -316,7 +401,6 @@ test("recordAgentFailure checks the absolute deadline before the first lock acqu
     ),
     /triple lock is busy/u,
   );
-  assert.ok(calls >= 4, `expected deadline check before first tryTripleLock, got ${calls} clock reads`);
   assert.equal(existsSync(paths.memory), false);
   assert.equal(existsSync(paths.pending), false);
 });

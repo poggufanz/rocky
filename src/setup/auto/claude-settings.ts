@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import {
-  hasOwnedAgentHooks,
+  hasOwnedClaudeHooks,
   hasOwnedGateGroup,
   mergeClaudeHooks,
   ownedClaudeHookProjection,
@@ -119,7 +119,7 @@ export function inspectClaudeSettings(settingsPath: string, paths: Paths): AutoT
     const agentState: AutoState = JSON.stringify(ownedClaudeHookProjection(value))
         === JSON.stringify(ownedClaudeHookProjection(agentMerged))
       ? "ok"
-      : hasOwnedAgentHooks(value) || ownedGate ? "stale" : "missing";
+      : hasOwnedClaudeHooks(value) ? "stale" : "missing";
     const reports = [report("agent-hooks", settingsPath, agentState)];
     if (desk?.status === "ready") {
       const deskMerged = mergeDeskHooks(value, desk.command, DESK_HOOK_ASYNC);

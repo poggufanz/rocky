@@ -26,6 +26,8 @@ const SINGLE_QUOTED_HEAD = /^'([^']*)'(?:[ \t]+|$)/;
 const UNQUOTED_HEAD = /^([^\s"'&|;()]+)(?:[ \t]+|$)/;
 
 const ROCKY_BASENAMES = new Set(["rocky", "rocky.cmd", "rocky.ps1"]);
+const SHELL_LAUNCHER_BASENAMES = new Set(["bash", "sh", "zsh", "dash", "pwsh", "powershell", "cmd", "wsl"]);
+const MAX_NESTED_SHELL_DEPTH = 4;
 const ROCKY_SUBCOMMAND = /^(?:run|watch)(?=$|[\s;&|()])/;
 const TOP_LEVEL_SHELL_OP = /&&|\|\||[;|(\r\n]/;
 const ROCKY_IN_TEXT =
@@ -42,6 +44,13 @@ function isValidCwd(value: unknown): value is string {
 function isRockyBinary(token: string): boolean {
   if (token.length === 0 || token.endsWith("/") || token.endsWith("\\")) return false;
   return ROCKY_BASENAMES.has(win32.basename(token).toLowerCase());
+}
+
+function isShellLauncher(token: string): boolean {
+  if (token.length === 0 || token.endsWith("/") || token.endsWith("\\")) return false;
+  let name = win32.basename(token).toLowerCase();
+  if (name.endsWith(".exe")) name = name.slice(0, -4);
+  return SHELL_LAUNCHER_BASENAMES.has(name);
 }
 
 function findClosingQuote(input: string, start: number): number {
@@ -144,7 +153,39 @@ function matchRockyHead(input: string): string | undefined {
   return head.rest.slice(subMatch[0].length);
 }
 
-export function classifyRockyWrap(command: string): RockyWrap {
+function extractQuotedSpans(input: string): string[] {
+  const spans: string[] = [];
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === "'" || ch === '"') {
+      const end = findClosingQuote(input, i);
+      const raw = end === -1 ? input.slice(i + 1) : input.slice(i + 1, end);
+      spans.push(ch === '"' ? raw.replace(/\\"/g, '"') : raw);
+      if (end === -1) break;
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return spans;
+}
+
+function hasShellLauncherWithRocky(segment: string, depth: number): boolean {
+  const stripped = stripLeadingPrefixes(segment);
+  const head = extractHeadToken(stripped);
+  if (!head || !isShellLauncher(head.token)) return false;
+  for (const span of extractQuotedSpans(head.rest)) {
+    if (depth < MAX_NESTED_SHELL_DEPTH) {
+      if (classifyRockyWrapInner(span, depth + 1) !== "plain") return true;
+    } else if (ROCKY_IN_TEXT.test(span)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function classifyRockyWrapInner(command: string, depth: number): RockyWrap {
   const trimmed = command.trim();
   if (trimmed.length === 0) return "plain";
 
@@ -155,9 +196,14 @@ export function classifyRockyWrap(command: string): RockyWrap {
 
   for (const segment of splitTopLevelSegments(trimmed)) {
     if (matchRockyHead(segment) !== undefined) return "undecidable";
+    if (hasShellLauncherWithRocky(segment, depth)) return "undecidable";
   }
 
   return ROCKY_IN_TEXT.test(blankQuotedSpans(trimmed)) ? "undecidable" : "plain";
+}
+
+export function classifyRockyWrap(command: string): RockyWrap {
+  return classifyRockyWrapInner(command, 0);
 }
 
 export function parseExitCodeHeader(error: string): { exitCode: number; body: string } | undefined {
