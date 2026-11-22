@@ -637,13 +637,19 @@ function tripleLockTicketQueue(path: string, ticket: TripleLockTicket, now = Dat
   return { head: ticket.name, position: 0 };
 }
 
-function acquireTripleLock(paths: RockyPaths, lockWaitMs = TRIPLE_LOCK_WAIT_MS): TripleLock {
+type TripleLockDeadlineMode = "progress" | "absolute";
+
+function acquireTripleLock(
+  paths: RockyPaths,
+  lockWaitMs: number,
+  deadlineMode: TripleLockDeadlineMode,
+): TripleLock {
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
   const wallStarted = Date.now();
   const monotonicStarted = performance.now();
   const ticket = createTripleLockTicket(path);
   try {
-    return acquireTripleLockQueued(path, ticket, wallStarted, monotonicStarted, lockWaitMs);
+    return acquireTripleLockQueued(path, ticket, wallStarted, monotonicStarted, lockWaitMs, deadlineMode);
   } finally {
     removeTripleLockTicket(ticket);
   }
@@ -664,9 +670,20 @@ function acquireTripleLockQueued(
   started: number,
   startedMonotonic: number,
   lockWaitMs: number,
+  deadlineMode: TripleLockDeadlineMode,
 ): TripleLock {
   let wallStarted = started;
   let monotonicStarted = startedMonotonic;
+  const absoluteDeadline = startedMonotonic + lockWaitMs;
+  const remainingWaitMs = (): number => {
+    if (deadlineMode === "absolute") {
+      return absoluteDeadline - performance.now();
+    }
+    return Math.min(
+      lockWaitMs - (Date.now() - wallStarted),
+      lockWaitMs - (performance.now() - monotonicStarted),
+    );
+  };
   const signal = new Int32Array(new SharedArrayBuffer(4));
   const initialWaitMs = 5 + (process.pid % 7);
   let waitMs = initialWaitMs;
@@ -674,15 +691,21 @@ function acquireTripleLockQueued(
   let observedHead: string | undefined;
   let observedIdentity: string | undefined;
   let deferReference = performance.now();
-  for (;;) {
-    // The deadline bounds time WITHOUT progress, not time in queue: a stuck or
-    // starved lock still fails in lockWaitMs, while honest ownership
-    // turnover among queued writers must never convert into spurious busy
-    // errors just because the queue is long.
+  for (let attempt = 0; ; attempt++) {
+    if (deadlineMode === "absolute" && attempt > 0 && !(remainingWaitMs() > 0)) {
+      throw new Error("Rocky triple lock is busy");
+    }
+    // In progress mode, the deadline bounds time WITHOUT progress, not time in
+    // queue: a stuck or starved lock still fails in lockWaitMs, while honest
+    // ownership turnover among queued writers must never convert into spurious
+    // busy errors just because the queue is long. In absolute mode, the
+    // monotonic deadline never resets.
     const identity = tripleLockPathIdentity(path);
     if (observedIdentity !== undefined && observedIdentity !== identity) {
-      wallStarted = Date.now();
-      monotonicStarted = performance.now();
+      if (deadlineMode === "progress") {
+        wallStarted = Date.now();
+        monotonicStarted = performance.now();
+      }
       deferReference = performance.now();
     }
     observedIdentity = identity;
@@ -701,10 +724,7 @@ function acquireTripleLockQueued(
         if (identity !== "absent") deferReference = performance.now();
         const stalled = performance.now() - deferReference > TRIPLE_LOCK_HEAD_STALL_MS;
         if (!stalled) {
-          const nonHeadRemaining = Math.min(
-            lockWaitMs - (Date.now() - wallStarted),
-            lockWaitMs - (performance.now() - monotonicStarted),
-          );
+          const nonHeadRemaining = remainingWaitMs();
           if (!(nonHeadRemaining > 0)) {
             throw new Error("Rocky triple lock is busy");
           }
@@ -717,6 +737,9 @@ function acquireTripleLockQueued(
         observedHead = ticket.name;
         waitMs = Math.min(waitMs, initialWaitMs);
       }
+    }
+    if (deadlineMode === "absolute" && attempt > 0 && !(remainingWaitMs() > 0)) {
+      throw new Error("Rocky triple lock is busy");
     }
     const lock = tryTripleLock(path);
     if (lock) {
@@ -764,9 +787,7 @@ function acquireTripleLockQueued(
         waitMs = initialWaitMs;
       }
     }
-    const wallRemaining = lockWaitMs - (Date.now() - wallStarted);
-    const monotonicRemaining = lockWaitMs - (performance.now() - monotonicStarted);
-    const remaining = Math.min(wallRemaining, monotonicRemaining);
+    const remaining = remainingWaitMs();
     if (!(remaining > 0)) {
       throw new Error("Rocky triple lock is busy");
     }
@@ -973,7 +994,9 @@ export function withMemoryTransaction<T>(
     tombstoneSweepDone = true;
     sweepReclaimTombstones(dirname(paths.memory));
   }
-  const lock = acquireTripleLock(paths, options.lockWaitMs ?? TRIPLE_LOCK_WAIT_MS);
+  const lock = options.lockWaitMs === undefined
+    ? acquireTripleLock(paths, TRIPLE_LOCK_WAIT_MS, "progress")
+    : acquireTripleLock(paths, options.lockWaitMs, "absolute");
   const now = options.now ?? Date.now();
   const initial = loadMemoryChecked(paths.memory, now);
   let records = initial.records;
@@ -1180,6 +1203,9 @@ export function recordAgentFailure(
     commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable, platform: process.platform,
   };
   return withMemoryTransaction<AgentFailureResult>((transaction) => {
+    if (!transaction.complete || !isCompleteMemoryCoverage(transaction.coverage)) {
+      throw new Error("Rocky agent failure requires complete memory coverage");
+    }
     if (identity.reliable) {
       const minTs = ts - HOOK_DUPLICATE_WINDOW_MS;
       const maxTs = ts + HOOK_DUPLICATE_WINDOW_MS;
@@ -1193,6 +1219,9 @@ export function recordAgentFailure(
         return existing.reliable && existing.value === identity.value;
       });
       if (duplicate) return { status: "skipped", reason: "hook-duplicate" };
+    }
+    if (!transaction.canAppendComplete([rec])) {
+      throw new Error("Rocky agent failure exceeds bounded memory envelope");
     }
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
