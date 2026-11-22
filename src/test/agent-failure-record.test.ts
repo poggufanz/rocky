@@ -300,26 +300,23 @@ test("recordAgentFailure refuses a free lock when lockWaitMs is zero", (t) => {
 
 test("recordAgentFailure checks the absolute deadline before the first lock acquisition", (t) => {
   const paths = freshPaths(t);
-  const originalNow = performance.now.bind(performance);
   let calls = 0;
-  performance.now = () => {
+  const monotonicNow = (): number => {
     calls += 1;
     // Calls 1..3 cover startedMonotonic, deferReference, and top-of-loop within
     // the 50 ms budget; call 4 simulates ticket/queue setup exhausting the
     // budget before the first tryTripleLock on an otherwise free lock.
     return calls <= 3 ? 1_000 + calls * 10 : 1_100;
   };
-  t.after(() => {
-    performance.now = originalNow;
-  });
 
   assert.throws(
     () => recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-      { lockWaitMs: 50 },
+      { lockWaitMs: 50, monotonicNow },
     ),
     /triple lock is busy/u,
   );
+  assert.ok(calls >= 4, `expected deadline check before first tryTripleLock, got ${calls} clock reads`);
   assert.equal(existsSync(paths.memory), false);
   assert.equal(existsSync(paths.pending), false);
 });

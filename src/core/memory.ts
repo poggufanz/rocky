@@ -643,16 +643,17 @@ function acquireTripleLock(
   paths: RockyPaths,
   lockWaitMs: number,
   deadlineMode: TripleLockDeadlineMode,
+  monotonicNow: () => number,
 ): TripleLock {
   if (deadlineMode === "absolute" && !(lockWaitMs > 0)) {
     throw new Error("Rocky triple lock is busy");
   }
   const path = `${paths.memory}${TRIPLE_LOCK_SUFFIX}`;
   const wallStarted = Date.now();
-  const monotonicStarted = performance.now();
+  const monotonicStarted = monotonicNow();
   const ticket = createTripleLockTicket(path);
   try {
-    return acquireTripleLockQueued(path, ticket, wallStarted, monotonicStarted, lockWaitMs, deadlineMode);
+    return acquireTripleLockQueued(path, ticket, wallStarted, monotonicStarted, lockWaitMs, deadlineMode, monotonicNow);
   } finally {
     removeTripleLockTicket(ticket);
   }
@@ -674,17 +675,18 @@ function acquireTripleLockQueued(
   startedMonotonic: number,
   lockWaitMs: number,
   deadlineMode: TripleLockDeadlineMode,
+  monotonicNow: () => number,
 ): TripleLock {
   let wallStarted = started;
   let monotonicStarted = startedMonotonic;
   const absoluteDeadline = startedMonotonic + lockWaitMs;
   const remainingWaitMs = (): number => {
     if (deadlineMode === "absolute") {
-      return absoluteDeadline - performance.now();
+      return absoluteDeadline - monotonicNow();
     }
     return Math.min(
       lockWaitMs - (Date.now() - wallStarted),
-      lockWaitMs - (performance.now() - monotonicStarted),
+      lockWaitMs - (monotonicNow() - monotonicStarted),
     );
   };
   const signal = new Int32Array(new SharedArrayBuffer(4));
@@ -693,7 +695,7 @@ function acquireTripleLockQueued(
   let observedOwner: string | undefined;
   let observedHead: string | undefined;
   let observedIdentity: string | undefined;
-  let deferReference = performance.now();
+  let deferReference = monotonicNow();
   for (;;) {
     if (deadlineMode === "absolute" && !(remainingWaitMs() > 0)) {
       throw new Error("Rocky triple lock is busy");
@@ -707,9 +709,9 @@ function acquireTripleLockQueued(
     if (observedIdentity !== undefined && observedIdentity !== identity) {
       if (deadlineMode === "progress") {
         wallStarted = Date.now();
-        monotonicStarted = performance.now();
+        monotonicStarted = monotonicNow();
       }
-      deferReference = performance.now();
+      deferReference = monotonicNow();
     }
     observedIdentity = identity;
     if (ticket !== undefined) {
@@ -722,10 +724,10 @@ function acquireTripleLockQueued(
         if (observedHead !== queue.head) {
           observedHead = queue.head;
           waitMs = initialWaitMs;
-          deferReference = performance.now();
+          deferReference = monotonicNow();
         }
-        if (identity !== "absent") deferReference = performance.now();
-        const stalled = performance.now() - deferReference > TRIPLE_LOCK_HEAD_STALL_MS;
+        if (identity !== "absent") deferReference = monotonicNow();
+        const stalled = monotonicNow() - deferReference > TRIPLE_LOCK_HEAD_STALL_MS;
         if (!stalled) {
           const nonHeadRemaining = remainingWaitMs();
           if (!(nonHeadRemaining > 0)) {
@@ -982,6 +984,8 @@ export interface MemoryTransaction {
 export interface MemoryTransactionOptions {
   now?: number;
   lockWaitMs?: number;
+  /** Injectable monotonic clock for deterministic lock-deadline tests. */
+  monotonicNow?: () => number;
 }
 
 export function withMemoryTransaction<T>(
@@ -997,9 +1001,10 @@ export function withMemoryTransaction<T>(
     tombstoneSweepDone = true;
     sweepReclaimTombstones(dirname(paths.memory));
   }
+  const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const lock = options.lockWaitMs === undefined
-    ? acquireTripleLock(paths, TRIPLE_LOCK_WAIT_MS, "progress")
-    : acquireTripleLock(paths, options.lockWaitMs, "absolute");
+    ? acquireTripleLock(paths, TRIPLE_LOCK_WAIT_MS, "progress", monotonicNow)
+    : acquireTripleLock(paths, options.lockWaitMs, "absolute", monotonicNow);
   const now = options.now ?? Date.now();
   const initial = loadMemoryChecked(paths.memory, now);
   let records = initial.records;
@@ -1192,7 +1197,7 @@ export const HOOK_DUPLICATE_WINDOW_MS = 5_000;
 
 export function recordAgentFailure(
   input: AgentFailureInput,
-  options: { lockWaitMs: number; now?: number },
+  options: { lockWaitMs: number; now?: number; monotonicNow?: () => number },
 ): AgentFailureResult {
   if (!Number.isSafeInteger(input.exitCode)) throw new RangeError("exitCode must be a safe integer");
   const cmd = boundCommand(input.cmd);
@@ -1229,7 +1234,7 @@ export function recordAgentFailure(
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
     return { status: "written", record: rec };
-  }, resolveRockyPaths(), { now: ts, lockWaitMs: options.lockWaitMs });
+  }, resolveRockyPaths(), { now: ts, lockWaitMs: options.lockWaitMs, monotonicNow: options.monotonicNow });
 }
 
 /**
