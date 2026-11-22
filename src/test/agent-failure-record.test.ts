@@ -35,12 +35,14 @@ const SAMPLE_AGENT: AgentStamp = {
 
 const SAMPLE_BODY = "> app@1.0.0 test\nError: Cannot find module 'express'\n";
 
+const noopObserve = (): undefined => undefined;
+
 test("recordAgentFailure writes an agent-origin failure fingerprinted from the body", (t) => {
   const paths = freshPaths(t);
   const cwd = paths.home;
   const result = recordAgentFailure(
     { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-    { lockWaitMs: 1_000 },
+    { lockWaitMs: 1_000, observe: noopObserve },
   );
 
   assert.equal(result.status, "written");
@@ -57,6 +59,41 @@ test("recordAgentFailure writes an agent-origin failure fingerprinted from the b
   assert.deepEqual(loaded.records[0], result.record);
 });
 
+test("recordAgentFailure runs observe on the snapshot before append", (t) => {
+  const paths = freshPaths(t);
+  const cwd = paths.home;
+  const first = recordAgentFailure(
+    { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
+    { lockWaitMs: 1_000, now: 1_000_000, observe: noopObserve },
+  );
+  assert.equal(first.status, "written");
+
+  let observedIds: string[] = [];
+  let observedComplete = false;
+  const second = recordAgentFailure(
+    { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
+    {
+      lockWaitMs: 1_000,
+      now: 1_010_000,
+      observe: ({ records, coverage }) => {
+        observedIds = records.map((r) => r.id);
+        observedComplete = coverage.complete;
+        return { priorCount: records.length, firstId: records[0]?.id };
+      },
+    },
+  );
+
+  assert.equal(second.status, "written");
+  assert.equal(observedComplete, true);
+  assert.deepEqual(observedIds, [first.record.id]);
+  assert.equal(observedIds.includes(second.record.id), false);
+  assert.deepEqual(second.observed, { priorCount: 1, firstId: first.record.id });
+
+  const loaded = loadMemoryChecked(paths.memory, 1_010_000);
+  assert.equal(loaded.records.length, 2);
+  assert.deepEqual(loaded.records.map((r) => r.id), [first.record.id, second.record.id]);
+});
+
 test("recordAgentFailure skips when the shell hook recorded the same command in the same cwd within 5 s", (t) => {
   const paths = freshPaths(t);
   const cwd = paths.home;
@@ -64,12 +101,21 @@ test("recordAgentFailure skips when the shell hook recorded the same command in 
   const hook = recordHookFailure("npm test", 1, cwd);
   const now = hook.ts + 4_000;
 
+  let observeCalled = false;
   const result = recordAgentFailure(
     { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-    { lockWaitMs: 1_000, now },
+    {
+      lockWaitMs: 1_000,
+      now,
+      observe: () => {
+        observeCalled = true;
+        return "unexpected";
+      },
+    },
   );
 
   assert.deepEqual(result, { status: "skipped", reason: "hook-duplicate" });
+  assert.equal(observeCalled, false);
   const failures = loadMemoryChecked(paths.memory, now).records.filter((r) => r.kind === "failure");
   assert.equal(failures.length, 1);
 });
@@ -83,7 +129,7 @@ test("recordAgentFailure still writes when the hook failure is 6 s old, in anoth
 
     const result = recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-      { lockWaitMs: 1_000, now },
+      { lockWaitMs: 1_000, now, observe: noopObserve },
     );
 
     assert.equal(result.status, "written");
@@ -100,7 +146,7 @@ test("recordAgentFailure still writes when the hook failure is 6 s old, in anoth
 
     const result = recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-      { lockWaitMs: 1_000, now },
+      { lockWaitMs: 1_000, now, observe: noopObserve },
     );
 
     assert.equal(result.status, "written");
@@ -116,7 +162,7 @@ test("recordAgentFailure still writes when the hook failure is 6 s old, in anoth
 
     const result = recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-      { lockWaitMs: 1_000, now },
+      { lockWaitMs: 1_000, now, observe: noopObserve },
     );
 
     assert.equal(result.status, "written");
@@ -134,7 +180,7 @@ test("recordAgentFailure gives up after lockWaitMs on a fresh foreign lock", (t)
   assert.throws(
     () => recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-      { lockWaitMs: 1_000 },
+      { lockWaitMs: 1_000, observe: noopObserve },
     ),
     /triple lock is busy/u,
   );
@@ -221,7 +267,7 @@ test("recordAgentFailure enforces an absolute deadline despite lock ownership tu
     assert.throws(
       () => recordAgentFailure(
         { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-        { lockWaitMs: 600 },
+        { lockWaitMs: 600, observe: noopObserve },
       ),
       /triple lock is busy/u,
     );
@@ -281,7 +327,7 @@ test("recordAgentFailure writes in tail-mode memory and still dedupes a hook fai
 
   const written = recordAgentFailure(
     { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-    { lockWaitMs: 1_000, now },
+    { lockWaitMs: 1_000, now, observe: noopObserve },
   );
   assert.equal(written.status, "written");
   assert.equal(existsSync(paths.pending), true);
@@ -290,7 +336,7 @@ test("recordAgentFailure writes in tail-mode memory and still dedupes a hook fai
 
   const dup = recordAgentFailure(
     { cmd: "npm run build", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-    { lockWaitMs: 1_000, now },
+    { lockWaitMs: 1_000, now, observe: noopObserve },
   );
   assert.deepEqual(dup, { status: "skipped", reason: "hook-duplicate" });
   assert.equal(readFileSync(paths.memory, "utf8"), afterWriteContent);
@@ -303,7 +349,7 @@ test("recordAgentFailure still writes when one corrupt line is within the skippe
 
   const result = recordAgentFailure(
     { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-    { lockWaitMs: 1_000, now: 3_000 },
+    { lockWaitMs: 1_000, now: 3_000, observe: noopObserve },
   );
   assert.equal(result.status, "written");
   assert.equal(existsSync(paths.pending), true);
@@ -319,11 +365,20 @@ test("recordAgentFailure writes nothing and leaves pending untouched above the s
     const seeded = "{corrupt-jsonl-1\n{corrupt-jsonl-2\n";
     writeFileSync(paths.memory, seeded, { mode: 0o600 });
 
+    let observeCalled = false;
     const result = recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-      { lockWaitMs: 1_000, now: 3_000 },
+      {
+        lockWaitMs: 1_000,
+        now: 3_000,
+        observe: () => {
+          observeCalled = true;
+          return undefined;
+        },
+      },
     );
     assert.deepEqual(result, { status: "skipped", reason: "coverage" });
+    assert.equal(observeCalled, false);
     assert.equal(readFileSync(paths.memory, "utf8"), seeded);
     assert.equal(existsSync(paths.pending), false);
   });
@@ -364,7 +419,7 @@ test("recordAgentFailure writes nothing and leaves pending untouched above the s
 
     const result = recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
-      { lockWaitMs: 1_000, now },
+      { lockWaitMs: 1_000, now, observe: noopObserve },
     );
     assert.deepEqual(result, { status: "skipped", reason: "coverage" });
     assert.equal(readFileSync(paths.memory, "utf8"), seeded);
@@ -378,7 +433,7 @@ test("recordAgentFailure refuses a free lock when lockWaitMs is zero", (t) => {
   assert.throws(
     () => recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-      { lockWaitMs: 0 },
+      { lockWaitMs: 0, observe: noopObserve },
     ),
     /triple lock is busy/u,
   );
@@ -397,7 +452,7 @@ test("recordAgentFailure checks the absolute deadline before the first lock acqu
   assert.throws(
     () => recordAgentFailure(
       { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd: paths.home, agent: SAMPLE_AGENT },
-      { lockWaitMs: 50, monotonicNow },
+      { lockWaitMs: 50, monotonicNow, observe: noopObserve },
     ),
     /triple lock is busy/u,
   );
