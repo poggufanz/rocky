@@ -2,17 +2,17 @@
  * Pure builder for the prior-attempts note emitted when a recurring error
  * repeats in the current directory.
  *
- * Uses only observed run order and optional file-change records — never stated
- * testimony, expectations, or raw error text. Output is a single printable
+ * Uses only observed run order and optional observed file-change records — never
+ * stated testimony, expectations, or raw error text. Output is a single printable
  * ASCII line capped at `ATTEMPT_NOTE_MAX_BYTES` bytes with the non-causal
  * footer preserved.
  */
 
-import { formatUtcDate, formatUtcDateTime } from "../commands/stats.js";
 import { joinAttemptCards, type CardJoin } from "./attempt-cards.js";
 import { buildProblems, type Attempt, type ProblemEntry } from "./attempts.js";
-import type { MemoryCoverage, MemoryRecord } from "./memory-read.js";
+import { isCompleteMemoryCoverage, type MemoryCoverage, type MemoryRecord } from "./memory-read.js";
 import { sanitizeTestimony } from "./redact.js";
+import { formatUtcDate, formatUtcDateTime } from "./utc-format.js";
 
 export const ATTEMPT_NOTE_MAX_BYTES = 600;
 export const ATTEMPT_NOTE_MAX_ATTEMPTS = 5;
@@ -32,10 +32,6 @@ const FOOTER_NOTICE = "Rocky records order, not cause.";
 
 function toPrintableAscii(text: string): string {
   return text.replace(/[^\x20-\x7e]/gu, "?");
-}
-
-function sanitizePath(rawPath: string): string {
-  return toPrintableAscii(sanitizeTestimony(rawPath)).trim();
 }
 
 function findMatchingHereEntry(
@@ -143,13 +139,15 @@ function collectClauseFiles(
   for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
     const attempt = attempts[attemptIndex]!;
     if (attempt.outcome !== outcome) continue;
-    if (attempt.changes.state !== "observed" && attempt.changes.state !== "testimony") continue;
+    if (attempt.changes.state !== "observed") continue;
 
     const seenInAttempt = new Set<string>();
     for (const rawPath of attempt.changes.files) {
-      const cleaned = sanitizePath(rawPath);
+      const identityRaw = sanitizeTestimony(rawPath).trim();
+      if (identityRaw.length === 0) continue;
+      const cleaned = toPrintableAscii(identityRaw).trim();
       if (cleaned.length === 0) continue;
-      const key = platform === "win32" ? cleaned.toLowerCase() : cleaned;
+      const key = platform === "win32" ? identityRaw.toLowerCase() : identityRaw;
       if (seenInAttempt.has(key)) continue;
       seenInAttempt.add(key);
 
@@ -280,7 +278,13 @@ export function priorAttemptsNote(
   const totalRecent = recentAttempts.length;
   const timeWord = totalRecent === 1 ? "time" : "times";
   const firstDate = formatUtcDate(recentAttempts[0]!.ts);
-  const header = `rocky: Same error recorded ${totalRecent} ${timeWord} before in this directory (first ${firstDate}).`;
+  const partialCoverage =
+    matched.entry.historyMayStartEarlier ||
+    coverage.skipped > 0 ||
+    !isCompleteMemoryCoverage(coverage);
+  const header = partialCoverage
+    ? `rocky: Same error recorded ${totalRecent} ${timeWord} before in this directory in the records read (earliest read ${firstDate}).`
+    : `rocky: Same error recorded ${totalRecent} ${timeWord} before in this directory (first ${firstDate}).`;
   const outcomesClause = buildOutcomeClause(totalRecent, summary);
   const passPrefix = `Files edited before the passing ${rerunWord(summary.passedCount)}: `;
   const samePrefix = `Files edited before the same-way ${summary.sameCount === 1 ? "failure" : "failures"}: `;

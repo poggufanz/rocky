@@ -591,8 +591,9 @@ test("never includes stated text or expectations", () => {
     assert.equal(withCards.text.includes(forbidden), false, `leaked ${forbidden}`);
   }
   assert.ok(withCards.text.includes("src/observed.ts"));
+  assert.equal(withCards.text.includes("src/testimony-file.ts"), false);
 
-  // With cardsFor returning empty cards, testimony files are surfaced while stated text stays excluded.
+  // With cardsFor returning empty cards, testimony paths never enter the note and no file clause renders.
   const withTestimonyFiles = priorAttemptsNote(
     records,
     completeCoverage(records.length),
@@ -602,7 +603,8 @@ test("never includes stated text or expectations", () => {
   assert.ok(withTestimonyFiles);
   assert.equal(withTestimonyFiles.text.includes("SECRET_STATED"), false);
   assert.equal(withTestimonyFiles.text.includes("SECRET_EXPECTATION"), false);
-  assert.ok(withTestimonyFiles.text.includes("src/testimony-file.ts"));
+  assert.equal(withTestimonyFiles.text.includes("src/testimony-file.ts"), false);
+  assert.equal(withTestimonyFiles.text.includes("Files edited"), false);
 
   // With cardsFor: undefined, file clauses are omitted even when rationale files exist.
   const withoutCardsFor = priorAttemptsNote(
@@ -757,8 +759,191 @@ test("template strings have no causal words", () => {
   assert.match(lastFive.text, /After the last 5 runs:/);
   variants.push(lastFive.text);
 
-  assert.equal(variants.length, 9);
+  // 9. Incomplete-coverage (bounded tail) header variant.
+  const tailCoverage: MemoryCoverage = {
+    version: MEMORY_FORMAT_VERSION,
+    scanned: 10_000,
+    skipped: 0,
+    truncated: 1,
+    bytesScanned: 100_000,
+    bytesTotal: 200_000,
+    complete: false,
+    reason: "record-cap",
+    window: "tail",
+    startOffset: 100_000,
+    oldestTs: t1 - HOUR_MS,
+  };
+  const partialHeader = priorAttemptsNote(
+    ref.records,
+    tailCoverage,
+    { fingerprints: [fp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning(ref.cards), platform: "linux" },
+  );
+  assert.ok(partialHeader);
+  assert.match(partialHeader.text, /in the records read \(earliest read 2026-11-12\)\./);
+  variants.push(partialHeader.text);
+
+  assert.equal(variants.length, 10);
   assert.deepEqual(causalWordViolations(variants), []);
+});
+
+test("discloses incomplete coverage in the header while preserving complete coverage byte for byte", () => {
+  const fp = "aaaa000000000014";
+  const tailNow = 1_700_000_000_000; // 2023-11-14 22:13 UTC
+  const tailTs = 1_699_999_940_000; // 2023-11-14 22:12 UTC
+  const tailCoverage: MemoryCoverage = {
+    version: MEMORY_FORMAT_VERSION,
+    scanned: 10_000,
+    skipped: 0,
+    truncated: 1,
+    bytesScanned: 100_000,
+    bytesTotal: 200_000,
+    complete: false,
+    reason: "record-cap",
+    window: "tail",
+    startOffset: 100_000,
+    oldestTs: 1_699_990_000_000,
+  };
+  const tailRecord = makeFailure({
+    id: "f1",
+    ts: tailTs,
+    fingerprint: fp,
+    signature: ["error: tail entry"],
+    excerpt: "Error: tail entry",
+  });
+
+  // Bounded-tail fixture (singular): header qualifies count and earliest read date.
+  const tailNote = priorAttemptsNote(
+    [tailRecord],
+    tailCoverage,
+    { fingerprints: [fp], cwd: "/app" },
+    { now: tailNow, cardsFor: undefined, platform: "linux" },
+  );
+  assert.ok(tailNote);
+  assert.equal(
+    tailNote.text,
+    `rocky: Same error recorded 1 time before in this directory in the records read (earliest read 2023-11-14). ` +
+      `Rocky records order, not cause. More: rocky attempts ${fp}`,
+  );
+
+  // Bounded-tail fixture (plural) and skipped-lines coverage also qualify the header.
+  const refFp = "3f2a9c1e44d0b7a1";
+  const { records, cards } = buildReferenceScenario(refFp);
+  const skippedCoverage: MemoryCoverage = {
+    ...completeCoverage(records.length),
+    skipped: 2,
+    complete: false,
+  };
+  const skippedNote = priorAttemptsNote(
+    records,
+    skippedCoverage,
+    { fingerprints: [refFp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning(cards), platform: "linux" },
+  );
+  assert.ok(skippedNote);
+  assert.equal(
+    skippedNote.text,
+    `rocky: Same error recorded 4 times before in this directory in the records read (earliest read 2026-11-12). ` +
+      `After those runs: 2 reruns failed the same way, 1 failed with another error, 1 passed (2026-11-12 14:03). ` +
+      `Files edited before the passing rerun: src/session.ts. ` +
+      `Files edited before the same-way failures: src/auth.ts (2). ` +
+      `Rocky records order, not cause. More: rocky attempts ${refFp}`,
+  );
+
+  // Complete coverage keeps the reference sentence byte for byte.
+  const completeNote = priorAttemptsNote(
+    records,
+    completeCoverage(records.length),
+    { fingerprints: [refFp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning(cards), platform: "linux" },
+  );
+  assert.ok(completeNote);
+  assert.equal(
+    completeNote.text,
+    `rocky: Same error recorded 4 times before in this directory (first 2026-11-12). ` +
+      `After those runs: 2 reruns failed the same way, 1 failed with another error, 1 passed (2026-11-12 14:03). ` +
+      `Files edited before the passing rerun: src/session.ts. ` +
+      `Files edited before the same-way failures: src/auth.ts (2). ` +
+      `Rocky records order, not cause. More: rocky attempts ${refFp}`,
+  );
+});
+
+test("counts distinct non-ASCII paths separately when ASCII renderings collide", () => {
+  const fp = "3f2a9c1e44d0b7a1";
+  const t1 = REF_NOW - 3 * HOUR_MS;
+  const t2 = REF_NOW - 2 * HOUR_MS;
+  const t3 = REF_NOW - HOUR_MS;
+  const t4 = REF_NOW - 30 * MIN_MS;
+
+  // Two distinct paths (café vs cafè) share the ASCII display "src/caf?.ts": must not collapse to "(2)".
+  const twoDistinctRecords: MemoryRecord[] = [
+    makeFailure({ id: "c1", ts: t1, fingerprint: fp }),
+    makeFailure({ id: "c2", ts: t2, fingerprint: fp }),
+    makeFailure({ id: "c3", ts: t3, fingerprint: fp }),
+  ];
+  const collidingCard = makeCard("card-collide", {
+    started_ms: t1 - 5_000,
+    ended_ms: t3 + 5_000,
+    blocks: [
+      makeBlock(1, "src/café.ts"),
+      makeBlock(2, "src/cafè.ts"),
+    ],
+    flow: [
+      makeCmdStep(t1 - 500, t1),
+      makeEditStep([1], t1 + 10_000, t1 + 11_000),
+      makeCmdStep(t2 - 500, t2),
+      makeEditStep([2], t2 + 10_000, t2 + 11_000),
+      makeCmdStep(t3 - 500, t3),
+    ],
+  });
+  const noteTwoDistinct = priorAttemptsNote(
+    twoDistinctRecords,
+    completeCoverage(twoDistinctRecords.length),
+    { fingerprints: [fp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning([collidingCard]), platform: "linux" },
+  );
+  assert.ok(noteTwoDistinct);
+  assert.match(noteTwoDistinct.text, /^[\x20-\x7e]*$/);
+  assert.equal(noteTwoDistinct.text.includes("src/caf?.ts (2)"), false);
+  assert.ok(
+    noteTwoDistinct.text.includes("Files edited before the same-way failures: src/caf?.ts, src/caf?.ts."),
+    `unexpected text: ${noteTwoDistinct.text}`,
+  );
+
+  // Repeated edits to café (x2) plus one edit to cafè (x1) keep separate counts: "(2)" and uncounted.
+  const mixedRecords: MemoryRecord[] = [
+    ...twoDistinctRecords,
+    makeFailure({ id: "c4", ts: t4, fingerprint: fp }),
+  ];
+  const mixedCard = makeCard("card-collide-mixed", {
+    started_ms: t1 - 5_000,
+    ended_ms: t4 + 5_000,
+    blocks: [
+      makeBlock(1, "src/café.ts"),
+      makeBlock(2, "src/cafè.ts"),
+      makeBlock(3, "src/café.ts"),
+    ],
+    flow: [
+      makeCmdStep(t1 - 500, t1),
+      makeEditStep([1], t1 + 10_000, t1 + 11_000),
+      makeCmdStep(t2 - 500, t2),
+      makeEditStep([2], t2 + 10_000, t2 + 11_000),
+      makeCmdStep(t3 - 500, t3),
+      makeEditStep([3], t3 + 10_000, t3 + 11_000),
+      makeCmdStep(t4 - 500, t4),
+    ],
+  });
+  const noteMixed = priorAttemptsNote(
+    mixedRecords,
+    completeCoverage(mixedRecords.length),
+    { fingerprints: [fp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning([mixedCard]), platform: "linux" },
+  );
+  assert.ok(noteMixed);
+  assert.ok(
+    noteMixed.text.includes("Files edited before the same-way failures: src/caf?.ts (2), src/caf?.ts."),
+    `unexpected text: ${noteMixed.text}`,
+  );
 });
 
 test("computes from the snapshot before the current failure", () => {
