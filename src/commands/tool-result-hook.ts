@@ -122,20 +122,17 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
 
     let noteDeps: {
       priorAttemptsNote: typeof import("../core/attempt-note.js").priorAttemptsNote;
-      fingerprint: typeof import("../core/fingerprint.js").fingerprint;
       makeCardsFor: typeof import("../desk/cards-read.js").makeCardsFor;
       toolTextAllowed: typeof import("../desk/cards-read.js").toolTextAllowed;
     } | undefined;
     if (enabled) {
       try {
-        const [noteMod, fpMod, cardsMod] = await Promise.all([
+        const [noteMod, cardsMod] = await Promise.all([
           import("../core/attempt-note.js"),
-          import("../core/fingerprint.js"),
           import("../desk/cards-read.js"),
         ]);
         noteDeps = {
           priorAttemptsNote: noteMod.priorAttemptsNote,
-          fingerprint: fpMod.fingerprint,
           makeCardsFor: cardsMod.makeCardsFor,
           toolTextAllowed: cardsMod.toolTextAllowed,
         };
@@ -157,7 +154,7 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
         {
           lockWaitMs: TOOL_RESULT_LOCK_WAIT_MS,
           now,
-          observe: ({ records, coverage }) => {
+          observe: ({ records, coverage, fingerprint }) => {
             if (noteDeps === undefined) return undefined;
             try {
               const cardsFor = noteDeps.makeCardsFor({
@@ -167,7 +164,7 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
               return noteDeps.priorAttemptsNote(
                 records,
                 coverage,
-                { fingerprints: [noteDeps.fingerprint(event.body, event.cmd, event.exitCode)], cwd: event.cwd },
+                { fingerprints: [fingerprint], cwd: event.cwd },
                 { now, cardsFor, platform: process.platform },
               );
             } catch {

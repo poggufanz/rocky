@@ -7,7 +7,9 @@ import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
 import { fingerprint, signatureLines } from "../core/fingerprint.js";
 import {
+  boundCommand,
   HOOK_DUPLICATE_WINDOW_MS,
+  MAX_COMMAND_BYTES,
   recordAgentFailure,
   recordHookFailure,
   resolveFixOnSuccess,
@@ -70,14 +72,16 @@ test("recordAgentFailure runs observe on the snapshot before append", (t) => {
 
   let observedIds: string[] = [];
   let observedComplete = false;
+  let observedFingerprint = "";
   const second = recordAgentFailure(
     { cmd: "npm test", exitCode: 1, body: SAMPLE_BODY, cwd, agent: SAMPLE_AGENT },
     {
       lockWaitMs: 1_000,
       now: 1_010_000,
-      observe: ({ records, coverage }) => {
+      observe: ({ records, coverage, fingerprint: snapshotFp }) => {
         observedIds = records.map((r) => r.id);
         observedComplete = coverage.complete;
+        observedFingerprint = snapshotFp;
         return { priorCount: records.length, firstId: records[0]?.id };
       },
     },
@@ -85,6 +89,7 @@ test("recordAgentFailure runs observe on the snapshot before append", (t) => {
 
   assert.equal(second.status, "written");
   assert.equal(observedComplete, true);
+  assert.equal(observedFingerprint, second.record.fingerprint);
   assert.deepEqual(observedIds, [first.record.id]);
   assert.equal(observedIds.includes(second.record.id), false);
   assert.deepEqual(second.observed, { priorCount: 1, firstId: first.record.id });
@@ -92,6 +97,34 @@ test("recordAgentFailure runs observe on the snapshot before append", (t) => {
   const loaded = loadMemoryChecked(paths.memory, 1_010_000);
   assert.equal(loaded.records.length, 2);
   assert.deepEqual(loaded.records.map((r) => r.id), [first.record.id, second.record.id]);
+});
+
+test("recordAgentFailure passes the bounded-command writer fingerprint to observe", (t) => {
+  const paths = freshPaths(t);
+  const cwd = paths.home;
+  const longCmd = `npm test -- ${"x".repeat(MAX_COMMAND_BYTES + 200)}`;
+  const boundedCmd = boundCommand(longCmd);
+  assert.notEqual(boundedCmd, longCmd);
+  assert.notEqual(fingerprint("", boundedCmd, 1), fingerprint("", longCmd, 1));
+
+  let observedFingerprint = "";
+  const result = recordAgentFailure(
+    { cmd: longCmd, exitCode: 1, body: "", cwd, agent: SAMPLE_AGENT },
+    {
+      lockWaitMs: 1_000,
+      now: 1_020_000,
+      observe: ({ fingerprint: snapshotFp }) => {
+        observedFingerprint = snapshotFp;
+        return snapshotFp;
+      },
+    },
+  );
+
+  assert.equal(result.status, "written");
+  assert.equal(result.record.cmd, boundedCmd);
+  assert.equal(result.record.fingerprint, fingerprint("", boundedCmd, 1));
+  assert.equal(observedFingerprint, result.record.fingerprint);
+  assert.equal(result.observed, result.record.fingerprint);
 });
 
 test("recordAgentFailure skips when the shell hook recorded the same command in the same cwd within 5 s", (t) => {

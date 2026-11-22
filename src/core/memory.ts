@@ -1205,7 +1205,7 @@ export function recordAgentFailure<N>(
     lockWaitMs: number;
     now?: number;
     monotonicNow?: () => number;
-    observe: (snapshot: { records: readonly MemoryRecord[]; coverage: MemoryCoverage }) => N;
+    observe: (snapshot: { records: readonly MemoryRecord[]; coverage: MemoryCoverage; fingerprint: string }) => N;
   },
 ): AgentFailureResult<N> {
   if (!Number.isSafeInteger(input.exitCode)) throw new RangeError("exitCode must be a safe integer");
@@ -1237,7 +1237,11 @@ export function recordAgentFailure<N>(
       });
       if (duplicate) return { status: "skipped", reason: "hook-duplicate" };
     }
-    const observed = options.observe({ records: transaction.records, coverage: transaction.coverage });
+    const observed = options.observe({
+      records: transaction.records,
+      coverage: transaction.coverage,
+      fingerprint: rec.fingerprint,
+    });
     transaction.append(rec);
     touchPendingUnlocked(transaction.paths);
     return { status: "written", record: rec, observed };

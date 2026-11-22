@@ -8,6 +8,7 @@ import test, { type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cwdHash, type ExposureRow } from "../core/attempt-note-state.js";
 import { commandIdentity, fingerprint, FINGERPRINT_ALGORITHM_VERSION, signatureLines } from "../core/fingerprint.js";
+import { boundCommand, MAX_COMMAND_BYTES } from "../core/memory.js";
 import { loadMemoryChecked } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
@@ -525,6 +526,64 @@ test("process: shown arm returns additionalContext once per session and key", (t
   assert.equal(row2.delivered, false);
   assert.ok(row2.bytes > 0);
   assert.ok(row2.latencyMs >= 0);
+});
+
+test("process: silent failure with command longer than writer bound matches seeded agent failures", (t) => {
+  const { rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const longCmd = `npm test -- ${"x".repeat(MAX_COMMAND_BYTES + 200)}`;
+  const boundedCmd = boundCommand(longCmd);
+  assert.ok(Buffer.byteLength(longCmd, "utf8") > MAX_COMMAND_BYTES);
+  assert.notEqual(boundedCmd, longCmd);
+  assert.notEqual(fingerprint("", boundedCmd, 1), fingerprint("", longCmd, 1));
+
+  const fp = seedAgentFailures(paths.memory, workDir, boundedCmd, "", 2);
+  const env = { ROCKY_TEST_SEAMS: "1", ROCKY_ATTEMPT_ARM: "shown" };
+
+  const result = spawnHook(
+    ["hook", "tool-result", "claude-code"],
+    failurePayload({
+      cwd: workDir,
+      session_id: "s-long-silent",
+      tool_use_id: "toolu_long_1",
+      tool_input: { command: longCmd },
+      error: "Exit code 1\n",
+    }),
+    rockyHome,
+    workDir,
+    PROCESS_TIMEOUT_MS,
+    env,
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.ok(Buffer.byteLength(result.stdout, "utf8") < 2048);
+
+  const parsed = JSON.parse(result.stdout) as {
+    hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+  };
+  assert.equal(parsed.hookSpecificOutput?.hookEventName, "PostToolUseFailure");
+  const context = parsed.hookSpecificOutput?.additionalContext ?? "";
+  assert.ok(
+    context.startsWith("rocky: Same error recorded 2 times before"),
+    `unexpected additionalContext: ${context}`,
+  );
+  assert.ok(
+    context.endsWith(`Rocky records order, not cause. More: rocky attempts ${fp}`),
+    `missing footer in additionalContext: ${context}`,
+  );
+
+  const rows = readExposureRows(rockyHome);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.v, 1);
+  assert.equal(row.lane, "tool-result");
+  assert.equal(row.kind, "note");
+  assert.equal(row.arm, "shown");
+  assert.equal(row.session, "s-long-silent");
+  assert.equal(row.cwdHash, cwdHash(workDir));
+  assert.equal(row.delivered, true);
+  assert.equal(row.bytes, Buffer.byteLength(context, "utf8"));
 });
 
 test("process: held arm prints {} and logs delivered:false", (t) => {
