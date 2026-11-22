@@ -330,14 +330,14 @@ function isRockyClaudeHookCommand(command: string): boolean {
 }
 
 /**
- * Recognize the exact gate command Rocky writes for the PreToolUse
- * rationale-gate entry. The gate is new in v0.7, so unlike the agent-event
- * marker above it has no legacy bare-`rocky` or pre-canonical spelling to
- * stay compatible with - only the current `rockyGateHookCommand` shape.
+ * Recognize the canonical `"<node>" "<entry>" <marker>` command shape Rocky
+ * writes for hook families that have no legacy bare-`rocky` or pre-canonical
+ * spelling to stay compatible with. Marker has no default: every caller chooses.
  */
-function isRockyGateHookCommand(command: string): boolean {
+function isCanonicalRockyHookCommand(command: string, marker: string): boolean {
   if (typeof command !== "string" || command.length === 0 || hasControl(command)) return false;
-  const suffix = ` ${GATE_MARKER}`;
+  if (marker.length === 0) return false;
+  const suffix = ` ${marker}`;
   if (!command.endsWith(suffix)) return false;
   const paths = command.slice(0, -suffix.length);
   try {
@@ -345,12 +345,22 @@ function isRockyGateHookCommand(command: string): boolean {
     if (paths[first.next] !== " ") return false;
     const second = parseQuotedCommandPath(paths, first.next + 1, true);
     if (second.next !== paths.length) return false;
-    requireSafeAbsolutePath(first.value, "Node");
-    requireSafeAbsolutePath(second.value, "entry");
-    return rockyGateHookCommand(first.value, second.value) === command;
+    const executable = requireSafeAbsolutePath(first.value, "Node");
+    const script = requireSafeAbsolutePath(second.value, "entry");
+    return `${quotePath(executable)} ${quotePath(script)} ${marker}` === command;
   } catch {
     return false;
   }
+}
+
+/**
+ * Recognize the exact gate command Rocky writes for the PreToolUse
+ * rationale-gate entry. The gate is new in v0.7, so unlike the agent-event
+ * marker above it has no legacy bare-`rocky` or pre-canonical spelling to
+ * stay compatible with - only the current `rockyGateHookCommand` shape.
+ */
+function isRockyGateHookCommand(command: string): boolean {
+  return isCanonicalRockyHookCommand(command, GATE_MARKER);
 }
 
 /**
@@ -358,21 +368,7 @@ function isRockyGateHookCommand(command: string): boolean {
  * current `rockySessionStartHookCommand` shape.
  */
 function isRockySessionHookCommand(command: string): boolean {
-  if (typeof command !== "string" || command.length === 0 || hasControl(command)) return false;
-  const suffix = ` ${SESSION_MARKER}`;
-  if (!command.endsWith(suffix)) return false;
-  const paths = command.slice(0, -suffix.length);
-  try {
-    const first = parseQuotedCommandPath(paths, 0, true);
-    if (paths[first.next] !== " ") return false;
-    const second = parseQuotedCommandPath(paths, first.next + 1, true);
-    if (second.next !== paths.length) return false;
-    requireSafeAbsolutePath(first.value, "Node");
-    requireSafeAbsolutePath(second.value, "entry");
-    return rockySessionStartHookCommand(first.value, second.value) === command;
-  } catch {
-    return false;
-  }
+  return isCanonicalRockyHookCommand(command, SESSION_MARKER);
 }
 
 function tomlBasicString(value: string): string {
@@ -773,7 +769,7 @@ function commandFor(options: AgentHooksRuntimeOptions): string {
 
 function sessionCommandFor(options: AgentHooksRuntimeOptions): string {
   const sessionCommand = options.sessionCommand ?? rockySessionStartHookCommand(options.nodePath, options.entryPath);
-  if (!sessionCommand.includes(SESSION_MARKER)) throw new Error("session hook command is not Rocky-owned");
+  if (!isRockySessionHookCommand(sessionCommand)) throw new Error("session hook command is not Rocky-owned");
   return sessionCommand;
 }
 

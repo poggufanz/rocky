@@ -1010,3 +1010,53 @@ test("agentHooksStatus is installed with four events and absent for an old three
   assert.equal(upgraded.status, "written");
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
 });
+
+test("installClaudeAgentHooks refuses non-canonical sessionCommand overrides before preview or consent and leaves settings byte-identical", async (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  const beforeBytes = Buffer.from(
+    `${JSON.stringify({
+      custom: { keep: true },
+      hooks: { SessionStart: [{ hooks: [{ type: "command", command: "foreign-session" }] }] },
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  writeFileSync(value.settings, beforeBytes);
+
+  const nonCanonicalOverrides = [
+    "rocky hook session-start claude-code",
+    "foreign-tool --label 'hook session-start claude-code'",
+    '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook session-start claude-code',
+    '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook session-start claude-code',
+    `${value.sessionCommand} --extra`,
+  ];
+
+  for (const sessionCommand of nonCanonicalOverrides) {
+    const details: string[] = [];
+    let prompted = false;
+    const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
+      command: value.command,
+      sessionCommand,
+      detail: (message) => details.push(message),
+      confirmation: {
+        async confirm(): Promise<boolean> {
+          prompted = true;
+          return true;
+        },
+      },
+    });
+    assert.deepEqual(
+      result,
+      { status: "error", detail: "Claude Code agent hooks update cannot complete" },
+      sessionCommand,
+    );
+    assert.equal(prompted, false, sessionCommand);
+    assert.equal(details.length, 0, sessionCommand);
+    assert.deepEqual(readFileSync(value.settings), beforeBytes, sessionCommand);
+    assert.deepEqual(
+      agentHooksStatus({ settingsPath: value.settings }, { command: value.command, sessionCommand }),
+      { claudeCode: "unreadable" },
+      sessionCommand,
+    );
+  }
+});
