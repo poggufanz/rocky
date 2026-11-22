@@ -156,3 +156,19 @@ test("hook session-start prints {} and exits 0 when the session-start module can
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "{}");
 });
+
+test("hook tool-result keeps memory out of its static import closure", () => {
+  const hookModule = join(compiledRoot, "commands", "tool-result-hook.js");
+  assert.ok(existsSync(hookModule), `compiled module is missing: ${hookModule}`);
+  const hookImports = staticSpecifiers(hookModule).sort();
+  assert.deepEqual(hookImports, ["../core/state-paths.js", "../core/tool-result.js", "node:fs"]);
+});
+
+test("hook tool-result prints {} and exits 0 when the tool-result module cannot load", (t) => {
+  const root = installStartupClosure(t);
+  mkdirSync(join(root, "commands"), { recursive: true });
+  writeFileSync(join(root, "commands", "tool-result-hook.js"), 'throw new Error("tool-result cannot load");\n', "utf8");
+  const result = runInstalledEntry(root, ["hook", "tool-result", "claude-code"], "{}");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "{}");
+});

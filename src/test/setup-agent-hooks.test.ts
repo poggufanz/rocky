@@ -32,6 +32,7 @@ import {
   rockyGateHookCommand,
   rockyHookCommand,
   rockySessionStartHookCommand,
+  rockyToolResultHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
 import { createPlatformServices } from "../setup/platform.js";
@@ -85,35 +86,104 @@ test("rockySessionStartHookCommand is absolute, quoted, and targets session-star
   assert.throws(() => rockySessionStartHookCommand("/usr/bin/node", "/home/a/.npm/_npx/a/index.js"), /ephemeral/);
 });
 
-test("buildClaudeHookEntries emits exact four-event shape", () => {
-  assert.deepEqual(buildClaudeHookEntries("CMD", "SESSION-CMD"), {
+test("rockyToolResultHookCommand is absolute, quoted, and targets tool-result claude-code", () => {
+  const command = rockyToolResultHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  assert.equal(command, '"/usr/bin/node" "/opt/rocky/dist/index.js" hook tool-result claude-code');
+  assert.throws(() => rockyToolResultHookCommand("node", "/opt/rocky/index.js"), /absolute/);
+  assert.throws(() => rockyToolResultHookCommand("/usr/bin/node\n", "/opt/rocky/index.js"), /unsafe/);
+  assert.throws(() => rockyToolResultHookCommand("/usr/bin/node", "/home/a/.npm/_npx/a/index.js"), /ephemeral/);
+});
+
+test("buildClaudeHookEntries emits exact five-event shape", () => {
+  assert.deepEqual(buildClaudeHookEntries({ agent: "CMD", session: "SESSION-CMD", toolResult: "TOOL-RESULT-CMD" }), {
     SessionStart: [{ hooks: [{ type: "command", command: "SESSION-CMD" }] }],
     UserPromptSubmit: [{ hooks: [{ type: "command", command: "CMD" }] }],
-    PostToolUse: [{
-      matcher: "Edit|Write|MultiEdit|NotebookEdit",
-      hooks: [{ type: "command", command: "CMD" }],
+    PostToolUse: [
+      {
+        matcher: "Edit|Write|MultiEdit|NotebookEdit",
+        hooks: [{ type: "command", command: "CMD" }],
+      },
+      {
+        matcher: "Bash|PowerShell",
+        hooks: [{ type: "command", command: "TOOL-RESULT-CMD", async: true }],
+      },
+    ],
+    PostToolUseFailure: [{
+      matcher: "Bash|PowerShell",
+      hooks: [{ type: "command", command: "TOOL-RESULT-CMD", timeout: 5 }],
     }],
     Stop: [{ hooks: [{ type: "command", command: "CMD" }] }],
   });
 });
 
-test("mergeClaudeHooks is idempotent and preserves foreign hooks", () => {
+test("mergeClaudeHooks adds PostToolUseFailure and a Bash|PowerShell PostToolUse group with the exact shape", () => {
+  const agent = rockyHookCommand("claude-code", "/usr/bin/node", "/opt/rocky/dist/index.js");
+  const session = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const toolResult = rockyToolResultHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const merged = mergeClaudeHooks({}, { agent, session, toolResult, gate: undefined });
+  const hooks = merged.hooks as Record<string, unknown[]>;
+  assert.deepEqual(hooks.PostToolUse, [
+    {
+      matcher: "Edit|Write|MultiEdit|NotebookEdit",
+      hooks: [{ type: "command", command: agent }],
+    },
+    {
+      matcher: "Bash|PowerShell",
+      hooks: [{ type: "command", command: toolResult, async: true }],
+    },
+  ]);
+  assert.deepEqual(hooks.PostToolUseFailure, [
+    {
+      matcher: "Bash|PowerShell",
+      hooks: [{ type: "command", command: toolResult, timeout: 5 }],
+    },
+  ]);
+});
+
+test("mergeClaudeHooks is idempotent and keeps foreign PostToolUse/PostToolUseFailure groups in order", () => {
   const sessionCommand = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const toolResultCommand = rockyToolResultHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
   const foreign = {
     keep: { answer: 42 },
     hooks: {
-      PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
+      PostToolUse: [
+        { matcher: "Bash", hooks: [{ type: "command", command: "other-tool-1" }] },
+        { matcher: "Read", hooks: [{ type: "command", command: "other-tool-2" }] },
+      ],
+      PostToolUseFailure: [
+        { matcher: "Bash", hooks: [{ type: "command", command: "other-fail-1" }] },
+        { matcher: "PowerShell", hooks: [{ type: "command", command: "other-fail-2" }] },
+      ],
     },
   };
-  const once = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
-  const twice = mergeClaudeHooks(structuredClone(once), LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
+  const commands = {
+    agent: LEGACY_CLAUDE_HOOK_COMMAND,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: undefined,
+  };
+  const once = mergeClaudeHooks(structuredClone(foreign), commands);
+  const twice = mergeClaudeHooks(structuredClone(once), commands);
   assert.deepEqual(twice, once);
-  assert.deepEqual((once.hooks as Record<string, unknown[]>).PostToolUse?.[0], foreign.hooks.PostToolUse[0]);
-  assert.deepEqual(mergeClaudeHooks({}, "X", "S"), {
+  const hooks = once.hooks as Record<string, unknown[]>;
+  assert.deepEqual(hooks.PostToolUse, [
+    ...foreign.hooks.PostToolUse,
+    { matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: LEGACY_CLAUDE_HOOK_COMMAND }] },
+    { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: toolResultCommand, async: true }] },
+  ]);
+  assert.deepEqual(hooks.PostToolUseFailure, [
+    ...foreign.hooks.PostToolUseFailure,
+    { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: toolResultCommand, timeout: 5 }] },
+  ]);
+  assert.deepEqual(mergeClaudeHooks({}, { agent: "X", session: "S", toolResult: "T", gate: undefined }), {
     hooks: {
       SessionStart: [{ hooks: [{ type: "command", command: "S" }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: "X" }] }],
-      PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: "X" }] }],
+      PostToolUse: [
+        { matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: "X" }] },
+        { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: "T", async: true }] },
+      ],
+      PostToolUseFailure: [{ matcher: "Bash|PowerShell", hooks: [{ type: "command", command: "T", timeout: 5 }] }],
       Stop: [{ hooks: [{ type: "command", command: "X" }] }],
     },
   });
@@ -121,6 +191,7 @@ test("mergeClaudeHooks is idempotent and preserves foreign hooks", () => {
 
 test("mergeClaudeHooks keeps foreign nested hooks in mixed groups", () => {
   const sessionCommand = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const toolResultCommand = rockyToolResultHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
   const existing = {
     hooks: {
       Stop: [{
@@ -132,7 +203,12 @@ test("mergeClaudeHooks keeps foreign nested hooks in mixed groups", () => {
       }],
     },
   };
-  const merged = mergeClaudeHooks(existing, LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
+  const merged = mergeClaudeHooks(existing, {
+    agent: LEGACY_CLAUDE_HOOK_COMMAND,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: undefined,
+  });
   assert.deepEqual((merged.hooks as Record<string, unknown[]>).Stop?.[0], {
     name: "foreign-group",
     hooks: [{ type: "command", command: "other-tool" }],
@@ -145,23 +221,44 @@ test("mergeClaudeHooks keeps foreign nested hooks in mixed groups", () => {
 });
 
 test("merge and remove reject malformed hook containers", () => {
-  assert.throws(() => mergeClaudeHooks({ hooks: [] }, "X", "S"), /hooks/);
-  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: {} } }, "X", "S"), /array/);
-  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: [{ hooks: "bad" }] } }, "X", "S"), /array/);
+  const commands = { agent: "X", session: "S", toolResult: "T", gate: undefined };
+  assert.throws(() => mergeClaudeHooks({ hooks: [] }, commands), /hooks/);
+  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: {} } }, commands), /array/);
+  assert.throws(() => mergeClaudeHooks({ hooks: { Stop: [{ hooks: "bad" }] } }, commands), /array/);
   assert.throws(() => removeClaudeHooks({ hooks: { Stop: null } }), /array/);
 });
 
 test("removeClaudeHooks strips only Rocky entries and drops empty containers", () => {
   const sessionCommand = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const toolResultCommand = rockyToolResultHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const commands = {
+    agent: LEGACY_CLAUDE_HOOK_COMMAND,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: undefined,
+  };
   const foreign = {
     root: true,
     hooks: {
       PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "other-tool" }] }],
     },
   };
-  const merged = mergeClaudeHooks(structuredClone(foreign), LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand);
+  const merged = mergeClaudeHooks(structuredClone(foreign), commands);
   assert.deepEqual(removeClaudeHooks(merged), foreign);
-  assert.deepEqual(removeClaudeHooks(mergeClaudeHooks({}, LEGACY_CLAUDE_HOOK_COMMAND, sessionCommand)), {});
+  assert.deepEqual(removeClaudeHooks(mergeClaudeHooks({}, commands)), {});
+});
+
+test("removeClaudeHooks preserves noncanonical or foreign tool-result commands", () => {
+  const commands = [
+    "rocky hook tool-result claude-code",
+    "foreign-tool --label 'hook tool-result claude-code'",
+    '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook tool-result claude-code',
+    '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook tool-result claude-code',
+  ];
+  for (const command of commands) {
+    const foreign = { hooks: { PostToolUseFailure: [{ matcher: "Bash|PowerShell", hooks: [{ type: "command", command, timeout: 5 }] }] } };
+    assert.deepEqual(removeClaudeHooks(foreign), foreign, command);
+  }
 });
 
 test("removeClaudeHooks preserves noncanonical or foreign session-start commands", () => {
@@ -247,7 +344,29 @@ test("removeAgentEventHooks strips canonical, legacy bang, and bare spellings wh
   });
 });
 
-function fixture(t: test.TestContext): { root: string; settings: string; command: string; sessionCommand: string } {
+test("removeAgentEventHooks keeps SessionStart and both tool-result groups", () => {
+  const agent = rockyHookCommand("claude-code", "/usr/bin/node", "/opt/rocky/dist/index.js");
+  const session = rockySessionStartHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const toolResult = rockyToolResultHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const gate = rockyGateHookCommand("/usr/bin/node", "/opt/rocky/dist/index.js");
+  const merged = mergeClaudeHooks({}, { agent, session, toolResult, gate });
+  assert.deepEqual(removeAgentEventHooks(merged), {
+    hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: session }] }],
+      PostToolUse: [{ matcher: "Bash|PowerShell", hooks: [{ type: "command", command: toolResult, async: true }] }],
+      PostToolUseFailure: [{ matcher: "Bash|PowerShell", hooks: [{ type: "command", command: toolResult, timeout: 5 }] }],
+      PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: gate }] }],
+    },
+  });
+});
+
+function fixture(t: test.TestContext): {
+  root: string;
+  settings: string;
+  command: string;
+  sessionCommand: string;
+  toolResultCommand: string;
+} {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rocky-agent-hooks-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
@@ -255,6 +374,7 @@ function fixture(t: test.TestContext): { root: string; settings: string; command
     settings: join(root, "nested", "claude-settings.json"),
     command: rockyHookCommand("claude-code", process.execPath, process.execPath),
     sessionCommand: rockySessionStartHookCommand(process.execPath, process.execPath),
+    toolResultCommand: rockyToolResultHookCommand(process.execPath, process.execPath),
   };
 }
 
@@ -352,13 +472,17 @@ test("install preserves foreign settings and is unchanged on repeat", async (t) 
   const options = {
     command: value.command,
     sessionCommand: value.sessionCommand,
+    toolResultCommand: value.toolResultCommand,
     confirmation,
     detail: (message: string) => details.push(message),
   };
   const first = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(first.status, "written");
   const bytes = readFileSync(value.settings);
-  assert.deepEqual(JSON.parse(details[0] ?? "null"), buildClaudeHookEntries(value.command, value.sessionCommand));
+  assert.deepEqual(
+    JSON.parse(details[0] ?? "null"),
+    buildClaudeHookEntries({ agent: value.command, session: value.sessionCommand, toolResult: value.toolResultCommand }),
+  );
   const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
   assert.deepEqual(parsed.custom, existing.custom);
   assert.deepEqual((parsed.hooks as Record<string, unknown>).OtherEvent, existing.hooks.OtherEvent);
@@ -373,16 +497,31 @@ test("install preserves foreign settings and is unchanged on repeat", async (t) 
   assert.equal(details.length, 2);
 });
 
-test("uninstall removes only owned groups, is idempotent, and leaves foreign root values", async (t) => {
+test("uninstall removes the tool-result groups and drops PostToolUseFailure when nothing foreign remains", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true });
   const foreign = { custom: "keep", hooks: { PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "foreign" }] }] } };
-  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks(structuredClone(foreign), value.command, value.sessionCommand))}\n`);
-  const first = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand });
+  writeFileSync(
+    value.settings,
+    `${JSON.stringify(mergeClaudeHooks(structuredClone(foreign), {
+      agent: value.command,
+      session: value.sessionCommand,
+      toolResult: value.toolResultCommand,
+      gate: undefined,
+    }))}\n`,
+  );
+  const options = {
+    command: value.command,
+    sessionCommand: value.sessionCommand,
+    toolResultCommand: value.toolResultCommand,
+  };
+  const first = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(first.status, "written");
-  assert.deepEqual(JSON.parse(readFileSync(value.settings, "utf8")), foreign);
+  const after = JSON.parse(readFileSync(value.settings, "utf8")) as { hooks: Record<string, unknown> };
+  assert.equal(after.hooks.PostToolUseFailure, undefined);
+  assert.deepEqual(after, foreign);
   const bytes = readFileSync(value.settings);
-  const second = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, { command: value.command, sessionCommand: value.sessionCommand });
+  const second = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(second.status, "unchanged");
   assert.deepEqual(readFileSync(value.settings), bytes);
 });
@@ -612,36 +751,119 @@ test("status is absent for partial, stale, duplicate, or unknown owned markers",
   const write = (config: Record<string, unknown>) => writeFileSync(value.settings, `${JSON.stringify(config)}\n`);
   const command = value.command;
   const sessionCommand = value.sessionCommand;
-  const statusOptions = { command, sessionCommand };
-  const complete = mergeClaudeHooks({}, command, sessionCommand);
+  const toolResultCommand = value.toolResultCommand;
+  const commands = { agent: command, session: sessionCommand, toolResult: toolResultCommand, gate: undefined };
+  const statusOptions = { command, sessionCommand, toolResultCommand };
+  const complete = mergeClaudeHooks({}, commands);
   write(complete);
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "installed" });
   const hooks = complete.hooks as Record<string, unknown[]>;
   hooks.Stop = [...hooks.Stop, ...hooks.Stop];
   write(complete);
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
-  const stale = mergeClaudeHooks({}, command, sessionCommand);
+  const stale = mergeClaudeHooks({}, commands);
   (stale.hooks as Record<string, unknown[]>).Stop = [{ hooks: [{ type: "command", command: "old hook agent-event claude-code" }] }];
   write(stale);
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
-  const unknown = mergeClaudeHooks({}, command, sessionCommand);
+  const unknown = mergeClaudeHooks({}, commands);
   (unknown.hooks as Record<string, unknown[]>).OtherEvent = [{ hooks: [{ type: "command", command }] }];
   write(unknown);
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
-  const sessionWithMatcher = mergeClaudeHooks({}, command, sessionCommand);
+  const sessionWithMatcher = mergeClaudeHooks({}, commands);
   (sessionWithMatcher.hooks as Record<string, unknown[]>).SessionStart = [{
     matcher: "startup",
     hooks: [{ type: "command", command: sessionCommand }],
   }];
   write(sessionWithMatcher);
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
-  const sessionAsync = mergeClaudeHooks({}, command, sessionCommand);
+  const sessionAsync = mergeClaudeHooks({}, commands);
   (sessionAsync.hooks as Record<string, unknown[]>).SessionStart = [{
     hooks: [{ type: "command", command: sessionCommand, async: true }],
   }];
   write(sessionAsync);
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "absent" });
   t.after(() => rmSync(value.root, { recursive: true, force: true }));
+});
+
+test("agentHooksStatus is installed for a fresh merge and absent when the tool-result groups are missing or have a wrong matcher, timeout, or async flag", (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true });
+  const write = (config: Record<string, unknown>) => writeFileSync(value.settings, `${JSON.stringify(config)}\n`);
+  const commands = {
+    agent: value.command,
+    session: value.sessionCommand,
+    toolResult: value.toolResultCommand,
+    gate: undefined,
+  };
+  const statusOptions = {
+    command: value.command,
+    sessionCommand: value.sessionCommand,
+    toolResultCommand: value.toolResultCommand,
+  };
+
+  write(mergeClaudeHooks({}, commands));
+  assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, statusOptions), { claudeCode: "installed" });
+
+  const cases: ReadonlyArray<readonly [string, (hooks: Record<string, unknown[]>) => void]> = [
+    ["missing PostToolUseFailure", (hooks) => { delete hooks.PostToolUseFailure; }],
+    ["missing PostToolUse tool-result group", (hooks) => { hooks.PostToolUse = hooks.PostToolUse.slice(0, 1); }],
+    ["reversed PostToolUse group order", (hooks) => { hooks.PostToolUse = [...hooks.PostToolUse].reverse(); }],
+    ["PostToolUse tool-result wrong matcher", (hooks) => {
+      hooks.PostToolUse = [
+        hooks.PostToolUse[0],
+        { matcher: "Bash", hooks: [{ type: "command", command: value.toolResultCommand, async: true }] },
+      ];
+    }],
+    ["PostToolUse tool-result missing async", (hooks) => {
+      hooks.PostToolUse = [
+        hooks.PostToolUse[0],
+        { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: value.toolResultCommand }] },
+      ];
+    }],
+    ["PostToolUse tool-result async false", (hooks) => {
+      hooks.PostToolUse = [
+        hooks.PostToolUse[0],
+        { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: value.toolResultCommand, async: false }] },
+      ];
+    }],
+    ["PostToolUse tool-result unexpected timeout", (hooks) => {
+      hooks.PostToolUse = [
+        hooks.PostToolUse[0],
+        { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: value.toolResultCommand, async: true, timeout: 5 }] },
+      ];
+    }],
+    ["PostToolUseFailure wrong matcher", (hooks) => {
+      hooks.PostToolUseFailure = [
+        { matcher: "Bash", hooks: [{ type: "command", command: value.toolResultCommand, timeout: 5 }] },
+      ];
+    }],
+    ["PostToolUseFailure missing timeout", (hooks) => {
+      hooks.PostToolUseFailure = [
+        { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: value.toolResultCommand }] },
+      ];
+    }],
+    ["PostToolUseFailure wrong timeout", (hooks) => {
+      hooks.PostToolUseFailure = [
+        { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: value.toolResultCommand, timeout: 10 }] },
+      ];
+    }],
+    ["PostToolUseFailure async true", (hooks) => {
+      hooks.PostToolUseFailure = [
+        { matcher: "Bash|PowerShell", hooks: [{ type: "command", command: value.toolResultCommand, timeout: 5, async: true }] },
+      ];
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const config = mergeClaudeHooks({}, commands);
+    mutate(config.hooks as Record<string, unknown[]>);
+    write(config);
+    assert.deepEqual(
+      agentHooksStatus({ settingsPath: value.settings }, statusOptions),
+      { claudeCode: "absent" },
+      name,
+    );
+  }
 });
 
 test("dedicated setup branch installs only Claude hooks and never invokes MCP adapters", async (t) => {
@@ -926,7 +1148,7 @@ test("setup status reports Codex manual and uninstall leaves TOML untouched", as
   assert.equal(readFileSync(configPath, "utf8"), before);
 });
 
-test("installClaudeAgentHooks writes four events including SessionStart and rerun is unchanged", async (t) => {
+test("installClaudeAgentHooks writes five events including SessionStart and tool-result and rerun is unchanged", async (t) => {
   const value = fixture(t);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
   const expectedSessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
@@ -941,12 +1163,12 @@ test("installClaudeAgentHooks writes four events including SessionStart and reru
   const first = await installClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(first.status, "written");
   const proposed = JSON.parse(details[0] ?? "null") as Record<string, unknown>;
-  assert.deepEqual(Object.keys(proposed), ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]);
+  assert.deepEqual(Object.keys(proposed), ["SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "Stop"]);
 
   const parsed = JSON.parse(readFileSync(value.settings, "utf8")) as {
     hooks: Record<string, Array<{ matcher?: unknown; hooks: Array<Record<string, unknown>> }>>;
   };
-  assert.deepEqual(Object.keys(parsed.hooks), ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]);
+  assert.deepEqual(Object.keys(parsed.hooks), ["SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "Stop"]);
   assert.equal(parsed.hooks.SessionStart.length, 1);
   assert.equal(parsed.hooks.SessionStart[0].matcher, undefined);
   assert.deepEqual(parsed.hooks.SessionStart[0].hooks, [
@@ -1057,6 +1279,60 @@ test("installClaudeAgentHooks refuses non-canonical sessionCommand overrides bef
       agentHooksStatus({ settingsPath: value.settings }, { command: value.command, sessionCommand }),
       { claudeCode: "unreadable" },
       sessionCommand,
+    );
+  }
+});
+
+test("installClaudeAgentHooks rejects a non-canonical toolResultCommand before any preview", async (t) => {
+  const value = fixture(t);
+  mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
+  const beforeBytes = Buffer.from(
+    `${JSON.stringify({
+      custom: { keep: true },
+      hooks: { PostToolUseFailure: [{ matcher: "Bash", hooks: [{ type: "command", command: "foreign-fail" }] }] },
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  writeFileSync(value.settings, beforeBytes);
+
+  const nonCanonicalOverrides = [
+    "rocky hook tool-result claude-code",
+    "foreign-tool --label 'hook tool-result claude-code'",
+    '"/opt/Rocky\\! CLI/node" "/opt/Rocky\\! CLI/index.js" hook tool-result claude-code',
+    '"C:\\Program Files\\%PATH%\\node.exe" "C:\\Rocky\\dist\\index.js" hook tool-result claude-code',
+    `${value.toolResultCommand} --extra`,
+  ];
+
+  for (const toolResultCommand of nonCanonicalOverrides) {
+    const details: string[] = [];
+    let prompted = false;
+    const result = await installClaudeAgentHooks({ settingsPath: value.settings }, {
+      command: value.command,
+      sessionCommand: value.sessionCommand,
+      toolResultCommand,
+      detail: (message) => details.push(message),
+      confirmation: {
+        async confirm(): Promise<boolean> {
+          prompted = true;
+          return true;
+        },
+      },
+    });
+    assert.deepEqual(
+      result,
+      { status: "error", detail: "Claude Code agent hooks update cannot complete" },
+      toolResultCommand,
+    );
+    assert.equal(prompted, false, toolResultCommand);
+    assert.equal(details.length, 0, toolResultCommand);
+    assert.deepEqual(readFileSync(value.settings), beforeBytes, toolResultCommand);
+    assert.deepEqual(
+      agentHooksStatus(
+        { settingsPath: value.settings },
+        { command: value.command, sessionCommand: value.sessionCommand, toolResultCommand },
+      ),
+      { claudeCode: "unreadable" },
+      toolResultCommand,
     );
   }
 });

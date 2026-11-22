@@ -37,6 +37,7 @@ import {
   rockyGateHookCommand,
   rockyHookCommand,
   rockySessionStartHookCommand,
+  rockyToolResultHookCommand,
   uninstallClaudeAgentHooks,
 } from "../setup/agent-hooks.js";
 import { SetupUsageError, parseSetupArgs } from "../setup/parser.js";
@@ -133,10 +134,12 @@ test("desk install keeps foreign hooks and mixed groups in order", () => {
 test("agent uninstall leaves desk hooks; desk uninstall leaves agent and gate hooks", () => {
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
-  const both = mergeDeskHooks(mergeClaudeHooks({}, command, sessionCommand, gateCommand), DESK_COMMAND, DESK_HOOK_ASYNC);
+  const commands = { agent: command, session: sessionCommand, toolResult: toolResultCommand, gate: gateCommand };
+  const both = mergeDeskHooks(mergeClaudeHooks({}, commands), DESK_COMMAND, DESK_HOOK_ASYNC);
   assert.deepEqual(removeClaudeHooks(structuredClone(both)), mergeDeskHooks({}, DESK_COMMAND, DESK_HOOK_ASYNC));
-  assert.deepEqual(removeDeskHooks(structuredClone(both)), mergeClaudeHooks({}, command, sessionCommand, gateCommand));
+  assert.deepEqual(removeDeskHooks(structuredClone(both)), mergeClaudeHooks({}, commands));
 });
 
 test("desk reinstall is idempotent (status unchanged)", async (t) => {
@@ -297,12 +300,23 @@ test("agent hook status stays installed when desk hooks are also present", async
   const value = settingsFixture(t);
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
   writeFileSync(
     value.settings,
-    `${JSON.stringify(mergeDeskHooks(mergeClaudeHooks({}, command, sessionCommand), DESK_COMMAND, DESK_HOOK_ASYNC))}\n`,
+    `${JSON.stringify(mergeDeskHooks(mergeClaudeHooks({}, {
+      agent: command,
+      session: sessionCommand,
+      toolResult: toolResultCommand,
+      gate: undefined,
+    }), DESK_COMMAND, DESK_HOOK_ASYNC))}\n`,
   );
-  const options = { command, sessionCommand, confirmation: { async confirm(): Promise<boolean> { return true; } } };
+  const options = {
+    command,
+    sessionCommand,
+    toolResultCommand,
+    confirmation: { async confirm(): Promise<boolean> { return true; } },
+  };
   assert.deepEqual(agentHooksStatus({ settingsPath: value.settings }, options), { claudeCode: "installed" });
   const removed = await uninstallClaudeAgentHooks({ settingsPath: value.settings }, options);
   assert.equal(removed.status, "written");
@@ -552,11 +566,17 @@ test("agent hooks: --yes with uninstall prints no install note", async (t) => {
   assert.equal(asked(), 0);
 });
 
-test("removeAgentEventHooks drops canonical and bare agent-event hooks, keeps SessionStart, gate, and foreign", () => {
+test("removeAgentEventHooks drops canonical and bare agent-event hooks, keeps SessionStart, tool-result, gate, and foreign", () => {
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
-  const base = mergeClaudeHooks({}, command, sessionCommand, gateCommand);
+  const base = mergeClaudeHooks({}, {
+    agent: command,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: gateCommand,
+  });
   const baseHooks = base.hooks as Record<string, unknown[]>;
   const input: Record<string, unknown> = {
     hooks: {
@@ -579,19 +599,26 @@ test("removeAgentEventHooks drops canonical and bare agent-event hooks, keeps Se
   assert.deepEqual(hooks.SessionStart, baseHooks.SessionStart);
   assert.deepEqual(hooks.PreToolUse, baseHooks.PreToolUse);
   assert.equal(hooks.UserPromptSubmit, undefined);
-  assert.equal(hooks.PostToolUse, undefined);
+  assert.deepEqual(hooks.PostToolUse, baseHooks.PostToolUse.slice(1));
+  assert.deepEqual(hooks.PostToolUseFailure, baseHooks.PostToolUseFailure);
   assert.deepEqual(hooks.Stop, [{ hooks: [{ type: "command", command: "foreign-tool" }] }]);
   assert.equal(JSON.stringify(output).includes("hook agent-event claude-code"), false);
 });
 
-test("desk install removes agent-event hooks and keeps SessionStart and the gate", async (t) => {
+test("desk install removes agent-event hooks and keeps SessionStart, tool-result, and the gate", async (t) => {
   const value = settingsFixture(t);
   const hookBin = hookBinFixture(t);
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
-  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, command, sessionCommand, gateCommand))}\n`);
+  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, {
+    agent: command,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: gateCommand,
+  }))}\n`);
   const details: string[] = [];
 
   const result = await installDeskHooks({ settingsPath: value.settings }, {
@@ -626,8 +653,14 @@ test("desk uninstall does not put agent-event hooks back", async (t) => {
   const hookBin = hookBinFixture(t);
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
-  writeFileSync(fallback, `${JSON.stringify(mergeClaudeHooks({}, command, sessionCommand, gateCommand))}\n`);
+  writeFileSync(fallback, `${JSON.stringify(mergeClaudeHooks({}, {
+    agent: command,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: gateCommand,
+  }))}\n`);
   const dependencies = commandDependencies(home, {}, hookBin);
 
   const installed = await captureStderr(() => setup(["--desk-hooks", hookBin], dependencies));
@@ -669,9 +702,15 @@ test("desk install fails without writing when the desk binary is deleted during 
   const hookBin = hookBinFixture(t);
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
-  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, command, sessionCommand, gateCommand))}\n`);
+  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, {
+    agent: command,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: gateCommand,
+  }))}\n`);
   const beforeBytes = readFileSync(value.settings);
 
   const result = await installDeskHooks({ settingsPath: value.settings }, {
@@ -698,9 +737,15 @@ test("desk install fails without removing agent-event hooks when the desk path i
   mkdirSync(dirBin);
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
-  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, command, sessionCommand, gateCommand))}\n`);
+  writeFileSync(value.settings, `${JSON.stringify(mergeClaudeHooks({}, {
+    agent: command,
+    session: sessionCommand,
+    toolResult: toolResultCommand,
+    gate: gateCommand,
+  }))}\n`);
   const beforeBytes = readFileSync(value.settings);
 
   const result = await installDeskHooks({ settingsPath: value.settings }, {
@@ -721,6 +766,7 @@ test("desk install refuses undisclosed retirement when agent-event hooks appear 
   const hookBin = hookBinFixture(t);
   const command = rockyHookCommand("claude-code", process.execPath, process.execPath);
   const sessionCommand = rockySessionStartHookCommand(process.execPath, process.execPath);
+  const toolResultCommand = rockyToolResultHookCommand(process.execPath, process.execPath);
   const gateCommand = rockyGateHookCommand(process.execPath, process.execPath);
   mkdirSync(dirname(value.settings), { recursive: true, mode: 0o700 });
   writeFileSync(value.settings, `${JSON.stringify({ custom: { keep: true } })}\n`);
@@ -733,7 +779,12 @@ test("desk install refuses undisclosed retirement when agent-event hooks appear 
       async confirm() {
         writeFileSync(
           value.settings,
-          `${JSON.stringify(mergeClaudeHooks({ custom: { keep: true } }, command, sessionCommand, gateCommand))}\n`,
+          `${JSON.stringify(mergeClaudeHooks({ custom: { keep: true } }, {
+            agent: command,
+            session: sessionCommand,
+            toolResult: toolResultCommand,
+            gate: gateCommand,
+          }))}\n`,
         );
         return true;
       },
@@ -819,8 +870,14 @@ test("setup --status reports absent, not retired, when desk hooks coexist with s
   const staleEntry = process.platform === "win32" ? "C:\\old\\index.js" : "/old/index.js";
   const staleCommand = rockyHookCommand("claude-code", staleNode, staleEntry);
   const staleSession = rockySessionStartHookCommand(staleNode, staleEntry);
+  const staleToolResult = rockyToolResultHookCommand(staleNode, staleEntry);
   const desk = JSON.parse(readFileSync(fallback, "utf8")) as Record<string, unknown>;
-  const withStale = mergeClaudeHooks(desk, staleCommand, staleSession);
+  const withStale = mergeClaudeHooks(desk, {
+    agent: staleCommand,
+    session: staleSession,
+    toolResult: staleToolResult,
+    gate: undefined,
+  });
   writeFileSync(fallback, `${JSON.stringify(withStale)}\n`);
 
   const status = await captureStderr(() => setup(["--status"], dependencies));

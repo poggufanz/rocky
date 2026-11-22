@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import {
-  hasOwnedAgentHooks,
+  hasOwnedClaudeHooks,
   hasOwnedGateGroup,
   mergeClaudeHooks,
   ownedClaudeHookProjection,
@@ -10,6 +10,7 @@ import {
   rockyGateHookCommand,
   rockyHookCommand,
   rockySessionStartHookCommand,
+  rockyToolResultHookCommand,
   writeMutation,
   type AgentHooksOperationResult,
   type CurrentConfig,
@@ -91,12 +92,12 @@ function buildAgentSide(
   gateCommand: string | undefined,
   retire: boolean,
 ): Record<string, unknown> {
-  const merged = mergeClaudeHooks(
-    value,
-    rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
-    rockySessionStartHookCommand(paths.nodePath, paths.entryPath),
-    gateCommand,
-  );
+  const merged = mergeClaudeHooks(value, {
+    agent: rockyHookCommand("claude-code", paths.nodePath, paths.entryPath),
+    session: rockySessionStartHookCommand(paths.nodePath, paths.entryPath),
+    toolResult: rockyToolResultHookCommand(paths.nodePath, paths.entryPath),
+    gate: gateCommand,
+  });
   return retire ? removeAgentEventHooks(merged) : merged;
 }
 
@@ -118,7 +119,7 @@ export function inspectClaudeSettings(settingsPath: string, paths: Paths): AutoT
     const agentState: AutoState = JSON.stringify(ownedClaudeHookProjection(value))
         === JSON.stringify(ownedClaudeHookProjection(agentMerged))
       ? "ok"
-      : hasOwnedAgentHooks(value) || ownedGate ? "stale" : "missing";
+      : hasOwnedClaudeHooks(value) ? "stale" : "missing";
     const reports = [report("agent-hooks", settingsPath, agentState)];
     if (desk?.status === "ready") {
       const deskMerged = mergeDeskHooks(value, desk.command, DESK_HOOK_ASYNC);
@@ -226,6 +227,7 @@ export function claudeSettingsSnippets(paths: Paths, keptGate: boolean): string[
     snippets.push(JSON.stringify(rockyHookCommand("claude-code", paths.nodePath, paths.entryPath)));
   }
   snippets.push(JSON.stringify(rockySessionStartHookCommand(paths.nodePath, paths.entryPath)));
+  snippets.push(JSON.stringify(rockyToolResultHookCommand(paths.nodePath, paths.entryPath)));
   if (keptGate) snippets.push(JSON.stringify(rockyGateHookCommand(paths.nodePath, paths.entryPath)));
   if (deskCommand !== undefined) snippets.push(JSON.stringify(deskCommand));
   return snippets;
