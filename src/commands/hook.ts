@@ -147,7 +147,8 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
   }
   const memory = readMemory();
   const now = Date.now();
-  const fp = commandFingerprintCandidates(cmd, exitCode);
+  // ponytail: lookup must hash the bounded command form that recordHookFailure stores.
+  const fp = commandFingerprintCandidates(boundCommand(cmd), exitCode);
   let preparedNote: PreparedLaneOneNote | undefined;
   if (memory !== undefined && !isTypoSymptom(cmd, exitCode)) {
     try {
