@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -296,7 +297,11 @@ async function main() {
       auth,
     });
 
-    seedInlineProbeRepo(sandbox.taskDir, opts.arm, buildToolEnv(process.env, process.platform));
+    seedInlineProbeRepo(
+      sandbox.taskDir,
+      opts.arm,
+      buildToolEnv(process.env, process.platform, { home: sandbox.home }),
+    );
 
     const claudeExe = resolveExecutableOnPath(
       process.platform === "win32" ? ["claude.exe", "claude.cmd", "claude"] : ["claude"],
@@ -397,13 +402,17 @@ async function main() {
   }
 }
 
-function isMainModule() {
-  if (!process.argv[1]) return false;
-  const entry = resolve(process.argv[1]);
-  const self = fileURLToPath(import.meta.url);
-  return process.platform === "win32"
-    ? entry.toLowerCase() === self.toLowerCase()
-    : entry === self;
+export function isMainModule(
+  argv1 = process.argv[1],
+  metaUrl = import.meta.url,
+  realpath = realpathSync,
+) {
+  if (!argv1) return false;
+  try {
+    return realpath(argv1) === realpath(fileURLToPath(metaUrl));
+  } catch {
+    return false;
+  }
 }
 
 if (isMainModule()) {

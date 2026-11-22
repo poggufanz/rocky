@@ -14,8 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, test } from "node:test";
-import { fileURLToPath } from "node:url";
-import { CAPTURE_PROMPT, ENV_REPORT_KEYS } from "../capture.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { CAPTURE_PROMPT, ENV_REPORT_KEYS, isMainModule } from "../capture.mjs";
 import {
   CLAUDE_FLAGS,
   MODEL,
@@ -25,6 +25,7 @@ import {
   createSandbox,
   destroySandbox,
   packArm,
+  publishTarball,
   redactText,
   resolveExecutableOnPath,
   scrubEnv,
@@ -83,18 +84,56 @@ describe("sandbox", () => {
     assert.deepEqual(input, snapshot);
   });
 
+  test("buildToolEnv with home pins HOME, USERPROFILE, and GIT_CONFIG_NOSYSTEM without tokens", () => {
+    const input = {
+      ROCKY_EVAL_OAUTH_TOKEN: "eval-secret",
+      CLAUDE_CODE_OAUTH_TOKEN: "claude-secret",
+      CLAUDECODE: "1",
+      NODE_OPTIONS: "--require /evil.cjs",
+      Home: "/controller-home",
+      UserProfile: "C:\\Users\\controller",
+      GIT_CONFIG_GLOBAL: "/controller/.gitconfig",
+      XDG_CONFIG_HOME: "/controller/.config",
+      PATH: "/usr/bin",
+    };
+    const snapshot = { ...input };
+    const sandboxHome = "/sandbox/run-1/home";
+
+    const out = buildToolEnv(input, process.platform, { home: sandboxHome });
+
+    assert.equal(out.HOME, sandboxHome);
+    assert.equal(out.USERPROFILE, sandboxHome);
+    assert.equal(out.Home, undefined);
+    assert.equal(out.UserProfile, undefined);
+    assert.equal(out.GIT_CONFIG_NOSYSTEM, "1");
+    assert.equal(out.GIT_CONFIG_GLOBAL, undefined);
+    assert.equal(out.XDG_CONFIG_HOME, undefined);
+    assert.equal(out.ROCKY_EVAL_OAUTH_TOKEN, undefined);
+    assert.equal(out.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.equal(out.CLAUDECODE, undefined);
+    assert.equal(out.NODE_OPTIONS, undefined);
+    assert.deepEqual(input, snapshot);
+  });
+
   test("stripRockyFromPath removes rocky shims, empty entries, and relative entries", () => {
     const winSeen = [];
     const winOut = stripRockyFromPath(
-      "C:\\A;C:\\B;;rel\\bin;.;\\drive-rel;C:\\C",
+      "C:\\A;C:\\B;;rel\\bin;.;\\drive-rel;/drive-rel;C:/D;\\\\server\\share\\bin;//server/share/bin;C:\\C",
       "win32",
       (dir) => {
         winSeen.push(dir);
         return dir === "C:\\B";
       },
     );
-    assert.equal(winOut, "C:\\A;C:\\C");
-    assert.deepEqual(winSeen, ["C:\\A", "C:\\B", "C:\\C"]);
+    assert.equal(winOut, "C:\\A;C:/D;\\\\server\\share\\bin;//server/share/bin;C:\\C");
+    assert.deepEqual(winSeen, [
+      "C:\\A",
+      "C:\\B",
+      "C:/D",
+      "\\\\server\\share\\bin",
+      "//server/share/bin",
+      "C:\\C",
+    ]);
 
     const posixSeen = [];
     const posixOut = stripRockyFromPath(
@@ -150,6 +189,26 @@ describe("sandbox", () => {
     );
   });
 
+  test("assertNoAncestorInstructions probes POSIX components ending in a literal backslash", () => {
+    const offending = "/real/dir\\/CLAUDE.md";
+    const exists = (candidate) => candidate === offending;
+    const realpath = (candidate) => {
+      if (candidate === "/clean/link") return "/real/dir\\/target";
+      const err = new Error(`ENOENT: ${candidate}`);
+      err.code = "ENOENT";
+      throw err;
+    };
+
+    assert.throws(
+      () => assertNoAncestorInstructions("/real/dir\\/sub", exists, realpath, "linux"),
+      /\/real\/dir\\\/CLAUDE\.md/,
+    );
+    assert.throws(
+      () => assertNoAncestorInstructions("/clean/link/sub/run", exists, realpath, "linux"),
+      /\/real\/dir\\\/CLAUDE\.md/,
+    );
+  });
+
   test("assertOutsideWorkspace refuses repo child, workspace sibling, ..foo child, and symlinked targets", () => {
     const posixRealpath = (candidate) => {
       if (candidate === "/ext/link") return "/ws/repo";
@@ -167,6 +226,10 @@ describe("sandbox", () => {
     );
     assert.throws(
       () => assertOutsideWorkspace("/ws/sibling", "/ws/repo", "linux", posixRealpath),
+      /enclosing workspace/i,
+    );
+    assert.throws(
+      () => assertOutsideWorkspace("/ws/..\\scratch/out", "/ws/repo", "linux", posixRealpath),
       /enclosing workspace/i,
     );
     assert.throws(
@@ -394,6 +457,32 @@ describe("sandbox", () => {
     }
   });
 
+  test("publishTarball preserves existing cached tarball on race and cleans staged file", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "rocky-eval-publish-"));
+    try {
+      const cached = join(cacheDir, "rocky-abc.tgz");
+      const stagedRace = join(cacheDir, "rocky-abc.tgz.tmp-race");
+      writeFileSync(cached, "first-winner-bytes", "utf8");
+      writeFileSync(stagedRace, "second-loser-bytes", "utf8");
+
+      const raceResult = publishTarball(stagedRace, cached);
+      assert.equal(raceResult, cached);
+      assert.equal(readFileSync(cached, "utf8"), "first-winner-bytes");
+      assert.equal(existsSync(stagedRace), false);
+
+      const freshCached = join(cacheDir, "rocky-def.tgz");
+      const stagedFresh = join(cacheDir, "rocky-def.tgz.tmp-fresh");
+      writeFileSync(stagedFresh, "fresh-tarball-bytes", "utf8");
+
+      const freshResult = publishTarball(stagedFresh, freshCached);
+      assert.equal(freshResult, freshCached);
+      assert.equal(readFileSync(freshCached, "utf8"), "fresh-tarball-bytes");
+      assert.equal(existsSync(stagedFresh), false);
+    } finally {
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
   test("exports frozen model, flags, and packArm", () => {
     assert.equal(MODEL, "claude-sonnet-5-5");
     assert.deepEqual(CLAUDE_FLAGS, [
@@ -435,6 +524,29 @@ describe("sandbox", () => {
 });
 
 describe("capture CLI guards", () => {
+  test("isMainModule resolves symlinks via realpath and returns false on errors", () => {
+    const captureUrl = pathToFileURL(captureScript).href;
+    assert.equal(isMainModule(captureScript, captureUrl), true);
+    assert.equal(isMainModule(undefined, captureUrl), false);
+    assert.equal(isMainModule("", captureUrl), false);
+
+    const symlinkRealpath = (candidate) => {
+      if (candidate === "/bin/capture-link") return "/repo/scripts/eval/capture.mjs";
+      if (candidate === fileURLToPath(captureUrl)) return "/repo/scripts/eval/capture.mjs";
+      return candidate;
+    };
+    assert.equal(isMainModule("/bin/capture-link", captureUrl, symlinkRealpath), true);
+    assert.equal(isMainModule("/bin/other-script", captureUrl, symlinkRealpath), false);
+    assert.equal(
+      isMainModule("/missing/path", captureUrl, () => {
+        const err = new Error("ENOENT");
+        err.code = "ENOENT";
+        throw err;
+      }),
+      false,
+    );
+  });
+
   test("CAPTURE_PROMPT requests only the seven reported variables and never dumps full env", () => {
     for (const key of ENV_REPORT_KEYS) {
       assert.match(CAPTURE_PROMPT, new RegExp(`\\b${key}\\b`));

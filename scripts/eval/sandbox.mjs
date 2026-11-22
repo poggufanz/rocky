@@ -6,6 +6,7 @@ import {
   constants as fsConstants,
   copyFileSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -93,11 +94,13 @@ export function scrubEnv(env, platform = process.platform) {
 
 /**
  * Build a scrubbed environment for git/npm helper children without agent tokens or color overrides.
+ * When `options.home` is set, pins `HOME`/`USERPROFILE` to that directory and disables system/global git config.
  * @param {Record<string, string | undefined>} [env]
  * @param {NodeJS.Platform} [platform]
+ * @param {{ home?: string }} [options]
  * @returns {Record<string, string>}
  */
-export function buildToolEnv(env = process.env, platform = process.platform) {
+export function buildToolEnv(env = process.env, platform = process.platform, options = {}) {
   const toolEnv = scrubEnv(env, platform);
   const hasPathKey = Object.keys(toolEnv).some((key) => key.toUpperCase() === "PATH");
   if (hasPathKey) {
@@ -107,6 +110,23 @@ export function buildToolEnv(env = process.env, platform = process.platform) {
     if (key.toUpperCase() === "FORCE_COLOR") delete toolEnv[key];
   }
   toolEnv.npm_config_color = "false";
+  if (typeof options.home === "string" && options.home.length > 0) {
+    for (const key of Object.keys(toolEnv)) {
+      const upper = key.toUpperCase();
+      if (
+        upper === "HOME"
+        || upper === "USERPROFILE"
+        || upper === "GIT_CONFIG_NOSYSTEM"
+        || upper === "GIT_CONFIG_GLOBAL"
+        || upper === "XDG_CONFIG_HOME"
+      ) {
+        delete toolEnv[key];
+      }
+    }
+    toolEnv.HOME = options.home;
+    toolEnv.USERPROFILE = options.home;
+    toolEnv.GIT_CONFIG_NOSYSTEM = "1";
+  }
   return toolEnv;
 }
 
@@ -122,7 +142,7 @@ function defaultHasRockyShim(dir, platform) {
 
 function isAbsolutePathEntry(entry, platform) {
   if (platform === "win32") {
-    return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(entry);
+    return win32.isAbsolute(entry) && /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(entry);
   }
   return posix.isAbsolute(entry);
 }
@@ -155,6 +175,7 @@ export function stripRockyFromPath(
 
 function pathApiFor(target, fallbackApi = process.platform === "win32" ? win32 : posix) {
   if (/^[A-Za-z]:[\\/]|^\\\\/.test(target)) return win32;
+  if (fallbackApi === win32 && target.startsWith("//")) return win32;
   if (target.startsWith("/")) return posix;
   return fallbackApi;
 }
@@ -162,7 +183,10 @@ function pathApiFor(target, fallbackApi = process.platform === "win32" ? win32 :
 function stripTrailingSep(target, pathApi) {
   const root = pathApi.parse(target).root;
   let current = target;
-  while (current.length > root.length && (current.endsWith("/") || current.endsWith("\\"))) {
+  const isSep = pathApi === win32
+    ? (ch) => ch === "/" || ch === "\\"
+    : (ch) => ch === "/";
+  while (current.length > root.length && isSep(current[current.length - 1])) {
     current = current.slice(0, -1);
   }
   return current;
@@ -217,17 +241,21 @@ function walkAncestorsForSentinels(startDir, pathApi, exists, visited) {
  * @param {string} dir
  * @param {(candidate: string) => boolean} [exists]
  * @param {(candidate: string) => string} [realpath]
+ * @param {NodeJS.Platform} [platform]
  */
 export function assertNoAncestorInstructions(
   dir,
   exists = existsSync,
   realpath = realpathSync.native,
+  platform,
 ) {
   if (typeof dir !== "string" || dir.length === 0) {
     throw new Error("Sandbox root must be a non-empty path");
   }
-  const pathApi = pathApiFor(dir);
-  const absolute = pathApi.isAbsolute(dir) ? pathApi.normalize(dir) : resolve(dir);
+  const pathApi = platform !== undefined
+    ? (platform === "win32" ? win32 : posix)
+    : pathApiFor(dir);
+  const absolute = pathApi.isAbsolute(dir) ? pathApi.normalize(dir) : pathApi.resolve(dir);
   const visited = new Set();
 
   walkAncestorsForSentinels(absolute, pathApi, exists, visited);
@@ -244,7 +272,7 @@ function isPathInside(target, base, pathApi, caseInsensitive) {
   const rel = pathApi.relative(normBase, normTarget);
   if (rel === "") return true;
   if (pathApi.isAbsolute(rel)) return false;
-  const firstSegment = rel.split(/[\\/]/)[0];
+  const firstSegment = rel.split(pathApi.sep)[0];
   return firstSegment !== "..";
 }
 
@@ -440,6 +468,24 @@ function removeTreeWithRetry(target) {
 }
 
 /**
+ * Atomically publish a staged tarball to its cache path without replacing an existing entry.
+ * @param {string} staged
+ * @param {string} cached
+ * @returns {string}
+ */
+export function publishTarball(staged, cached) {
+  try {
+    linkSync(staged, cached);
+  } catch (error) {
+    const code = error && typeof error === "object" ? error.code : undefined;
+    if (code !== "EEXIST") throw error;
+  } finally {
+    rmSync(staged, { force: true });
+  }
+  return cached;
+}
+
+/**
  * Pack a Rocky commit into a cached tarball using a temporary detached git worktree.
  * @param {string} commit
  * @param {string} cacheDir
@@ -509,18 +555,7 @@ export async function packArm(commit, cacheDir) {
     }
     const produced = join(packTmpDir, tarballs[0]);
     renameSync(produced, staging);
-    if (existsSync(cachedTgz)) {
-      rmSync(staging, { force: true });
-      return cachedTgz;
-    }
-    try {
-      renameSync(staging, cachedTgz);
-    } catch (error) {
-      rmSync(staging, { force: true });
-      if (existsSync(cachedTgz)) return cachedTgz;
-      throw error;
-    }
-    return cachedTgz;
+    return publishTarball(staging, cachedTgz);
   } finally {
     rmSync(staging, { force: true });
     removeTreeWithRetry(packTmpDir);
@@ -530,7 +565,6 @@ export async function packArm(commit, cacheDir) {
     });
     if (removed.status !== 0 || existsSync(worktreeDir)) {
       removeTreeWithRetry(worktreeDir);
-      runCommand(git, ["worktree", "prune"], { cwd: REPO_ROOT, env: toolEnv });
     }
   }
 }
@@ -572,7 +606,7 @@ export async function createSandbox({
   }
 
   const resolvedRoot = resolve(root);
-  assertNoAncestorInstructions(resolvedRoot, exists, realpath);
+  assertNoAncestorInstructions(resolvedRoot, exists, realpath, platform);
 
   const dir = join(resolvedRoot, runId);
   const home = join(dir, "home");
