@@ -412,9 +412,10 @@ async function readGateEventStdin(): Promise<string> {
 interface HookStdinResult {
   bytes: Uint8Array;
   overflow: boolean;
+  readError: boolean;
 }
 
-/** Bounded stdin read for one-shot hook lanes. Flags any input past maxBytes without buffering the rest. Never throws. */
+/** Bounded stdin read for one-shot hook lanes. Flags overflow or stream read errors without throwing. */
 async function readHookStdin(maxBytes: number): Promise<HookStdinResult> {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -422,15 +423,16 @@ async function readHookStdin(maxBytes: number): Promise<HookStdinResult> {
     for await (const chunk of process.stdin) {
       const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
       if (total + buffer.byteLength > maxBytes) {
-        return { bytes: Buffer.alloc(0), overflow: true };
+        return { bytes: Buffer.alloc(0), overflow: true, readError: false };
       }
       chunks.push(buffer);
       total += buffer.byteLength;
     }
   } catch {
-    // A stdin stream error still must not throw out of the hook.
+    // A stdin stream error still must not throw out of the hook; surface it so callers can choose.
+    return { bytes: Buffer.concat(chunks), overflow: false, readError: true };
   }
-  return { bytes: Buffer.concat(chunks), overflow: false };
+  return { bytes: Buffer.concat(chunks), overflow: false, readError: false };
 }
 
 /** Host-consent probe for the listen lane: explicit opt-in only, never PATH/config guessing. */
@@ -481,20 +483,35 @@ async function runGateEvent(vendor: string): Promise<number> {
   return 0;
 }
 
-/** `rocky hook session-start claude-code`: read stdin, record session id, print {}, always exit 0. */
-async function runSessionStart(): Promise<number> {
+interface JsonStdinHookSpec {
+  /** Load the hook module lazily and return its stdin byte cap and handler. */
+  load: () => Promise<{
+    maxBytes: number;
+    handle: (bytes: Uint8Array) => string | Promise<string>;
+  }>;
+  /**
+   * Required policy when stdin errors before EOF (no default):
+   * - "drop": return "{}" without invoking `handle`
+   * - "use-bytes": invoke `handle` with the bytes buffered before the error
+   */
+  onReadError: "drop" | "use-bytes";
+}
+
+/** Shared fail-open runner for JSON-stdout stdin hooks (`session-start`, `tool-result`). */
+async function runJsonStdinHook(spec: JsonStdinHookSpec): Promise<number> {
   // Broken stdout pipes can emit async errors (for example EPIPE) after write() returns.
   process.stdout.on("error", () => {});
   let stdout = "{}";
   try {
-    const { SESSION_START_STDIN_CAP_BYTES, sessionStartHook } = await import("./commands/session-start-hook.js");
-    const stdinRead = await readHookStdin(SESSION_START_STDIN_CAP_BYTES);
-    if (!stdinRead.overflow) {
-      stdout = sessionStartHook(stdinRead.bytes, process.env);
+    const { maxBytes, handle } = await spec.load();
+    const stdinRead = await readHookStdin(maxBytes);
+    const shouldDrop = stdinRead.overflow || (stdinRead.readError && spec.onReadError === "drop");
+    if (!shouldDrop) {
+      stdout = await handle(stdinRead.bytes);
     }
   } catch {
-    // `sessionStartHook` never throws, but the module can fail to load. The
-    // hook must stay fail-open and still print {}.
+    // Handlers never throw, but module loading or awaiting can fail. The hook
+    // must stay fail-open and still print {}.
   }
   try {
     process.stdout.write(stdout, () => {});
@@ -504,27 +521,32 @@ async function runSessionStart(): Promise<number> {
   return 0;
 }
 
+/** `rocky hook session-start claude-code`: read stdin, record session id, print {}, always exit 0. */
+function runSessionStart(): Promise<number> {
+  return runJsonStdinHook({
+    load: async () => {
+      const { SESSION_START_STDIN_CAP_BYTES, sessionStartHook } = await import("./commands/session-start-hook.js");
+      return {
+        maxBytes: SESSION_START_STDIN_CAP_BYTES,
+        handle: (bytes) => sessionStartHook(bytes, process.env),
+      };
+    },
+    onReadError: "use-bytes",
+  });
+}
+
 /** `rocky hook tool-result claude-code`: read stdin, record unwrapped agent failure or fix, print {}, always exit 0. */
-async function runToolResult(): Promise<number> {
-  // Broken stdout pipes can emit async errors (for example EPIPE) after write() returns.
-  process.stdout.on("error", () => {});
-  let stdout = "{}";
-  try {
-    const { TOOL_RESULT_STDIN_CAP_BYTES, toolResultHook } = await import("./commands/tool-result-hook.js");
-    const stdinRead = await readHookStdin(TOOL_RESULT_STDIN_CAP_BYTES);
-    if (!stdinRead.overflow) {
-      stdout = await toolResultHook(stdinRead.bytes);
-    }
-  } catch {
-    // `toolResultHook` never throws, but the module can fail to load. The
-    // hook must stay fail-open and still print {}.
-  }
-  try {
-    process.stdout.write(stdout, () => {});
-  } catch {
-    // Ignore sync stdout write errors so the hook stays fail-open.
-  }
-  return 0;
+function runToolResult(): Promise<number> {
+  return runJsonStdinHook({
+    load: async () => {
+      const { TOOL_RESULT_STDIN_CAP_BYTES, toolResultHook } = await import("./commands/tool-result-hook.js");
+      return {
+        maxBytes: TOOL_RESULT_STDIN_CAP_BYTES,
+        handle: toolResultHook,
+      };
+    },
+    onReadError: "drop",
+  });
 }
 
 /**

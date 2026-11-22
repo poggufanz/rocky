@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test, { type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadMemoryChecked } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
@@ -321,6 +321,60 @@ test("process: busy lock prints {} and exits 0 within 4 s", (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "{}");
   assert.ok(elapsed < 4_000, `expected exit within 4000ms, got ${elapsed.toFixed(1)}ms`);
+  assert.equal(existsSync(paths.memory), false);
+  assert.equal(existsSync(paths.pending), false);
+});
+
+test("process: stdin read error after valid JSON prints {} and writes nothing", (t) => {
+  const { root, rockyHome, workDir } = makeSandbox(t);
+  const paths = resolveRockyPaths({ ROCKY_HOME: rockyHome });
+  const payload = failurePayload({ cwd: workDir });
+  const preloadPath = join(root, "failing-stdin.mjs");
+  writeFileSync(
+    preloadPath,
+    [
+      'import { Readable } from "node:stream";',
+      'const payload = Buffer.from(process.env.ROCKY_TEST_STDIN_PAYLOAD ?? "", "utf8");',
+      "let pushed = false;",
+      "const failingStdin = new Readable({",
+      "  read() {",
+      "    if (!pushed) {",
+      "      pushed = true;",
+      "      this.push(payload);",
+      "      return;",
+      "    }",
+      '    this.destroy(new Error("simulated stdin read error"));',
+      "  },",
+      "});",
+      'Object.defineProperty(process, "stdin", { value: failingStdin, configurable: true });',
+    ].join("\n"),
+    "utf8",
+  );
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ROCKY_HOME: rockyHome,
+    ROCKY_TEST_STDIN_PAYLOAD: payload,
+  };
+  delete env.ROCKY_TEST_SEAMS;
+  delete env.NODE_OPTIONS;
+  delete env.NODE_TEST_CONTEXT;
+
+  const result = spawnSync(
+    process.execPath,
+    ["--import", pathToFileURL(preloadPath).href, entry, "hook", "tool-result", "claude-code"],
+    {
+      cwd: workDir,
+      env,
+      encoding: "utf8",
+      timeout: PROCESS_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "{}");
   assert.equal(existsSync(paths.memory), false);
   assert.equal(existsSync(paths.pending), false);
 });
