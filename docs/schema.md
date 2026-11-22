@@ -21,9 +21,9 @@ existing kind.
 
 | Kind | File | Since | Status | Payload |
 |------|------|-------|--------|---------|
-| `failure` | `memory.jsonl` | v0.1 | active | `cwd, cmd, exitCode, fingerprint, fingerprintV, signature[], excerpt, origin? (run\|hook\|watch\|agent), agent?{vendor,session,agentId?,toolUseId?}, resolvedBy?, commandIdentity?, identityV?, identityReliable?, platform?` (`rocky run` writes `agent: { vendor: "claude-code", session }` when `ROCKY_AGENT_SESSION` is valid; no writer emits `origin: "agent"`, `agentId`, or `toolUseId` yet) |
-| `fix` | `memory.jsonl` | v0.1 | active | `cwd, cmd, failureIds[], candidateFailureIds?, links?, agent?{vendor,session,agentId?,toolUseId?}, commandIdentity?, identityV?, identityReliable?, platform?` (`rocky run` writes `agent: { vendor: "claude-code", session }` when `ROCKY_AGENT_SESSION` is valid) |
-| `association` | `memory.jsonl` | v0.5 | active | like `fix` (including `agent?`, written by `rocky run` under the same rule), weak-evidence links only |
+| `failure` | `memory.jsonl` | v0.1 | active | `cwd, cmd, exitCode, fingerprint, fingerprintV, signature[], excerpt, origin? (run\|hook\|watch\|agent), agent?{vendor,session,agentId?,toolUseId?}, resolvedBy?, commandIdentity?, identityV?, identityReliable?, platform?` (`rocky run` writes `agent: { vendor: "claude-code", session }` when `ROCKY_AGENT_SESSION` is valid; `rocky hook tool-result claude-code` writes `origin: "agent"` with `agent: { vendor: "claude-code", session, agentId?, toolUseId? }`) |
+| `fix` | `memory.jsonl` | v0.1 | active | `cwd, cmd, failureIds[], candidateFailureIds?, links?, agent?{vendor,session,agentId?,toolUseId?}, commandIdentity?, identityV?, identityReliable?, platform?` (`rocky run` writes `agent: { vendor: "claude-code", session }` when `ROCKY_AGENT_SESSION` is valid; `rocky hook tool-result claude-code` writes `agent: { vendor: "claude-code", session, agentId?, toolUseId? }`) |
+| `association` | `memory.jsonl` | v0.5 | active | like `fix` (including `agent?`, written by `rocky run` and `rocky hook tool-result claude-code` under the same rules), weak-evidence links only |
 | `note` | `memory.jsonl` | v0.5 | active | `cwd, cmd, file, line, subject, answer` |
 | `triple` | `memory.jsonl` | v0.5 | active | intent/mechanism/rationale triple, `schemaV: 1`, agent-hook origin |
 | `journal` | `journal.jsonl` | v0.6 | active | `note` (single line, ≤500 chars) |
@@ -36,7 +36,12 @@ existing kind.
 
 ## Agent session stamp and hook lanes
 
-`failure`, `fix`, and `association` records carry an optional `agent` object shaped `{ vendor: "claude-code" | "codex" | "generic", session: string, agentId?: string, toolUseId?: string }`. Only `rocky run` writes it: when `ROCKY_AGENT_SESSION` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, `rocky run` writes `agent: { vendor: "claude-code", session }`. When the variable is unset or invalid, `rocky run` omits `agent` silently without guessing or transforming the value. `rocky watch` and the shell hook (`_hookfail`, `_hooksuccess`) stay unstamped.
+`failure`, `fix`, and `association` records carry an optional `agent` object shaped `{ vendor: "claude-code" | "codex" | "generic", session: string, agentId?: string, toolUseId?: string }`. Two writers emit it:
+
+- `rocky run`: when `ROCKY_AGENT_SESSION` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, it writes `agent: { vendor: "claude-code", session }`. When the variable is unset or invalid, `rocky run` omits `agent` silently without guessing or transforming the value.
+- `rocky hook tool-result claude-code`: validates `session_id` (and optional `agent_id` and `tool_use_id`) against `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` and writes `agent: { vendor: "claude-code", session, agentId?, toolUseId? }` on `origin: "agent"` `failure` records and on `fix` and `association` records linked on pass.
+
+`rocky watch` and the shell hook (`_hookfail`, `_hooksuccess`) stay unstamped.
 
 Rocky links a failure to a later pass only when both come from the same agent session, or when either one has no session stamp. Rocky records order, not cause. When both records carry `agent` and `session` differs (or both carry `agentId` and `agentId` differs), new `fix` and `association` records are filtered out at write time, and the memory loader applies the rule to confirmed links from `fix` records (association lookup matches stored IDs). Unstamped records stay eligible to link with stamped or unstamped records.
 
@@ -47,6 +52,7 @@ CLI hook lanes (`rocky hook <subcommand>`):
 - `hook gate-event <vendor>` — advisory `PreToolUse` endpoint; prints `{}` or an `additionalContext` note, never denies, exits `0`.
 - `hook listen-event <harnessId> --surface <surface>` — one-shot Listening event ingress; static argv, stdin JSON (`64 KiB` cap), fail-open, empty stdout.
 - `hook session-start claude-code` — private Claude Code `SessionStart` endpoint; reads stdin JSON (up to `1 MiB`), checks `hook_event_name === "SessionStart"`, validates `session_id` against `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` and `$CLAUDE_ENV_FILE` (non-empty absolute path free of control characters, regular file when present), and appends `export ROCKY_AGENT_SESSION='<session_id>'\n` (prepending `\n` when the existing file is non-empty without a trailing LF). Never creates missing parent directories, never denies, always prints `{}` and exits `0` on valid invocation (invalid vendor or extra arguments exit `2`).
+- `hook tool-result claude-code` — private Claude Code `PostToolUse` / `PostToolUseFailure` endpoint for `Bash` and `PowerShell` tool calls; reads stdin JSON (up to `1 MiB`, dropping over-cap input or stream read errors), waits at most `1 s` for the memory lock, and skips interrupts, background calls, commands wrapped in `rocky run` or `rocky watch`, and undecidable command forms. On `PostToolUseFailure`, receives the tool `error` text (combined stdout and stderr), requires a leading `Exit code <N>` line with a non-zero signed 32-bit integer, skips when an `origin: "hook"` failure for the same reliable command identity and `cwd` was recorded within `5 s`, and writes an `origin: "agent"` `failure` record storing only the same bounded, redacted excerpt, normalized signature, and fingerprint as `rocky run` plus `agent: { vendor: "claude-code", session, agentId?, toolUseId? }`. On `PostToolUse`, when `~/.rocky/pending` exists, runs `resolveFixOnSuccess` on the same session and agent lane. Always prints `{}` and exits `0` on valid invocation (invalid vendor or extra arguments exit `2`).
 
 ## Adapter priority
 
