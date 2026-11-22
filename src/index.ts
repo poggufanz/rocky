@@ -190,6 +190,9 @@ usage:
   rocky hook session-start claude-code
                             private SessionStart endpoint; records the session id
                             for rocky run; stdout is always {}.
+  rocky hook tool-result claude-code
+                            private Bash/PowerShell result endpoint; records unwrapped
+                            agent failures and fixes; stdout is always {}.
 
 Memory lives in ~/.rocky/memory.jsonl. There is no telemetry. Outside calls:
 rocky check asks registry.npmjs.org whether a package exists (package name only,
@@ -234,7 +237,8 @@ type HookRequest =
   }
   | { kind: "gate-event"; vendor: string }
   | { kind: "listen-event"; harnessId: string; surface: string }
-  | { kind: "session-start"; vendor: "claude-code" };
+  | { kind: "session-start"; vendor: "claude-code" }
+  | { kind: "tool-result"; vendor: "claude-code" };
 
 interface NotifyFlags {
   rationale?: string;
@@ -369,9 +373,15 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
       return { kind: "session-start", vendor };
     }
   }
+  if (subcommand === "tool-result") {
+    const [vendor, ...extra] = rest;
+    if (vendor === "claude-code" && extra.length === 0) {
+      return { kind: "tool-result", vendor };
+    }
+  }
   throw new CliUsageError(
     "hook needs one known subcommand",
-    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>|listen-event <harnessId> --surface <surface>|session-start claude-code",
+    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>|listen-event <harnessId> --surface <surface>|session-start claude-code|tool-result claude-code",
   );
 }
 
@@ -484,6 +494,29 @@ async function runSessionStart(): Promise<number> {
     }
   } catch {
     // `sessionStartHook` never throws, but the module can fail to load. The
+    // hook must stay fail-open and still print {}.
+  }
+  try {
+    process.stdout.write(stdout, () => {});
+  } catch {
+    // Ignore sync stdout write errors so the hook stays fail-open.
+  }
+  return 0;
+}
+
+/** `rocky hook tool-result claude-code`: read stdin, record unwrapped agent failure or fix, print {}, always exit 0. */
+async function runToolResult(): Promise<number> {
+  // Broken stdout pipes can emit async errors (for example EPIPE) after write() returns.
+  process.stdout.on("error", () => {});
+  let stdout = "{}";
+  try {
+    const { TOOL_RESULT_STDIN_CAP_BYTES, toolResultHook } = await import("./commands/tool-result-hook.js");
+    const stdinRead = await readHookStdin(TOOL_RESULT_STDIN_CAP_BYTES);
+    if (!stdinRead.overflow) {
+      stdout = await toolResultHook(stdinRead.bytes);
+    }
+  } catch {
+    // `toolResultHook` never throws, but the module can fail to load. The
     // hook must stay fail-open and still print {}.
   }
   try {
@@ -623,6 +656,11 @@ async function main(): Promise<number> {
           case "session-start":
             if (parsed.kind === "session-start") {
               return runSessionStart();
+            }
+            break;
+          case "tool-result":
+            if (parsed.kind === "tool-result") {
+              return runToolResult();
             }
             break;
         }
