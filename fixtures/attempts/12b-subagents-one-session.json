@@ -1,0 +1,80 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "F1",
+      "ts": 1699999880000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa00000000012b",
+      "fingerprintV": 2,
+      "signature": ["error: assertion failed"],
+      "excerpt": "Error: assertion failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1",
+        "agentId": "a1"
+      }
+    },
+    {
+      "kind": "failure",
+      "id": "F2",
+      "ts": 1699999940000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa00000000012b",
+      "fingerprintV": 2,
+      "signature": ["error: assertion failed"],
+      "excerpt": "Error: assertion failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1",
+        "agentId": "a2"
+      }
+    },
+    {
+      "kind": "failure",
+      "id": "F3",
+      "ts": 1699999970000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa00000000012b",
+      "fingerprintV": 2,
+      "signature": ["error: assertion failed"],
+      "excerpt": "Error: assertion failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux",
+      "agent": {
+        "vendor": "claude-code",
+        "session": "s1",
+        "agentId": "a1"
+      }
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["same_failure", "no_later_run", "no_later_run"]
+      }
+    ]
+  }
+}

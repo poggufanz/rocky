@@ -9,9 +9,9 @@ import {
 } from "./memory-query.js";
 import {
   cwdIdentityKey,
+  differentAgentSession,
   isOperationalMemoryRecord,
   tailReadable,
-  type AgentStamp,
   type AssociationRecord,
   type FailureRecord,
   type FixRecord,
@@ -100,13 +100,6 @@ function sha256Hex16(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
 }
 
-function isDifferentAgentSession(a: AgentStamp | undefined, b: AgentStamp | undefined): boolean {
-  if (a === undefined || b === undefined) return false;
-  if (a.session !== b.session) return true;
-  if (a.agentId !== undefined && b.agentId !== undefined && a.agentId !== b.agentId) return true;
-  return false;
-}
-
 function addToMapArray<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   const existing = map.get(key);
   if (existing === undefined) map.set(key, [value]);
@@ -148,7 +141,7 @@ function findMatchingAssociation(
     const record = candidate.record;
     if (candidate.cwdKey !== cwdKey) continue;
     if (record.ts <= failure.ts || record.ts > windowEnd) continue;
-    if (isDifferentAgentSession(failure.agent, record.agent)) continue;
+    if (differentAgentSession(failure.agent, record.agent)) continue;
     if (best === undefined || compareByTsOrder(candidate, best) < 0) {
       best = candidate;
     }
@@ -428,7 +421,6 @@ export function buildProblems(
       let outcomeTs: number | undefined;
       let nextFingerprint: string | undefined;
       let unknownReason: Attempt["unknownReason"];
-      let crossSession: true | undefined;
 
       for (let index = fItem.cwdIndex + 1; index < cwdList.length; index += 1) {
         const candidate = cwdList[index]!;
@@ -442,12 +434,9 @@ export function buildProblems(
             outcome = "passed";
             outcomeRecordId = fix.id;
             outcomeTs = fix.ts;
-            if (isDifferentAgentSession(failure.agent, fix.agent)) {
-              crossSession = true;
-            }
             break;
           }
-          if (isDifferentAgentSession(failure.agent, fix.agent)) continue;
+          if (differentAgentSession(failure.agent, fix.agent)) continue;
           if (failureReliable && fix.identityReliable === true && fix.commandIdentity === failure.commandIdentity) {
             outcome = "unknown";
             unknownReason = "unlinked-pass";
@@ -457,7 +446,7 @@ export function buildProblems(
           }
         } else {
           const nextFailure = candidate.record;
-          if (isDifferentAgentSession(failure.agent, nextFailure.agent)) continue;
+          if (differentAgentSession(failure.agent, nextFailure.agent)) continue;
           if (candidate.key === fItem.key) {
             outcome = "same_failure";
             outcomeRecordId = nextFailure.id;
@@ -520,7 +509,6 @@ export function buildProblems(
       if (nextFingerprint !== undefined) attempt.nextFingerprint = nextFingerprint;
       if (unknownReason !== undefined) attempt.unknownReason = unknownReason;
       if (session !== undefined) attempt.session = session;
-      if (crossSession !== undefined) attempt.crossSession = crossSession;
       if (stated !== undefined) attempt.stated = stated;
       attempts.push(attempt);
     }
@@ -542,7 +530,7 @@ export function buildProblems(
         attempt.outcome = "same_failure";
         attempt.outcomeRecordId = keptAttempt.failureId;
         attempt.outcomeTs = keptAttempt.ts;
-        if (isDifferentAgentSession(demotedFailure.agent, keptFailure.agent)) {
+        if (differentAgentSession(demotedFailure.agent, keptFailure.agent)) {
           attempt.crossSession = true;
         } else {
           delete attempt.crossSession;
