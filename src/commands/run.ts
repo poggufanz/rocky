@@ -16,6 +16,7 @@ import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
+  boundCommand,
   recordFailure,
   resolveFixOnSuccess,
   type ResolveFixOptions,
@@ -232,7 +233,8 @@ function onFailure(cmd: string, result: ExecResult, agent?: AgentStamp): void {
   let preparedNote: PreparedLaneOneNote | undefined;
   let noteDelivered = false;
   if (memory !== undefined) {
-    const fingerprints = fingerprintCandidates(result.stderr, cmd, result.code);
+    // ponytail: lookup must hash the bounded command form that recordFailure stores.
+    const fingerprints = fingerprintCandidates(result.stderr, boundCommand(cmd), result.code);
     const now = Date.now();
     try {
       preparedNote = prepareLaneOneNote({

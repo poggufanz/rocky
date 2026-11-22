@@ -124,6 +124,19 @@ function cachedCommandFingerprint(
   return fp;
 }
 
+function keyStrengthOf(
+  record: FailureRecord,
+  cmdFpCache: Map<number, Map<string, string>>,
+): "output" | "command" {
+  if (record.origin === "hook") return "command";
+  if (record.fingerprintV === 2 && Array.isArray(record.signature)) {
+    return record.signature.length === 0 ? "command" : "output";
+  }
+  return record.fingerprint === cachedCommandFingerprint(cmdFpCache, record.cmd, record.exitCode)
+    ? "command"
+    : "output";
+}
+
 function compareByTsOrder(a: { record: { ts: number }; order: number }, b: { record: { ts: number }; order: number }): number {
   return a.record.ts - b.record.ts || a.order - b.order;
 }
@@ -295,13 +308,7 @@ export function buildProblems(
     const record = failureRecords[i]!;
     const order = failureOrders[i]!;
     const canonical = canonicalFingerprint(record, migration);
-    let keyStrength: "output" | "command";
-    if (record.origin === "hook") {
-      keyStrength = "command";
-    } else {
-      const cmdFp = cachedCommandFingerprint(cmdFpCache, record.cmd, record.exitCode);
-      keyStrength = record.fingerprint === cmdFp ? "command" : "output";
-    }
+    const keyStrength = keyStrengthOf(record, cmdFpCache);
     const cwdKey = resolveCwdKey(record.cwd, record.platform);
     const key = `${keyStrength}:${canonical}:${cwdKey}`;
     if (record.fingerprintV !== 2 && !migration.provenLegacyRecords.has(record.id)) {

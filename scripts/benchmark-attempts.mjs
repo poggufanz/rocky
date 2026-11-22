@@ -1,105 +1,36 @@
+import { createHash } from "node:crypto";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
+import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { prepareLaneOneNote } from "../dist/commands/attempt-note-lane.js";
 import { buildProblems } from "../dist/core/attempts.js";
-import { commandIdentity, fingerprintSignature } from "../dist/core/fingerprint.js";
 import { MEMORY_FORMAT_VERSION } from "../dist/core/memory-read.js";
+import { assertDatasetMix, generateRealisticRecords } from "./benchmark-attempt-fixtures.mjs";
 
 const RECORD_COUNT = 10_000;
 const FINGERPRINT_COUNT = 200;
 const CWD_COUNT = 20;
 const WARMUPS = 1;
-const RUNS = 5;
+const RUNS = 20;
 const FULL_BUDGET_MS = 30;
 const SINGLE_BUDGET_MS = 10;
 const NOW = 1_800_000_000_000;
 
 function makeDataset() {
   const cwds = Array.from({ length: CWD_COUNT }, (_, index) => `/benchmark/project-${index}`);
-  const cmds = Array.from({ length: 10 }, (_, index) => {
-    const cmd = `npm run check-${index}`;
-    const identity = commandIdentity(cmd, { platform: "linux" });
-    return { cmd, commandIdentity: identity.value, identityReliable: identity.reliable };
+  const { records, fingerprints } = generateRealisticRecords({
+    recordCount: RECORD_COUNT,
+    fingerprintCount: FINGERPRINT_COUNT,
+    cwds,
+    platform: "linux",
+    startTs: NOW - 100_000_000,
+    stepMs: 5_000,
+    sampleTs: NOW,
+    excerptPrefix: "Error: benchmark failure family",
+    patchResolvedBy: true,
+    includeFixLinks: false,
   });
-  const fingerprints = Array.from({ length: FINGERPRINT_COUNT }, (_, index) => {
-    const signature = [`error: benchmark failure family ${index}`];
-    const cmdMeta = cmds[index % cmds.length];
-    return {
-      fp: fingerprintSignature(signature, cmdMeta.cmd, 1),
-      signature,
-      excerpt: `Error: benchmark failure family ${index}`,
-    };
-  });
-
-  const records = [];
-  const lastFailureByCwdFp = new Map();
-  let seq = 0;
-  let ts = NOW - 100_000_000;
-
-  while (records.length < RECORD_COUNT) {
-    ts += 5_000;
-    const slot = Math.floor(seq / FINGERPRINT_COUNT) % 10;
-    const fpIdx = seq % FINGERPRINT_COUNT;
-    const cwdIdx = (Math.floor(fpIdx / 10) + Math.floor(seq / (FINGERPRINT_COUNT * 10))) % CWD_COUNT;
-    const cwd = cwds[cwdIdx];
-    const fpMeta = fingerprints[fpIdx];
-    const cmdMeta = cmds[fpIdx % cmds.length];
-    const key = `${cwdIdx}:${fpIdx}`;
-    const prior = lastFailureByCwdFp.get(key);
-
-    if (slot === 7 && prior !== undefined && records.length < RECORD_COUNT) {
-      const fixId = `fix-${seq}`;
-      prior.resolvedBy = fixId;
-      records.push({
-        kind: "fix",
-        id: fixId,
-        ts,
-        cwd,
-        cmd: cmdMeta.cmd,
-        failureIds: [prior.id],
-        commandIdentity: cmdMeta.commandIdentity,
-        identityV: 1,
-        identityReliable: cmdMeta.identityReliable,
-        platform: "linux",
-      });
-      lastFailureByCwdFp.delete(key);
-    } else if (slot === 9 && prior !== undefined && records.length < RECORD_COUNT) {
-      records.push({
-        kind: "association",
-        id: `assoc-${seq}`,
-        ts,
-        cwd,
-        cmd: `${cmdMeta.cmd} -- --filter unit`,
-        candidateFailureIds: [prior.id],
-        links: [{ id: prior.id, basis: "program", confidence: "possible" }],
-        commandIdentity: cmdMeta.commandIdentity,
-        identityV: 1,
-        identityReliable: cmdMeta.identityReliable,
-        platform: "linux",
-      });
-      lastFailureByCwdFp.delete(key);
-    } else {
-      const failure = {
-        kind: "failure",
-        id: `fail-${seq}`,
-        ts,
-        cwd,
-        cmd: cmdMeta.cmd,
-        exitCode: 1,
-        fingerprint: fpMeta.fp,
-        fingerprintV: 2,
-        signature: fpMeta.signature,
-        excerpt: fpMeta.excerpt,
-        origin: "run",
-        commandIdentity: cmdMeta.commandIdentity,
-        identityV: 1,
-        identityReliable: cmdMeta.identityReliable,
-        platform: "linux",
-      };
-      records.push(failure);
-      lastFailureByCwdFp.set(key, failure);
-    }
-    seq += 1;
-  }
 
   const actualFingerprints = new Set(
     records.filter((record) => record.kind === "failure").map((record) => record.fingerprint),
@@ -111,26 +42,74 @@ function makeDataset() {
     );
   }
 
+  const mix = assertDatasetMix(records);
+
+  const targetFp = fingerprints[0].fp;
+  const targetFailure = records.find((record) => record.kind === "failure" && record.fingerprint === targetFp);
+
   return {
     records,
     actualFingerprints,
     actualCwds,
-    targetFingerprint: fingerprints[0].fp,
+    targetFingerprint: targetFp,
+    targetCwd: targetFailure.cwd,
+    mix,
     coverage: {
       version: MEMORY_FORMAT_VERSION,
       scanned: records.length,
       skipped: 0,
       truncated: 0,
-      bytesScanned: records.length * 400,
-      bytesTotal: records.length * 400,
+      bytesScanned: records.length * 1_400,
+      bytesTotal: records.length * 1_400,
       complete: true,
     },
   };
 }
 
-function median(values) {
+function percentile(values, p) {
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[index];
+}
+
+function summarize(values) {
+  const rounded = values.map((value) => Number(value.toFixed(3)));
+  const sum = values.reduce((acc, value) => acc + value, 0);
+  const p50 = Number(percentile(values, 50).toFixed(3));
+  const p95 = Number(percentile(values, 95).toFixed(3));
+  return {
+    count: values.length,
+    min: Number(Math.min(...values).toFixed(3)),
+    median: p50,
+    p50,
+    p95,
+    max: Number(Math.max(...values).toFixed(3)),
+    mean: Number((sum / values.length).toFixed(3)),
+    samples: rounded,
+  };
+}
+
+function shownSessions(count, prefix) {
+  const ids = [];
+  let seq = 1;
+  while (ids.length < count) {
+    const candidate = `${prefix}-${seq}`;
+    seq += 1;
+    const firstByte = createHash("sha256").update(candidate, "utf8").digest()[0];
+    if ((firstByte & 0x80) === 0) {
+      ids.push(candidate);
+    }
+  }
+  return ids;
+}
+
+function cleanEnv(rockyHome, session) {
+  const env = { ...process.env, ROCKY_HOME: rockyHome, ROCKY_AGENT_SESSION: session };
+  delete env.ROCKY_TEST_SEAMS;
+  delete env.ROCKY_ATTEMPT_ARM;
+  delete env.ROCKY_ATTEMPT_ADVISORY;
+  delete env.CLAUDECODE;
+  return env;
 }
 
 function measure(fn) {
@@ -140,7 +119,7 @@ function measure(fn) {
 }
 
 const assertBudget = process.argv.includes("--assert");
-const { records, actualFingerprints, actualCwds, targetFingerprint, coverage } = makeDataset();
+const { records, actualFingerprints, actualCwds, targetFingerprint, targetCwd, mix, coverage } = makeDataset();
 
 for (let index = 0; index < WARMUPS; index += 1) {
   buildProblems(records, coverage, { now: NOW, platform: "linux" });
@@ -159,15 +138,54 @@ for (let index = 0; index < RUNS; index += 1) {
     fingerprint: targetFingerprint,
     platform: "linux",
   }));
-  fullSamples.push(Number(full.elapsedMs.toFixed(3)));
-  singleSamples.push(Number(single.elapsedMs.toFixed(3)));
+  fullSamples.push(full.elapsedMs);
+  singleSamples.push(single.elapsedMs);
   fullEntries = full.result.entries.length;
   singleEntries = single.result.entries.length;
 }
 
-const fullMedianMs = median(fullSamples);
-const singleMedianMs = median(singleSamples);
-const passed = fullMedianMs <= FULL_BUDGET_MS && singleMedianMs <= SINGLE_BUDGET_MS;
+const tempHome = realpathSync.native(mkdtempSync(join(os.tmpdir(), "rocky-bench-attempts-")));
+const lane1Samples = [];
+let lane1NoteBytes = 0;
+try {
+  const sessions = shownSessions(WARMUPS + RUNS, "bench-attempts-l1");
+  for (let index = 0; index < WARMUPS; index += 1) {
+    prepareLaneOneNote({
+      lane: "run",
+      records,
+      coverage,
+      fingerprints: [targetFingerprint],
+      cwd: targetCwd,
+      now: NOW,
+      env: cleanEnv(tempHome, sessions[index]),
+      home: tempHome,
+    });
+  }
+  for (let index = 0; index < RUNS; index += 1) {
+    const measured = measure(() => prepareLaneOneNote({
+      lane: "run",
+      records,
+      coverage,
+      fingerprints: [targetFingerprint],
+      cwd: targetCwd,
+      now: NOW,
+      env: cleanEnv(tempHome, sessions[WARMUPS + index]),
+      home: tempHome,
+    }));
+    if (measured.result.text === undefined) {
+      throw new Error(`prepareLaneOneNote unexpectedly returned no note on iteration ${index}`);
+    }
+    lane1NoteBytes = Buffer.byteLength(`rocky: ${measured.result.text}`, "utf8");
+    lane1Samples.push(measured.elapsedMs);
+  }
+} finally {
+  rmSync(tempHome, { recursive: true, force: true });
+}
+
+const fullSummary = summarize(fullSamples);
+const singleSummary = summarize(singleSamples);
+const lane1Summary = summarize(lane1Samples);
+const passed = fullSummary.p50 <= FULL_BUDGET_MS && singleSummary.p50 <= SINGLE_BUDGET_MS;
 
 const report = {
   command: "npm run benchmark:attempts",
@@ -178,11 +196,13 @@ const report = {
     fingerprints: actualFingerprints,
     cwds: actualCwds,
     targetFingerprint,
+    mix,
   },
   warmups: WARMUPS,
   runs: RUNS,
-  fullMs: { median: fullMedianMs, samples: fullSamples, entries: fullEntries },
-  singleFingerprintMs: { median: singleMedianMs, samples: singleSamples, entries: singleEntries },
+  fullMs: { ...fullSummary, entries: fullEntries },
+  singleFingerprintMs: { ...singleSummary, entries: singleEntries },
+  prepareLaneOneNoteMs: { ...lane1Summary, noteBytes: lane1NoteBytes },
   gate: {
     fullBudgetMs: FULL_BUDGET_MS,
     singleBudgetMs: SINGLE_BUDGET_MS,

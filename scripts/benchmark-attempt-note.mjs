@@ -2,23 +2,24 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { prepareLaneOneNote } from "../dist/commands/attempt-note-lane.js";
 import { priorAttemptsNote } from "../dist/core/attempt-note.js";
+import { buildProblems } from "../dist/core/attempts.js";
 import {
   commandIdentity,
   fingerprint,
   FINGERPRINT_ALGORITHM_VERSION,
-  fingerprintSignature,
   signatureLines,
 } from "../dist/core/fingerprint.js";
 import { recordAgentFailure } from "../dist/core/memory.js";
-import { canonicalPath, loadMemoryChecked } from "../dist/core/memory-read.js";
+import { canonicalPath, cwdIdentityKey, loadMemoryChecked } from "../dist/core/memory-read.js";
 import { quoteShellPath } from "../dist/core/shell-quote.js";
 import { makeCardsFor, toolTextAllowed } from "../dist/desk/cards-read.js";
 import { cardsFilePath } from "../dist/listening/cards-path.js";
+import { assertDatasetMix, generateRealisticRecords } from "./benchmark-attempt-fixtures.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cliEntry = join(packageRoot, "dist", "index.js");
@@ -36,10 +37,35 @@ const IN_PROCESS_AGENT_FAILURE_WARMUPS = 1;
 const IN_PROCESS_AGENT_FAILURE_RUNS = 20;
 const TARGET_LANE1_MS = 10;
 const TARGET_LANE2_P95_MS = 300;
+const TARGET_REAL_NOTE_MS = 30;
+const PROBE_WARMUPS = 1;
+const PROBE_RUNS = 20;
 const PROCESS_TIMEOUT_MS = 30_000;
+const THIRTY_DAYS_MS = 30 * 86_400_000;
 
 const TARGET_STDERR = "Error: benchmark token missing in auth middleware";
 const TARGET_EXIT_CODE = 1;
+
+function parseHomeArg(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--home") {
+      const value = argv[i + 1];
+      if (value === undefined || value.length === 0 || value.startsWith("--")) {
+        throw new Error("--home requires a directory path");
+      }
+      return value;
+    }
+    if (arg.startsWith("--home=")) {
+      const value = arg.slice("--home=".length);
+      if (value.length === 0) {
+        throw new Error("--home requires a directory path");
+      }
+      return value;
+    }
+  }
+  return undefined;
+}
 
 function percentile(values, p) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -273,95 +299,26 @@ function seedFixture(rockyHome, repoDir, targetCmd, now, options = {}) {
   const cwds = Array.from({ length: BACKGROUND_CWDS }, (_, index) =>
     index === 0 ? repoDir : join(dirname(repoDir), `other-project-${index}`),
   );
-  const cmds = Array.from({ length: 10 }, (_, index) => {
-    const cmd = `npm run check-${index}`;
-    const identity = commandIdentity(cmd, { platform: process.platform });
-    return { cmd, commandIdentity: identity.value, identityV: identity.version, identityReliable: identity.reliable };
-  });
-  const families = Array.from({ length: BACKGROUND_FINGERPRINTS }, (_, index) => {
-    const signature = [`error: benchmark background family ${index}`];
-    const cmdMeta = cmds[index % cmds.length];
-    return {
-      fp: fingerprintSignature(signature, cmdMeta.cmd, 1),
-      signature,
-      excerpt: `Error: benchmark background family ${index}`,
-    };
-  });
-
   // Span ~14 hours before baseTs so oldestTs always covers the 8h+10m window in tail mode.
-  let ts = baseTs - 50_000_000;
-  const records = [];
-  const lastFailureByKey = new Map();
-  let seq = 0;
-
-  while (records.length < backgroundCount) {
-    ts += 4_500;
-    const slot = Math.floor(seq / BACKGROUND_FINGERPRINTS) % 10;
-    const fpIdx = seq % BACKGROUND_FINGERPRINTS;
-    const cwdIdx = (Math.floor(fpIdx / 10) + Math.floor(seq / (BACKGROUND_FINGERPRINTS * 10))) % BACKGROUND_CWDS;
-    const cwd = cwds[cwdIdx];
-    const family = families[fpIdx];
-    const cmdMeta = cmds[fpIdx % cmds.length];
-    const key = `${cwdIdx}:${fpIdx}`;
-    const prior = lastFailureByKey.get(key);
-
-    if (slot === 7 && prior !== undefined) {
-      records.push({
-        kind: "fix",
-        id: `bg-fix-${seq}`,
-        ts,
-        cwd,
-        cmd: cmdMeta.cmd,
-        failureIds: [prior.id],
-        links: [{ id: prior.id, basis: "identity", confidence: "confirmed" }],
-        commandIdentity: cmdMeta.commandIdentity,
-        identityV: cmdMeta.identityV,
-        identityReliable: cmdMeta.identityReliable,
-        platform: process.platform,
-      });
-      lastFailureByKey.delete(key);
-    } else if (slot === 9 && prior !== undefined) {
-      records.push({
-        kind: "association",
-        id: `bg-assoc-${seq}`,
-        ts,
-        cwd,
-        cmd: `${cmdMeta.cmd} -- --filter unit`,
-        candidateFailureIds: [prior.id],
-        links: [{ id: prior.id, basis: "program", confidence: "possible" }],
-        commandIdentity: cmdMeta.commandIdentity,
-        identityV: cmdMeta.identityV,
-        identityReliable: cmdMeta.identityReliable,
-        platform: process.platform,
-      });
-      lastFailureByKey.delete(key);
-    } else {
-      const failure = {
-        kind: "failure",
-        id: `bg-fail-${seq}`,
-        ts,
-        cwd,
-        cmd: cmdMeta.cmd,
-        exitCode: 1,
-        fingerprint: family.fp,
-        fingerprintV: FINGERPRINT_ALGORITHM_VERSION,
-        signature: family.signature,
-        excerpt: family.excerpt,
-        origin: "run",
-        commandIdentity: cmdMeta.commandIdentity,
-        identityV: cmdMeta.identityV,
-        identityReliable: cmdMeta.identityReliable,
-        platform: process.platform,
-      };
-      records.push(failure);
-      lastFailureByKey.set(key, failure);
-    }
-    seq += 1;
-  }
+  const { records } = generateRealisticRecords({
+    recordCount: backgroundCount,
+    fingerprintCount: BACKGROUND_FINGERPRINTS,
+    cwds,
+    platform: process.platform,
+    startTs: baseTs - 50_000_000,
+    stepMs: 4_500,
+    sampleTs: now,
+    idPrefix: "bg-",
+    excerptPrefix: "Error: benchmark background family",
+    patchResolvedBy: false,
+    includeFixLinks: true,
+  });
 
   for (const record of targetRecords) {
     records.push(record);
   }
+
+  const datasetMix = assertDatasetMix(records);
 
   const memoryPath = join(rockyHome, "memory.jsonl");
   const memoryContent = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
@@ -540,6 +497,7 @@ function seedFixture(rockyHome, repoDir, targetCmd, now, options = {}) {
     cardsCount: cardLines.length,
     cardLogBytes: cardBytes,
     targetFp,
+    datasetMix,
   };
 }
 
@@ -567,262 +525,182 @@ function writeFailingScript(repoDir) {
   return `${quoteShellPath(process.execPath, process.platform)} ${quoteShellPath(scriptPath, process.platform)}`;
 }
 
-const root = realpathSync.native(mkdtempSync(join(os.tmpdir(), "rocky-bench-attempt-note-")));
+function resolveProbeNow(recordTs, now) {
+  return now - recordTs <= THIRTY_DAYS_MS ? now : recordTs;
+}
 
-try {
+function listRecurringFailuresNewestFirst(records, now) {
+  const seenIds = new Set();
+  const byKey = new Map();
+  for (let order = 0; order < records.length; order += 1) {
+    const record = records[order];
+    if (seenIds.has(record.id)) continue;
+    seenIds.add(record.id);
+    if (record.kind !== "failure") continue;
+    if (!Number.isSafeInteger(record.ts) || record.ts > now) continue;
+    const cwdKey = cwdIdentityKey(record.cwd, record.platform ?? process.platform);
+    const key = `${record.fingerprint}\u0000${cwdKey}`;
+    const group = byKey.get(key);
+    if (group === undefined) byKey.set(key, [{ record, order }]);
+    else group.push({ record, order });
+  }
+
+  const candidates = [];
+  for (const group of byKey.values()) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => (a.record.ts - b.record.ts) || (a.order - b.order));
+    const newest = group[group.length - 1];
+    candidates.push({ record: newest.record, order: newest.order, siblingCount: group.length });
+  }
+  candidates.sort((a, b) => (b.record.ts - a.record.ts) || (b.order - a.order));
+  return candidates;
+}
+
+function pickProbeTarget(records, coverage, now) {
+  const candidates = listRecurringFailuresNewestFirst(records, now);
+  if (candidates.length === 0) return undefined;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    const probeNow = resolveProbeNow(candidate.record.ts, now);
+    const probeNote = priorAttemptsNote(
+      records,
+      coverage,
+      { fingerprints: [candidate.record.fingerprint], cwd: candidate.record.cwd },
+      { now: probeNow, cardsFor: undefined, platform: process.platform },
+    );
+    if (probeNote !== undefined) {
+      return {
+        ...candidate,
+        probeNow,
+        noteProducingCandidateFound: true,
+        skippedNonNoteCandidates: i,
+      };
+    }
+  }
+
+  const fallback = candidates[0];
+  return {
+    ...fallback,
+    probeNow: resolveProbeNow(fallback.record.ts, now),
+    noteProducingCandidateFound: false,
+    skippedNonNoteCandidates: candidates.length,
+  };
+}
+
+function runHomeProbe(rawHomeDir) {
+  const homeDir = resolve(rawHomeDir);
+  const memoryPath = join(homeDir, "memory.jsonl");
+  if (!existsSync(memoryPath)) {
+    throw new Error(`No memory.jsonl found at ${memoryPath}`);
+  }
+
   const now = Date.now();
-  const repoDir = join(root, "repo");
-  mkdirSync(join(repoDir, ".git"), { recursive: true });
+  const loadStarted = performance.now();
+  const loaded = loadMemoryChecked(memoryPath, now);
+  const loadMemoryCheckedMs = Number((performance.now() - loadStarted).toFixed(3));
 
-  // 1. Lane 1: prepareLaneOneNote in-process + end-to-end inside `rocky run`
-  const lane1Home = join(root, "home-lane1");
-  const lane1Cmd = writeFailingScript(repoDir);
-  const lane1Fixture = seedFixture(lane1Home, repoDir, lane1Cmd, now);
-
-  const prevRockyHome = process.env.ROCKY_HOME;
-  let loaded;
-  try {
-    process.env.ROCKY_HOME = lane1Home;
-    loaded = loadMemoryChecked();
-  } finally {
-    if (prevRockyHome === undefined) delete process.env.ROCKY_HOME;
-    else process.env.ROCKY_HOME = prevRockyHome;
+  const target = pickProbeTarget(loaded.records, loaded.coverage, now);
+  if (target === undefined) {
+    throw new Error(`No failure with an earlier same-fingerprint, same-cwd sibling found in ${memoryPath}`);
   }
 
-  const lane1Sessions = shownSessions(LANE1_WARMUPS + LANE1_IN_PROCESS_RUNS, "bench-l1");
-  let sampleLane1Text = "";
-  let sampleLane1Bytes = 0;
+  const probeNow = target.probeNow;
+  const targetFp = target.record.fingerprint;
+  const targetCwd = target.record.cwd;
+  const failureCount = loaded.records.filter((record) => record.kind === "failure").length;
 
-  for (let i = 0; i < LANE1_WARMUPS; i += 1) {
-    prepareLaneOneNote({
-      lane: "run",
-      records: loaded.records,
-      coverage: loaded.coverage,
-      fingerprints: [lane1Fixture.targetFp],
-      cwd: repoDir,
-      now,
-      env: cleanEnv(lane1Home, { ROCKY_AGENT_SESSION: lane1Sessions[i] }),
-      home: lane1Home,
+  let singleEntryCount = 0;
+  let targetEntry;
+  for (let i = 0; i < PROBE_WARMUPS; i += 1) {
+    buildProblems(loaded.records, loaded.coverage, {
+      now: probeNow,
+      fingerprint: targetFp,
+      cwd: targetCwd,
+      platform: process.platform,
     });
   }
-
-  const lane1Samples = [];
-  for (let i = 0; i < LANE1_IN_PROCESS_RUNS; i += 1) {
-    const session = lane1Sessions[LANE1_WARMUPS + i];
+  const buildSingleSamples = [];
+  for (let i = 0; i < PROBE_RUNS; i += 1) {
     const started = performance.now();
-    const prepared = prepareLaneOneNote({
-      lane: "run",
-      records: loaded.records,
-      coverage: loaded.coverage,
-      fingerprints: [lane1Fixture.targetFp],
-      cwd: repoDir,
-      now,
-      env: cleanEnv(lane1Home, { ROCKY_AGENT_SESSION: session }),
-      home: lane1Home,
+    const set = buildProblems(loaded.records, loaded.coverage, {
+      now: probeNow,
+      fingerprint: targetFp,
+      cwd: targetCwd,
+      platform: process.platform,
     });
-    const elapsedMs = performance.now() - started;
-    if (prepared.text === undefined) {
-      throw new Error(`Lane-1 prepareLaneOneNote unexpectedly returned no note on iteration ${i}`);
-    }
-    if (!prepared.text.includes("src/session.ts") || !prepared.text.includes("src/auth.ts")) {
-      throw new Error(`Lane-1 note did not join the populated card log: ${prepared.text}`);
-    }
-    sampleLane1Text = `rocky: ${prepared.text}`;
-    sampleLane1Bytes = Buffer.byteLength(sampleLane1Text, "utf8");
-    lane1Samples.push(elapsedMs);
+    buildSingleSamples.push(performance.now() - started);
+    singleEntryCount = set.entries.length;
+    targetEntry = set.entries.find((entry) => entry.cwdScope === "here");
   }
 
-  // Real `rocky run` spawns to verify prepareLaneOneNote latency inside the CLI process.
-  const lane1ProcHome = join(root, "home-lane1-proc");
-  const lane1ProcFixture = seedFixture(lane1ProcHome, repoDir, lane1Cmd, now);
-  const lane1ProcSessions = shownSessions(LANE1_PROCESS_RUNS, "bench-l1-proc");
-  const lane1ProcWallMs = [];
-  for (let i = 0; i < LANE1_PROCESS_RUNS; i += 1) {
-    resetMemoryFile(lane1ProcHome, lane1ProcFixture);
+  for (let i = 0; i < PROBE_WARMUPS; i += 1) {
+    priorAttemptsNote(
+      loaded.records,
+      loaded.coverage,
+      { fingerprints: [targetFp], cwd: targetCwd },
+      { now: probeNow, cardsFor: undefined, platform: process.platform },
+    );
+  }
+  const noteWithoutCardsSamples = [];
+  let noteWithoutCards;
+  let noteWithoutCardsReturnedCount = 0;
+  for (let i = 0; i < PROBE_RUNS; i += 1) {
     const started = performance.now();
-    const result = spawnSync(process.execPath, [cliEntry, "run", lane1Cmd], {
-      cwd: repoDir,
-      env: cleanEnv(lane1ProcHome, { ROCKY_AGENT_SESSION: lane1ProcSessions[i] }),
-      encoding: "utf8",
-      timeout: PROCESS_TIMEOUT_MS,
-      windowsHide: true,
-    });
-    const elapsedMs = performance.now() - started;
-    if (result.status !== TARGET_EXIT_CODE) {
-      throw new Error(`rocky run exited ${result.status}, expected ${TARGET_EXIT_CODE}: ${result.stderr}`);
-    }
-    if (!result.stderr.includes("src/session.ts") || !result.stderr.includes("Rocky records order, not cause.")) {
-      throw new Error(`rocky run did not emit the joined prior-attempts note on spawn ${i}: ${result.stderr}`);
-    }
-    lane1ProcWallMs.push(elapsedMs);
-  }
-  const lane1ProcRows = readAdvisories(lane1ProcHome).filter((row) => row.lane === "run" && row.kind === "note");
-  const lane1ProcReportedMs = lane1ProcRows.map((row) => row.latencyMs);
-
-  // 2. Lane 2: 50 spawns + in-process recordAgentFailure/note timing for both
-  //    the standard card log (~30 KiB) and a card log near the 16 MiB cap.
-  const lane2Cmd = "npm test";
-
-  function measureLane2Variant(variantName, targetCardLogBytes) {
-    const lane2Home = join(root, `home-lane2-${variantName}`);
-    const lane2Fixture = seedFixture(lane2Home, repoDir, lane2Cmd, now, { targetCardLogBytes });
-    const lane2Sessions = shownSessions(LANE2_SPAWNS, `bench-l2-${variantName}`);
-    const lane2WallMs = [];
-    let lane2Delivered = 0;
-    let sampleLane2Context = "";
-
-    for (let i = 0; i < LANE2_SPAWNS; i += 1) {
-      resetMemoryFile(lane2Home, lane2Fixture);
-      const payload = JSON.stringify({
-        hook_event_name: "PostToolUseFailure",
-        tool_name: "Bash",
-        tool_input: { command: lane2Cmd },
-        error: `Exit code ${TARGET_EXIT_CODE}\n${TARGET_STDERR}\n`,
-        session_id: lane2Sessions[i],
-        tool_use_id: `tu-bench-l2-${variantName}-${i + 1}`,
-        cwd: repoDir,
-      });
-      const started = performance.now();
-      const result = spawnSync(process.execPath, [cliEntry, "hook", "tool-result", "claude-code"], {
-        cwd: repoDir,
-        env: cleanEnv(lane2Home),
-        input: payload,
-        encoding: "utf8",
-        timeout: PROCESS_TIMEOUT_MS,
-        windowsHide: true,
-      });
-      const elapsedMs = performance.now() - started;
-      if (result.status !== 0) {
-        throw new Error(`hook tool-result (${variantName}) exited ${result.status} on spawn ${i}: ${result.stderr}`);
-      }
-      const parsed = JSON.parse(result.stdout.trim());
-      const context = parsed?.hookSpecificOutput?.additionalContext;
-      if (parsed?.hookSpecificOutput?.hookEventName === "PostToolUseFailure" && typeof context === "string") {
-        if (!context.includes("src/session.ts") || !context.includes("src/auth.ts")) {
-          throw new Error(`Lane-2 (${variantName}) additionalContext did not join the populated card log on spawn ${i}: ${context}`);
-        }
-        lane2Delivered += 1;
-        sampleLane2Context = context;
-      }
-      lane2WallMs.push(elapsedMs);
-    }
-    if (lane2Delivered !== LANE2_SPAWNS) {
-      throw new Error(`Expected ${LANE2_SPAWNS} delivered lane-2 (${variantName}) notes, got ${lane2Delivered}`);
-    }
-    const lane2Rows = readAdvisories(lane2Home).filter((row) => row.lane === "tool-result" && row.kind === "note");
-    const lane2ReportedMs = lane2Rows.map((row) => row.latencyMs);
-
-    // In-process timings mirroring tool-result-hook.ts:
-    // - observe captures only the pre-append snapshot inside the lock
-    // - recordAgentFailureTotal bounds lock hold (never reads the card log)
-    // - noteBuildAfterLock computes the note and reads the card log outside the lock
-    const inProcessHome = join(root, `home-in-process-${variantName}`);
-    const inProcessFixture = seedFixture(inProcessHome, repoDir, lane2Cmd, now, { targetCardLogBytes });
-    const recordAgentFailureTotalMs = [];
-    const observeInsideLockMs = [];
-    const noteBuildAfterLockMs = [];
-
-    try {
-      process.env.ROCKY_HOME = inProcessHome;
-      for (let i = 0; i < IN_PROCESS_AGENT_FAILURE_WARMUPS + IN_PROCESS_AGENT_FAILURE_RUNS; i += 1) {
-        resetMemoryFile(inProcessHome, inProcessFixture);
-        let observeElapsed = 0;
-        const started = performance.now();
-        const outcome = recordAgentFailure(
-          {
-            cmd: lane2Cmd,
-            exitCode: TARGET_EXIT_CODE,
-            body: `${TARGET_STDERR}\n`,
-            cwd: repoDir,
-            agent: { vendor: "claude-code", session: `bench-inproc-${variantName}-${i}`, toolUseId: `tu-inproc-${variantName}-${i}` },
-          },
-          {
-            lockWaitMs: 1_000,
-            now: now + i + 1,
-            observe: (snapshot) => {
-              const obsStarted = performance.now();
-              const captured = {
-                records: snapshot.records,
-                coverage: snapshot.coverage,
-                fingerprint: snapshot.fingerprint,
-              };
-              observeElapsed = performance.now() - obsStarted;
-              return captured;
-            },
-          },
-        );
-        const totalElapsed = performance.now() - started;
-        if (outcome.status !== "written") {
-          throw new Error(`In-process recordAgentFailure (${variantName}) did not write on iteration ${i}`);
-        }
-        const noteStarted = performance.now();
-        const cardsFor = makeCardsFor({ home: inProcessHome, toolText: toolTextAllowed(inProcessHome) });
-        const note = priorAttemptsNote(
-          outcome.observed.records,
-          outcome.observed.coverage,
-          { fingerprints: [outcome.observed.fingerprint], cwd: repoDir },
-          { now: now + i + 1, cardsFor, platform: process.platform },
-        );
-        const noteElapsed = performance.now() - noteStarted;
-        if (note === undefined || !note.text.includes("src/session.ts") || !note.text.includes("src/auth.ts")) {
-          throw new Error(`In-process note build (${variantName}) did not join cards on iteration ${i}`);
-        }
-        if (i >= IN_PROCESS_AGENT_FAILURE_WARMUPS) {
-          recordAgentFailureTotalMs.push(totalElapsed);
-          observeInsideLockMs.push(observeElapsed);
-          noteBuildAfterLockMs.push(noteElapsed);
-        }
-      }
-    } finally {
-      if (prevRockyHome === undefined) delete process.env.ROCKY_HOME;
-      else process.env.ROCKY_HOME = prevRockyHome;
-    }
-
-    return {
-      fixture: {
-        records: lane2Fixture.recordsCount,
-        priorAttemptsForTarget: 5,
-        memoryBytes: lane2Fixture.memoryBytes,
-        cardsInRepoLog: lane2Fixture.cardsCount,
-        cardLogBytes: lane2Fixture.cardLogBytes,
-        targetFingerprint: lane2Fixture.targetFp,
-      },
-      targetP95Ms: TARGET_LANE2_P95_MS,
-      targetEnforced: false,
-      spawns: LANE2_SPAWNS,
-      delivered: lane2Delivered,
-      wallMs: summarize(lane2WallMs),
-      hookReportedLatencyMs: summarize(lane2ReportedMs),
-      sampleAdditionalContext: sampleLane2Context,
-      recordAgentFailureTotal: {
-        label: "recordAgentFailure total, an upper bound on lock hold (no card read inside lock)",
-        measuredInProcess: true,
-        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
-        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
-        ms: summarize(recordAgentFailureTotalMs),
-      },
-      observeInsideLock: {
-        label: "observe callback, captures pre-append snapshot inside the lock",
-        measuredInProcess: true,
-        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
-        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
-        ms: summarize(observeInsideLockMs),
-      },
-      noteBuildAfterLock: {
-        label: "priorAttemptsNote + card log read, runs after lock release",
-        measuredInProcess: true,
-        warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
-        runs: IN_PROCESS_AGENT_FAILURE_RUNS,
-        ms: summarize(noteBuildAfterLockMs),
-      },
-    };
+    noteWithoutCards = priorAttemptsNote(
+      loaded.records,
+      loaded.coverage,
+      { fingerprints: [targetFp], cwd: targetCwd },
+      { now: probeNow, cardsFor: undefined, platform: process.platform },
+    );
+    noteWithoutCardsSamples.push(performance.now() - started);
+    if (noteWithoutCards !== undefined) noteWithoutCardsReturnedCount += 1;
   }
 
-  const lane2Standard = measureLane2Variant("standard", 0);
-  const lane2NearCap = measureLane2Variant("near-16mib", NEAR_CAP_CARD_LOG_TARGET_BYTES);
+  for (let i = 0; i < PROBE_WARMUPS; i += 1) {
+    const cardsFor = makeCardsFor({ home: homeDir, toolText: toolTextAllowed(homeDir) });
+    priorAttemptsNote(
+      loaded.records,
+      loaded.coverage,
+      { fingerprints: [targetFp], cwd: targetCwd },
+      { now: probeNow, cardsFor, platform: process.platform },
+    );
+  }
+  const noteWithCardsSamples = [];
+  let noteWithCards;
+  let noteWithCardsReturnedCount = 0;
+  for (let i = 0; i < PROBE_RUNS; i += 1) {
+    const started = performance.now();
+    const cardsFor = makeCardsFor({ home: homeDir, toolText: toolTextAllowed(homeDir) });
+    noteWithCards = priorAttemptsNote(
+      loaded.records,
+      loaded.coverage,
+      { fingerprints: [targetFp], cwd: targetCwd },
+      { now: probeNow, cardsFor, platform: process.platform },
+    );
+    noteWithCardsSamples.push(performance.now() - started);
+    if (noteWithCards !== undefined) noteWithCardsReturnedCount += 1;
+  }
+
+  const buildSingleSummary = summarize(buildSingleSamples);
+  const withoutCardsAvailable = noteWithoutCardsReturnedCount === PROBE_RUNS;
+  const withCardsAvailable = noteWithCardsReturnedCount === PROBE_RUNS;
+  const noteWithoutCardsSummary = withoutCardsAvailable ? summarize(noteWithoutCardsSamples) : undefined;
+  const noteWithCardsSummary = withCardsAvailable ? summarize(noteWithCardsSamples) : undefined;
+  const bothVariantsReturnedNote = withoutCardsAvailable && withCardsAvailable;
+  const withoutCardsPassed =
+    bothVariantsReturnedNote && noteWithoutCardsSummary.p50 <= TARGET_REAL_NOTE_MS;
+  const withCardsPassed =
+    bothVariantsReturnedNote && noteWithCardsSummary.p50 <= TARGET_REAL_NOTE_MS;
+  const passed = withoutCardsPassed && withCardsPassed;
+
+  const noNoteCandidateNotice =
+    "No recurring failure in this memory file produced a prior-attempts note (for example, every recent attempt in each recurring group may have passed).";
 
   const report = {
-    command: "node scripts/benchmark-attempt-note.mjs",
+    command: `node scripts/benchmark-attempt-note.mjs --home ${rawHomeDir}`,
+    mode: "real-memory-probe",
+    readOnly: true,
     measuredAt: new Date().toISOString(),
     environment: {
       node: process.version,
@@ -830,21 +708,421 @@ try {
       arch: process.arch,
       cpus: os.cpus().length,
     },
-    fixture: lane2Standard.fixture,
-    lane1PrepareNote: {
-      targetMs: TARGET_LANE1_MS,
-      targetEnforced: false,
-      inProcessPrepareLaneOneNoteMs: summarize(lane1Samples),
-      rockyRunReportedPrepareMs: summarize(lane1ProcReportedMs),
-      rockyRunTotalWallMs: summarize(lane1ProcWallMs),
-      noteBytes: sampleLane1Bytes,
-      sampleNote: sampleLane1Text,
+    home: homeDir,
+    memory: {
+      records: loaded.records.length,
+      failures: failureCount,
+      bytesTotal: loaded.coverage.bytesTotal,
+      bytesScanned: loaded.coverage.bytesScanned,
+      complete: loaded.coverage.complete,
+      skipped: loaded.coverage.skipped,
+      truncated: loaded.coverage.truncated,
+      ...(loaded.coverage.reason === undefined ? {} : { reason: loaded.coverage.reason }),
+      ...(loaded.coverage.window === undefined ? {} : { window: loaded.coverage.window }),
     },
-    lane2ToolResultHook: lane2Standard,
-    lane2ToolResultHookNear16MiBCardLog: lane2NearCap,
+    target: {
+      id: target.record.id,
+      ts: target.record.ts,
+      fingerprint: targetFp,
+      cwd: targetCwd,
+      siblingCount: target.siblingCount,
+      keyStrength: targetEntry?.keyStrength ?? null,
+      entryAttempts: targetEntry?.attempts.length ?? 0,
+      probeNowSource: probeNow === now ? "now" : "target.ts",
+      noteProducingCandidateFound: target.noteProducingCandidateFound,
+      skippedNonNoteCandidates: target.skippedNonNoteCandidates,
+      ...(target.noteProducingCandidateFound ? {} : { selectionNotice: noNoteCandidateNotice }),
+    },
+    warmups: PROBE_WARMUPS,
+    runs: PROBE_RUNS,
+    loadMemoryCheckedMs,
+    buildProblemsSingleFingerprintMs: {
+      ...buildSingleSummary,
+      entries: singleEntryCount,
+    },
+    priorAttemptsNoteWithoutCardsMs: withoutCardsAvailable
+      ? {
+          ...noteWithoutCardsSummary,
+          available: true,
+          noteReturned: true,
+          noteBytes: noteWithoutCards.bytes,
+        }
+      : {
+          available: false,
+          noteReturned: false,
+          noteBytes: 0,
+          reason: target.noteProducingCandidateFound
+            ? "measurement unavailable: priorAttemptsNote (without cardsFor) produced no note"
+            : `measurement unavailable: no note produced. ${noNoteCandidateNotice}`,
+        },
+    priorAttemptsNoteWithCardsMs: withCardsAvailable
+      ? {
+          ...noteWithCardsSummary,
+          available: true,
+          noteReturned: true,
+          noteBytes: noteWithCards.bytes,
+        }
+      : {
+          available: false,
+          noteReturned: false,
+          noteBytes: 0,
+          reason: target.noteProducingCandidateFound
+            ? "measurement unavailable: priorAttemptsNote (with cardsFor) produced no note"
+            : `measurement unavailable: no note produced. ${noNoteCandidateNotice}`,
+        },
+    budget: bothVariantsReturnedNote
+      ? {
+          priorAttemptsNoteBudgetMs: TARGET_REAL_NOTE_MS,
+          withoutCardsPassed,
+          withCardsPassed,
+          passed,
+        }
+      : {
+          priorAttemptsNoteBudgetMs: TARGET_REAL_NOTE_MS,
+          status: "unavailable",
+          withoutCardsPassed: false,
+          withCardsPassed: false,
+          passed: false,
+          reason: target.noteProducingCandidateFound
+            ? `no pass reported: measurement unavailable because no note was produced (withoutCards: ${withoutCardsAvailable}, withCards: ${withCardsAvailable})`
+            : `no pass reported: measurement unavailable because no note was produced. ${noNoteCandidateNotice}`,
+        },
   };
 
+  if (!bothVariantsReturnedNote) {
+    const detail = target.noteProducingCandidateFound
+      ? `priorAttemptsNote produced no note in one or both variants (withoutCards: ${withoutCardsAvailable}, withCards: ${withCardsAvailable})`
+      : noNoteCandidateNotice;
+    process.stderr.write(`benchmark-attempt-note --home: measurement unavailable; no pass reported (${detail})\n`);
+  }
+
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-} finally {
-  rmSync(root, { recursive: true, force: true });
+}
+
+function runSyntheticBenchmarks() {
+  const root = realpathSync.native(mkdtempSync(join(os.tmpdir(), "rocky-bench-attempt-note-")));
+
+  try {
+    const now = Date.now();
+    const repoDir = join(root, "repo");
+    mkdirSync(join(repoDir, ".git"), { recursive: true });
+
+    // 1. Lane 1: buildProblems + prepareLaneOneNote in-process + end-to-end inside `rocky run`
+    const lane1Home = join(root, "home-lane1");
+    const lane1Cmd = writeFailingScript(repoDir);
+    const lane1Fixture = seedFixture(lane1Home, repoDir, lane1Cmd, now);
+
+    const prevRockyHome = process.env.ROCKY_HOME;
+    let loaded;
+    try {
+      process.env.ROCKY_HOME = lane1Home;
+      loaded = loadMemoryChecked();
+    } finally {
+      if (prevRockyHome === undefined) delete process.env.ROCKY_HOME;
+      else process.env.ROCKY_HOME = prevRockyHome;
+    }
+
+    for (let i = 0; i < LANE1_WARMUPS; i += 1) {
+      buildProblems(loaded.records, loaded.coverage, { now, platform: process.platform });
+      buildProblems(loaded.records, loaded.coverage, {
+        now,
+        fingerprint: lane1Fixture.targetFp,
+        cwd: repoDir,
+        platform: process.platform,
+      });
+    }
+    const buildAllSamples = [];
+    const buildSingleSamples = [];
+    let buildAllEntries = 0;
+    let buildSingleEntries = 0;
+    for (let i = 0; i < LANE1_IN_PROCESS_RUNS; i += 1) {
+      const allStarted = performance.now();
+      const allSet = buildProblems(loaded.records, loaded.coverage, { now, platform: process.platform });
+      buildAllSamples.push(performance.now() - allStarted);
+      buildAllEntries = allSet.entries.length;
+
+      const singleStarted = performance.now();
+      const singleSet = buildProblems(loaded.records, loaded.coverage, {
+        now,
+        fingerprint: lane1Fixture.targetFp,
+        cwd: repoDir,
+        platform: process.platform,
+      });
+      buildSingleSamples.push(performance.now() - singleStarted);
+      buildSingleEntries = singleSet.entries.length;
+    }
+
+    const lane1Sessions = shownSessions(LANE1_WARMUPS + LANE1_IN_PROCESS_RUNS, "bench-l1");
+    let sampleLane1Text = "";
+    let sampleLane1Bytes = 0;
+
+    for (let i = 0; i < LANE1_WARMUPS; i += 1) {
+      prepareLaneOneNote({
+        lane: "run",
+        records: loaded.records,
+        coverage: loaded.coverage,
+        fingerprints: [lane1Fixture.targetFp],
+        cwd: repoDir,
+        now,
+        env: cleanEnv(lane1Home, { ROCKY_AGENT_SESSION: lane1Sessions[i] }),
+        home: lane1Home,
+      });
+    }
+
+    const lane1Samples = [];
+    for (let i = 0; i < LANE1_IN_PROCESS_RUNS; i += 1) {
+      const session = lane1Sessions[LANE1_WARMUPS + i];
+      const started = performance.now();
+      const prepared = prepareLaneOneNote({
+        lane: "run",
+        records: loaded.records,
+        coverage: loaded.coverage,
+        fingerprints: [lane1Fixture.targetFp],
+        cwd: repoDir,
+        now,
+        env: cleanEnv(lane1Home, { ROCKY_AGENT_SESSION: session }),
+        home: lane1Home,
+      });
+      const elapsedMs = performance.now() - started;
+      if (prepared.text === undefined) {
+        throw new Error(`Lane-1 prepareLaneOneNote unexpectedly returned no note on iteration ${i}`);
+      }
+      if (!prepared.text.includes("src/session.ts") || !prepared.text.includes("src/auth.ts")) {
+        throw new Error(`Lane-1 note did not join the populated card log: ${prepared.text}`);
+      }
+      sampleLane1Text = `rocky: ${prepared.text}`;
+      sampleLane1Bytes = Buffer.byteLength(sampleLane1Text, "utf8");
+      lane1Samples.push(elapsedMs);
+    }
+
+    // Real `rocky run` spawns to verify prepareLaneOneNote latency inside the CLI process.
+    const lane1ProcHome = join(root, "home-lane1-proc");
+    const lane1ProcFixture = seedFixture(lane1ProcHome, repoDir, lane1Cmd, now);
+    const lane1ProcSessions = shownSessions(LANE1_PROCESS_RUNS, "bench-l1-proc");
+    const lane1ProcWallMs = [];
+    for (let i = 0; i < LANE1_PROCESS_RUNS; i += 1) {
+      resetMemoryFile(lane1ProcHome, lane1ProcFixture);
+      const started = performance.now();
+      const result = spawnSync(process.execPath, [cliEntry, "run", lane1Cmd], {
+        cwd: repoDir,
+        env: cleanEnv(lane1ProcHome, { ROCKY_AGENT_SESSION: lane1ProcSessions[i] }),
+        encoding: "utf8",
+        timeout: PROCESS_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      const elapsedMs = performance.now() - started;
+      if (result.status !== TARGET_EXIT_CODE) {
+        throw new Error(`rocky run exited ${result.status}, expected ${TARGET_EXIT_CODE}: ${result.stderr}`);
+      }
+      if (!result.stderr.includes("src/session.ts") || !result.stderr.includes("Rocky records order, not cause.")) {
+        throw new Error(`rocky run did not emit the joined prior-attempts note on spawn ${i}: ${result.stderr}`);
+      }
+      lane1ProcWallMs.push(elapsedMs);
+    }
+    const lane1ProcRows = readAdvisories(lane1ProcHome).filter((row) => row.lane === "run" && row.kind === "note");
+    const lane1ProcReportedMs = lane1ProcRows.map((row) => row.latencyMs);
+
+    // 2. Lane 2: 50 spawns + in-process recordAgentFailure/note timing for both
+    //    the standard card log (~30 KiB) and a card log near the 16 MiB cap.
+    const lane2Cmd = "npm test";
+
+    function measureLane2Variant(variantName, targetCardLogBytes) {
+      const lane2Home = join(root, `home-lane2-${variantName}`);
+      const lane2Fixture = seedFixture(lane2Home, repoDir, lane2Cmd, now, { targetCardLogBytes });
+      const lane2Sessions = shownSessions(LANE2_SPAWNS, `bench-l2-${variantName}`);
+      const lane2WallMs = [];
+      let lane2Delivered = 0;
+      let sampleLane2Context = "";
+
+      for (let i = 0; i < LANE2_SPAWNS; i += 1) {
+        resetMemoryFile(lane2Home, lane2Fixture);
+        const payload = JSON.stringify({
+          hook_event_name: "PostToolUseFailure",
+          tool_name: "Bash",
+          tool_input: { command: lane2Cmd },
+          error: `Exit code ${TARGET_EXIT_CODE}\n${TARGET_STDERR}\n`,
+          session_id: lane2Sessions[i],
+          tool_use_id: `tu-bench-l2-${variantName}-${i + 1}`,
+          cwd: repoDir,
+        });
+        const started = performance.now();
+        const result = spawnSync(process.execPath, [cliEntry, "hook", "tool-result", "claude-code"], {
+          cwd: repoDir,
+          env: cleanEnv(lane2Home),
+          input: payload,
+          encoding: "utf8",
+          timeout: PROCESS_TIMEOUT_MS,
+          windowsHide: true,
+        });
+        const elapsedMs = performance.now() - started;
+        if (result.status !== 0) {
+          throw new Error(`hook tool-result (${variantName}) exited ${result.status} on spawn ${i}: ${result.stderr}`);
+        }
+        const parsed = JSON.parse(result.stdout.trim());
+        const context = parsed?.hookSpecificOutput?.additionalContext;
+        if (parsed?.hookSpecificOutput?.hookEventName === "PostToolUseFailure" && typeof context === "string") {
+          if (!context.includes("src/session.ts") || !context.includes("src/auth.ts")) {
+            throw new Error(`Lane-2 (${variantName}) additionalContext did not join the populated card log on spawn ${i}: ${context}`);
+          }
+          lane2Delivered += 1;
+          sampleLane2Context = context;
+        }
+        lane2WallMs.push(elapsedMs);
+      }
+      if (lane2Delivered !== LANE2_SPAWNS) {
+        throw new Error(`Expected ${LANE2_SPAWNS} delivered lane-2 (${variantName}) notes, got ${lane2Delivered}`);
+      }
+      const lane2Rows = readAdvisories(lane2Home).filter((row) => row.lane === "tool-result" && row.kind === "note");
+      const lane2ReportedMs = lane2Rows.map((row) => row.latencyMs);
+
+      // In-process timings mirroring tool-result-hook.ts:
+      // - observe captures only the pre-append snapshot inside the lock
+      // - recordAgentFailureTotal bounds lock hold (never reads the card log)
+      // - noteBuildAfterLock computes the note and reads the card log outside the lock
+      const inProcessHome = join(root, `home-in-process-${variantName}`);
+      const inProcessFixture = seedFixture(inProcessHome, repoDir, lane2Cmd, now, { targetCardLogBytes });
+      const recordAgentFailureTotalMs = [];
+      const observeInsideLockMs = [];
+      const noteBuildAfterLockMs = [];
+
+      try {
+        process.env.ROCKY_HOME = inProcessHome;
+        for (let i = 0; i < IN_PROCESS_AGENT_FAILURE_WARMUPS + IN_PROCESS_AGENT_FAILURE_RUNS; i += 1) {
+          resetMemoryFile(inProcessHome, inProcessFixture);
+          let observeElapsed = 0;
+          const started = performance.now();
+          const outcome = recordAgentFailure(
+            {
+              cmd: lane2Cmd,
+              exitCode: TARGET_EXIT_CODE,
+              body: `${TARGET_STDERR}\n`,
+              cwd: repoDir,
+              agent: { vendor: "claude-code", session: `bench-inproc-${variantName}-${i}`, toolUseId: `tu-inproc-${variantName}-${i}` },
+            },
+            {
+              lockWaitMs: 1_000,
+              now: now + i + 1,
+              observe: (snapshot) => {
+                const obsStarted = performance.now();
+                const captured = {
+                  records: snapshot.records,
+                  coverage: snapshot.coverage,
+                  fingerprint: snapshot.fingerprint,
+                };
+                observeElapsed = performance.now() - obsStarted;
+                return captured;
+              },
+            },
+          );
+          const totalElapsed = performance.now() - started;
+          if (outcome.status !== "written") {
+            throw new Error(`In-process recordAgentFailure (${variantName}) did not write on iteration ${i}`);
+          }
+          const noteStarted = performance.now();
+          const cardsFor = makeCardsFor({ home: inProcessHome, toolText: toolTextAllowed(inProcessHome) });
+          const note = priorAttemptsNote(
+            outcome.observed.records,
+            outcome.observed.coverage,
+            { fingerprints: [outcome.observed.fingerprint], cwd: repoDir },
+            { now: now + i + 1, cardsFor, platform: process.platform },
+          );
+          const noteElapsed = performance.now() - noteStarted;
+          if (note === undefined || !note.text.includes("src/session.ts") || !note.text.includes("src/auth.ts")) {
+            throw new Error(`In-process note build (${variantName}) did not join cards on iteration ${i}`);
+          }
+          if (i >= IN_PROCESS_AGENT_FAILURE_WARMUPS) {
+            recordAgentFailureTotalMs.push(totalElapsed);
+            observeInsideLockMs.push(observeElapsed);
+            noteBuildAfterLockMs.push(noteElapsed);
+          }
+        }
+      } finally {
+        if (prevRockyHome === undefined) delete process.env.ROCKY_HOME;
+        else process.env.ROCKY_HOME = prevRockyHome;
+      }
+
+      return {
+        fixture: {
+          records: lane2Fixture.recordsCount,
+          priorAttemptsForTarget: 5,
+          memoryBytes: lane2Fixture.memoryBytes,
+          cardsInRepoLog: lane2Fixture.cardsCount,
+          cardLogBytes: lane2Fixture.cardLogBytes,
+          targetFingerprint: lane2Fixture.targetFp,
+          datasetMix: lane2Fixture.datasetMix,
+        },
+        targetP95Ms: TARGET_LANE2_P95_MS,
+        targetEnforced: false,
+        spawns: LANE2_SPAWNS,
+        delivered: lane2Delivered,
+        wallMs: summarize(lane2WallMs),
+        hookReportedLatencyMs: summarize(lane2ReportedMs),
+        sampleAdditionalContext: sampleLane2Context,
+        recordAgentFailureTotal: {
+          label: "recordAgentFailure total, an upper bound on lock hold (no card read inside lock)",
+          measuredInProcess: true,
+          warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+          runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+          ms: summarize(recordAgentFailureTotalMs),
+        },
+        observeInsideLock: {
+          label: "observe callback, captures pre-append snapshot inside the lock",
+          measuredInProcess: true,
+          warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+          runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+          ms: summarize(observeInsideLockMs),
+        },
+        noteBuildAfterLock: {
+          label: "priorAttemptsNote + card log read, runs after lock release",
+          measuredInProcess: true,
+          warmups: IN_PROCESS_AGENT_FAILURE_WARMUPS,
+          runs: IN_PROCESS_AGENT_FAILURE_RUNS,
+          ms: summarize(noteBuildAfterLockMs),
+        },
+      };
+    }
+
+    const lane2Standard = measureLane2Variant("standard", 0);
+    const lane2NearCap = measureLane2Variant("near-16mib", NEAR_CAP_CARD_LOG_TARGET_BYTES);
+
+    const report = {
+      command: "node scripts/benchmark-attempt-note.mjs",
+      measuredAt: new Date().toISOString(),
+      environment: {
+        node: process.version,
+        platform: process.platform,
+        arch: process.arch,
+        cpus: os.cpus().length,
+      },
+      fixture: lane2Standard.fixture,
+      buildProblems: {
+        warmups: LANE1_WARMUPS,
+        runs: LANE1_IN_PROCESS_RUNS,
+        allEntriesMs: { ...summarize(buildAllSamples), entries: buildAllEntries },
+        singleFingerprintMs: { ...summarize(buildSingleSamples), entries: buildSingleEntries },
+      },
+      lane1PrepareNote: {
+        targetMs: TARGET_LANE1_MS,
+        targetEnforced: false,
+        inProcessPrepareLaneOneNoteMs: summarize(lane1Samples),
+        rockyRunReportedPrepareMs: summarize(lane1ProcReportedMs),
+        rockyRunTotalWallMs: summarize(lane1ProcWallMs),
+        noteBytes: sampleLane1Bytes,
+        sampleNote: sampleLane1Text,
+      },
+      lane2ToolResultHook: lane2Standard,
+      lane2ToolResultHookNear16MiBCardLog: lane2NearCap,
+    };
+
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const homeArg = parseHomeArg(process.argv.slice(2));
+if (homeArg !== undefined) {
+  runHomeProbe(homeArg);
+} else {
+  runSyntheticBenchmarks();
 }

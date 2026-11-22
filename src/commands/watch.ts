@@ -15,7 +15,7 @@ import { fingerprintCandidates } from "../core/fingerprint.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import { CANCEL_CODES, runProcess, type ExecOptions, type ExecResult } from "../core/exec.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import { recordWatchFailure, type MemoryRecord } from "../core/memory.js";
+import { boundCommand, recordWatchFailure, type MemoryRecord } from "../core/memory.js";
 import { loadMemoryChecked, tailReadable, type MemoryCoverage } from "../core/memory-read.js";
 import { DEFAULT_WATCH_NOTIFY, loadConfig } from "../core/config-read.js";
 import { formatDuration, notify as realNotify, spokenDuration, type NotifyInput } from "../core/notify.js";
@@ -234,7 +234,8 @@ function onWatchFailure(cmd: string, cwd: string, quiet: boolean, result: ExecRe
   if (!quiet) say(outcomeLine(false, result.durationMs));
   const memory = readMemory(quiet);
   if (memory !== undefined) {
-    const fingerprints = fingerprintCandidates(result.stderr, cmd, result.code);
+    // ponytail: lookup must hash the bounded command form that recordWatchFailure stores.
+    const fingerprints = fingerprintCandidates(result.stderr, boundCommand(cmd), result.code);
     const now = Date.now();
     try {
       preparedNote = prepareLaneOneNote({

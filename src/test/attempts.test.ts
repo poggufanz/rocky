@@ -693,3 +693,124 @@ test("selectProblemEntries fingerprint and query modes", () => {
   assert.equal(byTextAllDirs.entries.length, 3);
 });
 
+test("buildProblems picks the key family from a v2 record's stored signature", () => {
+  const nonCmdFps = ["aaaa111100000001", "aaaa111100000002", "aaaa111100000003"];
+  const outputFailures = nonCmdFps.map((fp, i) => {
+    const cmd = `npm run check-${i}`;
+    assert.notEqual(fp, commandFingerprint(cmd, 1));
+    return makeFailure({
+      id: `f-out-${i}`,
+      ts: NOW - (4 - i) * 60_000,
+      origin: "run",
+      cmd,
+      fingerprint: fp,
+      fingerprintV: 2,
+      signature: [`error: failure ${i}`],
+      excerpt: `Error: failure ${i}`,
+    });
+  });
+
+  const emptySigCmd = "npm test";
+  const nonCmdFp = "bbbb222200000004";
+  assert.notEqual(nonCmdFp, commandFingerprint(emptySigCmd, 1));
+  const emptySigFailure = makeFailure({
+    id: "f-empty-sig",
+    ts: NOW - 30_000,
+    origin: "run",
+    cmd: emptySigCmd,
+    fingerprint: nonCmdFp,
+    fingerprintV: 2,
+    signature: [],
+    excerpt: "",
+  });
+
+  const result = buildProblems([...outputFailures, emptySigFailure], completeCoverage(4), { now: NOW });
+  assert.equal(result.entries.length, 4);
+  for (const fp of nonCmdFps) {
+    const entry = result.entries.find((item) => item.fingerprint === fp);
+    assert.ok(entry);
+    assert.equal(entry.keyStrength, "output");
+  }
+  const emptySigEntry = result.entries.find((item) => item.fingerprint === nonCmdFp);
+  assert.ok(emptySigEntry);
+  assert.equal(emptySigEntry.keyStrength, "command");
+});
+
+test("v2 record with non-empty signature is output even when its fingerprint equals the command hash", () => {
+  const cmd = "npm test";
+  const cmdFp = commandFingerprint(cmd, 1);
+  const failure = makeFailure({
+    id: "f-v2-sig-cmdfp",
+    ts: NOW - 60_000,
+    origin: "run",
+    cmd,
+    fingerprint: cmdFp,
+    fingerprintV: 2,
+    signature: ["error: assertion failed"],
+    excerpt: "Error: assertion failed",
+  });
+
+  const result = buildProblems([failure], completeCoverage(1), { now: NOW });
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0]!.keyStrength, "output");
+});
+
+test("v1 record keeps the command-hash recompute rule", () => {
+  const cmd = "npm test";
+  const cmdFp = commandFingerprint(cmd, 1);
+  const otherFp = "cccc333300000005";
+  assert.notEqual(otherFp, cmdFp);
+
+  const matchingV1 = makeFailure({
+    id: "f-v1-cmd",
+    ts: NOW - 60_000,
+    origin: "run",
+    cmd,
+    exitCode: 1,
+    fingerprint: cmdFp,
+    fingerprintV: 1,
+    signature: [],
+    excerpt: "",
+  });
+  const nonMatchingV1 = makeFailure({
+    id: "f-v1-other",
+    ts: NOW - 30_000,
+    origin: "run",
+    cmd,
+    exitCode: 1,
+    fingerprint: otherFp,
+    fingerprintV: 1,
+    signature: [],
+    excerpt: "",
+  });
+
+  const result = buildProblems([matchingV1, nonMatchingV1], completeCoverage(2), { now: NOW });
+  assert.equal(result.entries.length, 2);
+  const matchingEntry = result.entries.find((item) => item.family.includes(cmdFp));
+  const nonMatchingEntry = result.entries.find((item) => item.family.includes(otherFp));
+  assert.ok(matchingEntry);
+  assert.ok(nonMatchingEntry);
+  assert.equal(matchingEntry.keyStrength, "command");
+  assert.equal(nonMatchingEntry.keyStrength, "output");
+});
+
+test("hook origin stays command", () => {
+  const cmd = "npm test";
+  const nonCmdFp = "dddd444400000006";
+  assert.notEqual(nonCmdFp, commandFingerprint(cmd, 1));
+  const hookFailure = makeFailure({
+    id: "f-hook-nonempty-sig",
+    ts: NOW - 60_000,
+    origin: "hook",
+    cmd,
+    fingerprint: nonCmdFp,
+    fingerprintV: 2,
+    signature: ["npm test"],
+    excerpt: "",
+  });
+
+  const result = buildProblems([hookFailure], completeCoverage(1), { now: NOW });
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0]!.keyStrength, "command");
+});
+
