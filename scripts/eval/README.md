@@ -4,7 +4,9 @@ Sandboxed A/B harness for running Claude Code against isolated Rocky installatio
 
 ## Running capture
 
-Choose a `--root` directory with no `CLAUDE.md`, `AGENTS.md`, or `.claude` in the root or any ancestor (for example `C:\rocky-eval` on Windows or `/tmp/rocky-eval` on POSIX), and an `--out` directory outside this repository.
+Choose a `--root` directory with no `CLAUDE.md`, `AGENTS.md`, or `.claude` in the root or any ancestor (for example `C:\rocky-eval` on Windows or `/tmp/rocky-eval` on POSIX), and an `--out` directory outside this repository and its enclosing workspace.
+
+`capture.mjs` runs `npm test` twice in an inline failing repo and asks the agent to print only the seven reported environment variables (`HOME`, `CLAUDE_CONFIG_DIR`, `ROCKY_HOME`, `ROCKY_TEST_SEAMS`, `ROCKY_ATTEMPT_ARM`, `ROCKY_AGENT_SESSION`, `PATH`), never the full environment. The harness also redacts the token value from all saved artifacts and output as a second layer.
 
 Token auth (reads `ROCKY_EVAL_OAUTH_TOKEN` from the current environment and passes it into the sandbox as `CLAUDE_CODE_OAUTH_TOKEN` only):
 

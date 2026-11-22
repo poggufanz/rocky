@@ -7,12 +7,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CLAUDE_FLAGS,
   assertNoAncestorInstructions,
+  assertOutsideWorkspace,
   buildCommandInvocation,
+  buildToolEnv,
   createSandbox,
   destroySandbox,
   packArm,
@@ -23,8 +25,7 @@ import {
 const EVAL_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(EVAL_DIR, "..", "..");
 const FIXTURES_DIR = join(EVAL_DIR, "fixtures", "claude-md");
-const CAPTURE_PROMPT = "Run npm test twice, then run printenv (or Get-ChildItem Env: in PowerShell) and stop.";
-const ENV_REPORT_KEYS = [
+export const ENV_REPORT_KEYS = [
   "HOME",
   "CLAUDE_CONFIG_DIR",
   "ROCKY_HOME",
@@ -33,6 +34,8 @@ const ENV_REPORT_KEYS = [
   "ROCKY_AGENT_SESSION",
   "PATH",
 ];
+export const CAPTURE_PROMPT =
+  `Run npm test twice, then print only these environment variables, one per line as NAME=value: ${ENV_REPORT_KEYS.join(", ")}. Then stop.`;
 
 function usageError(message) {
   process.stderr.write(`Error: ${message}\n`);
@@ -100,15 +103,6 @@ function parseArgs(argv) {
   return opts;
 }
 
-function isInsideDirectory(targetPath, basePath) {
-  const target = resolve(targetPath);
-  const base = resolve(basePath);
-  const normTarget = process.platform === "win32" ? target.toLowerCase() : target;
-  const normBase = process.platform === "win32" ? base.toLowerCase() : base;
-  const rel = relative(normBase, normTarget);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
 function spawnNoShell(file, args, options) {
   const env = options.env ?? process.env;
   const comSpec = env.ComSpec ?? env.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC;
@@ -133,7 +127,7 @@ function spawnNoShell(file, args, options) {
   };
 }
 
-function seedInlineProbeRepo(taskDir, arm, env) {
+function seedInlineProbeRepo(taskDir, arm, toolEnv) {
   const pkg = {
     name: "capture-probe",
     version: "1.0.0",
@@ -152,15 +146,15 @@ function seedInlineProbeRepo(taskDir, arm, env) {
 
   const git = resolveExecutableOnPath(
     process.platform === "win32" ? ["git.exe", "git.cmd", "git"] : ["git"],
-    env.PATH ?? "",
+    toolEnv.PATH ?? "",
   );
   if (git) {
-    spawnNoShell(git, ["init"], { cwd: taskDir, env, timeout: 30_000 });
-    spawnNoShell(git, ["add", "-A"], { cwd: taskDir, env, timeout: 30_000 });
+    spawnNoShell(git, ["init"], { cwd: taskDir, env: toolEnv, timeout: 30_000 });
+    spawnNoShell(git, ["add", "-A"], { cwd: taskDir, env: toolEnv, timeout: 30_000 });
     spawnNoShell(
       git,
       ["-c", "user.name=eval", "-c", "user.email=eval@example.invalid", "commit", "-m", "init"],
-      { cwd: taskDir, env, timeout: 30_000 },
+      { cwd: taskDir, env: toolEnv, timeout: 30_000 },
     );
   }
 }
@@ -263,8 +257,10 @@ function summarizeTranscript(events) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const outDir = resolve(opts.out);
-  if (isInsideDirectory(outDir, REPO_ROOT)) {
-    usageError(`--out must be outside the repo (${REPO_ROOT}); got ${outDir}`);
+  try {
+    assertOutsideWorkspace(outDir, REPO_ROOT);
+  } catch (error) {
+    usageError(error instanceof Error ? error.message : String(error));
   }
 
   const secrets = [];
@@ -300,7 +296,7 @@ async function main() {
       auth,
     });
 
-    seedInlineProbeRepo(sandbox.taskDir, opts.arm, sandbox.env);
+    seedInlineProbeRepo(sandbox.taskDir, opts.arm, buildToolEnv(process.env, process.platform));
 
     const claudeExe = resolveExecutableOnPath(
       process.platform === "win32" ? ["claude.exe", "claude.cmd", "claude"] : ["claude"],
@@ -401,4 +397,15 @@ async function main() {
   }
 }
 
-await main();
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  const entry = resolve(process.argv[1]);
+  const self = fileURLToPath(import.meta.url);
+  return process.platform === "win32"
+    ? entry.toLowerCase() === self.toLowerCase()
+    : entry === self;
+}
+
+if (isMainModule()) {
+  await main();
+}

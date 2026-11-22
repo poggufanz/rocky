@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   accessSync,
   chmodSync,
@@ -8,8 +9,10 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, posix, resolve, win32 } from "node:path";
@@ -88,6 +91,25 @@ export function scrubEnv(env, platform = process.platform) {
   return out;
 }
 
+/**
+ * Build a scrubbed environment for git/npm helper children without agent tokens or color overrides.
+ * @param {Record<string, string | undefined>} [env]
+ * @param {NodeJS.Platform} [platform]
+ * @returns {Record<string, string>}
+ */
+export function buildToolEnv(env = process.env, platform = process.platform) {
+  const toolEnv = scrubEnv(env, platform);
+  const hasPathKey = Object.keys(toolEnv).some((key) => key.toUpperCase() === "PATH");
+  if (hasPathKey) {
+    setSinglePath(toolEnv, getPathValue(toolEnv));
+  }
+  for (const key of Object.keys(toolEnv)) {
+    if (key.toUpperCase() === "FORCE_COLOR") delete toolEnv[key];
+  }
+  toolEnv.npm_config_color = "false";
+  return toolEnv;
+}
+
 function defaultHasRockyShim(dir, platform) {
   const pathApi = platform === "win32" ? win32 : posix;
   const cleanDir = platform === "win32" ? dir.replace(/^"|"$/g, "") : dir;
@@ -98,8 +120,15 @@ function defaultHasRockyShim(dir, platform) {
   return names.some((name) => existsSync(pathApi.join(cleanDir, name)));
 }
 
+function isAbsolutePathEntry(entry, platform) {
+  if (platform === "win32") {
+    return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(entry);
+  }
+  return posix.isAbsolute(entry);
+}
+
 /**
- * Remove every PATH directory that contains a rocky shim.
+ * Remove empty, non-absolute, and rocky-shim PATH entries.
  * @param {string | undefined} pathValue
  * @param {NodeJS.Platform} [platform]
  * @param {(dir: string) => boolean} [hasRockyShim]
@@ -115,43 +144,153 @@ export function stripRockyFromPath(
   const checker = hasRockyShim ?? ((dir) => defaultHasRockyShim(dir, platform));
   return pathValue
     .split(sep)
-    .filter((entry) => entry.length === 0 || !checker(entry))
+    .filter((entry) => {
+      const clean = platform === "win32" ? entry.replace(/^"|"$/g, "") : entry;
+      if (clean.length === 0) return false;
+      if (!isAbsolutePathEntry(clean, platform)) return false;
+      return !checker(entry);
+    })
     .join(sep);
 }
 
-/**
- * Refuse a sandbox root if CLAUDE.md, AGENTS.md, or .claude exists in it or any ancestor.
- * @param {string} dir
- * @param {(candidate: string) => boolean} [exists]
- */
-export function assertNoAncestorInstructions(dir, exists = existsSync) {
-  if (typeof dir !== "string" || dir.length === 0) {
-    throw new Error("Sandbox root must be a non-empty path");
-  }
-  const isWinStyle = /^[A-Za-z]:[\\/]|^\\\\/.test(dir);
-  const isPosixStyle = dir.startsWith("/");
-  const pathApi = isWinStyle
-    ? win32
-    : isPosixStyle
-      ? posix
-      : (process.platform === "win32" ? win32 : posix);
-  const absolute = pathApi.isAbsolute(dir) ? pathApi.normalize(dir) : resolve(dir);
-  const root = pathApi.parse(absolute).root;
-  let current = absolute;
+function pathApiFor(target, fallbackApi = process.platform === "win32" ? win32 : posix) {
+  if (/^[A-Za-z]:[\\/]|^\\\\/.test(target)) return win32;
+  if (target.startsWith("/")) return posix;
+  return fallbackApi;
+}
+
+function stripTrailingSep(target, pathApi) {
+  const root = pathApi.parse(target).root;
+  let current = target;
   while (current.length > root.length && (current.endsWith("/") || current.endsWith("\\"))) {
     current = current.slice(0, -1);
   }
+  return current;
+}
 
+function resolveDeepestExisting(absolute, pathApi, realpath) {
+  let cursor = stripTrailingSep(absolute, pathApi);
+  /** @type {string[]} */
+  const suffix = [];
   while (true) {
-    for (const sentinel of ANCESTOR_SENTINELS) {
-      const candidate = pathApi.join(current, sentinel);
-      if (exists(candidate)) {
-        throw new Error(`Refusing sandbox root: found ancestor instruction or config at ${candidate}`);
+    try {
+      const resolved = realpath(cursor);
+      const resolvedApi = pathApiFor(resolved, pathApi);
+      const cleanResolved = stripTrailingSep(resolved, resolvedApi);
+      const canonical = suffix.length > 0
+        ? resolvedApi.join(cleanResolved, ...suffix.slice().reverse())
+        : cleanResolved;
+      return { deepestExisting: cleanResolved, canonical, pathApi: resolvedApi };
+    } catch (error) {
+      const code = error && typeof error === "object" ? error.code : undefined;
+      if (code !== undefined && code !== "ENOENT" && code !== "ENOTDIR") {
+        throw error;
+      }
+      const parent = pathApi.dirname(cursor);
+      if (parent === cursor) return null;
+      suffix.push(pathApi.basename(cursor));
+      cursor = stripTrailingSep(parent, pathApi);
+    }
+  }
+}
+
+function walkAncestorsForSentinels(startDir, pathApi, exists, visited) {
+  let current = stripTrailingSep(startDir, pathApi);
+  while (true) {
+    if (!visited.has(current)) {
+      visited.add(current);
+      for (const sentinel of ANCESTOR_SENTINELS) {
+        const candidate = pathApi.join(current, sentinel);
+        if (exists(candidate)) {
+          throw new Error(`Refusing sandbox root: found ancestor instruction or config at ${candidate}`);
+        }
       }
     }
     const parent = pathApi.dirname(current);
     if (parent === current) break;
-    current = parent;
+    current = stripTrailingSep(parent, pathApi);
+  }
+}
+
+/**
+ * Refuse a sandbox root if CLAUDE.md, AGENTS.md, or .claude exists in it or any lexical/canonical ancestor.
+ * @param {string} dir
+ * @param {(candidate: string) => boolean} [exists]
+ * @param {(candidate: string) => string} [realpath]
+ */
+export function assertNoAncestorInstructions(
+  dir,
+  exists = existsSync,
+  realpath = realpathSync.native,
+) {
+  if (typeof dir !== "string" || dir.length === 0) {
+    throw new Error("Sandbox root must be a non-empty path");
+  }
+  const pathApi = pathApiFor(dir);
+  const absolute = pathApi.isAbsolute(dir) ? pathApi.normalize(dir) : resolve(dir);
+  const visited = new Set();
+
+  walkAncestorsForSentinels(absolute, pathApi, exists, visited);
+
+  const canonical = resolveDeepestExisting(absolute, pathApi, realpath);
+  if (canonical) {
+    walkAncestorsForSentinels(canonical.deepestExisting, canonical.pathApi, exists, visited);
+  }
+}
+
+function isPathInside(target, base, pathApi, caseInsensitive) {
+  const normTarget = caseInsensitive ? target.toLowerCase() : target;
+  const normBase = caseInsensitive ? base.toLowerCase() : base;
+  const rel = pathApi.relative(normBase, normTarget);
+  if (rel === "") return true;
+  if (pathApi.isAbsolute(rel)) return false;
+  const firstSegment = rel.split(/[\\/]/)[0];
+  return firstSegment !== "..";
+}
+
+/**
+ * Refuse a destination path that resolves inside the repository or its enclosing workspace.
+ * @param {string} targetPath
+ * @param {string} [repoRoot]
+ * @param {NodeJS.Platform} [platform]
+ * @param {(candidate: string) => string} [realpath]
+ */
+export function assertOutsideWorkspace(
+  targetPath,
+  repoRoot = REPO_ROOT,
+  platform = process.platform,
+  realpath = realpathSync.native,
+) {
+  if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
+    throw new Error("Output path must be a non-empty path");
+  }
+  if (typeof repoRoot !== "string" || repoRoot.trim().length === 0) {
+    throw new Error("Repository root must be a non-empty path");
+  }
+
+  const fallbackApi = platform === "win32" ? win32 : posix;
+  const targetApi = pathApiFor(targetPath, fallbackApi);
+  const repoApi = pathApiFor(repoRoot, fallbackApi);
+  const absTarget = targetApi.isAbsolute(targetPath) ? targetApi.normalize(targetPath) : resolve(targetPath);
+  const absRepo = repoApi.isAbsolute(repoRoot) ? repoApi.normalize(repoRoot) : resolve(repoRoot);
+
+  const targetResolved = resolveDeepestExisting(absTarget, targetApi, realpath);
+  const repoResolved = resolveDeepestExisting(absRepo, repoApi, realpath);
+
+  const canonicalTarget = targetResolved ? targetResolved.canonical : stripTrailingSep(absTarget, targetApi);
+  const canonicalRepo = repoResolved ? repoResolved.canonical : stripTrailingSep(absRepo, repoApi);
+  const effectiveApi = repoResolved ? repoResolved.pathApi : repoApi;
+  const caseInsensitive = platform === "win32" || effectiveApi === win32;
+
+  const workspaceDir = effectiveApi.dirname(canonicalRepo);
+  const workspaceResolved = resolveDeepestExisting(workspaceDir, effectiveApi, realpath);
+  const canonicalWorkspace = workspaceResolved ? workspaceResolved.canonical : stripTrailingSep(workspaceDir, effectiveApi);
+
+  if (isPathInside(canonicalTarget, canonicalRepo, effectiveApi, caseInsensitive)) {
+    throw new Error(`Path must be outside the repo (${canonicalRepo}); got ${targetPath}`);
+  }
+  if (isPathInside(canonicalTarget, canonicalWorkspace, effectiveApi, caseInsensitive)) {
+    throw new Error(`Path must be outside the repo and enclosing workspace (${canonicalWorkspace}); got ${targetPath}`);
   }
 }
 
@@ -196,7 +335,7 @@ export function resolveExecutableOnPath(
       const candidate = pathApi.join(dir, name);
       try {
         accessSync(candidate, mode);
-        if (lstatSync(candidate).isFile()) return resolve(candidate);
+        if (statSync(candidate).isFile()) return resolve(candidate);
       } catch {
         // Keep searching PATH candidates.
       }
@@ -314,12 +453,16 @@ export async function packArm(commit, cacheDir) {
     throw new Error("packArm requires a non-empty cacheDir");
   }
 
-  const git = resolveGitExecutable(process.env);
-  const npm = resolveNpmExecutable(process.env);
+  const toolEnv = buildToolEnv(process.env, process.platform);
+  const git = resolveGitExecutable(toolEnv);
+  const npm = resolveNpmExecutable(toolEnv);
   const resolvedCache = resolve(cacheDir);
   mkdirSync(resolvedCache, { recursive: true });
 
-  const rev = runCommand(git, ["rev-parse", "--verify", `${commit}^{commit}`], { cwd: REPO_ROOT });
+  const rev = runCommand(git, ["rev-parse", "--verify", `${commit}^{commit}`], {
+    cwd: REPO_ROOT,
+    env: toolEnv,
+  });
   if (rev.status !== 0) {
     throw new Error(`Unable to resolve commit ${commit}: ${rev.stderr.trim()}`);
   }
@@ -327,18 +470,15 @@ export async function packArm(commit, cacheDir) {
   const cachedTgz = join(resolvedCache, `rocky-${sha}.tgz`);
   if (existsSync(cachedTgz)) return cachedTgz;
 
-  const worktreeDir = join(resolvedCache, `wt-${sha}`);
-  const packTmpDir = join(resolvedCache, `pack-${sha.slice(0, 12)}-${process.pid}`);
-  const buildEnv = { ...process.env };
-  delete buildEnv.FORCE_COLOR;
-  buildEnv.npm_config_color = "false";
+  const unique = `${process.pid}-${randomBytes(4).toString("hex")}`;
+  const worktreeDir = join(resolvedCache, `wt-${sha}-${unique}`);
+  const packTmpDir = join(resolvedCache, `pack-${sha.slice(0, 12)}-${unique}`);
+  const staging = `${cachedTgz}.tmp-${unique}`;
 
-  if (existsSync(worktreeDir)) {
-    runCommand(git, ["worktree", "remove", "--force", worktreeDir], { cwd: REPO_ROOT });
-    removeTreeWithRetry(worktreeDir);
-  }
-
-  const add = runCommand(git, ["worktree", "add", "--detach", worktreeDir, sha], { cwd: REPO_ROOT });
+  const add = runCommand(git, ["worktree", "add", "--detach", worktreeDir, sha], {
+    cwd: REPO_ROOT,
+    env: toolEnv,
+  });
   if (add.status !== 0) {
     throw new Error(`git worktree add failed for ${sha}: ${add.stderr.trim()}`);
   }
@@ -346,7 +486,7 @@ export async function packArm(commit, cacheDir) {
   try {
     const ci = runCommand(npm, ["ci", "--no-audit", "--no-fund"], {
       cwd: worktreeDir,
-      env: buildEnv,
+      env: toolEnv,
       timeout: 300_000,
     });
     if (ci.status !== 0) {
@@ -356,7 +496,7 @@ export async function packArm(commit, cacheDir) {
     mkdirSync(packTmpDir, { recursive: true });
     const pack = runCommand(npm, ["pack", "--pack-destination", packTmpDir], {
       cwd: worktreeDir,
-      env: buildEnv,
+      env: toolEnv,
       timeout: 180_000,
     });
     if (pack.status !== 0) {
@@ -368,16 +508,29 @@ export async function packArm(commit, cacheDir) {
       throw new Error(`Expected 1 tarball from npm pack, found ${tarballs.length}`);
     }
     const produced = join(packTmpDir, tarballs[0]);
-    const staging = `${cachedTgz}.tmp-${process.pid}`;
     renameSync(produced, staging);
-    renameSync(staging, cachedTgz);
+    if (existsSync(cachedTgz)) {
+      rmSync(staging, { force: true });
+      return cachedTgz;
+    }
+    try {
+      renameSync(staging, cachedTgz);
+    } catch (error) {
+      rmSync(staging, { force: true });
+      if (existsSync(cachedTgz)) return cachedTgz;
+      throw error;
+    }
     return cachedTgz;
   } finally {
+    rmSync(staging, { force: true });
     removeTreeWithRetry(packTmpDir);
-    const removed = runCommand(git, ["worktree", "remove", "--force", worktreeDir], { cwd: REPO_ROOT });
+    const removed = runCommand(git, ["worktree", "remove", "--force", worktreeDir], {
+      cwd: REPO_ROOT,
+      env: toolEnv,
+    });
     if (removed.status !== 0 || existsSync(worktreeDir)) {
       removeTreeWithRetry(worktreeDir);
-      runCommand(git, ["worktree", "prune"], { cwd: REPO_ROOT });
+      runCommand(git, ["worktree", "prune"], { cwd: REPO_ROOT, env: toolEnv });
     }
   }
 }
@@ -392,6 +545,7 @@ export async function packArm(commit, cacheDir) {
  *   auth?: SandboxAuth,
  *   platform?: NodeJS.Platform,
  *   exists?: (candidate: string) => boolean,
+ *   realpath?: (candidate: string) => string,
  *   env?: Record<string, string | undefined>,
  * }} options
  * @returns {Promise<Sandbox>}
@@ -404,6 +558,7 @@ export async function createSandbox({
   auth,
   platform = process.platform,
   exists = existsSync,
+  realpath = realpathSync.native,
   env = process.env,
 }) {
   if (!VALID_ARMS.has(arm)) {
@@ -417,7 +572,7 @@ export async function createSandbox({
   }
 
   const resolvedRoot = resolve(root);
-  assertNoAncestorInstructions(resolvedRoot, exists);
+  assertNoAncestorInstructions(resolvedRoot, exists, realpath);
 
   const dir = join(resolvedRoot, runId);
   const home = join(dir, "home");
@@ -429,146 +584,167 @@ export async function createSandbox({
     ? null
     : (platform === "win32" ? prefixDir : join(prefixDir, "bin"));
 
-  mkdirSync(home, { recursive: true });
-  mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  if (platform !== "win32") chmodSync(configDir, 0o700);
-  mkdirSync(rockyHome, { recursive: true });
-  mkdirSync(taskDir, { recursive: true });
-
-  const sandboxEnv = scrubEnv(env, platform);
-  const cleanedPath = stripRockyFromPath(getPathValue(env), platform);
-  const sep = platform === "win32" ? ";" : ":";
-  const nextPath = prefixBin === null
-    ? cleanedPath
-    : [prefixBin, cleanedPath].filter(Boolean).join(sep);
-  setSinglePath(sandboxEnv, nextPath);
-
-  sandboxEnv.HOME = home;
-  sandboxEnv.USERPROFILE = home;
-  sandboxEnv.CLAUDE_CONFIG_DIR = configDir;
-  sandboxEnv.ROCKY_HOME = rockyHome;
-
-  if (arm === "after") {
-    sandboxEnv.ROCKY_TEST_SEAMS = "1";
-    sandboxEnv.ROCKY_ATTEMPT_ARM = "shown";
+  mkdirSync(resolvedRoot, { recursive: true });
+  try {
+    mkdirSync(dir);
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "EEXIST") {
+      throw new Error(`Sandbox run directory already exists: ${dir}`);
+    }
+    throw error;
   }
 
-  const secrets = [];
-  if (auth !== undefined) {
-    if (auth.kind === "token") {
-      const token = env.ROCKY_EVAL_OAUTH_TOKEN;
-      if (typeof token !== "string" || token.length === 0) {
-        throw new Error("Missing ROCKY_EVAL_OAUTH_TOKEN in harness environment");
-      }
-      sandboxEnv.CLAUDE_CODE_OAUTH_TOKEN = token;
-      secrets.push(token);
-    } else if (auth.kind === "copy-credentials") {
-      if (typeof auth.from !== "string" || auth.from.length === 0) {
-        throw new Error("copy-credentials auth requires a 'from' file path");
-      }
-      if (!existsSync(auth.from) || !lstatSync(auth.from).isFile()) {
-        throw new Error(`Credentials file does not exist or is not a file: ${auth.from}`);
-      }
-      const dest = join(configDir, ".credentials.json");
-      copyFileSync(auth.from, dest);
-      if (platform !== "win32") chmodSync(dest, 0o600);
-    } else {
-      throw new Error(`Unsupported auth kind: ${String(auth.kind)}`);
-    }
-  }
+  try {
+    mkdirSync(home, { recursive: true });
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    if (platform !== "win32") chmodSync(configDir, 0o700);
+    mkdirSync(rockyHome, { recursive: true });
+    mkdirSync(taskDir, { recursive: true });
 
-  if (arm === "before" || arm === "after") {
-    if (typeof tgz !== "string" || tgz.length === 0 || !existsSync(tgz)) {
-      throw new Error(`Arm '${arm}' requires an existing tarball path`);
-    }
-    mkdirSync(prefixDir, { recursive: true });
-    const npm = resolveNpmExecutable(sandboxEnv, platform);
-    const npmEnv = { ...sandboxEnv };
-    delete npmEnv.CLAUDE_CODE_OAUTH_TOKEN;
-    delete npmEnv.FORCE_COLOR;
-    npmEnv.NPM_CONFIG_CACHE = join(dir, ".npm-cache");
-    npmEnv.npm_config_color = "false";
+    const sandboxEnv = scrubEnv(env, platform);
+    const cleanedPath = stripRockyFromPath(getPathValue(env), platform);
+    const sep = platform === "win32" ? ";" : ":";
+    const nextPath = prefixBin === null
+      ? cleanedPath
+      : [prefixBin, cleanedPath].filter(Boolean).join(sep);
+    setSinglePath(sandboxEnv, nextPath);
 
-    const install = runCommand(
-      npm,
-      ["i", "-g", "--prefix", prefixDir, resolve(tgz), "--no-audit", "--no-fund"],
-      { cwd: taskDir, env: npmEnv, platform, timeout: 180_000 },
-    );
-    if (install.status !== 0) {
-      throw new Error(
-        redactText(`npm install failed for arm '${arm}': ${install.stderr || install.stdout}`, secrets),
+    sandboxEnv.HOME = home;
+    sandboxEnv.USERPROFILE = home;
+    sandboxEnv.CLAUDE_CONFIG_DIR = configDir;
+    sandboxEnv.ROCKY_HOME = rockyHome;
+
+    if (arm === "after") {
+      sandboxEnv.ROCKY_TEST_SEAMS = "1";
+      sandboxEnv.ROCKY_ATTEMPT_ARM = "shown";
+    }
+
+    const secrets = [];
+    if (auth !== undefined) {
+      if (auth.kind === "token") {
+        const token = env.ROCKY_EVAL_OAUTH_TOKEN;
+        if (typeof token !== "string" || token.length === 0) {
+          throw new Error("Missing ROCKY_EVAL_OAUTH_TOKEN in harness environment");
+        }
+        sandboxEnv.CLAUDE_CODE_OAUTH_TOKEN = token;
+        secrets.push(token);
+      } else if (auth.kind === "copy-credentials") {
+        if (typeof auth.from !== "string" || auth.from.length === 0) {
+          throw new Error("copy-credentials auth requires a 'from' file path");
+        }
+        if (!existsSync(auth.from) || !lstatSync(auth.from).isFile()) {
+          throw new Error(`Credentials file does not exist or is not a file: ${auth.from}`);
+        }
+        const dest = join(configDir, ".credentials.json");
+        copyFileSync(auth.from, dest);
+        if (platform !== "win32") chmodSync(dest, 0o600);
+      } else {
+        throw new Error(`Unsupported auth kind: ${String(auth.kind)}`);
+      }
+    }
+
+    if (arm === "before" || arm === "after") {
+      if (typeof tgz !== "string" || tgz.length === 0 || !existsSync(tgz)) {
+        throw new Error(`Arm '${arm}' requires an existing tarball path`);
+      }
+      mkdirSync(prefixDir, { recursive: true });
+      const npm = resolveNpmExecutable(sandboxEnv, platform);
+      const npmEnv = { ...sandboxEnv };
+      delete npmEnv.CLAUDE_CODE_OAUTH_TOKEN;
+      for (const key of Object.keys(npmEnv)) {
+        if (key.toUpperCase() === "FORCE_COLOR") delete npmEnv[key];
+      }
+      npmEnv.NPM_CONFIG_CACHE = join(dir, ".npm-cache");
+      npmEnv.npm_config_color = "false";
+
+      const install = runCommand(
+        npm,
+        ["i", "-g", "--prefix", prefixDir, resolve(tgz), "--no-audit", "--no-fund"],
+        { cwd: taskDir, env: npmEnv, platform, timeout: 180_000 },
       );
-    }
+      if (install.status !== 0) {
+        throw new Error(
+          redactText(`npm install failed for arm '${arm}': ${install.stderr || install.stdout}`, secrets),
+        );
+      }
 
-    const rockyShim = platform === "win32"
-      ? join(prefixBin, "rocky.cmd")
-      : join(prefixBin, "rocky");
-    if (!existsSync(rockyShim)) {
-      throw new Error(`Installed rocky shim is missing: ${rockyShim}`);
-    }
+      const rockyShim = platform === "win32"
+        ? join(prefixBin, "rocky.cmd")
+        : join(prefixBin, "rocky");
+      if (!existsSync(rockyShim)) {
+        throw new Error(`Installed rocky shim is missing: ${rockyShim}`);
+      }
 
-    const runSetupMcp = () => runCommand(
-      rockyShim,
-      ["setup", "--harness", "claude-code", "--yes"],
-      { cwd: taskDir, env: sandboxEnv, platform, timeout: 60_000 },
-    );
-    // The first `claude mcp list` health probe after a fresh install can miss
-    // the cold start of the new package and exit 1 although the registration
-    // was written. Setup is idempotent, so one rerun verifies the same entry.
-    let setupMcp = runSetupMcp();
-    if (setupMcp.status !== 0) setupMcp = runSetupMcp();
-    if (setupMcp.status !== 0) {
-      throw new Error(
-        redactText(
-          `rocky setup --harness claude-code --yes failed (exit ${setupMcp.status}): ${setupMcp.stderr || setupMcp.stdout}`,
-          secrets,
-        ),
-      );
-    }
-
-    // `rocky setup --agent-hooks` intentionally requires a TTY for consent.
-    // Pass a one-shot preload solely to this setup child so the absolute shim
-    // accepts "y\n" without polluting sandboxEnv.
-    const ttyPreload = join(dir, ".tty-confirm-preload.cjs");
-    writeFileSync(
-      ttyPreload,
-      'Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });\n',
-      "utf8",
-    );
-    try {
-      const hookEnv = {
-        ...sandboxEnv,
-        NODE_OPTIONS: `--require ${JSON.stringify(
-          platform === "win32" ? ttyPreload.replaceAll("\\", "/") : ttyPreload,
-        )}`,
-      };
-      const setupHooks = runCommand(
+      const runSetupMcp = () => runCommand(
         rockyShim,
-        ["setup", "--agent-hooks"],
-        { cwd: taskDir, env: hookEnv, input: "y\n", platform, timeout: 60_000 },
+        ["setup", "--harness", "claude-code", "--yes"],
+        { cwd: taskDir, env: sandboxEnv, platform, timeout: 60_000 },
       );
-      if (setupHooks.status !== 0) {
+      // The first `claude mcp list` health probe after a fresh install can miss
+      // the cold start of the new package and exit 1 although the registration
+      // was written. Setup is idempotent, so one rerun verifies the same entry.
+      let setupMcp = runSetupMcp();
+      if (setupMcp.status !== 0) setupMcp = runSetupMcp();
+      if (setupMcp.status !== 0) {
         throw new Error(
           redactText(
-            `rocky setup --agent-hooks failed (exit ${setupHooks.status}): ${setupHooks.stderr || setupHooks.stdout}`,
+            `rocky setup --harness claude-code --yes failed (exit ${setupMcp.status}): ${setupMcp.stderr || setupMcp.stdout}`,
             secrets,
           ),
         );
       }
-    } finally {
-      rmSync(ttyPreload, { force: true });
-    }
-  }
 
-  return {
-    dir,
-    home,
-    configDir,
-    rockyHome,
-    taskDir,
-    prefixBin,
-    env: sandboxEnv,
-  };
+      // `rocky setup --agent-hooks` intentionally requires a TTY for consent.
+      // Pass a one-shot preload solely to this setup child so the absolute shim
+      // accepts "y\n" without polluting sandboxEnv.
+      const ttyPreload = join(dir, ".tty-confirm-preload.cjs");
+      writeFileSync(
+        ttyPreload,
+        'Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });\n',
+        "utf8",
+      );
+      try {
+        const hookEnv = {
+          ...sandboxEnv,
+          NODE_OPTIONS: `--require ${JSON.stringify(
+            platform === "win32" ? ttyPreload.replaceAll("\\", "/") : ttyPreload,
+          )}`,
+        };
+        const setupHooks = runCommand(
+          rockyShim,
+          ["setup", "--agent-hooks"],
+          { cwd: taskDir, env: hookEnv, input: "y\n", platform, timeout: 60_000 },
+        );
+        if (setupHooks.status !== 0) {
+          throw new Error(
+            redactText(
+              `rocky setup --agent-hooks failed (exit ${setupHooks.status}): ${setupHooks.stderr || setupHooks.stdout}`,
+              secrets,
+            ),
+          );
+        }
+      } finally {
+        rmSync(ttyPreload, { force: true });
+      }
+    }
+
+    return {
+      dir,
+      home,
+      configDir,
+      rockyHome,
+      taskDir,
+      prefixBin,
+      env: sandboxEnv,
+    };
+  } catch (error) {
+    try {
+      removeTreeWithRetry(dir);
+    } catch {
+      // Preserve the original initialization error.
+    }
+    throw error;
+  }
 }
 
 /**
