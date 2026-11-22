@@ -406,7 +406,9 @@ test("the elsewhere-admission lines follow the output rules", () => {
 test("hookFail speaks the full-record hint with the quoted command last, and plainly", () => {
   const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-hint-"));
   const hintCwd = mkdtempSync(join(tmpdir(), "rocky-hook-hint-cwd-"));
+  const prevAdvisory = process.env.ROCKY_ATTEMPT_ADVISORY;
   process.env.ROCKY_HOME = isolatedHome;
+  process.env.ROCKY_ATTEMPT_ADVISORY = "off";
   try {
     const failure = {
       kind: "failure", id: "hint-failure", ts: Date.now() - 1000, cwd: hintCwd, cmd: "hint-test-cmd",
@@ -416,18 +418,15 @@ test("hookFail speaks the full-record hint with the quoted command last, and pla
     writeFileSync(join(isolatedHome, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
     const { result, tty } = captureTty(() => hookFail("hint-test-cmd", 1, hintCwd));
     assert.equal(result, 0);
-    const lines = tty.split("\n").filter((line) => line.length > 0);
     assert.equal(
-      lines[0],
-      "rocky: Same error again. The hook captures only the command, not stderr. To capture stderr too, run: rocky run 'hint-test-cmd'",
+      tty,
+      "rocky: Same error again. The hook captures only the command, not stderr. To capture stderr too, run: rocky run 'hint-test-cmd'\n",
     );
-    if (lines.length > 1) {
-      assert.equal(lines.length, 2);
-      assert.match(lines[1]!, /^rocky: Same error recorded 1 time before in this directory /);
-    }
     assertPlainSpeech(tty);
   } finally {
     process.env.ROCKY_HOME = home;
+    if (prevAdvisory === undefined) delete process.env.ROCKY_ATTEMPT_ADVISORY;
+    else process.env.ROCKY_ATTEMPT_ADVISORY = prevAdvisory;
   }
 });
 

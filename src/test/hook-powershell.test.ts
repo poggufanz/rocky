@@ -1837,7 +1837,7 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   const repeatCmd = "Get-Item ./__rocky_speech_repeat__ -ErrorAction SilentlyContinue 2>$null";
 
   const child = spawn(exe, ["-NoProfile", "-NoLogo"], {
-    env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim },
+    env: { ...process.env, ROCKY_HOME: rockyHome, ROCKY_BIN: shim, ROCKY_ATTEMPT_ADVISORY: "off" },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -1915,9 +1915,8 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   );
 
   assert.ok(
-    (stderr.includes(`rocky run '${repeatCmd}'\n`)
-      || stderr.includes(`rocky run '${repeatCmd}'\r\n`))
-      && stderr.endsWith("\n"),
+    stderr.endsWith(`rocky run '${repeatCmd}'\n`)
+      || stderr.endsWith(`rocky run '${repeatCmd}'\r\n`),
     `the repeat-occurrence command must arrive complete via this session's own stderr, never truncated, never missing; got stderr: ${JSON.stringify(stderr)}`,
   );
 
