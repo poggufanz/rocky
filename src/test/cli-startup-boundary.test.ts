@@ -136,3 +136,23 @@ test("hook gate-event allows and exits 0 when the gate module cannot load", (t) 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "{}");
 });
+
+test("hook session-start keeps a minimal import closure of node:fs, node:path, and agent-session", () => {
+  const hookModule = join(compiledRoot, "commands", "session-start-hook.js");
+  assert.ok(existsSync(hookModule), `compiled module is missing: ${hookModule}`);
+  const hookImports = staticSpecifiers(hookModule).sort();
+  assert.deepEqual(hookImports, ["../core/agent-session.js", "node:fs", "node:path"]);
+
+  const agentSessionModule = join(compiledRoot, "core", "agent-session.js");
+  assert.ok(existsSync(agentSessionModule), `compiled module is missing: ${agentSessionModule}`);
+  assert.deepEqual(staticSpecifiers(agentSessionModule), []);
+});
+
+test("hook session-start prints {} and exits 0 when the session-start module cannot load", (t) => {
+  const root = installStartupClosure(t);
+  mkdirSync(join(root, "commands"), { recursive: true });
+  writeFileSync(join(root, "commands", "session-start-hook.js"), 'throw new Error("session-start cannot load");\n', "utf8");
+  const result = runInstalledEntry(root, ["hook", "session-start", "claude-code"], "{}");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "{}");
+});

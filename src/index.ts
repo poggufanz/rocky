@@ -187,6 +187,8 @@ usage:
                             PreToolUse advisory endpoint; reads one hook payload from
                             stdin, prints {} or one advisory note, never blocks,
                             always exits 0.
+  rocky hook session-start claude-code
+                            private SessionStart endpoint; records the session id for rocky run; stdout is always {}.
 
 Memory lives in ~/.rocky/memory.jsonl. There is no telemetry. Outside calls:
 rocky check asks registry.npmjs.org whether a package exists (package name only,
@@ -230,7 +232,8 @@ type HookRequest =
     files?: string[];
   }
   | { kind: "gate-event"; vendor: string }
-  | { kind: "listen-event"; harnessId: string; surface: string };
+  | { kind: "listen-event"; harnessId: string; surface: string }
+  | { kind: "session-start"; vendor: "claude-code" };
 
 interface NotifyFlags {
   rationale?: string;
@@ -359,9 +362,15 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
       return { kind: "gate-event", vendor };
     }
   }
+  if (subcommand === "session-start") {
+    const [vendor, ...extra] = rest;
+    if (vendor === "claude-code" && extra.length === 0) {
+      return { kind: "session-start", vendor };
+    }
+  }
   throw new CliUsageError(
     "hook needs one known subcommand",
-    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>|listen-event <harnessId> --surface <surface>",
+    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>|listen-event <harnessId> --surface <surface>|session-start claude-code",
   );
 }
 
@@ -396,9 +405,13 @@ async function readHookStdin(capBytes: number): Promise<Uint8Array> {
   try {
     for await (const chunk of process.stdin) {
       const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-      total += buffer.byteLength;
-      if (total > capBytes) break;
+      const remaining = capBytes - total;
+      if (buffer.byteLength > remaining) {
+        if (remaining > 0) chunks.push(buffer.subarray(0, remaining));
+        break;
+      }
       chunks.push(buffer);
+      total += buffer.byteLength;
     }
   } catch {
     // A stdin stream error still must not throw out of the hook.
@@ -449,6 +462,25 @@ async function runGateEvent(vendor: string): Promise<number> {
     process.stdout.write(stdout);
   } catch {
     // Never fail the hook because stdout could not be written.
+  }
+  return 0;
+}
+
+/** `rocky hook session-start claude-code`: read stdin, record session id, print {}, always exit 0. */
+async function runSessionStart(): Promise<number> {
+  let stdout = "{}";
+  try {
+    const { SESSION_START_STDIN_CAP_BYTES, sessionStartHook } = await import("./commands/session-start-hook.js");
+    const stdin = await readHookStdin(SESSION_START_STDIN_CAP_BYTES + 1);
+    stdout = sessionStartHook(stdin, process.env);
+  } catch {
+    // `sessionStartHook` never throws, but the module can fail to load. The
+    // hook must stay fail-open and still print {}.
+  }
+  try {
+    process.stdout.write(stdout);
+  } catch {
+    // Ignore stdout write errors so the hook stays fail-open.
   }
   return 0;
 }
@@ -577,6 +609,11 @@ async function main(): Promise<number> {
           case "listen-event":
             if (parsed.kind === "listen-event") {
               return runListenEvent(parsed.harnessId, parsed.surface);
+            }
+            break;
+          case "session-start":
+            if (parsed.kind === "session-start") {
+              return runSessionStart();
             }
             break;
         }
