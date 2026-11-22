@@ -137,7 +137,7 @@ test("hook gate-event allows and exits 0 when the gate module cannot load", (t) 
   assert.equal(result.stdout, "{}");
 });
 
-test("hook session-start keeps a minimal import closure of node:fs, node:path, and agent-session", () => {
+test("hook session-start keeps a minimal import closure of node builtins and agent-session", () => {
   const hookModule = join(compiledRoot, "commands", "session-start-hook.js");
   assert.ok(existsSync(hookModule), `compiled module is missing: ${hookModule}`);
   const hookImports = staticSpecifiers(hookModule).sort();
@@ -145,7 +145,7 @@ test("hook session-start keeps a minimal import closure of node:fs, node:path, a
 
   const agentSessionModule = join(compiledRoot, "core", "agent-session.js");
   assert.ok(existsSync(agentSessionModule), `compiled module is missing: ${agentSessionModule}`);
-  assert.deepEqual(staticSpecifiers(agentSessionModule), []);
+  assert.deepEqual(staticSpecifiers(agentSessionModule), ["node:crypto"]);
 });
 
 test("hook session-start prints {} and exits 0 when the session-start module cannot load", (t) => {

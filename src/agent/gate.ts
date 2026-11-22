@@ -15,8 +15,8 @@
  * note can still print.
  */
 
-import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { sanitizeSessionId } from "../core/agent-session.js";
 import { clarityNudgeLine } from "../core/prompt-clarity.js";
 import {
   countCycleClusters,
@@ -30,9 +30,9 @@ import { fingerprint } from "../core/fingerprint.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { logHookError } from "../commands/agent-hook.js";
 
+export { sanitizeSessionId };
+
 const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
-/** Session ids longer than this get hashed instead of used verbatim as a filename. */
-const MAX_RAW_SESSION_ID_LEN = 64;
 /** Known PreToolUse payload shapes accepted by `gate-event`. */
 const KNOWN_GATE_VENDORS: ReadonlySet<string> = new Set(["claude-code", "generic"]);
 const EXPLICIT_FINGERPRINT = /^[0-9a-f]{16}$/u;
@@ -59,22 +59,6 @@ function isPlainRecord(value: unknown): value is PlainRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-}
-
-/**
- * `session_id` arrives from untrusted vendor stdin and becomes a filename
- * (`<gate-state>/<id>.cycles.json`). Allowlist to `[a-zA-Z0-9_-]` so
- * path separators and `..` cannot escape `gate-state/`, and hash overly
- * long ids to bound filename length. Missing/empty/non-string ids return
- * `undefined` so callers stay silent without sharing one fallback file.
- */
-export function sanitizeSessionId(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const raw = value.trim();
-  if (raw.length === 0) return undefined;
-  const sanitized = raw.replace(/[^a-zA-Z0-9_-]/gu, "_");
-  if (sanitized.length <= MAX_RAW_SESSION_ID_LEN) return sanitized;
-  return `sid-${createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 24)}`;
 }
 
 function readFailureFingerprint(raw: PlainRecord): string | undefined {
