@@ -68,13 +68,13 @@ The exposure log lives at `~/.rocky/advisories.jsonl` (under `ROCKY_HOME` when s
 Each `"note"` row follows this shape:
 
 ```json
-{"v":1,"ts":1795300000000,"session":"sess-01","lane":"tool-result","kind":"note","arm":"shown","key":"output:3f2a9c1e44d0b7a1:0123456789abcdef","cwdHash":"0123456789abcdef","anchorFailureId":"fail-01","latencyMs":42,"delivered":true,"bytes":312}
+{"v":1,"ts":1795300000000,"session":"sess-04","lane":"tool-result","kind":"note","arm":"shown","key":"output:3f2a9c1e44d0b7a1:0123456789abcdef","cwdHash":"0123456789abcdef","anchorFailureId":"fail-01","latencyMs":42,"delivered":true,"bytes":312}
 ```
 
 A `"skip"` row from the tool-result lane carries an extra `reason` field and may have `null` for `session`, `arm`, `key`, and `anchorFailureId` (for example when a tool-result skip occurs before a problem key is available):
 
 ```json
-{"v":1,"ts":1795300000500,"session":"sess-01","lane":"tool-result","kind":"skip","arm":null,"key":null,"cwdHash":"0123456789abcdef","anchorFailureId":null,"latencyMs":3,"delivered":false,"bytes":0,"reason":"lock_busy"}
+{"v":1,"ts":1795300000500,"session":"sess-04","lane":"tool-result","kind":"skip","arm":null,"key":null,"cwdHash":"0123456789abcdef","anchorFailureId":null,"latencyMs":3,"delivered":false,"bytes":0,"reason":"lock_busy"}
 ```
 
 | Field | Type | Meaning |
