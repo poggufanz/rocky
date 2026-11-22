@@ -1915,8 +1915,9 @@ async function realHostSpeechRoundTripSmoke(t: TestContext, exe: string): Promis
   );
 
   assert.ok(
-    stderr.endsWith(`rocky run '${repeatCmd}'\n`)
-      || stderr.endsWith(`rocky run '${repeatCmd}'\r\n`),
+    (stderr.includes(`rocky run '${repeatCmd}'\n`)
+      || stderr.includes(`rocky run '${repeatCmd}'\r\n`))
+      && stderr.endsWith("\n"),
     `the repeat-occurrence command must arrive complete via this session's own stderr, never truncated, never missing; got stderr: ${JSON.stringify(stderr)}`,
   );
 

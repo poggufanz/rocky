@@ -47,8 +47,9 @@ import {
   type ResolveFixOptions,
   type MemoryRecord,
 } from "../core/memory.js";
-import { loadMemoryChecked, tailReadable } from "../core/memory-read.js";
+import { loadMemoryChecked, tailReadable, type MemoryCoverage } from "../core/memory-read.js";
 import { findByFingerprint, fixFromElsewhere, getFix } from "../core/memory-query.js";
+import { prepareLaneOneNote, type PreparedLaneOneNote } from "./attempt-note-lane.js";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
@@ -93,7 +94,7 @@ export function hookStaleLine(installed: string): string | undefined {
  * An unreadable memory file is spoken over /dev/tty, not thrown — a detached
  * hook handler must never take the shell down.
  */
-function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolean } | undefined {
+function readMemory(): { records: MemoryRecord[]; coverage: MemoryCoverage; historyMayStartEarlier: boolean } | undefined {
   try {
     const loaded = loadMemoryChecked();
     const coverageDetail = (): string => {
@@ -112,6 +113,7 @@ function readMemory(): { records: MemoryRecord[]; historyMayStartEarlier: boolea
     }
     return {
       records: loaded.records,
+      coverage: loaded.coverage,
       historyMayStartEarlier: loaded.coverage.window === "tail",
     };
   } catch {
@@ -144,9 +146,30 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
     // Detached bookkeeping must never become the hooked command's outcome.
   }
   const memory = readMemory();
+  const now = Date.now();
+  const fp = commandFingerprintCandidates(cmd, exitCode);
+  let preparedNote: PreparedLaneOneNote | undefined;
+  if (memory !== undefined) {
+    try {
+      preparedNote = prepareLaneOneNote({
+        lane: "hookfail",
+        records: memory.records,
+        coverage: memory.coverage,
+        fingerprints: fp,
+        cwd,
+        now,
+        env: process.env,
+        home: resolveRockyPaths().home,
+      });
+    } catch {
+      preparedNote = undefined;
+    }
+  }
 
+  let recordedId: string | null = null;
   try {
-    recordHookFailure(cmd, exitCode, cwd);
+    const rec = recordHookFailure(cmd, exitCode, cwd);
+    recordedId = rec.id;
   } catch {
     sayTty("The memory file could not be written. This event was not recorded.");
     detailTty(`memory: ${resolveRockyPaths().memory}`);
@@ -154,49 +177,62 @@ export function hookFail(cmd: string, exitCode: number, cwd: string): number {
 
   if (memory === undefined) return 0; // unreadable memory: recorded, but nothing to recall
 
-  const now = Date.now();
-  const fp = commandFingerprintCandidates(cmd, exitCode);
-  const previous = findByFingerprint(memory.records, fp, now);
+  try {
+    const previous = findByFingerprint(memory.records, fp, now);
+    if (previous.length === 0) return 0; // first time: the hook stays quiet
 
-  if (previous.length === 0) return 0; // first time: the hook stays quiet
+    const withFix = [...previous].reverse().find((f) => getFix(memory.records, f, now));
+    if (withFix) {
+      const fix = getFix(memory.records, withFix, now)!;
+      // The recurrence match above is a coarse, masked fingerprint on `cmd`
+      // (no stderr reaches a detached hook handler) — it can pair the current
+      // failure with a past one whose literal command differs (a masked
+      // number, a different filename). `fix.cmd` is always identity-equal to
+      // that PAST failure's command (resolveFixOnSuccess only ever confirms a
+      // fix under exact identity), never to whatever actually changed between
+      // runs — so it is never "the fix", only a possibly-different command
+      // that happened to work. Say only what's true in each case.
+      const currentIdentity = commandIdentity(cmd);
+      const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
+      const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
+      sayTty(`Same error as before, recorded ${ago(withFix.ts)}.`);
+      if (sameCommand) {
+        sayTty(phrase("fix-recurrence-same"));
+      } else {
+        sayTty("Last time, you ran:");
+        detailTty(safeTerminalLine(fix.cmd));
+        sayTty("Possible fix only.");
+      }
+      const elsewhere = fixFromElsewhere(fix, withFix.cwd);
+      if (elsewhere !== undefined) {
+        sayTty("But that fix comes from a different directory.");
+        detailTty(`place: ${safeTerminalLine(elsewhere)}`);
+        sayTty("Possible only. Check before acting.");
+      }
+      if (!sameCommand) sayTty("Try that command?");
+    } else if (!isTypoSymptom(cmd, exitCode)) {
+      const hint = deepMemoryHint(cmd);
+      // No hint means the command already went through `rocky run`, so the full
+      // stderr record exists and that run has already reported. The hook stays
+      // quiet.
+      if (hint) sayTty(`Same error again. The hook captures only the command, not stderr. To capture stderr too, run: ${safeTerminalLine(hint)}`);
+    }
 
-  const withFix = [...previous].reverse().find((f) => getFix(memory.records, f, now));
-  if (withFix) {
-    const fix = getFix(memory.records, withFix, now)!;
-    // The recurrence match above is a coarse, masked fingerprint on `cmd`
-    // (no stderr reaches a detached hook handler) — it can pair the current
-    // failure with a past one whose literal command differs (a masked
-    // number, a different filename). `fix.cmd` is always identity-equal to
-    // that PAST failure's command (resolveFixOnSuccess only ever confirms a
-    // fix under exact identity), never to whatever actually changed between
-    // runs — so it is never "the fix", only a possibly-different command
-    // that happened to work. Say only what's true in each case.
-    const currentIdentity = commandIdentity(cmd);
-    const fixIdentity = commandIdentity(fix.cmd, { platform: fix.platform ?? process.platform });
-    const sameCommand = currentIdentity.reliable && fixIdentity.reliable && currentIdentity.value === fixIdentity.value;
-    sayTty(`Same error as before, recorded ${ago(withFix.ts)}.`);
-    if (sameCommand) {
-      sayTty(phrase("fix-recurrence-same"));
-    } else {
-      sayTty("Last time, you ran:");
-      detailTty(safeTerminalLine(fix.cmd));
-      sayTty("Possible fix only.");
+    if (preparedNote?.text !== undefined) {
+      try {
+        sayTty(preparedNote.text);
+      } catch {
+        // Fail open: note output must never disrupt the hooked shell.
+      }
     }
-    const elsewhere = fixFromElsewhere(fix, withFix.cwd);
-    if (elsewhere !== undefined) {
-      sayTty("But that fix comes from a different directory.");
-      detailTty(`place: ${safeTerminalLine(elsewhere)}`);
-      sayTty("Possible only. Check before acting.");
+    return 0;
+  } finally {
+    try {
+      preparedNote?.finish(recordedId);
+    } catch {
+      // Fail open: exposure logging must never disrupt the hooked shell.
     }
-    if (!sameCommand) sayTty("Try that command?");
-  } else if (!isTypoSymptom(cmd, exitCode)) {
-    const hint = deepMemoryHint(cmd);
-    // No hint means the command already went through `rocky run`, so the full
-    // stderr record exists and that run has already reported. The hook stays
-    // quiet.
-    if (hint) sayTty(`Same error again. The hook captures only the command, not stderr. To capture stderr too, run: ${safeTerminalLine(hint)}`);
   }
-  return 0;
 }
 
 /**
