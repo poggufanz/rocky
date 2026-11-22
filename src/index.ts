@@ -398,17 +398,20 @@ async function readGateEventStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/** Bounded stdin read for one-shot hook lanes. Never throws. */
-async function readHookStdin(capBytes: number): Promise<Uint8Array> {
+interface HookStdinResult {
+  bytes: Uint8Array;
+  overflow: boolean;
+}
+
+/** Bounded stdin read for one-shot hook lanes. Flags any input past maxBytes without buffering the rest. Never throws. */
+async function readHookStdin(maxBytes: number): Promise<HookStdinResult> {
   const chunks: Buffer[] = [];
   let total = 0;
   try {
     for await (const chunk of process.stdin) {
       const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-      const remaining = capBytes - total;
-      if (buffer.byteLength > remaining) {
-        if (remaining > 0) chunks.push(buffer.subarray(0, remaining));
-        break;
+      if (total + buffer.byteLength > maxBytes) {
+        return { bytes: Buffer.alloc(0), overflow: true };
       }
       chunks.push(buffer);
       total += buffer.byteLength;
@@ -416,7 +419,7 @@ async function readHookStdin(capBytes: number): Promise<Uint8Array> {
   } catch {
     // A stdin stream error still must not throw out of the hook.
   }
-  return Buffer.concat(chunks);
+  return { bytes: Buffer.concat(chunks), overflow: false };
 }
 
 /** Host-consent probe for the listen lane: explicit opt-in only, never PATH/config guessing. */
@@ -427,17 +430,18 @@ function listenHostConsent(): boolean {
 
 /** `rocky hook listen-event <harnessId> --surface <surface>`: static argv, stdin JSON, fail-open, empty stdout. */
 async function runListenEvent(harnessId: string, surface: string): Promise<number> {
-  let stdinBytes: Uint8Array;
+  let stdinRead: HookStdinResult;
   try {
-    stdinBytes = await readHookStdin(64 * 1024);
+    stdinRead = await readHookStdin(64 * 1024);
   } catch {
     return 0;
   }
+  if (stdinRead.overflow) return 0;
   try {
     const ingress = await import("./listening/hook-ingress.js");
     const result = await ingress.handleListenEvent(
       ["listen-event", harnessId, "--surface", surface],
-      stdinBytes,
+      stdinRead.bytes,
       { hostConsent: listenHostConsent() },
     );
     void result;
@@ -468,19 +472,23 @@ async function runGateEvent(vendor: string): Promise<number> {
 
 /** `rocky hook session-start claude-code`: read stdin, record session id, print {}, always exit 0. */
 async function runSessionStart(): Promise<number> {
+  // Broken stdout pipes can emit async errors (for example EPIPE) after write() returns.
+  process.stdout.on("error", () => {});
   let stdout = "{}";
   try {
     const { SESSION_START_STDIN_CAP_BYTES, sessionStartHook } = await import("./commands/session-start-hook.js");
-    const stdin = await readHookStdin(SESSION_START_STDIN_CAP_BYTES + 1);
-    stdout = sessionStartHook(stdin, process.env);
+    const stdinRead = await readHookStdin(SESSION_START_STDIN_CAP_BYTES);
+    if (!stdinRead.overflow) {
+      stdout = sessionStartHook(stdinRead.bytes, process.env);
+    }
   } catch {
     // `sessionStartHook` never throws, but the module can fail to load. The
     // hook must stay fail-open and still print {}.
   }
   try {
-    process.stdout.write(stdout);
+    process.stdout.write(stdout, () => {});
   } catch {
-    // Ignore stdout write errors so the hook stays fail-open.
+    // Ignore sync stdout write errors so the hook stays fail-open.
   }
   return 0;
 }
