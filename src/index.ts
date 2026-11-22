@@ -188,7 +188,8 @@ usage:
                             stdin, prints {} or one advisory note, never blocks,
                             always exits 0.
   rocky hook session-start claude-code
-                            private SessionStart endpoint; records the session id for rocky run; stdout is always {}.
+                            private SessionStart endpoint; records the session id
+                            for rocky run; stdout is always {}.
 
 Memory lives in ~/.rocky/memory.jsonl. There is no telemetry. Outside calls:
 rocky check asks registry.npmjs.org whether a package exists (package name only,
