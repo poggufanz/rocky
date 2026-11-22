@@ -946,6 +946,170 @@ test("counts distinct non-ASCII paths separately when ASCII renderings collide",
   );
 });
 
+test("keeps paths differing by invisible controls separate instead of collapsing to (2)", () => {
+  const fp = "3f2a9c1e44d0b7a1";
+  const t1 = REF_NOW - 3 * HOUR_MS;
+  const t2 = REF_NOW - 2 * HOUR_MS;
+  const t3 = REF_NOW - HOUR_MS;
+
+  const sameWayRecords: MemoryRecord[] = [
+    makeFailure({ id: "zw1", ts: t1, fingerprint: fp }),
+    makeFailure({ id: "zw2", ts: t2, fingerprint: fp }),
+    makeFailure({ id: "zw3", ts: t3, fingerprint: fp }),
+  ];
+  const sameWayCard = makeCard("card-zw-same", {
+    started_ms: t1 - 5_000,
+    ended_ms: t3 + 5_000,
+    blocks: [
+      makeBlock(1, "src/a.ts"),
+      makeBlock(2, "src/a\u200b.ts"),
+    ],
+    flow: [
+      makeCmdStep(t1 - 500, t1),
+      makeEditStep([1], t1 + 10_000, t1 + 11_000),
+      makeCmdStep(t2 - 500, t2),
+      makeEditStep([2], t2 + 10_000, t2 + 11_000),
+      makeCmdStep(t3 - 500, t3),
+    ],
+  });
+
+  const sameWayNote = priorAttemptsNote(
+    sameWayRecords,
+    completeCoverage(sameWayRecords.length),
+    { fingerprints: [fp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning([sameWayCard]), platform: "linux" },
+  );
+  assert.ok(sameWayNote);
+  assert.match(sameWayNote.text, /^[\x20-\x7e]*$/);
+  assert.equal(sameWayNote.text.includes("src/a.ts (2)"), false);
+  assert.ok(
+    sameWayNote.text.includes("Files edited before the same-way failures: src/a.ts, src/a.ts."),
+    `unexpected text: ${sameWayNote.text}`,
+  );
+
+  // Passing-rerun clause also keys by raw path identity, not sanitized display text.
+  const fix1 = makeFix({ id: "zw-x1", ts: t1 + 5 * MIN_MS, failureIds: ["zw-p1"] });
+  const fix2 = makeFix({ id: "zw-x2", ts: t2 + 5 * MIN_MS, failureIds: ["zw-p2"] });
+  const passRecords: MemoryRecord[] = [
+    makeFailure({ id: "zw-p1", ts: t1, fingerprint: fp, resolvedBy: fix1.id }),
+    fix1,
+    makeFailure({ id: "zw-p2", ts: t2, fingerprint: fp, resolvedBy: fix2.id }),
+    fix2,
+    makeFailure({ id: "zw-p3", ts: t3, fingerprint: fp }),
+  ];
+  const passCard = makeCard("card-zw-pass", {
+    started_ms: t1 - 5_000,
+    ended_ms: t3 + 5_000,
+    blocks: [
+      makeBlock(1, "src/a.ts"),
+      makeBlock(2, "src/a\u200b.ts"),
+    ],
+    flow: [
+      makeCmdStep(t1 - 500, t1),
+      makeEditStep([1], t1 + 10_000, t1 + 11_000),
+      makeCmdStep(t2 - 500, t2),
+      makeEditStep([2], t2 + 10_000, t2 + 11_000),
+      makeCmdStep(t3 - 500, t3),
+    ],
+  });
+
+  const passNote = priorAttemptsNote(
+    passRecords,
+    completeCoverage(passRecords.length),
+    { fingerprints: [fp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning([passCard]), platform: "linux" },
+  );
+  assert.ok(passNote);
+  assert.match(passNote.text, /^[\x20-\x7e]*$/);
+  assert.equal(passNote.text.includes("src/a.ts (2)"), false);
+  assert.ok(
+    passNote.text.includes("Files edited before the passing reruns: src/a.ts, src/a.ts."),
+    `unexpected text: ${passNote.text}`,
+  );
+});
+
+test("keeps paths differing by trailing non-breaking space separate instead of collapsing to (2)", () => {
+  const fp = "3f2a9c1e44d0b7a1";
+  const t1 = REF_NOW - 3 * HOUR_MS;
+  const t2 = REF_NOW - 2 * HOUR_MS;
+  const t3 = REF_NOW - HOUR_MS;
+
+  const sameWayRecords: MemoryRecord[] = [
+    makeFailure({ id: "nbsp1", ts: t1, fingerprint: fp }),
+    makeFailure({ id: "nbsp2", ts: t2, fingerprint: fp }),
+    makeFailure({ id: "nbsp3", ts: t3, fingerprint: fp }),
+  ];
+  const sameWayCard = makeCard("card-nbsp-same", {
+    started_ms: t1 - 5_000,
+    ended_ms: t3 + 5_000,
+    blocks: [
+      makeBlock(1, "src/result.ts"),
+      makeBlock(2, "src/result.ts\u00a0"),
+    ],
+    flow: [
+      makeCmdStep(t1 - 500, t1),
+      makeEditStep([1], t1 + 10_000, t1 + 11_000),
+      makeCmdStep(t2 - 500, t2),
+      makeEditStep([2], t2 + 10_000, t2 + 11_000),
+      makeCmdStep(t3 - 500, t3),
+    ],
+  });
+
+  const sameWayNote = priorAttemptsNote(
+    sameWayRecords,
+    completeCoverage(sameWayRecords.length),
+    { fingerprints: [fp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning([sameWayCard]), platform: "linux" },
+  );
+  assert.ok(sameWayNote);
+  assert.match(sameWayNote.text, /^[\x20-\x7e]*$/);
+  assert.equal(sameWayNote.text.includes("(2)"), false);
+  assert.ok(
+    sameWayNote.text.includes("Files edited before the same-way failures: src/result.ts?, src/result.ts."),
+    `unexpected text: ${sameWayNote.text}`,
+  );
+
+  // Passing-rerun clause also preserves both identities separately.
+  const fix1 = makeFix({ id: "nbsp-x1", ts: t1 + 5 * MIN_MS, failureIds: ["nbsp-p1"] });
+  const fix2 = makeFix({ id: "nbsp-x2", ts: t2 + 5 * MIN_MS, failureIds: ["nbsp-p2"] });
+  const passRecords: MemoryRecord[] = [
+    makeFailure({ id: "nbsp-p1", ts: t1, fingerprint: fp, resolvedBy: fix1.id }),
+    fix1,
+    makeFailure({ id: "nbsp-p2", ts: t2, fingerprint: fp, resolvedBy: fix2.id }),
+    fix2,
+    makeFailure({ id: "nbsp-p3", ts: t3, fingerprint: fp }),
+  ];
+  const passCard = makeCard("card-nbsp-pass", {
+    started_ms: t1 - 5_000,
+    ended_ms: t3 + 5_000,
+    blocks: [
+      makeBlock(1, "src/result.ts"),
+      makeBlock(2, "src/result.ts\u00a0"),
+    ],
+    flow: [
+      makeCmdStep(t1 - 500, t1),
+      makeEditStep([1], t1 + 10_000, t1 + 11_000),
+      makeCmdStep(t2 - 500, t2),
+      makeEditStep([2], t2 + 10_000, t2 + 11_000),
+      makeCmdStep(t3 - 500, t3),
+    ],
+  });
+
+  const passNote = priorAttemptsNote(
+    passRecords,
+    completeCoverage(passRecords.length),
+    { fingerprints: [fp], cwd: "/app" },
+    { now: REF_NOW, cardsFor: cardsReturning([passCard]), platform: "linux" },
+  );
+  assert.ok(passNote);
+  assert.match(passNote.text, /^[\x20-\x7e]*$/);
+  assert.equal(passNote.text.includes("(2)"), false);
+  assert.ok(
+    passNote.text.includes("Files edited before the passing reruns: src/result.ts?, src/result.ts."),
+    `unexpected text: ${passNote.text}`,
+  );
+});
+
 test("computes from the snapshot before the current failure", () => {
   const fp = "3f2a9c1e44d0b7a1";
   const t1 = REF_NOW - 30 * MIN_MS;

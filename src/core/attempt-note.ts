@@ -133,7 +133,7 @@ function collectClauseFiles(
   outcome: "passed" | "same_failure",
   platform: NodeJS.Platform,
 ): string[] {
-  const stats = new Map<string, { display: string; count: number; lastOrder: number; firstOrder: number }>();
+  const stats = new Map<string, { rawPath: string; count: number; lastOrder: number; firstOrder: number }>();
   let globalOrder = 0;
 
   for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
@@ -143,17 +143,14 @@ function collectClauseFiles(
 
     const seenInAttempt = new Set<string>();
     for (const rawPath of attempt.changes.files) {
-      const identityRaw = sanitizeTestimony(rawPath).trim();
-      if (identityRaw.length === 0) continue;
-      const cleaned = toPrintableAscii(identityRaw).trim();
-      if (cleaned.length === 0) continue;
-      const key = platform === "win32" ? identityRaw.toLowerCase() : identityRaw;
+      if (rawPath.length === 0) continue;
+      const key = platform === "win32" ? rawPath.toLowerCase() : rawPath;
       if (seenInAttempt.has(key)) continue;
       seenInAttempt.add(key);
 
       const existing = stats.get(key);
       if (existing === undefined) {
-        stats.set(key, { display: cleaned, count: 1, lastOrder: attemptIndex, firstOrder: globalOrder });
+        stats.set(key, { rawPath, count: 1, lastOrder: attemptIndex, firstOrder: globalOrder });
       } else {
         existing.count += 1;
         existing.lastOrder = attemptIndex;
@@ -164,6 +161,11 @@ function collectClauseFiles(
 
   return [...stats.values()]
     .sort((a, b) => (b.count - a.count) || (b.lastOrder - a.lastOrder) || (a.firstOrder - b.firstOrder))
+    .map((item) => ({
+      display: toPrintableAscii(sanitizeTestimony(item.rawPath)).trim(),
+      count: item.count,
+    }))
+    .filter((item) => item.display.length > 0)
     .slice(0, MAX_FILES_PER_CLAUSE)
     .map((item) => (item.count > 1 ? `${item.display} (${item.count})` : item.display));
 }
