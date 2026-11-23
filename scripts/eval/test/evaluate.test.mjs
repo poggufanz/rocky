@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { normalizeLine } from "../../../dist/core/fingerprint.js";
 import {
   classifyTargetRuns,
+  evaluateBatch,
   runMetrics,
   stripRockyLines,
   toolCalls,
@@ -1038,6 +1039,83 @@ describe("evaluate.mjs CLI", () => {
       assert.match(lines[0], /\barm=none\b/);
       assert.match(lines[1], /\barm=before\b/);
       assert.match(lines[2], /\barm=after\b/);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
+  test("evaluateBatch reads only canonical run dirs and ignores leftover .prev and .next dirs", () => {
+    const outDir = mkdtempSync(join(tmpdir(), "rocky-eval-ignore-swap-"));
+    try {
+      const runsDir = join(outDir, "runs");
+      const canonical = join(runsDir, "T02-before-b1");
+      const stalePrev = join(runsDir, "T02-before-b1.prev");
+      const orphanNext = join(runsDir, "T02-after-b1.next");
+      mkdirSync(canonical, { recursive: true });
+      mkdirSync(stalePrev, { recursive: true });
+      mkdirSync(orphanNext, { recursive: true });
+
+      writeFileSync(
+        join(canonical, "run.json"),
+        JSON.stringify({
+          runId: "T02-before-b1",
+          taskId: "T02",
+          arm: "before",
+          block: 1,
+          invalid: null,
+          accept: { solved: true, reason: "ok" },
+        }),
+        "utf8",
+      );
+      writeFileSync(
+        join(canonical, "transcript.jsonl"),
+        readFileSync(join(fixturesDir, "four-turn-pass.jsonl"), "utf8"),
+        "utf8",
+      );
+
+      // Leftover .prev with the same runId and a failed outcome must NOT overwrite canonical metrics.
+      writeFileSync(
+        join(stalePrev, "run.json"),
+        JSON.stringify({
+          runId: "T02-before-b1",
+          taskId: "T02",
+          arm: "before",
+          block: 1,
+          invalid: "api_error",
+          accept: { solved: false, reason: "stale-prev" },
+        }),
+        "utf8",
+      );
+      writeFileSync(
+        join(stalePrev, "transcript.jsonl"),
+        `${JSON.stringify({ type: "result", subtype: "error_api", is_error: true, num_turns: 1, duration_ms: 50 })}\n`,
+        "utf8",
+      );
+
+      // Leftover .next without a canonical dir must also be ignored.
+      writeFileSync(
+        join(orphanNext, "run.json"),
+        JSON.stringify({
+          runId: "T02-after-b1",
+          taskId: "T02",
+          arm: "after",
+          block: 1,
+          invalid: null,
+          accept: { solved: true, reason: "staged-only" },
+        }),
+        "utf8",
+      );
+      writeFileSync(
+        join(orphanNext, "transcript.jsonl"),
+        readFileSync(join(fixturesDir, "four-turn-pass.jsonl"), "utf8"),
+        "utf8",
+      );
+
+      const { metrics } = evaluateBatch(outDir);
+      assert.deepEqual(Object.keys(metrics), ["T02-before-b1"]);
+      assert.equal(metrics["T02-before-b1"].invalid, null);
+      assert.equal(metrics["T02-before-b1"].solved, true);
+      assert.equal(metrics["T02-before-b1"].turnsToPass, 3);
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }

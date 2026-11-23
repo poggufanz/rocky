@@ -1066,7 +1066,21 @@ function containsAnySecretBuffer(buf, secretBuffers) {
   return false;
 }
 
-async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile) {
+function pickUniqueQuarantineTarget(filePath, relPath, lstatFn = lstatSync) {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const suffix = `.quarantined-${process.pid}-${randomBytes(6).toString("hex")}`;
+    const candidatePath = `${filePath}${suffix}`;
+    if (lstatOrNull(candidatePath, lstatFn) === null) {
+      return {
+        renamedPath: candidatePath,
+        renamedRelPath: `${relPath}${suffix}`,
+      };
+    }
+  }
+  throw new Error(`unable to allocate unique quarantine target for ${relPath}`);
+}
+
+async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile, onMatch = null) {
   if (secretBuffers.length === 0) return false;
   const maxSecretLen = secretBuffers.reduce((max, buf) => Math.max(max, buf.length), 0);
   const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
@@ -1082,6 +1096,9 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile)
       const chunk = readBuf.subarray(0, bytesRead);
       const combined = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
       if (containsAnySecretBuffer(combined, secretBuffers)) {
+        if (typeof onMatch === "function") {
+          onMatch();
+        }
         return true;
       }
       if (holdback > 0) {
@@ -1098,10 +1115,12 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile)
 /**
  * Scan saved run artifacts (`transcript.jsonl`, `stderr.txt`, `final/**`, and `rocky-home/*`)
  * for any secret value using bounded chunked byte scans without following symlinks.
- * Every file containing a secret is deleted from `workRunDir` and its POSIX-style
+ * Calls `io.onHit(relPath)` synchronously on the first token match before reading any further
+ * file. Every file containing a secret is deleted from `workRunDir` and its POSIX-style
  * relative path is recorded in `quarantined` (never contents). If deletion fails after retries,
- * the file is truncated to zero bytes (or renamed to `<name>.quarantined` inside the run dir
- * and truncated if direct truncation fails) and recorded in `quarantined` as
+ * the file is truncated to zero bytes (or renamed to a fresh unique
+ * `<name>.quarantined-<pid>-<random>` path inside the run dir without replacing any existing
+ * entry and truncated if direct truncation fails) and recorded in `quarantined` as
  * `{ path, removed: false, error }` (redacted message only).
  * Records unreadable files/directories (or files that could neither be removed nor truncated)
  * as relative paths in `scanErrors` and continues scanning all remaining artifacts.
@@ -1116,6 +1135,7 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile)
  *   unlinkSync?: (path: string) => void,
  *   truncateSync?: typeof truncateSync,
  *   renameSync?: typeof renameSync,
+ *   onHit?: (relPath: string) => void,
  * }} [io]
  * @returns {Promise<{
  *   leaked: boolean,
@@ -1136,23 +1156,44 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
   const rmFn = io.rmSync ?? io.unlinkSync ?? rmSync;
   const truncateFn = io.truncateSync ?? truncateSync;
   const renameFn = io.renameSync ?? renameSync;
+  const onHitFn = typeof io.onHit === "function" ? io.onHit : null;
 
   let leaked = false;
+  let notifiedHit = false;
   /** @type {Array<string | { path: string, removed: false, error: string }>} */
   const quarantined = [];
   /** @type {string[]} */
   const scanErrors = [];
 
+  function notifyHit(relPath) {
+    leaked = true;
+    if (!notifiedHit) {
+      notifiedHit = true;
+      if (onHitFn) {
+        try {
+          onHitFn(relPath);
+        } catch {
+          // Callback failures must not prevent quarantining or scanning remaining files.
+        }
+      }
+    }
+  }
+
   async function scanAndQuarantineFile(filePath, relPath) {
     let containsSecret = false;
     try {
-      containsSecret = await fileContainsAnySecret(filePath, secretBuffers, openFn);
+      containsSecret = await fileContainsAnySecret(
+        filePath,
+        secretBuffers,
+        openFn,
+        () => notifyHit(relPath),
+      );
     } catch {
       scanErrors.push(relPath);
       return;
     }
     if (!containsSecret) return;
-    leaked = true;
+    notifyHit(relPath);
     try {
       removeFileWithRetry(filePath, rmFn);
       quarantined.push(relPath);
@@ -1169,22 +1210,20 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
       } catch (truncError) {
         errorParts.push(`truncate failed: ${errorMessage(truncError)}`);
 
-        // Fallback 2: rename to <name>.quarantined inside the run dir and truncate.
-        if (!filePath.endsWith(".quarantined")) {
-          const renamedPath = `${filePath}.quarantined`;
-          const renamedRelPath = `${relPath}.quarantined`;
+        // Fallback 2: rename to a fresh unique <name>.quarantined-<pid>-<random> target
+        // inside the run dir without replacing any existing entry, then truncate to zero bytes.
+        try {
+          const { renamedPath, renamedRelPath } = pickUniqueQuarantineTarget(filePath, relPath, lstatFn);
+          renameFn(filePath, renamedPath);
+          finalRelPath = renamedRelPath;
           try {
-            renameFn(filePath, renamedPath);
-            finalRelPath = renamedRelPath;
-            try {
-              truncateFn(renamedPath, 0);
-              neutralized = true;
-            } catch (postRenameTruncError) {
-              errorParts.push(`post-rename truncate failed: ${errorMessage(postRenameTruncError)}`);
-            }
-          } catch (renameError) {
-            errorParts.push(`rename failed: ${errorMessage(renameError)}`);
+            truncateFn(renamedPath, 0);
+            neutralized = true;
+          } catch (postRenameTruncError) {
+            errorParts.push(`post-rename truncate failed: ${errorMessage(postRenameTruncError)}`);
           }
+        } catch (renameError) {
+          errorParts.push(`rename failed: ${errorMessage(renameError)}`);
         }
       }
 
@@ -1250,11 +1289,25 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
     }
   }
 
+  const topLevelTranscripts = new Set(["transcript.jsonl"]);
+  const topLevelStderrs = new Set(["stderr.txt"]);
+  try {
+    const rootStat = lstatOrNull(workRunDir, lstatFn);
+    if (rootStat && !rootStat.isSymbolicLink() && rootStat.isDirectory()) {
+      for (const name of readdirFn(workRunDir)) {
+        if (name.startsWith("transcript.jsonl.quarantined")) {
+          topLevelTranscripts.add(name);
+        } else if (name.startsWith("stderr.txt.quarantined")) {
+          topLevelStderrs.add(name);
+        }
+      }
+    }
+  } catch {
+    // Still scan canonical top-level stream files even if listing workRunDir fails.
+  }
   for (const name of [
-    "transcript.jsonl",
-    "transcript.jsonl.quarantined",
-    "stderr.txt",
-    "stderr.txt.quarantined",
+    ...Array.from(topLevelTranscripts).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    ...Array.from(topLevelStderrs).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
   ]) {
     await scanSingleFile(join(workRunDir, name), name);
   }
@@ -1387,18 +1440,23 @@ function recoverInterruptedSwap(runDir, lstatFn = lstatSync) {
   const prevDir = `${runDir}.prev`;
   const hasRun = lstatOrNull(runDir, lstatFn) !== null;
   const hasPrev = lstatOrNull(prevDir, lstatFn) !== null;
-  const hasNext = lstatOrNull(nextDir, lstatFn) !== null;
+  const nextStat = lstatOrNull(nextDir, lstatFn);
+  const hasNextDir = nextStat !== null && !nextStat.isSymbolicLink() && nextStat.isDirectory();
 
-  if (!hasRun && hasPrev) {
-    if (hasNext && lstatOrNull(join(nextDir, "run.json"), lstatFn)?.isFile()) {
+  if (!hasRun) {
+    if (hasNextDir && lstatOrNull(join(nextDir, "run.json"), lstatFn)?.isFile()) {
       renameDirWithRetry(nextDir, runDir);
-      removeTreeWithRetry(prevDir);
-    } else {
+      if (hasPrev) {
+        removeTreeWithRetry(prevDir);
+      }
+      return;
+    }
+    if (hasPrev) {
       renameDirWithRetry(prevDir, runDir);
     }
     return;
   }
-  if (hasRun && hasPrev) {
+  if (hasPrev) {
     removeTreeWithRetry(prevDir);
   }
 }
@@ -1441,26 +1499,12 @@ export function isValidRunJson(parsed) {
   return true;
 }
 
-function resolveEffectiveRunDirReadOnly(runDir, lstatFn = lstatSync) {
-  const nextDir = `${runDir}.next`;
-  const prevDir = `${runDir}.prev`;
-  const hasRun = lstatOrNull(runDir, lstatFn) !== null;
-  if (hasRun) return runDir;
-  const hasPrev = lstatOrNull(prevDir, lstatFn) !== null;
-  if (!hasPrev) return runDir;
-  const hasNext = lstatOrNull(nextDir, lstatFn) !== null;
-  if (hasNext && lstatOrNull(join(nextDir, "run.json"), lstatFn)?.isFile()) {
-    return nextDir;
-  }
-  return prevDir;
-}
-
 function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
   try {
-    const effectiveDir = resolveEffectiveRunDirReadOnly(runDir, lstatFn);
+    recoverInterruptedSwap(runDir, lstatFn);
 
-    const retriesPath = join(effectiveDir, "retries.json");
-    const runJsonPath = join(effectiveDir, "run.json");
+    const retriesPath = join(runDir, "retries.json");
+    const runJsonPath = join(runDir, "run.json");
     const durable = readDurableRetries(retriesPath, lstatFn);
     if (durable.malformed) {
       return { action: "malformed", reason: "malformed or unreadable retries.json" };
@@ -2168,8 +2212,9 @@ export async function runBatch(options, overrides = {}) {
         if (entry && typeof entry === "object" && typeof entry.path === "string") {
           if (!quarantinedSet.has(entry.path)) {
             quarantinedSet.add(entry.path);
-            if (entry.path.endsWith(".quarantined")) {
-              quarantinedSet.add(entry.path.slice(0, -".quarantined".length));
+            const quarantineSuffixMatch = /^(.*)\.quarantined-\d+-[0-9a-f]+$/.exec(entry.path);
+            if (quarantineSuffixMatch) {
+              quarantinedSet.add(quarantineSuffixMatch[1]);
             }
             quarantined.push({
               path: entry.path,
@@ -2199,6 +2244,10 @@ export async function runBatch(options, overrides = {}) {
             rmSync: deps.rmSync,
             truncateSync: deps.truncateSync,
             renameSync: deps.renameSync,
+            onHit: () => {
+              tokenLeaked = true;
+              setBatchHalt("token_leak", item.runId);
+            },
           });
           for (const entry of scanRes.quarantined) {
             recordQuarantined(entry);
@@ -2218,7 +2267,6 @@ export async function runBatch(options, overrides = {}) {
       };
 
       try {
-        recoverInterruptedSwap(runDir, deps.lstatSync);
         if (isRetry) {
           // Persist incremented retry count BEFORE launching the retry so crashes cannot reset the cap.
           writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, secrets);

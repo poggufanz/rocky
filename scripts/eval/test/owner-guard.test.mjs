@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { verdict } from "../analyze.mjs";
+import { evaluateBatch } from "../evaluate.mjs";
 import { ownerBaseline, ownerCheck } from "../owner-guard.mjs";
 import {
   BatchLeakError,
@@ -1353,10 +1354,11 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
         `expected stderr naming file and asking owner to delete it, got ${JSON.stringify(logsTrunc)}`,
       );
 
-      // Case 2: rm throws AND direct truncate throws -> rename to <name>.quarantined and truncate to 0 bytes.
+      // Case 2: rm throws AND direct truncate throws -> rename to unique <name>.quarantined-<pid>-<random> and truncate to 0 bytes.
       const outRename = join(baseTmp, "out-rename");
       const startedRename = [];
       const logsRename = [];
+      const quarantinedSuffixRe = /\.quarantined-\d+-[0-9a-f]+$/;
 
       await assert.rejects(
         () => runBatch(
@@ -1381,7 +1383,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
               throw err;
             },
             truncateSync: (targetPath, len) => {
-              if (!String(targetPath).endsWith(".quarantined")) {
+              if (!quarantinedSuffixRe.test(String(targetPath))) {
                 const err = new Error("EACCES: cannot truncate in place");
                 err.code = "EACCES";
                 throw err;
@@ -1397,16 +1399,16 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       assert.equal(startedRename.length, 1);
       const renameRunDir = join(outRename, "runs", startedRename[0]);
       const origFile = join(renameRunDir, "final", "locked-leak.txt");
-      const renamedFile = join(renameRunDir, "final", "locked-leak.txt.quarantined");
-      assert.equal(existsSync(origFile), false, "original file should be renamed to .quarantined");
-      assert.equal(existsSync(renamedFile), true, ".quarantined file should exist inside the run dir");
-      assert.equal(readFileSync(renamedFile, "utf8"), "", ".quarantined file must be truncated to zero bytes");
-      assert.equal(lstatSync(renamedFile).size, 0);
-
       const renameRunJson = JSON.parse(readFileSync(join(renameRunDir, "run.json"), "utf8"));
       assert.equal(renameRunJson.invalid, "token_leak");
       assert.equal(renameRunJson.quarantined.length, 1);
-      assert.equal(renameRunJson.quarantined[0].path, "final/locked-leak.txt.quarantined");
+      const renamedRelPath = renameRunJson.quarantined[0].path;
+      assert.match(renamedRelPath, /^final\/locked-leak\.txt\.quarantined-\d+-[0-9a-f]+$/);
+      const renamedFile = join(renameRunDir, renamedRelPath);
+      assert.equal(existsSync(origFile), false, "original file should be renamed to unique quarantined target");
+      assert.equal(existsSync(renamedFile), true, "renamed quarantined file should exist inside the run dir");
+      assert.equal(readFileSync(renamedFile, "utf8"), "", "renamed quarantined file must be truncated to zero bytes");
+      assert.equal(lstatSync(renamedFile).size, 0);
       assert.equal(renameRunJson.quarantined[0].removed, false);
       assert.match(renameRunJson.quarantined[0].error, /unlink denied/);
       assert.match(renameRunJson.quarantined[0].error, /cannot truncate in place/);
@@ -1415,10 +1417,159 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       assert.equal(renameBatchJson.halted?.reason, "token_leak");
       assert.ok(
         logsRename.some(
-          (line) => line.includes("final/locked-leak.txt.quarantined") && /delete/i.test(line),
+          (line) => line.includes(renamedRelPath) && /delete/i.test(line),
         ),
-        `expected stderr naming .quarantined file and asking owner to delete it, got ${JSON.stringify(logsRename)}`,
+        `expected stderr naming unique quarantined file and asking owner to delete it, got ${JSON.stringify(logsRename)}`,
       );
+
+      // Case 3: artifact already named x.quarantined whose delete and in-place truncate fail ->
+      // still renamed to a fresh unique name and truncated (no suffix guard).
+      const outAlreadySuffixed = join(baseTmp, "out-already-suffixed");
+      const startedSuffixed = [];
+
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outAlreadySuffixed },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "x.quarantined"), `secret=${token}\n`, "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId }) => {
+              startedSuffixed.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            rmSync: () => {
+              const err = new Error("EIO: unlink denied");
+              err.code = "EIO";
+              throw err;
+            },
+            truncateSync: (targetPath, len) => {
+              if (!quarantinedSuffixRe.test(String(targetPath))) {
+                const err = new Error("EACCES: cannot truncate in place");
+                err.code = "EACCES";
+                throw err;
+              }
+              return truncateSync(targetPath, len);
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(startedSuffixed.length, 1);
+      const suffixedRunDir = join(outAlreadySuffixed, "runs", startedSuffixed[0]);
+      const origSuffixed = join(suffixedRunDir, "final", "x.quarantined");
+      const suffixedRunJson = JSON.parse(readFileSync(join(suffixedRunDir, "run.json"), "utf8"));
+      assert.equal(suffixedRunJson.invalid, "token_leak");
+      assert.equal(suffixedRunJson.quarantined.length, 1);
+      const freshSuffixedRel = suffixedRunJson.quarantined[0].path;
+      assert.match(freshSuffixedRel, /^final\/x\.quarantined\.quarantined-\d+-[0-9a-f]+$/);
+      const freshSuffixedPath = join(suffixedRunDir, freshSuffixedRel);
+      assert.equal(existsSync(origSuffixed), false, "x.quarantined must be renamed to a fresh unique path");
+      assert.equal(existsSync(freshSuffixedPath), true);
+      assert.equal(readFileSync(freshSuffixedPath, "utf8"), "", "fresh renamed file must be truncated to zero bytes");
+      assert.equal(lstatSync(freshSuffixedPath).size, 0);
+      assert.equal(suffixedRunJson.quarantined[0].removed, false);
+
+      // Case 4: an existing report.txt.quarantined sibling is untouched when report.txt is quarantined.
+      const outSibling = join(baseTmp, "out-sibling");
+      const startedSibling = [];
+      const siblingContent = "precious-existing-sibling-artifact\n";
+
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outSibling },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "report.txt"), `secret=${token}\n`, "utf8");
+              writeFileSync(join(sandbox.taskDir, "report.txt.quarantined"), siblingContent, "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId }) => {
+              startedSibling.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            rmSync: () => {
+              const err = new Error("EIO: unlink denied");
+              err.code = "EIO";
+              throw err;
+            },
+            truncateSync: (targetPath, len) => {
+              if (!quarantinedSuffixRe.test(String(targetPath))) {
+                const err = new Error("EACCES: cannot truncate in place");
+                err.code = "EACCES";
+                throw err;
+              }
+              return truncateSync(targetPath, len);
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(startedSibling.length, 1);
+      const siblingRunDir = join(outSibling, "runs", startedSibling[0]);
+      const siblingFile = join(siblingRunDir, "final", "report.txt.quarantined");
+      assert.equal(existsSync(join(siblingRunDir, "final", "report.txt")), false);
+      assert.equal(existsSync(siblingFile), true, "existing report.txt.quarantined sibling must remain");
+      assert.equal(
+        readFileSync(siblingFile, "utf8"),
+        siblingContent,
+        "existing report.txt.quarantined sibling must not be overwritten or truncated",
+      );
+      const siblingRunJson = JSON.parse(readFileSync(join(siblingRunDir, "run.json"), "utf8"));
+      assert.equal(siblingRunJson.invalid, "token_leak");
+      assert.equal(siblingRunJson.quarantined.length, 1);
+      const reportFreshRel = siblingRunJson.quarantined[0].path;
+      assert.match(reportFreshRel, /^final\/report\.txt\.quarantined-\d+-[0-9a-f]+$/);
+      assert.equal(readFileSync(join(siblingRunDir, reportFreshRel), "utf8"), "");
+
+      // Case 5: direct collision retry — if first candidate target exists, picks another without overwriting.
+      const collisionDir = join(baseTmp, "direct-collision");
+      mkdirSync(join(collisionDir, "final"), { recursive: true });
+      writeFileSync(join(collisionDir, "final", "collide.txt"), `tok=${token}\n`, "utf8");
+      let simulatedCollisionChecks = 0;
+      const collisionRes = await scanRunArtifactsForSecrets(collisionDir, "none", [token], {
+        rmSync: () => {
+          const err = new Error("EIO: unlink denied");
+          err.code = "EIO";
+          throw err;
+        },
+        truncateSync: (targetPath, len) => {
+          if (!quarantinedSuffixRe.test(String(targetPath))) {
+            const err = new Error("EACCES: in-place truncate denied");
+            err.code = "EACCES";
+            throw err;
+          }
+          return truncateSync(targetPath, len);
+        },
+        lstatSync: (targetPath) => {
+          if (quarantinedSuffixRe.test(String(targetPath))) {
+            simulatedCollisionChecks += 1;
+            if (simulatedCollisionChecks === 1) {
+              // Pretend the first randomly generated candidate already exists.
+              return lstatSync(join(collisionDir, "final", "collide.txt"));
+            }
+          }
+          return lstatSync(targetPath);
+        },
+      });
+      assert.equal(simulatedCollisionChecks, 2, "must skip occupied candidate and retry with a fresh random name");
+      assert.equal(collisionRes.leaked, true);
+      assert.equal(collisionRes.quarantined.length, 1);
+      assert.match(collisionRes.quarantined[0].path, /^final\/collide\.txt\.quarantined-\d+-[0-9a-f]+$/);
+      assert.equal(readFileSync(join(collisionDir, collisionRes.quarantined[0].path), "utf8"), "");
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }
@@ -1600,8 +1751,8 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       );
       assert.equal(existsSync(join(prevLeakDir, "run.json")), true, ".prev leak must not be deleted or moved");
 
-      // Case 4: on a clean (non-halted) resume, an unrelated entry with a .prev neighbour AND a skipped
-      // scheduled run's stale .prev remain untouched (swap recovery only runs for runIds that actually run).
+      // Case 4: on a clean (non-halted) resume, an unrelated entry with a .prev neighbour remains untouched,
+      // while swap recovery runs for every scheduled runId (settling skipped runs too).
       const outCleanResume = join(baseTmp, "out-clean-resume");
       await runBatch(
         { ...commonOpts, outDir: outCleanResume, secrets: [] },
@@ -1614,15 +1765,115 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       mkdirSync(cleanUnrelatedPrev, { recursive: true });
       mkdirSync(skippedRunPrev, { recursive: true });
       writeFileSync(join(cleanUnrelatedPrev, "keep.txt"), "unrelated-intact\n", "utf8");
-      writeFileSync(join(skippedRunPrev, "keep.txt"), "skipped-prev-intact\n", "utf8");
+      writeFileSync(join(skippedRunPrev, "keep.txt"), "stale-scheduled-prev\n", "utf8");
 
       const cleanSummary = await runBatch(
         { ...commonOpts, outDir: outCleanResume, secrets: [] },
         makeFakeDeps(owner),
       );
       assert.equal(cleanSummary.ran, 0);
-      assert.equal(existsSync(join(cleanUnrelatedPrev, "keep.txt")), true);
-      assert.equal(existsSync(join(skippedRunPrev, "keep.txt")), true);
+      assert.equal(existsSync(join(cleanUnrelatedPrev, "keep.txt")), true, "unrelated .prev must stay untouched");
+      assert.equal(existsSync(skippedRunPrev), false, "scheduled run stale .prev must be removed on clean resume");
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("clean resume settles interrupted swaps for skipped scheduled runs so canonical dir and metrics use .next", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-swap-settle-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+
+    try {
+      const commonOpts = {
+        outDir,
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      await runBatch(commonOpts, makeFakeDeps(owner));
+
+      // Simulate an interrupted retry swap for SMOKE-none-b1:
+      // canonical missing + .next (success) + .prev (older failure).
+      const targetRunId = "SMOKE-none-b1";
+      const canonicalDir = join(outDir, "runs", targetRunId);
+      const nextDir = `${canonicalDir}.next`;
+      const prevDir = `${canonicalDir}.prev`;
+      rmSync(canonicalDir, { recursive: true, force: true });
+
+      mkdirSync(join(nextDir, "final"), { recursive: true });
+      writeFileSync(
+        join(nextDir, "run.json"),
+        `${JSON.stringify({
+          runId: targetRunId,
+          taskId: "SMOKE",
+          arm: "none",
+          block: 1,
+          invalid: null,
+          accept: { solved: true, reason: "promoted-from-next" },
+          retries: 1,
+          noneRockyHomeEntries: [],
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      writeFileSync(
+        join(nextDir, "transcript.jsonl"),
+        `${JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, duration_ms: 100 })}\n`,
+        "utf8",
+      );
+      writeFileSync(join(nextDir, "stderr.txt"), "", "utf8");
+      writeFileSync(join(nextDir, "final", "marker.txt"), "from-next\n", "utf8");
+
+      mkdirSync(join(prevDir, "final"), { recursive: true });
+      writeFileSync(
+        join(prevDir, "run.json"),
+        `${JSON.stringify({
+          runId: targetRunId,
+          taskId: "SMOKE",
+          arm: "none",
+          block: 1,
+          invalid: "api_error",
+          accept: { solved: false, reason: "stale-prev-failure" },
+          retries: 0,
+          noneRockyHomeEntries: [],
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      writeFileSync(
+        join(prevDir, "transcript.jsonl"),
+        `${JSON.stringify({ type: "result", subtype: "error_api", is_error: true, num_turns: 1, duration_ms: 100 })}\n`,
+        "utf8",
+      );
+      writeFileSync(join(prevDir, "stderr.txt"), "old failure\n", "utf8");
+      writeFileSync(join(prevDir, "final", "marker.txt"), "from-prev\n", "utf8");
+
+      // Resume (even without re-running SMOKE-none-b1) must settle the swap after halt/leak checks pass.
+      const summary = await runBatch(commonOpts, makeFakeDeps(owner));
+      assert.equal(summary.ran, 0);
+      assert.equal(summary.skipped, 3);
+      assert.equal(existsSync(canonicalDir), true, "canonical run dir must be promoted from .next");
+      assert.equal(existsSync(nextDir), false, ".next must be promoted away");
+      assert.equal(existsSync(prevDir), false, "stale .prev must be removed");
+      assert.equal(readFileSync(join(canonicalDir, "final", "marker.txt"), "utf8"), "from-next\n");
+
+      const promotedRun = JSON.parse(readFileSync(join(canonicalDir, "run.json"), "utf8"));
+      assert.equal(promotedRun.invalid, null);
+      assert.equal(promotedRun.accept?.solved, true);
+      assert.equal(promotedRun.accept?.reason, "promoted-from-next");
+
+      const { metrics } = evaluateBatch(outDir);
+      assert.equal(metrics[targetRunId].invalid, null);
+      assert.equal(metrics[targetRunId].solved, true);
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }
@@ -1821,6 +2072,118 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       const firstRunFin = JSON.parse(readFileSync(join(outFinally, "runs", firstRunIdFin, "run.json"), "utf8"));
       assert.equal(firstRunFin.invalid, "token_leak");
       assert.deepEqual(firstRunFin.quarantined, ["final/a-token.txt"]);
+
+      // Case 3: scanner fires onHit synchronously at the FIRST token match before reading any further file;
+      // while a slow read on a subsequent file is held pending, worker 2 finishes and claims no new run.
+      const directHitDir = join(baseTmp, "direct-onhit");
+      mkdirSync(join(directHitDir, "final"), { recursive: true });
+      writeFileSync(join(directHitDir, "final", "a-hit.txt"), `tok=${token}\n`, "utf8");
+      writeFileSync(join(directHitDir, "final", "b-next.txt"), "clean-second-file\n", "utf8");
+      const directEvents = [];
+      await scanRunArtifactsForSecrets(directHitDir, "none", [token], {
+        openFile: async (filePath, flags) => {
+          if (String(filePath).endsWith("a-hit.txt")) directEvents.push("open:a-hit");
+          if (String(filePath).endsWith("b-next.txt")) directEvents.push("open:b-next");
+          return openFile(filePath, flags);
+        },
+        onHit: (relPath) => {
+          directEvents.push(`onHit:${relPath}`);
+        },
+      });
+      assert.deepEqual(directEvents, ["open:a-hit", "onHit:final/a-hit.txt", "open:b-next"]);
+
+      const outSlowScan = join(baseTmp, "out-slow-scan");
+      const startedSlow = [];
+      const bothStartedSlow = deferred();
+      const slowReadEntered = deferred();
+      const allowSlowReadFinish = deferred();
+      let leakingSandboxSlow = null;
+      let firstRunIdSlow = null;
+      let slowReadWasPending = false;
+      let worker2FinishedWhileScanPending = false;
+      let slowReadReleased = false;
+      let ownerCheckCallsSlow = 0;
+
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outSlowScan },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              if (!leakingSandboxSlow) {
+                leakingSandboxSlow = sandbox.dir;
+                writeFileSync(join(sandbox.taskDir, "a-hit.txt"), `tok=${token}\n`, "utf8");
+                writeFileSync(join(sandbox.taskDir, "b-slow.txt"), "clean-but-slow\n", "utf8");
+              }
+              writeFileSync(join(sandbox.taskDir, "clean.txt"), "ok\n", "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId, sandbox }) => {
+              const count = startedSlow.push(runId);
+              if (count === 2) {
+                bothStartedSlow.resolve();
+              }
+              if (sandbox.dir === leakingSandboxSlow) {
+                firstRunIdSlow = runId;
+                await bothStartedSlow.promise;
+              } else if (count <= 2) {
+                // Hold worker 2 until worker 1 has hit a-hit.txt and is suspended reading b-slow.txt.
+                await slowReadEntered.promise;
+              }
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            openFile: async (filePath, flags) => {
+              if (
+                !slowReadWasPending
+                && firstRunIdSlow
+                && String(filePath).includes(firstRunIdSlow)
+                && String(filePath).endsWith("b-slow.txt")
+              ) {
+                slowReadWasPending = true;
+                // Release worker 2 while worker 1's scan is STILL in flight on b-slow.txt.
+                slowReadEntered.resolve();
+                await allowSlowReadFinish.promise;
+              }
+              return openFile(filePath, flags);
+            },
+            ownerCheck: (base, arg) => {
+              const res = ownerCheck(base, arg);
+              ownerCheckCallsSlow += 1;
+              if (ownerCheckCallsSlow === 1) {
+                // Worker 2 just completed while worker 1's scan is still suspended on b-slow.txt.
+                if (!slowReadReleased) {
+                  worker2FinishedWhileScanPending = true;
+                }
+                setImmediate(() => {
+                  slowReadReleased = true;
+                  allowSlowReadFinish.resolve();
+                });
+              }
+              return res;
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(slowReadWasPending, true, "slow read after first hit must be exercised");
+      assert.equal(
+        worker2FinishedWhileScanPending,
+        true,
+        "worker 2 must finish and re-check the scheduler while worker 1 is still reading b-slow.txt",
+      );
+      assert.equal(
+        startedSlow.length,
+        2,
+        `worker 2 must claim no new run while scan is still reading b-slow.txt, started=${JSON.stringify(startedSlow)}`,
+      );
+      const firstRunSlow = JSON.parse(readFileSync(join(outSlowScan, "runs", firstRunIdSlow, "run.json"), "utf8"));
+      assert.equal(firstRunSlow.invalid, "token_leak");
+      assert.deepEqual(firstRunSlow.quarantined, ["final/a-hit.txt"]);
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }

@@ -1091,6 +1091,7 @@ export function evaluateBatch(outDir, options = {}) {
   const metrics = {};
 
   for (const dirName of runDirNames) {
+    if (dirName.endsWith(".next") || dirName.endsWith(".prev")) continue;
     const runDir = join(runsDir, dirName);
     let stat;
     try {
