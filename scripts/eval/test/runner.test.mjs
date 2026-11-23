@@ -22,6 +22,7 @@ import { ACCEPT_MAX_BUFFER_BYTES, accept, runTargetCommand } from "../accept.mjs
 import { renderClaudeMd } from "../history.mjs";
 import {
   ARMS,
+  BatchLeakError,
   COPY_CREDENTIALS_DISABLED_MESSAGE,
   DEFAULT_K,
   DEFAULT_SEED,
@@ -107,6 +108,19 @@ function makeFakeDeps(overrides = {}) {
     },
     sweepStrays: async () => 0,
     assertRootClean: () => {},
+    ownerBaseline: () => ({
+      memoryPath: "/fake-owner/.rocky/memory.jsonl",
+      memoryBytes: 0,
+      settings: [],
+    }),
+    ownerCheck: () => ({
+      appendedTotal: 0,
+      appendedUnderEvalRoot: 0,
+      memoryTruncated: false,
+      settingsChanged: [],
+      settingsTouched: [],
+      leak: false,
+    }),
     log: () => {},
     ...overrides,
   };
@@ -1226,8 +1240,8 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
           }
           if (runId === "SMOKE-none-b1") {
             return {
-              stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false, note: secretToken })}\n`,
-              stderr: `leaked ${secretToken}\n`,
+              stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+              stderr: "clean stderr\n",
               exitCode: 0,
               timedOut: false,
             };
@@ -1286,7 +1300,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       // 2. Every sandbox was destroyed, even the crashed run.
       assert.equal(destroyedSandboxes.length, 6);
 
-      // 3. batch.json provenance check (no owner leak baseline yet, secret redacted).
+      // 3. batch.json provenance check (ownerBaseline + ownerCheck recorded, secret redacted).
       const batchJson = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
       assert.equal(batchJson.model, MODEL);
       assert.deepEqual(batchJson.claudeFlags, CLAUDE_FLAGS);
@@ -1303,7 +1317,8 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       assert.equal(batchJson.seed, 7);
       assert.equal(batchJson.k, 2);
       assert.equal(batchJson.concurrency, 2);
-      assert.equal("ownerLeakBaseline" in batchJson, false);
+      assert.equal(typeof batchJson.ownerBaseline.memoryBytes, "number");
+      assert.equal(batchJson.ownerCheck.leak, false);
 
       // 4. Artifact filtering checks: final/ without .git; rocky-home/ filtered; no home/.claude.
       const noneDir = join(outDir, "runs", "SMOKE-none-b1");
@@ -1331,19 +1346,17 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       assert.equal(apiErrRun.invalid, "api_error");
       assert.equal(apiErrRun.retries, 0);
 
-      const leakedRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
-      assert.equal(leakedRun.invalid, "token_leak");
-      assert.equal(leakedRun.strayKilled, 1);
-      assert.match(readFileSync(join(noneDir, "transcript.jsonl"), "utf8"), /<redacted>/);
-      assert.match(readFileSync(join(noneDir, "stderr.txt"), "utf8"), /<redacted>/);
+      const cleanNoneRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
+      assert.equal(cleanNoneRun.invalid, null);
+      assert.equal(cleanNoneRun.strayKilled, 1);
 
       const timedOutRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-none-b2", "run.json"), "utf8"));
       assert.equal(timedOutRun.invalid, "timeout");
       assert.equal(timedOutRun.timedOut, true);
       assert.equal(timedOutRun.killFailed, true);
       assert.equal(timedOutRun.taskkillStatus, 128);
-      assert.equal(leakedRun.killFailed, false);
-      assert.equal(leakedRun.taskkillStatus, null);
+      assert.equal(cleanNoneRun.killFailed, false);
+      assert.equal(cleanNoneRun.taskkillStatus, null);
 
       // 6. Token secret NEVER appears in any file under outDir.
       for (const rel of listAllFiles(outDir)) {
@@ -1786,60 +1799,74 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
   test("voids token-mode runs when token appears in copied final/ or rocky-home/ artifacts and preserves plain copies", async () => {
     const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-token-scan-"));
-    const outDir = join(baseTmp, "out");
     const rootDir = join(baseTmp, "sbx");
     const cacheDir = join(baseTmp, "cache");
     const token = "sk-ant-oat01-saved-artifact-leak-token-99999";
     const binaryPayload = Buffer.from([0x00, 0xff, 0xfe, 0x80, 0x81, 0x42]);
 
     try {
-      const fakeDeps = makeFakeDeps({
-        materializeTask: async (task, sandbox, arm) => {
-          writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
-          if (arm === "none") {
-            mkdirSync(join(sandbox.taskDir, "nested"), { recursive: true });
-            writeFileSync(join(sandbox.taskDir, "nested", "leaked.txt"), `saved=${token}\n`, "utf8");
-            writeFileSync(join(sandbox.taskDir, "bin.dat"), binaryPayload);
-          } else if (arm === "before") {
-            writeFileSync(
-              join(sandbox.rockyHome, "memory.jsonl"),
-              `{"cmd":"echo ${token}"}\n`,
-              "utf8",
-            );
-          } else if (arm === "after") {
-            writeFileSync(join(sandbox.rockyHome, "memory.jsonl"), '{"kind":"failure"}\n', "utf8");
-            writeFileSync(join(sandbox.rockyHome, "advisories.jsonl"), '{"lane":"run"}\n', "utf8");
-          }
-          return { runs: [], cards: 0 };
-        },
-      });
+      const common = {
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [token],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
 
-      await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "token" },
-          secrets: [token],
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        fakeDeps,
+      // Case 1: token in copied final/ file voids the run as token_leak, stops batch (exit 3), copy is plain.
+      const outFinal = join(baseTmp, "out-final");
+      await assert.rejects(
+        () => runBatch(
+          { ...common, outDir: outFinal },
+          makeFakeDeps({
+            materializeTask: async (_task, sandbox, arm) => {
+              writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
+              if (arm === "none") {
+                mkdirSync(join(sandbox.taskDir, "nested"), { recursive: true });
+                writeFileSync(join(sandbox.taskDir, "nested", "leaked.txt"), `saved=${token}\n`, "utf8");
+                writeFileSync(join(sandbox.taskDir, "bin.dat"), binaryPayload);
+              }
+              return { runs: [], cards: 0 };
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
       );
 
-      // arm=none: token in copied final/ file voids the run as token_leak; copy is plain (unmodified).
-      const noneDir = join(outDir, "runs", "SMOKE-none-b1");
+      const noneDir = join(outFinal, "runs", "SMOKE-none-b1");
       const noneRun = JSON.parse(readFileSync(join(noneDir, "run.json"), "utf8"));
       assert.equal(noneRun.invalid, "token_leak");
       assert.equal(readFileSync(join(noneDir, "final", "nested", "leaked.txt"), "utf8"), `saved=${token}\n`);
       assert.deepEqual(readFileSync(join(noneDir, "final", "bin.dat")), binaryPayload);
 
-      // arm=before: token in copied rocky-home/memory.jsonl voids the run as token_leak; copy is plain.
-      const beforeDir = join(outDir, "runs", "SMOKE-before-b1");
+      // Case 2: token in copied rocky-home/memory.jsonl voids the run as token_leak, stops batch (exit 3), copy is plain.
+      const outRocky = join(baseTmp, "out-rocky");
+      await assert.rejects(
+        () => runBatch(
+          { ...common, outDir: outRocky },
+          makeFakeDeps({
+            materializeTask: async (_task, sandbox, arm) => {
+              writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
+              if (arm === "before") {
+                writeFileSync(
+                  join(sandbox.rockyHome, "memory.jsonl"),
+                  `{"cmd":"echo ${token}"}\n`,
+                  "utf8",
+                );
+              }
+              return { runs: [], cards: 0 };
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      const beforeDir = join(outRocky, "runs", "SMOKE-before-b1");
       const beforeRun = JSON.parse(readFileSync(join(beforeDir, "run.json"), "utf8"));
       assert.equal(beforeRun.invalid, "token_leak");
       assert.equal(
@@ -1847,8 +1874,22 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         `{"cmd":"echo ${token}"}\n`,
       );
 
-      // arm=after: clean artifacts remain valid.
-      const afterDir = join(outDir, "runs", "SMOKE-after-b1");
+      // Case 3: clean artifacts complete all runs normally.
+      const outClean = join(baseTmp, "out-clean");
+      await runBatch(
+        { ...common, outDir: outClean },
+        makeFakeDeps({
+          materializeTask: async (_task, sandbox, arm) => {
+            writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
+            if (arm === "after") {
+              writeFileSync(join(sandbox.rockyHome, "memory.jsonl"), '{"kind":"failure"}\n', "utf8");
+              writeFileSync(join(sandbox.rockyHome, "advisories.jsonl"), '{"lane":"run"}\n', "utf8");
+            }
+            return { runs: [], cards: 0 };
+          },
+        }),
+      );
+      const afterDir = join(outClean, "runs", "SMOKE-after-b1");
       const afterRun = JSON.parse(readFileSync(join(afterDir, "run.json"), "utf8"));
       assert.equal(afterRun.invalid, null);
 
@@ -1857,8 +1898,14 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       mkdirSync(boundaryDir, { recursive: true });
       const padding = "x".repeat(64 * 1024 - 10);
       writeFileSync(join(boundaryDir, "transcript.jsonl"), `${padding}${token}tail\n`, "utf8");
-      assert.equal(await scanRunArtifactsForSecrets(boundaryDir, "none", [token]), true);
-      assert.equal(await scanRunArtifactsForSecrets(boundaryDir, "none", ["not-present-token"]), false);
+      assert.deepEqual(await scanRunArtifactsForSecrets(boundaryDir, "none", [token]), {
+        leaked: true,
+        scanErrors: [],
+      });
+      assert.deepEqual(await scanRunArtifactsForSecrets(boundaryDir, "none", ["not-present-token"]), {
+        leaked: false,
+        scanErrors: [],
+      });
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }
@@ -1866,96 +1913,108 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
   test("preserves token_leak precedence when grading throws after a detected leak", async () => {
     const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-leak-precedence-"));
-    const outDir = join(baseTmp, "out");
     const rootDir = join(baseTmp, "sbx");
     const cacheDir = join(baseTmp, "cache");
     const token = "sk-ant-oat01-precedence-secret-token-77777";
-    const logs = [];
 
     try {
-      const fakeDeps = makeFakeDeps({
-        materializeTask: async (task, sandbox, arm) => {
-          writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
-          if (arm === "none") {
-            writeFileSync(join(sandbox.taskDir, "leaked.txt"), `token=${token}\n`, "utf8");
-          }
-          return { runs: [], cards: 0 };
-        },
-        runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
-          if (runId === "SMOKE-before-b1") {
-            const script = [
-              `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false }) + "\\n");`,
-              `process.stderr.write("streamed leak " + ${JSON.stringify(token)} + "\\n");`,
-            ].join("\n");
-            return spawnProcess({
-              file: process.execPath,
-              args: ["-e", script],
-              cwd: sandbox.taskDir,
-              env: process.env,
-              timeoutMs: 10_000,
-              stdoutPath,
-              stderrPath,
-              secrets,
-            });
-          }
-          return {
-            stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
-            stderr: "clean stderr\n",
-            exitCode: 0,
-            timedOut: false,
-          };
-        },
-        accept: async (_task, finalDir) => {
-          if (finalDir.includes("SMOKE-none-b1") || finalDir.includes("SMOKE-before-b1")) {
-            throw new Error(`grader boom with ${token}`);
-          }
-          return { solved: true, reason: "ok" };
-        },
-        log: (line) => logs.push(line),
-      });
+      const common = {
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [token],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
 
-      await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "token" },
-          secrets: [token],
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        fakeDeps,
+      // Case 1: Leak in copied final/ followed by accept() exception -> stays token_leak and stops batch (exit 3).
+      const outFinal = join(baseTmp, "out-final");
+      const logsFinal = [];
+      await assert.rejects(
+        () => runBatch(
+          { ...common, outDir: outFinal },
+          makeFakeDeps({
+            materializeTask: async (_task, sandbox, arm) => {
+              writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
+              if (arm === "none") {
+                writeFileSync(join(sandbox.taskDir, "leaked.txt"), `token=${token}\n`, "utf8");
+              }
+              return { runs: [], cards: 0 };
+            },
+            accept: async (_task, finalDir) => {
+              if (finalDir.includes("SMOKE-none-b1")) {
+                throw new Error(`grader boom with ${token}`);
+              }
+              return { solved: true, reason: "ok" };
+            },
+            log: (line) => logsFinal.push(line),
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
       );
 
-      // Leak in copied final/ followed by accept() exception -> stays token_leak.
-      const noneRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
+      const noneRun = JSON.parse(readFileSync(join(outFinal, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
       assert.equal(noneRun.invalid, "token_leak");
       assert.equal(noneRun.accept, null);
       assert.match(noneRun.error, /grader boom with <redacted>/);
       assert.equal(noneRun.error.includes(token), false);
+      assert.ok(
+        logsFinal.some((line) => line.includes("SMOKE-none-b1") && line.includes("invalid=token_leak")),
+        `expected log line to report invalid=token_leak, got: ${JSON.stringify(logsFinal)}`,
+      );
 
-      // Leak in streamed stderr (redacted on disk) followed by accept() exception -> stays token_leak.
-      const beforeRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-before-b1", "run.json"), "utf8"));
+      // Case 2: Leak in streamed stderr (redacted on disk) followed by accept() exception -> stays token_leak.
+      const outStream = join(baseTmp, "out-stream");
+      await assert.rejects(
+        () => runBatch(
+          { ...common, outDir: outStream },
+          makeFakeDeps({
+            runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
+              if (runId === "SMOKE-before-b1") {
+                const script = [
+                  `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false }) + "\\n");`,
+                  `process.stderr.write("streamed leak " + ${JSON.stringify(token)} + "\\n");`,
+                ].join("\n");
+                return spawnProcess({
+                  file: process.execPath,
+                  args: ["-e", script],
+                  cwd: sandbox.taskDir,
+                  env: process.env,
+                  timeoutMs: 10_000,
+                  stdoutPath,
+                  stderrPath,
+                  secrets,
+                });
+              }
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "clean stderr\n",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            accept: async (_task, finalDir) => {
+              if (finalDir.includes("SMOKE-before-b1")) {
+                throw new Error(`grader boom with ${token}`);
+              }
+              return { solved: true, reason: "ok" };
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      const beforeRun = JSON.parse(readFileSync(join(outStream, "runs", "SMOKE-before-b1", "run.json"), "utf8"));
       assert.equal(beforeRun.invalid, "token_leak");
       assert.equal(beforeRun.accept, null);
       assert.match(beforeRun.error, /grader boom with <redacted>/);
       assert.equal(
-        readFileSync(join(outDir, "runs", "SMOKE-before-b1", "stderr.txt"), "utf8"),
+        readFileSync(join(outStream, "runs", "SMOKE-before-b1", "stderr.txt"), "utf8"),
         "streamed leak <redacted>\n",
-      );
-
-      // Clean arm still completes normally.
-      const afterRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-after-b1", "run.json"), "utf8"));
-      assert.equal(afterRun.invalid, null);
-      assert.deepEqual(afterRun.accept, { solved: true, reason: "ok" });
-
-      assert.ok(
-        logs.some((line) => line.includes("SMOKE-none-b1") && line.includes("invalid=token_leak")),
-        `expected log line to report invalid=token_leak, got: ${JSON.stringify(logs)}`,
       );
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });

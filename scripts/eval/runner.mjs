@@ -14,12 +14,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { accept as defaultAccept } from "./accept.mjs";
 import { materializeTask as defaultMaterializeTask, renderClaudeMd } from "./history.mjs";
+import {
+  ownerBaseline as defaultOwnerBaseline,
+  ownerCheck as defaultOwnerCheck,
+} from "./owner-guard.mjs";
 import {
   CLAUDE_FLAGS,
   MODEL,
@@ -90,6 +94,21 @@ export class ProvenanceMismatchError extends Error {
     this.name = "ProvenanceMismatchError";
     this.exitCode = 2;
     this.differingFields = differingFields;
+  }
+}
+
+export class BatchLeakError extends Error {
+  /**
+   * @param {string} message
+   * @param {{ tokenLeakRuns?: string[], ownerCheck?: any, summary?: any }} [details]
+   */
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "BatchLeakError";
+    this.exitCode = 3;
+    this.tokenLeakRuns = details.tokenLeakRuns ?? [];
+    this.ownerCheck = details.ownerCheck ?? null;
+    this.summary = details.summary ?? null;
   }
 }
 
@@ -1023,7 +1042,7 @@ function containsAnySecretBuffer(buf, secretBuffers) {
   return false;
 }
 
-async function fileContainsAnySecret(filePath, secretBuffers) {
+async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile) {
   if (secretBuffers.length === 0) return false;
   const maxSecretLen = secretBuffers.reduce((max, buf) => Math.max(max, buf.length), 0);
   const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
@@ -1031,7 +1050,7 @@ async function fileContainsAnySecret(filePath, secretBuffers) {
   const readBuf = Buffer.allocUnsafe(chunkSize);
   let tail = Buffer.alloc(0);
 
-  const fh = await openFile(filePath, "r");
+  const fh = await openFn(filePath, "r");
   try {
     while (true) {
       const { bytesRead } = await fh.read(readBuf, 0, chunkSize, null);
@@ -1055,51 +1074,102 @@ async function fileContainsAnySecret(filePath, secretBuffers) {
 /**
  * Scan saved run artifacts (`transcript.jsonl`, `stderr.txt`, `final/**`, and `rocky-home/*`)
  * for any secret value using bounded chunked byte scans without following symlinks.
+ * Records unreadable files/directories as relative paths in `scanErrors` and continues
+ * scanning all remaining artifacts.
  * @param {string} workRunDir
  * @param {string} arm
  * @param {readonly string[]} secrets
- * @returns {Promise<boolean>}
+ * @param {{
+ *   lstatSync?: typeof lstatSync,
+ *   readdirSync?: typeof readdirSync,
+ *   openFile?: typeof openFile,
+ * }} [io]
+ * @returns {Promise<{ leaked: boolean, scanErrors: string[] }>}
  */
-export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets) {
+export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = {}) {
   const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
-  if (secretBuffers.length === 0) return false;
+  if (secretBuffers.length === 0) {
+    return { leaked: false, scanErrors: [] };
+  }
 
-  for (const name of ["transcript.jsonl", "stderr.txt"]) {
-    const filePath = join(workRunDir, name);
-    const stat = lstatOrNull(filePath);
-    if (stat?.isFile() && await fileContainsAnySecret(filePath, secretBuffers)) {
-      return true;
+  const lstatFn = io.lstatSync ?? lstatSync;
+  const readdirFn = io.readdirSync ?? readdirSync;
+  const openFn = io.openFile ?? openFile;
+
+  let leaked = false;
+  /** @type {string[]} */
+  const scanErrors = [];
+
+  async function scanSingleFile(filePath, relPath) {
+    let stat;
+    try {
+      stat = lstatOrNull(filePath, lstatFn);
+    } catch {
+      scanErrors.push(relPath);
+      return;
+    }
+    if (!stat || stat.isSymbolicLink() || !stat.isFile()) return;
+    try {
+      if (await fileContainsAnySecret(filePath, secretBuffers, openFn)) {
+        leaked = true;
+      }
+    } catch {
+      scanErrors.push(relPath);
     }
   }
 
-  async function scanTree(dirPath, recursive) {
-    const rootStat = lstatOrNull(dirPath);
-    if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) return false;
-    const entries = readdirSync(dirPath).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  async function scanTree(dirPath, relPrefix, recursive) {
+    let rootStat;
+    try {
+      rootStat = lstatOrNull(dirPath, lstatFn);
+    } catch {
+      scanErrors.push(relPrefix);
+      return;
+    }
+    if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) return;
+
+    let entries;
+    try {
+      entries = readdirFn(dirPath).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    } catch {
+      scanErrors.push(relPrefix);
+      return;
+    }
+
     for (const name of entries) {
       const fullPath = join(dirPath, name);
-      const stat = lstatSync(fullPath);
+      const relPath = `${relPrefix}/${name}`;
+      let stat;
+      try {
+        stat = lstatFn(fullPath);
+      } catch {
+        scanErrors.push(relPath);
+        continue;
+      }
       if (stat.isSymbolicLink()) continue;
       if (stat.isDirectory()) {
-        if (recursive && await scanTree(fullPath, true)) {
-          return true;
+        if (recursive) {
+          await scanTree(fullPath, relPath, true);
         }
       } else if (stat.isFile()) {
-        if (await fileContainsAnySecret(fullPath, secretBuffers)) {
-          return true;
+        try {
+          if (await fileContainsAnySecret(fullPath, secretBuffers, openFn)) {
+            leaked = true;
+          }
+        } catch {
+          scanErrors.push(relPath);
         }
       }
     }
-    return false;
   }
 
-  if (await scanTree(join(workRunDir, "final"), true)) {
-    return true;
+  for (const name of ["transcript.jsonl", "stderr.txt"]) {
+    await scanSingleFile(join(workRunDir, name), name);
   }
-  if (arm !== "none" && await scanTree(join(workRunDir, "rocky-home"), false)) {
-    return true;
-  }
-  return false;
+  await scanTree(join(workRunDir, "final"), "final", true);
+  await scanTree(join(workRunDir, "rocky-home"), "rocky-home", false);
+
+  return { leaked, scanErrors };
 }
 
 /**
@@ -1108,9 +1178,10 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets) {
  * Copies regular files plainly with `copyFileSync` (preserving source mode).
  * @param {string} srcDir
  * @param {string} destDir
+ * @param {typeof copyFileSync} [copyFile]
  * @returns {string[]}
  */
-function copyFinalWithoutGit(srcDir, destDir) {
+function copyFinalWithoutGit(srcDir, destDir, copyFile = copyFileSync) {
   mkdirSync(destDir, { recursive: true });
   /** @type {string[]} */
   const skippedLinks = [];
@@ -1145,7 +1216,7 @@ function copyFinalWithoutGit(srcDir, destDir) {
         mkdirSync(destPath, { recursive: true });
         walk(srcPath, destPath, rel);
       } else if (lstat.isFile()) {
-        copyFileSync(srcPath, destPath);
+        copyFile(srcPath, destPath);
       }
     }
   }
@@ -1160,9 +1231,10 @@ function copyFinalWithoutGit(srcDir, destDir) {
  * @param {string} srcRockyHome
  * @param {string} destRockyHome
  * @param {string} arm
+ * @param {typeof copyFileSync} [copyFile]
  * @returns {string[]}
  */
-function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm) {
+function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, copyFile = copyFileSync) {
   if (arm === "none") return [];
   mkdirSync(destRockyHome, { recursive: true });
   /** @type {string[]} */
@@ -1197,7 +1269,7 @@ function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm) {
       continue;
     }
     if (!lstat.isFile()) continue;
-    copyFileSync(srcPath, join(destRockyHome, name));
+    copyFile(srcPath, join(destRockyHome, name));
   }
   return skippedLinks;
 }
@@ -1409,11 +1481,12 @@ async function defaultRunClaude({ task, sandbox, timeoutMs, stdoutPath, stderrPa
   });
 }
 
-async function runWithConcurrency(items, concurrency, worker) {
+async function runWithConcurrency(items, concurrency, worker, shouldStop = () => false) {
   let nextIndex = 0;
   const workerCount = Math.min(concurrency, items.length);
   const workers = Array.from({ length: workerCount }, async () => {
     while (true) {
+      if (shouldStop()) break;
       const idx = nextIndex;
       nextIndex += 1;
       if (idx >= items.length) break;
@@ -1439,6 +1512,7 @@ async function runWithConcurrency(items, concurrency, worker) {
  *   only?: readonly string[] | null,
  *   retryInvalid?: boolean,
  *   timeoutMs?: number,
+ *   platform?: NodeJS.Platform,
  * }} options
  * @param {Partial<{
  *   manifest: any,
@@ -1462,6 +1536,14 @@ async function runWithConcurrency(items, concurrency, worker) {
  *   sweepStrays: (sandboxDir: string) => Promise<number>,
  *   assertRootClean: (dir: string) => void,
  *   lstatSync: typeof lstatSync,
+ *   readdirSync: typeof readdirSync,
+ *   copyFileSync: typeof copyFileSync,
+ *   openFile: typeof openFile,
+ *   ownerHome: string,
+ *   ownerConfigDir: string | null | undefined,
+ *   ownerRockyHome: string | null | undefined,
+ *   ownerBaseline: typeof defaultOwnerBaseline,
+ *   ownerCheck: typeof defaultOwnerCheck,
  *   log: (line: string) => void,
  * }>} [overrides]
  */
@@ -1480,6 +1562,18 @@ export async function runBatch(options, overrides = {}) {
     sweepStrays: overrides.sweepStrays ?? ((dir) => sweepWin32Strays(dir)),
     assertRootClean: overrides.assertRootClean ?? ((dir) => assertNoAncestorInstructions(dir)),
     lstatSync: overrides.lstatSync ?? lstatSync,
+    readdirSync: overrides.readdirSync ?? readdirSync,
+    copyFileSync: overrides.copyFileSync ?? copyFileSync,
+    openFile: overrides.openFile ?? openFile,
+    ownerHome: overrides.ownerHome ?? homedir(),
+    ownerConfigDir: overrides.ownerConfigDir !== undefined
+      ? overrides.ownerConfigDir
+      : (process.env.CLAUDE_CONFIG_DIR || undefined),
+    ownerRockyHome: overrides.ownerRockyHome !== undefined
+      ? overrides.ownerRockyHome
+      : (process.env.ROCKY_HOME || undefined),
+    ownerBaseline: overrides.ownerBaseline ?? defaultOwnerBaseline,
+    ownerCheck: overrides.ownerCheck ?? defaultOwnerCheck,
     log: overrides.log ?? ((line) => process.stderr.write(`${line}\n`)),
   };
 
@@ -1509,6 +1603,7 @@ export async function runBatch(options, overrides = {}) {
   const seed = options.seed ?? DEFAULT_SEED;
   const timeoutMs = options.timeoutMs ?? RUN_TIMEOUT_MS;
   const retryInvalid = Boolean(options.retryInvalid);
+  const platform = options.platform ?? process.platform;
 
   const outDir = resolve(options.outDir);
   const rootDir = resolve(options.rootDir);
@@ -1546,6 +1641,10 @@ export async function runBatch(options, overrides = {}) {
   };
 
   const batchPath = join(outDir, "batch.json");
+  /** @type {Record<string, any>} */
+  let batchData;
+  /** @type {any} */
+  let baseline;
   if (existsSync(batchPath)) {
     let existingBatch;
     try {
@@ -1563,8 +1662,26 @@ export async function runBatch(options, overrides = {}) {
         diffs,
       );
     }
+    if (
+      !existingBatch.ownerBaseline
+      || typeof existingBatch.ownerBaseline !== "object"
+      || Array.isArray(existingBatch.ownerBaseline)
+    ) {
+      throw new ProvenanceMismatchError(
+        `Existing batch provenance at ${batchPath} is missing ownerBaseline`,
+        ["ownerBaseline"],
+      );
+    }
+    baseline = existingBatch.ownerBaseline;
+    batchData = existingBatch;
   } else {
-    const provenance = {
+    baseline = deps.ownerBaseline({
+      ownerHome: deps.ownerHome,
+      ownerConfigDir: deps.ownerConfigDir,
+      ownerRockyHome: deps.ownerRockyHome,
+      platform,
+    });
+    batchData = {
       v: 1,
       startedAt: new Date().toISOString(),
       claudeVersion,
@@ -1583,8 +1700,33 @@ export async function runBatch(options, overrides = {}) {
       arms: [...ARMS],
       taskIds,
       auth: options.auth.kind,
+      ownerBaseline: baseline,
     };
-    writeJsonAtomic(batchPath, provenance, secrets);
+    writeJsonAtomic(batchPath, batchData, secrets);
+  }
+
+  let stopBatch = false;
+  let ownerLeakDetected = false;
+  /** @type {string[]} */
+  const tokenLeakRuns = [];
+  /** @type {any} */
+  let latestOwnerCheck = batchData.ownerCheck ?? null;
+
+  function runAndRecordOwnerCheck(contextLabel) {
+    const check = deps.ownerCheck(baseline, { evalRoot: rootDir, platform });
+    latestOwnerCheck = check;
+    batchData.ownerCheck = check;
+    writeJsonAtomic(batchPath, batchData, secrets);
+    if (check && check.leak === true) {
+      ownerLeakDetected = true;
+      stopBatch = true;
+      deps.log(
+        redact(
+          `[eval] abort: owner leak detected (${contextLabel}): appendedUnderEvalRoot=${check.appendedUnderEvalRoot ?? 0}, settingsChanged=${Array.isArray(check.settingsChanged) ? check.settingsChanged.length : 0}`,
+        ),
+      );
+    }
+    return check;
   }
 
   const runsDir = join(outDir, "runs");
@@ -1608,17 +1750,28 @@ export async function runBatch(options, overrides = {}) {
   }
 
   if (pending.length === 0) {
-    deps.log(
-      redact(`[eval] 0 runs to execute (${skipped} skipped, ${malformed} malformed).`),
-    );
-    return {
+    runAndRecordOwnerCheck("batch-end");
+    const emptySummary = {
       batchPath,
       total: planned.length,
       ran: 0,
       skipped,
       malformed,
       publishFailed: 0,
+      stopped: stopBatch,
+      tokenLeakRuns,
+      ownerCheck: latestOwnerCheck,
     };
+    if (ownerLeakDetected) {
+      throw new BatchLeakError(
+        `Batch stopped due to owner leak (appendedUnderEvalRoot=${latestOwnerCheck?.appendedUnderEvalRoot ?? 0}, settingsChanged=${latestOwnerCheck?.settingsChanged?.length ?? 0})`,
+        { tokenLeakRuns, ownerCheck: latestOwnerCheck, summary: emptySummary },
+      );
+    }
+    deps.log(
+      redact(`[eval] 0 runs to execute (${skipped} skipped, ${malformed} malformed).`),
+    );
+    return emptySummary;
   }
 
   // Pack both Rocky arms once, sequentially, before any run starts.
@@ -1632,239 +1785,307 @@ export async function runBatch(options, overrides = {}) {
 
   let completed = 0;
   let publishFailed = 0;
-  await runWithConcurrency(pending, concurrency, async ({ item, retries, isRetry }) => {
-    const task = taskById.get(item.taskId);
-    const runDir = join(runsDir, item.runId);
-    const nextDir = `${runDir}.next`;
-    const workRunDir = isRetry ? nextDir : runDir;
-    const retriesJsonPath = join(workRunDir, "retries.json");
-    const runJsonPath = join(workRunDir, "run.json");
-    const stdoutPath = join(workRunDir, "transcript.jsonl");
-    const stderrPath = join(workRunDir, "stderr.txt");
-    const startedAt = new Date().toISOString();
-    const startMs = Date.now();
-    const sandboxRunId = `${item.runId}-${randomBytes(3).toString("hex")}`;
+  await runWithConcurrency(
+    pending,
+    concurrency,
+    async ({ item, retries, isRetry }) => {
+      const task = taskById.get(item.taskId);
+      const runDir = join(runsDir, item.runId);
+      const nextDir = `${runDir}.next`;
+      const workRunDir = isRetry ? nextDir : runDir;
+      const retriesJsonPath = join(workRunDir, "retries.json");
+      const runJsonPath = join(workRunDir, "run.json");
+      const stdoutPath = join(workRunDir, "transcript.jsonl");
+      const stderrPath = join(workRunDir, "stderr.txt");
+      const startedAt = new Date().toISOString();
+      const startMs = Date.now();
+      const sandboxRunId = `${item.runId}-${randomBytes(3).toString("hex")}`;
 
-    let sandbox = null;
-    let tokenLeaked = false;
+      let sandbox = null;
+      let tokenLeaked = false;
 
-    let retryCountCommitted = !isRetry;
-    /** @type {number | null} */
-    let exitCode = null;
-    let timedOut = false;
-    let killFailed = false;
-    /** @type {number | null} */
-    let taskkillStatus = null;
-    let strayKilled = 0;
-    let swept = false;
-    /** @type {string[]} */
-    const skippedLinks = [];
-    /** @type {string[] | null} */
-    let noneRockyHomeEntries = item.arm === "none" ? [] : null;
-    /** @type {{ solved: boolean, reason: string } | null} */
-    let acceptResult = null;
-    /** @type {null | "api_error" | "timeout" | "harness_crash" | "transcript_broken" | "token_leak"} */
-    let invalid = null;
-    /** @type {string | null} */
-    let runError = null;
-    /** @type {string | null} */
-    let cleanupError = null;
+      let retryCountCommitted = !isRetry;
+      /** @type {number | null} */
+      let exitCode = null;
+      let timedOut = false;
+      let killFailed = false;
+      /** @type {number | null} */
+      let taskkillStatus = null;
+      let strayKilled = 0;
+      let swept = false;
+      /** @type {string[]} */
+      const skippedLinks = [];
+      /** @type {string[]} */
+      const scanErrors = [];
+      /** @type {string[] | null} */
+      let noneRockyHomeEntries = item.arm === "none" ? [] : null;
+      /** @type {{ solved: boolean, reason: string } | null} */
+      let acceptResult = null;
+      /** @type {null | "api_error" | "timeout" | "harness_crash" | "transcript_broken" | "token_leak"} */
+      let invalid = null;
+      /** @type {string | null} */
+      let runError = null;
+      /** @type {string | null} */
+      let cleanupError = null;
 
-    try {
-      if (isRetry) {
-        // Persist incremented retry count BEFORE launching the retry so crashes cannot reset the cap.
-        writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, secrets);
-        retryCountCommitted = true;
-        removeTreeWithRetry(workRunDir);
-        mkdirSync(workRunDir, { recursive: true });
-        writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
-      } else {
-        removeTreeWithRetry(runDir);
-        mkdirSync(runDir, { recursive: true });
-        writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
-      }
+      try {
+        if (isRetry) {
+          // Persist incremented retry count BEFORE launching the retry so crashes cannot reset the cap.
+          writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, secrets);
+          retryCountCommitted = true;
+          removeTreeWithRetry(workRunDir);
+          mkdirSync(workRunDir, { recursive: true });
+          writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
+        } else {
+          removeTreeWithRetry(runDir);
+          mkdirSync(runDir, { recursive: true });
+          writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
+        }
 
-      sandbox = await deps.createSandbox({
-        arm: item.arm,
-        runId: sandboxRunId,
-        root: rootDir,
-        tgz: tarballs[item.arm],
-        auth: options.auth,
-      });
+        sandbox = await deps.createSandbox({
+          arm: item.arm,
+          runId: sandboxRunId,
+          root: rootDir,
+          tgz: tarballs[item.arm],
+          auth: options.auth,
+        });
 
-      await deps.materializeTask(task, sandbox, item.arm);
+        await deps.materializeTask(task, sandbox, item.arm);
 
-      const claudeRes = await deps.runClaude({
-        runId: item.runId,
-        task,
-        sandbox,
-        timeoutMs,
-        stdoutPath,
-        stderrPath,
-        secrets,
-      });
-      exitCode = claudeRes.exitCode ?? null;
-      timedOut = Boolean(claudeRes.timedOut);
-      killFailed = Boolean(claudeRes.killFailed);
-      taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
-      if (claudeRes.streamed === true && claudeRes.tokenLeaked) {
-        tokenLeaked = true;
-      }
-
-      // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
-      swept = true;
-      strayKilled = await deps.sweepStrays(sandbox.dir);
-
-      let transcriptSummary;
-      if (claudeRes.streamed === true) {
-        transcriptSummary = claudeRes.transcript;
-      } else {
-        const outWriter = createRedactingFileWriter(stdoutPath, secrets);
-        const errWriter = createRedactingFileWriter(stderrPath, secrets);
-        const parser = createTranscriptParser();
-        const rawStdout = String(claudeRes.stdout ?? "");
-        const rawStderr = String(claudeRes.stderr ?? "");
-        outWriter.write(rawStdout);
-        parser.write(rawStdout);
-        errWriter.write(rawStderr);
-        const [outRes, errRes] = await Promise.all([outWriter.end(), errWriter.end()]);
-        transcriptSummary = parser.end();
-        if (outRes.leaked || errRes.leaked) {
+        const claudeRes = await deps.runClaude({
+          runId: item.runId,
+          task,
+          sandbox,
+          timeoutMs,
+          stdoutPath,
+          stderrPath,
+          secrets,
+        });
+        exitCode = claudeRes.exitCode ?? null;
+        timedOut = Boolean(claudeRes.timedOut);
+        killFailed = Boolean(claudeRes.killFailed);
+        taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
+        if (claudeRes.streamed === true && claudeRes.tokenLeaked) {
           tokenLeaked = true;
         }
-      }
 
-      const finalDir = join(workRunDir, "final");
-      skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir));
-      if (item.arm === "none") {
-        noneRockyHomeEntries = listNoneRockyHomeEntries(sandbox.rockyHome, deps.lstatSync);
-      }
-      skippedLinks.push(...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm));
-
-      if (await scanRunArtifactsForSecrets(workRunDir, item.arm, secrets)) {
-        tokenLeaked = true;
-      }
-
-      invalid = classifyOutcome({
-        transcript: transcriptSummary,
-        tokenLeaked,
-        timedOut,
-      });
-
-      acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
-    } catch (error) {
-      if (sandbox && !swept) {
+        // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
         swept = true;
-        try {
-          strayKilled = await deps.sweepStrays(sandbox.dir);
-        } catch {
-          // Best-effort stray sweep during crash cleanup.
+        strayKilled = await deps.sweepStrays(sandbox.dir);
+
+        let transcriptSummary;
+        if (claudeRes.streamed === true) {
+          transcriptSummary = claudeRes.transcript;
+        } else {
+          const outWriter = createRedactingFileWriter(stdoutPath, secrets);
+          const errWriter = createRedactingFileWriter(stderrPath, secrets);
+          const parser = createTranscriptParser();
+          const rawStdout = String(claudeRes.stdout ?? "");
+          const rawStderr = String(claudeRes.stderr ?? "");
+          outWriter.write(rawStdout);
+          parser.write(rawStdout);
+          errWriter.write(rawStderr);
+          const [outRes, errRes] = await Promise.all([outWriter.end(), errWriter.end()]);
+          transcriptSummary = parser.end();
+          if (outRes.leaked || errRes.leaked) {
+            tokenLeaked = true;
+          }
         }
-      }
-      runError = redact(error instanceof Error ? error.message : String(error));
-      if (tokenLeaked || invalid === "token_leak") {
-        invalid = "token_leak";
-      } else {
-        invalid = "harness_crash";
-      }
-    }
 
-    // Always clean up the sandbox BEFORE publishing run.json.
-    if (sandbox) {
-      try {
-        await deps.destroySandbox(sandbox);
+        const finalDir = join(workRunDir, "final");
+        skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir, deps.copyFileSync));
+        if (item.arm === "none") {
+          noneRockyHomeEntries = listNoneRockyHomeEntries(sandbox.rockyHome, deps.lstatSync);
+        }
+        skippedLinks.push(
+          ...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm, deps.copyFileSync),
+        );
+
+        invalid = classifyOutcome({
+          transcript: transcriptSummary,
+          tokenLeaked,
+          timedOut,
+        });
+
+        acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
       } catch (error) {
-        cleanupError = redact(error instanceof Error ? error.message : String(error));
-        deps.log(`[eval] warning: destroySandbox failed for ${item.runId}: ${cleanupError}`);
-      }
-    }
-
-    // Check artifact/retry metadata and publish inside one guard so any metadata or write
-    // error logs, increments publishFailed, and never rejects the worker pool.
-    try {
-      const artifactsExist = hasRunArtifacts(workRunDir, item.arm, deps.lstatSync);
-      if (runError === null && !artifactsExist) {
-        if (invalid !== "token_leak") {
+        if (sandbox && !swept) {
+          swept = true;
+          try {
+            strayKilled = await deps.sweepStrays(sandbox.dir);
+          } catch {
+            // Best-effort stray sweep during crash cleanup.
+          }
+        }
+        runError = redact(error instanceof Error ? error.message : String(error));
+        if (tokenLeaked || invalid === "token_leak") {
+          invalid = "token_leak";
+        } else {
           invalid = "harness_crash";
         }
-        runError = "run artifacts are incomplete";
+      } finally {
+        // Always scan whatever artifacts exist, even if copying or grading threw.
+        try {
+          const scanRes = await scanRunArtifactsForSecrets(workRunDir, item.arm, secrets, {
+            lstatSync: deps.lstatSync,
+            readdirSync: deps.readdirSync,
+            openFile: deps.openFile,
+          });
+          if (scanRes.scanErrors.length > 0) {
+            scanErrors.push(...scanRes.scanErrors);
+          }
+          if (scanRes.leaked) {
+            tokenLeaked = true;
+          }
+        } catch (scanErr) {
+          const msg = redact(scanErr instanceof Error ? scanErr.message : String(scanErr));
+          scanErrors.push(".");
+          deps.log(`[eval] warning: artifact scan failed for ${item.runId}: ${msg}`);
+        }
+        if (tokenLeaked) {
+          invalid = "token_leak";
+        }
+
+        // Always clean up the sandbox BEFORE publishing run.json.
+        if (sandbox) {
+          try {
+            await deps.destroySandbox(sandbox);
+          } catch (error) {
+            cleanupError = redact(error instanceof Error ? error.message : String(error));
+            deps.log(`[eval] warning: destroySandbox failed for ${item.runId}: ${cleanupError}`);
+          }
+        }
       }
 
-      const durableRetryInfo = readDurableRetries(retriesJsonPath, deps.lstatSync);
-      const recordedRetries = !durableRetryInfo.malformed && durableRetryInfo.present
-        ? durableRetryInfo.count
-        : retries;
+      // Check artifact/retry metadata and publish inside one guard so any metadata or write
+      // error logs, increments publishFailed, and never rejects the worker pool.
+      try {
+        const artifactsExist = hasRunArtifacts(workRunDir, item.arm, deps.lstatSync);
+        if (runError === null && !artifactsExist) {
+          if (invalid !== "token_leak") {
+            invalid = "harness_crash";
+          }
+          runError = "run artifacts are incomplete";
+        }
 
-      /** @type {Record<string, unknown>} */
-      const record = {
-        runId: item.runId,
-        taskId: item.taskId,
-        arm: item.arm,
-        block: item.block,
-        startedAt,
-        wallMs: Math.max(0, Date.now() - startMs),
-        exitCode,
-        timedOut,
-        invalid,
-        accept: acceptResult,
-        retries: recordedRetries,
-        skippedLinks,
-        strayKilled,
-        killFailed,
-        taskkillStatus,
-      };
-      if (item.arm === "none") {
-        record.noneRockyHomeEntries = noneRockyHomeEntries ?? [];
-      }
-      if (runError !== null) {
-        record.error = runError;
-      }
-      if (cleanupError !== null) {
-        record.cleanupError = cleanupError;
+        const durableRetryInfo = readDurableRetries(retriesJsonPath, deps.lstatSync);
+        const recordedRetries = !durableRetryInfo.malformed && durableRetryInfo.present
+          ? durableRetryInfo.count
+          : retries;
+
+        /** @type {Record<string, unknown>} */
+        const record = {
+          runId: item.runId,
+          taskId: item.taskId,
+          arm: item.arm,
+          block: item.block,
+          startedAt,
+          wallMs: Math.max(0, Date.now() - startMs),
+          exitCode,
+          timedOut,
+          invalid,
+          accept: acceptResult,
+          retries: recordedRetries,
+          skippedLinks,
+          strayKilled,
+          killFailed,
+          taskkillStatus,
+        };
+        if (item.arm === "none") {
+          record.noneRockyHomeEntries = noneRockyHomeEntries ?? [];
+        }
+        if (scanErrors.length > 0) {
+          record.scanErrors = scanErrors;
+        }
+        if (runError !== null) {
+          record.error = runError;
+        }
+        if (cleanupError !== null) {
+          record.cleanupError = cleanupError;
+        }
+
+        if (isRetry && !retryCountCommitted) {
+          throw new Error(`retry count could not be persisted in ${runDir}`);
+        }
+        mkdirSync(workRunDir, { recursive: true });
+        writeJsonAtomic(runJsonPath, record, secrets);
+        if (isRetry) {
+          swapStagedRunDir(runDir, workRunDir, deps.lstatSync);
+        }
+        completed += 1;
+        if (runError !== null) {
+          deps.log(
+            redact(
+              `[eval ${completed}/${pending.length}] ${item.runId}: invalid=${String(invalid)} (${runError})`,
+            ),
+          );
+        } else {
+          deps.log(
+            redact(
+              `[eval ${completed}/${pending.length}] ${item.runId}: solved=${acceptResult?.solved} invalid=${String(invalid)} (${record.wallMs}ms)`,
+            ),
+          );
+        }
+      } catch (publishError) {
+        publishFailed += 1;
+        const msg = redact(publishError instanceof Error ? publishError.message : String(publishError));
+        deps.log(`[eval] error: failed to publish run.json for ${item.runId}: ${msg}`);
       }
 
-      if (isRetry && !retryCountCommitted) {
-        throw new Error(`retry count could not be persisted in ${runDir}`);
-      }
-      mkdirSync(workRunDir, { recursive: true });
-      writeJsonAtomic(runJsonPath, record, secrets);
-      if (isRetry) {
-        swapStagedRunDir(runDir, workRunDir, deps.lstatSync);
-      }
-      completed += 1;
-      if (runError !== null) {
+      if (invalid === "token_leak") {
+        tokenLeakRuns.push(item.runId);
+        stopBatch = true;
         deps.log(
-          redact(
-            `[eval ${completed}/${pending.length}] ${item.runId}: invalid=${String(invalid)} (${runError})`,
-          ),
-        );
-      } else {
-        deps.log(
-          redact(
-            `[eval ${completed}/${pending.length}] ${item.runId}: solved=${acceptResult?.solved} invalid=${String(invalid)} (${record.wallMs}ms)`,
-          ),
+          redact(`[eval] abort: token_leak in ${item.runId}; stopping batch (no new runs will start)`),
         );
       }
-    } catch (publishError) {
-      publishFailed += 1;
-      const msg = redact(publishError instanceof Error ? publishError.message : String(publishError));
-      deps.log(`[eval] error: failed to publish run.json for ${item.runId}: ${msg}`);
-    }
-  });
+
+      try {
+        runAndRecordOwnerCheck(`after ${item.runId}`);
+      } catch (checkError) {
+        const msg = redact(checkError instanceof Error ? checkError.message : String(checkError));
+        deps.log(`[eval] warning: ownerCheck failed after ${item.runId}: ${msg}`);
+      }
+    },
+    () => stopBatch,
+  );
+
+  runAndRecordOwnerCheck("batch-end");
 
   deps.log(
     redact(
       `[eval] summary: total=${planned.length} ran=${completed} skipped=${skipped} malformed=${malformed} publishFailed=${publishFailed}`,
     ),
   );
-  return {
+  const summary = {
     batchPath,
     total: planned.length,
     ran: completed,
     skipped,
     malformed,
     publishFailed,
+    stopped: stopBatch,
+    tokenLeakRuns,
+    ownerCheck: latestOwnerCheck,
   };
+  if (tokenLeakRuns.length > 0 || ownerLeakDetected) {
+    /** @type {string[]} */
+    const reasons = [];
+    if (tokenLeakRuns.length > 0) {
+      reasons.push(`token_leak in ${tokenLeakRuns.join(", ")}`);
+    }
+    if (ownerLeakDetected) {
+      reasons.push(
+        `owner leak (appendedUnderEvalRoot=${latestOwnerCheck?.appendedUnderEvalRoot ?? 0}, settingsChanged=${latestOwnerCheck?.settingsChanged?.length ?? 0})`,
+      );
+    }
+    throw new BatchLeakError(`Batch stopped due to ${reasons.join("; ")}`, {
+      tokenLeakRuns,
+      ownerCheck: latestOwnerCheck,
+      summary,
+    });
+  }
+  return summary;
 }
 
 function usageError(message) {

@@ -569,7 +569,8 @@ export function verdict(batch) {
     }
   }
 
-  const ownerLeak = Boolean(batch.ownerCheck && batch.ownerCheck.leak === true);
+  const effectiveOwnerCheck = batch.ownerCheck ?? batch.provenance?.ownerCheck ?? null;
+  const ownerLeak = Boolean(effectiveOwnerCheck && effectiveOwnerCheck.leak === true);
   const validRuns = runs.filter((run) => !isInvalidRun(run));
 
   // Positive control: all `after` trap runs (including invalid runs); `not_delivered` = `noteDelivered === false`.
