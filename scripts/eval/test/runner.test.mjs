@@ -22,6 +22,7 @@ import { ACCEPT_MAX_BUFFER_BYTES, accept, runTargetCommand } from "../accept.mjs
 import { renderClaudeMd } from "../history.mjs";
 import {
   ARMS,
+  BatchIncompleteError,
   BatchLeakError,
   COPY_CREDENTIALS_DISABLED_MESSAGE,
   DEFAULT_K,
@@ -1319,8 +1320,10 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       assert.equal(batchJson.concurrency, 2);
       assert.equal(typeof batchJson.ownerBaseline.memoryBytes, "number");
       assert.equal(batchJson.ownerCheck.leak, false);
+      assert.equal(batchJson.scheduledRuns, 6);
       assert.equal(typeof batchJson.completedAt, "string");
       assert.ok(batchJson.completedAt.length > 0);
+      assert.equal("incomplete" in batchJson, false);
 
       // 4. Artifact filtering checks: final/ without .git; rocky-home/ filtered; no home/.claude.
       const noneDir = join(outDir, "runs", "SMOKE-none-b1");
@@ -1611,9 +1614,20 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       writeFileSync(join(outDir, "runs", "SMOKE-after-b1", "run.json"), "{not-valid-json", "utf8");
 
       logs.length = 0;
-      const summary = await runBatch({ ...opts, retryInvalid: true }, fakeDeps);
-      assert.equal(summary.ran, 0);
-      assert.equal(summary.malformed, 1);
+      let malformedErr = null;
+      try {
+        await runBatch({ ...opts, retryInvalid: true }, fakeDeps);
+      } catch (err) {
+        malformedErr = err;
+      }
+      assert.ok(malformedErr instanceof BatchIncompleteError, `expected BatchIncompleteError, got ${String(malformedErr)}`);
+      assert.equal(malformedErr.exitCode, 4);
+      assert.equal(malformedErr.summary.ran, 0);
+      assert.equal(malformedErr.summary.malformed, 1);
+      assert.deepEqual(malformedErr.incomplete, { malformed: 1, publishFailed: 0, missing: 1 });
+      const malformedBatch = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal("completedAt" in malformedBatch, false);
+      assert.deepEqual(malformedBatch.incomplete, { malformed: 1, publishFailed: 0, missing: 1 });
       assert.equal(callCounts.get("SMOKE-before-b1"), 1, "interrupted retry at count=2 must not retry again");
       assert.equal(callCounts.get("SMOKE-after-b1"), 1, "malformed run.json must never be retried");
       assert.ok(
@@ -1666,22 +1680,31 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         log: (line) => logs.push(line),
       });
 
-      const summary = await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "token" },
-          secrets: [secret],
-          concurrency: 2,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        fakeDeps,
-      );
+      let incompleteErr = null;
+      try {
+        await runBatch(
+          {
+            outDir,
+            rootDir,
+            cacheDir,
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "token" },
+            secrets: [secret],
+            concurrency: 2,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          fakeDeps,
+        );
+      } catch (err) {
+        incompleteErr = err;
+      }
+
+      assert.ok(incompleteErr instanceof BatchIncompleteError, `expected BatchIncompleteError, got ${String(incompleteErr)}`);
+      assert.equal(incompleteErr.exitCode, 4);
+      const summary = incompleteErr.summary;
 
       // destroySandbox ran BEFORE run.json was published.
       assert.equal(runJsonExistedDuringDestroy, false);
@@ -1698,9 +1721,14 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       assert.equal(afterRun.invalid, null);
       assert.equal(afterRun.accept.solved, true);
 
-      // Unwritable run was logged, counted, and did not reject the worker pool.
+      // Unwritable run was logged, counted, did not reject the worker pool, omitted completedAt, and recorded incomplete.
       assert.equal(summary.publishFailed, 1);
       assert.equal(summary.ran, 2);
+      assert.deepEqual(incompleteErr.incomplete, { malformed: 0, publishFailed: 1, missing: 1 });
+      const batchAfterPublishFail = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal("completedAt" in batchAfterPublishFail, false);
+      assert.equal(batchAfterPublishFail.scheduledRuns, 3);
+      assert.deepEqual(batchAfterPublishFail.incomplete, { malformed: 0, publishFailed: 1, missing: 1 });
       assert.ok(
         logs.some((line) => line.includes("SMOKE-none-b1") && /failed to publish run\.json/i.test(line)),
         `expected publish error log for SMOKE-none-b1, got: ${JSON.stringify(logs)}`,
@@ -2156,9 +2184,21 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         log: (line) => logs.push(line),
       });
 
-      const summary = await runBatch({ ...opts, retryInvalid: true }, fakeDeps);
+      let malformedErr = null;
+      try {
+        await runBatch({ ...opts, retryInvalid: true }, fakeDeps);
+      } catch (err) {
+        malformedErr = err;
+      }
+      assert.ok(malformedErr instanceof BatchIncompleteError, `expected BatchIncompleteError, got ${String(malformedErr)}`);
+      assert.equal(malformedErr.exitCode, 4);
+      const summary = malformedErr.summary;
       assert.equal(summary.malformed, 2);
       assert.equal(summary.ran, 1);
+      assert.deepEqual(malformedErr.incomplete, { malformed: 2, publishFailed: 0, missing: 2 });
+      const batchAfterMalformed = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal("completedAt" in batchAfterMalformed, false);
+      assert.deepEqual(batchAfterMalformed.incomplete, { malformed: 2, publishFailed: 0, missing: 2 });
       assert.deepEqual(executed, ["SMOKE-none-b1"]);
       assert.ok(
         logs.some((line) => line.includes("SMOKE-before-b1") && /malformed/i.test(line)),
@@ -2205,25 +2245,38 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         log: (line) => logs.push(line),
       });
 
-      const summary = await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "token" },
-          secrets: [],
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        fakeDeps,
-      );
+      let publishErr = null;
+      try {
+        await runBatch(
+          {
+            outDir,
+            rootDir,
+            cacheDir,
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "token" },
+            secrets: [],
+            concurrency: 1,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          fakeDeps,
+        );
+      } catch (err) {
+        publishErr = err;
+      }
 
+      assert.ok(publishErr instanceof BatchIncompleteError, `expected BatchIncompleteError, got ${String(publishErr)}`);
+      assert.equal(publishErr.exitCode, 4);
+      const summary = publishErr.summary;
       assert.equal(summary.publishFailed, 1);
       assert.equal(summary.ran, 2);
+      assert.deepEqual(publishErr.incomplete, { malformed: 0, publishFailed: 1, missing: 1 });
+      const batchAfterEacces = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal("completedAt" in batchAfterEacces, false);
+      assert.equal(batchAfterEacces.scheduledRuns, 3);
+      assert.deepEqual(batchAfterEacces.incomplete, { malformed: 0, publishFailed: 1, missing: 1 });
       assert.ok(
         logs.some((line) => line.includes("SMOKE-none-b1") && /EACCES/i.test(line)),
         `expected EACCES publish failure log for SMOKE-none-b1, got ${JSON.stringify(logs)}`,
@@ -2231,6 +2284,51 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       const afterRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-after-b1", "run.json"), "utf8"));
       assert.equal(afterRun.invalid, null);
       assert.equal(afterRun.accept.solved, true);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("omits completedAt and exits 4 when a scheduled run is skipped at max-retries without run.json", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-missing-maxretry-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+
+    try {
+      const skippedDir = join(outDir, "runs", "SMOKE-before-b1");
+      mkdirSync(skippedDir, { recursive: true });
+      writeFileSync(join(skippedDir, "retries.json"), `${JSON.stringify({ count: 2 }, null, 2)}\n`, "utf8");
+
+      let caught = null;
+      try {
+        await runBatch(
+          {
+            outDir,
+            rootDir,
+            cacheDir,
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "token" },
+            secrets: [],
+            concurrency: 1,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          makeFakeDeps(),
+        );
+      } catch (err) {
+        caught = err;
+      }
+
+      assert.ok(caught instanceof BatchIncompleteError, `expected BatchIncompleteError, got ${String(caught)}`);
+      assert.equal(caught.exitCode, 4);
+      assert.deepEqual(caught.incomplete, { malformed: 0, publishFailed: 0, missing: 1 });
+      const batchJson = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal("completedAt" in batchJson, false);
+      assert.equal(batchJson.scheduledRuns, 3);
+      assert.deepEqual(batchJson.incomplete, { malformed: 0, publishFailed: 0, missing: 1 });
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }

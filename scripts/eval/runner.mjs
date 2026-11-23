@@ -114,6 +114,20 @@ export class BatchLeakError extends Error {
   }
 }
 
+export class BatchIncompleteError extends Error {
+  /**
+   * @param {string} message
+   * @param {{ incomplete?: { malformed: number, publishFailed: number, missing: number }, summary?: any }} [details]
+   */
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "BatchIncompleteError";
+    this.exitCode = 4;
+    this.incomplete = details.incomplete ?? null;
+    this.summary = details.summary ?? null;
+  }
+}
+
 /**
  * Deterministic 32-bit PRNG returning floats in [0, 1).
  * @param {number} seed
@@ -1562,6 +1576,51 @@ function hasRunArtifacts(workRunDir, arm, lstatFn = lstatSync, quarantinedSet = 
   return transcriptOk && stderrOk && finalOk && rockyOk;
 }
 
+function countMissingPublishedRuns(runsDir, planned, lstatFn = lstatSync) {
+  let missing = 0;
+  for (const item of planned) {
+    const runDir = join(runsDir, item.runId);
+    let dirStat;
+    try {
+      dirStat = lstatOrNull(runDir, lstatFn);
+    } catch {
+      missing += 1;
+      continue;
+    }
+    if (!dirStat || dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      missing += 1;
+      continue;
+    }
+    const runJsonPath = join(runDir, "run.json");
+    let fileStat;
+    try {
+      fileStat = lstatOrNull(runJsonPath, lstatFn);
+    } catch {
+      missing += 1;
+      continue;
+    }
+    if (!fileStat || fileStat.isSymbolicLink() || !fileStat.isFile()) {
+      missing += 1;
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(runJsonPath, "utf8"));
+      if (
+        !isValidRunJson(parsed)
+        || parsed.runId !== item.runId
+        || parsed.taskId !== item.taskId
+        || parsed.arm !== item.arm
+        || parsed.block !== item.block
+      ) {
+        missing += 1;
+      }
+    } catch {
+      missing += 1;
+    }
+  }
+  return missing;
+}
+
 function findPublishedTokenLeakRuns(runsDir, planned, lstatFn = lstatSync) {
   /** @type {Set<string>} */
   const leakedIds = new Set();
@@ -1952,6 +2011,7 @@ export async function runBatch(options, overrides = {}) {
     }
     baseline = existingBatch.ownerBaseline;
     batchData = existingBatch;
+    batchData.scheduledRuns = planned.length;
   } else {
     baseline = deps.ownerBaseline({
       ownerHome: deps.ownerHome,
@@ -1977,6 +2037,7 @@ export async function runBatch(options, overrides = {}) {
       concurrency,
       arms: [...ARMS],
       taskIds,
+      scheduledRuns: planned.length,
       auth: options.auth.kind,
       ownerBaseline: baseline,
     };
@@ -2080,6 +2141,31 @@ export async function runBatch(options, overrides = {}) {
     return check;
   }
 
+  function finalizeBatchCompletion(summary) {
+    if (stopBatch || batchData.halted) {
+      return summary;
+    }
+    const missing = countMissingPublishedRuns(runsDir, planned, deps.lstatSync);
+    if (summary.malformed === 0 && summary.publishFailed === 0 && missing === 0) {
+      delete batchData.incomplete;
+      batchData.completedAt = new Date().toISOString();
+      persistBatchJson(batchData);
+      return summary;
+    }
+    const incomplete = {
+      malformed: summary.malformed,
+      publishFailed: summary.publishFailed,
+      missing,
+    };
+    delete batchData.completedAt;
+    batchData.incomplete = incomplete;
+    persistBatchJson(batchData);
+    const incompleteSummary = { ...summary, incomplete };
+    const msg = `Batch incomplete (malformed=${incomplete.malformed}, publishFailed=${incomplete.publishFailed}, missing=${incomplete.missing})`;
+    deps.log(redact(`[eval] error: ${msg}`));
+    throw new BatchIncompleteError(msg, { incomplete, summary: incompleteSummary });
+  }
+
   mkdirSync(runsDir, { recursive: true });
 
   /** @type {Array<{ item: typeof planned[number], retries: number, isRetry: boolean }>} */
@@ -2131,18 +2217,15 @@ export async function runBatch(options, overrides = {}) {
         summary: emptySummary,
       });
     }
-    if (!stopBatch && !batchData.halted) {
-      batchData.completedAt = new Date().toISOString();
-      persistBatchJson(batchData);
-    }
     deps.log(
       redact(`[eval] 0 runs to execute (${skipped} skipped, ${malformed} malformed).`),
     );
-    return emptySummary;
+    return finalizeBatchCompletion(emptySummary);
   }
 
-  if (batchData.completedAt !== undefined) {
+  if (batchData.completedAt !== undefined || batchData.incomplete !== undefined) {
     delete batchData.completedAt;
+    delete batchData.incomplete;
     persistBatchJson(batchData);
   }
 
@@ -2533,11 +2616,7 @@ export async function runBatch(options, overrides = {}) {
       summary,
     });
   }
-  if (!stopBatch && !batchData.halted) {
-    batchData.completedAt = new Date().toISOString();
-    persistBatchJson(batchData);
-  }
-  return summary;
+  return finalizeBatchCompletion(summary);
 }
 
 function usageError(message) {

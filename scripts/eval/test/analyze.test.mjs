@@ -420,7 +420,8 @@ describe("verdict", () => {
       "descriptive only: no claim rule for this comparison",
     );
 
-    // Invalid batch (leak) on run2 with trigger -> trigger true, authorized false with batch invalid note.
+    // Invalid batch (leak) on run2 with trigger -> trigger true, authorized false;
+    // afterVsBefore preserves its descriptive note with "; batch invalid" appended.
     const leakRuns = runs.map((r, idx) => (idx === 0 ? { ...r, leak: ["none-arm-rocky"] } : r));
     const invalidRun2 = verdict({ runs: leakRuns, label: "run2", seed: 20261123, resamples: 500 });
     assert.equal(invalidRun2.batchValid, false);
@@ -429,6 +430,10 @@ describe("verdict", () => {
     assert.equal(invalidRun2.claims.afterVsNone.claimed, false);
     assert.equal(invalidRun2.claims.afterVsNone.authorizationNote, "batch invalid");
     assert.equal(invalidRun2.claims.afterVsBefore.authorized, false);
+    assert.equal(
+      invalidRun2.claims.afterVsBefore.authorizationNote,
+      "run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked; batch invalid",
+    );
     assert.equal(invalidRun2.claims.beforeVsNone.authorized, false);
     assert.equal(
       invalidRun2.claims.beforeVsNone.authorizationNote,
@@ -539,6 +544,65 @@ describe("verdict", () => {
     assert.equal(haltedProvenance.veto.vetoed, null);
   });
 
+  test("incomplete batches (missing metric rows or missing completedAt) set batchValid false for every label", () => {
+    const trapIds = ["T01", "T02", "T03", "T04", "T05", "T06"];
+    const runs = [];
+    for (const taskId of trapIds) {
+      runs.push(
+        makeRun({ taskId, arm: "none", block: 1, repeatFailures: 3, solved: true }),
+        makeRun({ taskId, arm: "before", block: 1, repeatFailures: 2, solved: true }),
+        makeRun({ taskId, arm: "after", block: 1, repeatFailures: 0, solved: true, noteDelivered: true }),
+      );
+    }
+    // Add control runs hitting both harm veto thresholds.
+    runs.push(
+      makeRun({ taskId: "C01", arm: "none", block: 1, solved: true, numTurns: 4 }),
+      makeRun({ taskId: "C01", arm: "after", block: 1, solved: false, numTurns: 8 }),
+    );
+
+    // One metric row missing vs scheduledRuns (20 rows present, 21 scheduled) even with completedAt set.
+    const oneMissing = verdict({
+      runs,
+      label: "run2",
+      provenance: {
+        completedAt: "2026-11-23T03:00:00.000Z",
+        scheduledRuns: runs.length + 1,
+        taskIds: [...trapIds, "C01"],
+      },
+      seed: 20261123,
+      resamples: 200,
+    });
+    assert.equal(oneMissing.batchValid, false);
+    assert.equal(oneMissing.batchIncomplete, true);
+    assert.equal(oneMissing.invalidReason, "batch incomplete");
+    assert.equal(oneMissing.veto.vetoed, null);
+    assert.equal(oneMissing.claims.afterVsNone.authorized, false);
+    assert.equal(oneMissing.claims.afterVsNone.authorizationNote, "batch incomplete");
+    assert.equal(oneMissing.claims.afterVsBefore.authorized, false);
+    assert.equal(
+      oneMissing.claims.afterVsBefore.authorizationNote,
+      "run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked; batch incomplete",
+    );
+
+    // Unfinished batch (no completedAt) under a diagnostic label also sets batchValid false and vetoed null.
+    const unfinishedDiag = verdict({
+      runs,
+      label: "dev",
+      provenance: {
+        scheduledRuns: runs.length,
+        taskIds: [...trapIds, "C01"],
+      },
+      seed: 20261123,
+      resamples: 200,
+    });
+    assert.equal(unfinishedDiag.batchValid, false);
+    assert.equal(unfinishedDiag.batchIncomplete, true);
+    assert.equal(unfinishedDiag.veto.solvedVetoed, true);
+    assert.equal(unfinishedDiag.veto.turnVetoed, true);
+    assert.equal(unfinishedDiag.veto.vetoed, null);
+    assert.equal(unfinishedDiag.claims.afterVsNone.authorizationNote, "batch incomplete");
+  });
+
   test("verdict passes batch k to signFlipP for exact per-task mean ties", () => {
     const runs = [];
     // 5 trap tasks with 7 runs per arm giving per-task diffs (after - none) = [4/7, 4/7, 6/7, -2, -2].
@@ -599,6 +663,7 @@ describe("report.mjs", () => {
       const batchJson = {
         v: 1,
         startedAt: "2026-11-23T02:00:00.000Z",
+        completedAt: "2026-11-23T03:00:00.000Z",
         claudeVersion: "2.1.330 (Claude Code)",
         model: "claude-sonnet-5-5",
         claudeFlags: ["-p", "--max-turns", "30"],
@@ -614,6 +679,7 @@ describe("report.mjs", () => {
         concurrency: 2,
         arms: ["none", "before", "after"],
         taskIds: ["T01", "C01", "S01"],
+        scheduledRuns: 8,
         auth: "token",
       };
       const metricsJson = {
@@ -804,7 +870,10 @@ describe("report.mjs", () => {
       assert.match(invalidMd, /3\/10 \(30\.0%\)/);
       assert.match(invalidMd, /1\/8 \(12\.5%\)/);
       assert.match(invalidMd, /\| afterVsNone \(after - none\) \|.*\| yes \| no \| batch invalid \|/);
-      assert.match(invalidMd, /\| afterVsBefore \(after - before\) \|.*\| yes \| no \| batch invalid \|/);
+      assert.match(
+        invalidMd,
+        /\| afterVsBefore \(after - before\) \|.*\| yes \| no \| run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked; batch invalid \|/,
+      );
       assert.match(
         invalidMd,
         /\| beforeVsNone \(before - none\) \|.*\| yes \| no \| descriptive only: no claim rule for this comparison \|/,
@@ -814,6 +883,66 @@ describe("report.mjs", () => {
       assert.match(invalidMd, /- \*\*Batch valid:\*\* false/);
       assert.match(invalidMd, /- \*\*Vetoed:\*\* not decided \(batch invalid\)/);
       assert.doesNotMatch(invalidMd, /- \*\*Vetoed:\*\* true/);
+
+      // Unhalted, unfinished batch (no completedAt) with raw veto triggers under a diagnostic label ("dev"):
+      // still renders Vetoed: not decided (batch incomplete), never Vetoed: true.
+      const unfinishedMetrics = {
+        ...metricsJson,
+        "C01-none-b1": makeRun({ taskId: "C01", arm: "none", solved: true, numTurns: 4 }),
+        "C01-after-b1": makeRun({ taskId: "C01", arm: "after", solved: false, numTurns: 8 }),
+      };
+      writeFileSync(join(dir, "metrics.json"), `${JSON.stringify(unfinishedMetrics, null, 2)}\n`, "utf8");
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({
+          v: 1,
+          seed: 20261123,
+          k: 1,
+          taskIds: [...trapIds, "C01"],
+          scheduledRuns: 20,
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      const unfinishedDev = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "dev", "--dest", dest, "--resamples", "200"],
+        { encoding: "utf8" },
+      );
+      assert.equal(unfinishedDev.status, 0, unfinishedDev.stderr);
+      const unfinishedMd = readFileSync(dest, "utf8");
+      assert.match(unfinishedMd, /- \*\*Batch valid:\*\* false/);
+      assert.match(unfinishedMd, /- \*\*Vetoed:\*\* not decided \(batch incomplete\)/);
+      assert.doesNotMatch(unfinishedMd, /- \*\*Vetoed:\*\* true/);
+      assert.match(unfinishedMd, /\| afterVsNone \(after - none\) \|.*\| yes \| no \| batch incomplete \|/);
+
+      // Completed batch.json with scheduledRuns = 21 but only 20 metric rows (1 run missing):
+      // run2 report marks batchValid false, Vetoed: not decided (batch incomplete), and appends "; batch incomplete" to run2 afterVsBefore.
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({
+          v: 1,
+          seed: 20261123,
+          k: 1,
+          taskIds: [...trapIds, "C01"],
+          scheduledRuns: 21,
+          completedAt: "2026-11-23T03:00:00.000Z",
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      const missingRowRun2 = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run2", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(missingRowRun2.status, 0, missingRowRun2.stderr);
+      const missingRowMd = readFileSync(dest, "utf8");
+      assert.match(missingRowMd, /- \*\*Batch valid:\*\* false/);
+      assert.match(missingRowMd, /- \*\*Vetoed:\*\* not decided \(batch incomplete\)/);
+      assert.match(missingRowMd, /\| afterVsNone \(after - none\) \|.*\| yes \| no \| batch incomplete \|/);
+      assert.match(
+        missingRowMd,
+        /\| afterVsBefore \(after - before\) \|.*\| yes \| no \| run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked; batch incomplete \|/,
+      );
 
       // Halted batch (e.g. owner_check_error) without completedAt:
       // run1 refuses with exit 2; non-preregistered label renders Batch valid: false and Vetoed: not decided (batch invalid).
@@ -856,7 +985,7 @@ describe("report.mjs", () => {
     try {
       writeFileSync(
         join(dir, "batch.json"),
-        `${JSON.stringify({ v: 1, seed: 20261123, k: 1, taskIds: ["SMOKE"] }, null, 2)}\n`,
+        `${JSON.stringify({ v: 1, seed: 20261123, k: 1, taskIds: ["SMOKE"], scheduledRuns: 2, completedAt: "2026-11-23T03:00:00.000Z" }, null, 2)}\n`,
         "utf8",
       );
       writeFileSync(

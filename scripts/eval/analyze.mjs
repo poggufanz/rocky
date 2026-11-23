@@ -494,6 +494,9 @@ function meanPairedDiff(sampledTasks) {
  *   label?: string,
  *   k?: number,
  *   halted?: any,
+ *   completedAt?: string | null,
+ *   scheduledRuns?: number,
+ *   incomplete?: any,
  *   ownerCheck?: { leak?: boolean, [key: string]: any } | null,
  *   ownerLeakLatched?: boolean,
  *   seed?: number,
@@ -525,6 +528,37 @@ export function verdict(batch) {
   const haltInfo = rawHalted && typeof rawHalted === "object" && !Array.isArray(rawHalted)
     ? rawHalted
     : (halted ? { reason: typeof rawHalted === "string" ? rawHalted : "halted" } : null);
+
+  const hasProvenance = Boolean(
+    batch.provenance && typeof batch.provenance === "object" && !Array.isArray(batch.provenance),
+  );
+  const rawCompletedAt = batch.completedAt !== undefined
+    ? batch.completedAt
+    : batch.provenance?.completedAt;
+  const hasCompletedAt = typeof rawCompletedAt === "string" && rawCompletedAt.trim().length > 0;
+  const missingCompletedAt =
+    (hasProvenance || Object.prototype.hasOwnProperty.call(batch, "completedAt")) && !hasCompletedAt;
+
+  const rawScheduledRuns = batch.scheduledRuns !== undefined
+    ? batch.scheduledRuns
+    : batch.provenance?.scheduledRuns;
+  const scheduledRuns =
+    typeof rawScheduledRuns === "number" && Number.isInteger(rawScheduledRuns) && rawScheduledRuns >= 0
+      ? rawScheduledRuns
+      : null;
+  const scheduledTaskIds = Array.isArray(batch.provenance?.taskIds) ? batch.provenance.taskIds : null;
+  const scheduledIncludesSmoke = scheduledTaskIds ? scheduledTaskIds.includes("SMOKE") : false;
+  const recordedRuns = scheduledTaskIds && !scheduledIncludesSmoke ? runs.length : rawRuns.length;
+  const fewerRunsThanScheduled = scheduledRuns !== null && recordedRuns < scheduledRuns;
+
+  const rawIncomplete = batch.incomplete !== undefined
+    ? batch.incomplete
+    : batch.provenance?.incomplete;
+  const hasIncompleteMarker = Boolean(
+    rawIncomplete === true
+    || (rawIncomplete && typeof rawIncomplete === "object" && !Array.isArray(rawIncomplete)),
+  );
+  const batchIncomplete = hasIncompleteMarker || missingCompletedAt || fewerRunsThanScheduled;
 
   const seed = typeof batch.seed === "number"
     ? batch.seed
@@ -604,11 +638,16 @@ export function verdict(batch) {
     armValid[arm] =
       !ownerLeak
       && !halted
+      && !batchIncomplete
       && (leaksByArm[arm] ?? 0) === 0
       && !(arm === "after" && notDeliveredExceeded);
   }
   const anyLeak = ownerLeak || leakRuns.length > 0;
-  const batchValid = !notDeliveredExceeded && !anyLeak && !halted;
+  const batchInvalidOther = notDeliveredExceeded || anyLeak || halted;
+  const batchValid = !batchInvalidOther && !batchIncomplete;
+  const invalidReasonNote = batchValid
+    ? null
+    : (batchInvalidOther ? "batch invalid" : "batch incomplete");
 
   // Claims: trap tasks only, paired per-task differences on repeatFailures.
   const trapRuns = runs.filter((run) => taskKindOf(run, kindMap) === "trap");
@@ -648,6 +687,9 @@ export function verdict(batch) {
     return mean(vals);
   }
 
+  const RUN2_AFTER_VS_BEFORE_NOTE =
+    "run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked";
+
   function authorizeClaim(comparisonKey, trigger) {
     if (comparisonKey === "beforeVsNone") {
       return {
@@ -655,8 +697,16 @@ export function verdict(batch) {
         authorizationNote: "descriptive only: no claim rule for this comparison",
       };
     }
+    if (normalizedLabel === "run2" && comparisonKey === "afterVsBefore") {
+      return {
+        authorized: false,
+        authorizationNote: batchValid
+          ? RUN2_AFTER_VS_BEFORE_NOTE
+          : `${RUN2_AFTER_VS_BEFORE_NOTE}; ${invalidReasonNote}`,
+      };
+    }
     if (!batchValid) {
-      return { authorized: false, authorizationNote: "batch invalid" };
+      return { authorized: false, authorizationNote: invalidReasonNote };
     }
     if (normalizedLabel === "run1") {
       return {
@@ -665,13 +715,6 @@ export function verdict(batch) {
       };
     }
     if (normalizedLabel === "run2") {
-      if (comparisonKey === "afterVsBefore") {
-        return {
-          authorized: false,
-          authorizationNote:
-            "run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked",
-        };
-      }
       return {
         authorized: trigger,
         authorizationNote: trigger ? "authorized" : "statistical trigger not met",
@@ -844,6 +887,16 @@ export function verdict(batch) {
       invalidTotal: invalidAfterTrapTotal,
     },
     batchValid,
+    batchIncomplete,
+    invalidReason: invalidReasonNote,
+    completeness: {
+      completedAt: hasCompletedAt ? rawCompletedAt : null,
+      scheduledRuns,
+      recordedRuns,
+      incomplete: rawIncomplete && typeof rawIncomplete === "object" && !Array.isArray(rawIncomplete)
+        ? rawIncomplete
+        : null,
+    },
     halted: haltInfo,
     armValid,
     excluded,

@@ -215,6 +215,7 @@ export function renderReport({
     ["Concurrency", prov.concurrency !== undefined ? String(prov.concurrency) : "n/a"],
     ["Auth mode", prov.auth ?? "n/a"],
     ["Tasks scheduled", Array.isArray(prov.taskIds) ? prov.taskIds.join(", ") : "n/a"],
+    ["Scheduled runs", prov.scheduledRuns !== undefined ? String(prov.scheduledRuns) : "n/a"],
     ["Bootstrap", `${resamples} resamples, ${(level * 100).toFixed(0)}% two-stage CI (seed ${seed})`],
   ];
   lines.push("| Field | Value |");
@@ -283,6 +284,26 @@ export function renderReport({
   if (v.halted) {
     const haltRunSuffix = v.halted.runId ? ` (runId=${v.halted.runId})` : "";
     lines.push(`- Batch halted: reason=${v.halted.reason ?? "halted"}${haltRunSuffix}.`);
+  }
+  if (v.batchIncomplete) {
+    const parts = [];
+    if (!v.completeness?.completedAt) {
+      parts.push("missing completedAt");
+    }
+    if (
+      typeof v.completeness?.scheduledRuns === "number"
+      && v.completeness.recordedRuns < v.completeness.scheduledRuns
+    ) {
+      parts.push(`${v.completeness.recordedRuns}/${v.completeness.scheduledRuns} metric rows`);
+    }
+    if (v.completeness?.incomplete) {
+      const inc = v.completeness.incomplete;
+      parts.push(
+        `malformed=${inc.malformed ?? 0}, publishFailed=${inc.publishFailed ?? 0}, missing=${inc.missing ?? 0}`,
+      );
+    }
+    const detail = parts.length > 0 ? ` (${parts.join("; ")})` : "";
+    lines.push(`- Batch incomplete${detail}.`);
   }
   lines.push(`- Overall batch validity: **${v.batchValid ? "valid" : "invalid"}**.`);
   lines.push("");
@@ -416,7 +437,9 @@ export function renderReport({
 
   let verdictSummary;
   if (!v.batchValid) {
-    verdictSummary = "Batch invalid — no veto or claim decision recorded.";
+    verdictSummary = v.invalidReason === "batch incomplete"
+      ? "Batch incomplete — no veto or claim decision recorded."
+      : "Batch invalid — no veto or claim decision recorded.";
   } else if (v.veto.solvedDrop === null && v.veto.medianTurnRise === null) {
     verdictSummary = "No control or stale runs present — veto not evaluated.";
   } else if (v.veto.vetoed) {
@@ -424,7 +447,7 @@ export function renderReport({
   } else {
     verdictSummary = "Not vetoed — harm thresholds not exceeded.";
   }
-  const vetoedText = v.batchValid ? String(v.veto.vetoed) : "not decided (batch invalid)";
+  const vetoedText = v.batchValid ? String(v.veto.vetoed) : `not decided (${v.invalidReason ?? "batch invalid"})`;
   lines.push(`- **Batch valid:** ${v.batchValid}`);
   lines.push(`- **Vetoed:** ${vetoedText}`);
   lines.push(`- **Verdict:** ${verdictSummary}`);
