@@ -11,6 +11,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { open as openFile } from "node:fs/promises";
@@ -1027,10 +1028,16 @@ function removeFileWithRetry(target, rmFn = rmSync) {
       lastError = error;
       const code = error && typeof error === "object" ? error.code : undefined;
       if (code !== "EBUSY" && code !== "EPERM" && code !== "EACCES") throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75 * (attempt + 1));
+      if (attempt < 5) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75 * (attempt + 1));
+      }
     }
   }
   if (lastError) throw lastError;
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function renameDirWithRetry(oldPath, newPath) {
@@ -1092,9 +1099,12 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile)
  * Scan saved run artifacts (`transcript.jsonl`, `stderr.txt`, `final/**`, and `rocky-home/*`)
  * for any secret value using bounded chunked byte scans without following symlinks.
  * Every file containing a secret is deleted from `workRunDir` and its POSIX-style
- * relative path is recorded in `quarantined` (never contents).
- * Records unreadable or unremovable files/directories as relative paths in `scanErrors`
- * and continues scanning all remaining artifacts.
+ * relative path is recorded in `quarantined` (never contents). If deletion fails after retries,
+ * the file is truncated to zero bytes (or renamed to `<name>.quarantined` inside the run dir
+ * and truncated if direct truncation fails) and recorded in `quarantined` as
+ * `{ path, removed: false, error }` (redacted message only).
+ * Records unreadable files/directories (or files that could neither be removed nor truncated)
+ * as relative paths in `scanErrors` and continues scanning all remaining artifacts.
  * @param {string} workRunDir
  * @param {string} arm
  * @param {readonly string[]} secrets
@@ -1103,11 +1113,19 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile)
  *   readdirSync?: typeof readdirSync,
  *   openFile?: typeof openFile,
  *   rmSync?: typeof rmSync,
+ *   unlinkSync?: (path: string) => void,
+ *   truncateSync?: typeof truncateSync,
+ *   renameSync?: typeof renameSync,
  * }} [io]
- * @returns {Promise<{ leaked: boolean, quarantined: string[], scanErrors: string[] }>}
+ * @returns {Promise<{
+ *   leaked: boolean,
+ *   quarantined: Array<string | { path: string, removed: false, error: string }>,
+ *   scanErrors: string[],
+ * }>}
  */
 export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = {}) {
-  const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
+  const normalizedSecrets = normalizeSecrets(secrets);
+  const secretBuffers = normalizedSecrets.map((s) => Buffer.from(s, "utf8"));
   if (secretBuffers.length === 0) {
     return { leaked: false, quarantined: [], scanErrors: [] };
   }
@@ -1115,10 +1133,12 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
   const lstatFn = io.lstatSync ?? lstatSync;
   const readdirFn = io.readdirSync ?? readdirSync;
   const openFn = io.openFile ?? openFile;
-  const rmFn = io.rmSync ?? rmSync;
+  const rmFn = io.rmSync ?? io.unlinkSync ?? rmSync;
+  const truncateFn = io.truncateSync ?? truncateSync;
+  const renameFn = io.renameSync ?? renameSync;
 
   let leaked = false;
-  /** @type {string[]} */
+  /** @type {Array<string | { path: string, removed: false, error: string }>} */
   const quarantined = [];
   /** @type {string[]} */
   const scanErrors = [];
@@ -1136,8 +1156,46 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
     try {
       removeFileWithRetry(filePath, rmFn);
       quarantined.push(relPath);
-    } catch {
-      scanErrors.push(relPath);
+      return;
+    } catch (rmError) {
+      const errorParts = [errorMessage(rmError)];
+      let finalRelPath = relPath;
+      let neutralized = false;
+
+      // Fallback 1: truncate in place to zero bytes.
+      try {
+        truncateFn(filePath, 0);
+        neutralized = true;
+      } catch (truncError) {
+        errorParts.push(`truncate failed: ${errorMessage(truncError)}`);
+
+        // Fallback 2: rename to <name>.quarantined inside the run dir and truncate.
+        if (!filePath.endsWith(".quarantined")) {
+          const renamedPath = `${filePath}.quarantined`;
+          const renamedRelPath = `${relPath}.quarantined`;
+          try {
+            renameFn(filePath, renamedPath);
+            finalRelPath = renamedRelPath;
+            try {
+              truncateFn(renamedPath, 0);
+              neutralized = true;
+            } catch (postRenameTruncError) {
+              errorParts.push(`post-rename truncate failed: ${errorMessage(postRenameTruncError)}`);
+            }
+          } catch (renameError) {
+            errorParts.push(`rename failed: ${errorMessage(renameError)}`);
+          }
+        }
+      }
+
+      if (!neutralized) {
+        scanErrors.push(finalRelPath);
+      }
+      quarantined.push({
+        path: finalRelPath,
+        removed: false,
+        error: redactText(errorParts.join("; "), normalizedSecrets),
+      });
     }
   }
 
@@ -1192,7 +1250,12 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
     }
   }
 
-  for (const name of ["transcript.jsonl", "stderr.txt"]) {
+  for (const name of [
+    "transcript.jsonl",
+    "transcript.jsonl.quarantined",
+    "stderr.txt",
+    "stderr.txt.quarantined",
+  ]) {
     await scanSingleFile(join(workRunDir, name), name);
   }
   await scanTree(join(workRunDir, "final"), "final", true);
@@ -1378,12 +1441,26 @@ export function isValidRunJson(parsed) {
   return true;
 }
 
+function resolveEffectiveRunDirReadOnly(runDir, lstatFn = lstatSync) {
+  const nextDir = `${runDir}.next`;
+  const prevDir = `${runDir}.prev`;
+  const hasRun = lstatOrNull(runDir, lstatFn) !== null;
+  if (hasRun) return runDir;
+  const hasPrev = lstatOrNull(prevDir, lstatFn) !== null;
+  if (!hasPrev) return runDir;
+  const hasNext = lstatOrNull(nextDir, lstatFn) !== null;
+  if (hasNext && lstatOrNull(join(nextDir, "run.json"), lstatFn)?.isFile()) {
+    return nextDir;
+  }
+  return prevDir;
+}
+
 function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
   try {
-    recoverInterruptedSwap(runDir, lstatFn);
+    const effectiveDir = resolveEffectiveRunDirReadOnly(runDir, lstatFn);
 
-    const retriesPath = join(runDir, "retries.json");
-    const runJsonPath = join(runDir, "run.json");
+    const retriesPath = join(effectiveDir, "retries.json");
+    const runJsonPath = join(effectiveDir, "run.json");
     const durable = readDurableRetries(retriesPath, lstatFn);
     if (durable.malformed) {
       return { action: "malformed", reason: "malformed or unreadable retries.json" };
@@ -1441,40 +1518,31 @@ function hasRunArtifacts(workRunDir, arm, lstatFn = lstatSync, quarantinedSet = 
   return transcriptOk && stderrOk && finalOk && rockyOk;
 }
 
-function findPublishedTokenLeakRuns(runsDir, planned, lstatFn = lstatSync, readdirFn = readdirSync) {
+function findPublishedTokenLeakRuns(runsDir, planned, lstatFn = lstatSync) {
   /** @type {Set<string>} */
   const leakedIds = new Set();
   /** @type {Set<string>} */
-  const candidateNames = new Set();
+  const scheduledIds = new Set();
   for (const item of planned) {
-    candidateNames.add(item.runId);
-  }
-  try {
-    const rootStat = lstatOrNull(runsDir, lstatFn);
-    if (rootStat && !rootStat.isSymbolicLink() && rootStat.isDirectory()) {
-      for (const entry of readdirFn(runsDir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
-        if (!entry.endsWith(".next") && !entry.endsWith(".prev")) {
-          candidateNames.add(entry);
-        }
-      }
-    }
-  } catch {
-    // Best-effort scan; fall back to planned runIds.
+    scheduledIds.add(item.runId);
   }
 
-  for (const name of Array.from(candidateNames).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
-    const runDir = join(runsDir, name);
-    try {
-      recoverInterruptedSwap(runDir, lstatFn);
-      const runJsonPath = join(runDir, "run.json");
-      const stat = lstatOrNull(runJsonPath, lstatFn);
-      if (!stat || stat.isSymbolicLink() || !stat.isFile()) continue;
-      const parsed = JSON.parse(readFileSync(runJsonPath, "utf8"));
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.invalid === "token_leak") {
-        leakedIds.add(typeof parsed.runId === "string" && parsed.runId.length > 0 ? parsed.runId : name);
+  for (const runId of Array.from(scheduledIds).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const runDir = join(runsDir, runId);
+    for (const candidateDir of [runDir, `${runDir}.prev`, `${runDir}.next`]) {
+      try {
+        const dirStat = lstatOrNull(candidateDir, lstatFn);
+        if (!dirStat || dirStat.isSymbolicLink() || !dirStat.isDirectory()) continue;
+        const runJsonPath = join(candidateDir, "run.json");
+        const stat = lstatOrNull(runJsonPath, lstatFn);
+        if (!stat || stat.isSymbolicLink() || !stat.isFile()) continue;
+        const parsed = JSON.parse(readFileSync(runJsonPath, "utf8"));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.invalid === "token_leak") {
+          leakedIds.add(typeof parsed.runId === "string" && parsed.runId.length > 0 ? parsed.runId : runId);
+        }
+      } catch {
+        // Read-only probe; continue checking sibling candidates and remaining scheduled runs.
       }
-    } catch {
-      // Ignore unreadable or malformed run dirs here; decideRunAction handles them.
     }
   }
   return Array.from(leakedIds);
@@ -1612,6 +1680,9 @@ async function runWithConcurrency(items, concurrency, worker, shouldStop = () =>
  *   copyFileSync: typeof copyFileSync,
  *   openFile: typeof openFile,
  *   rmSync: typeof rmSync,
+ *   unlinkSync: (path: string) => void,
+ *   truncateSync: typeof truncateSync,
+ *   renameSync: typeof renameSync,
  *   writeBatchJson: (targetPath: string, data: any, secrets: readonly string[]) => void,
  *   ownerHome: string,
  *   ownerConfigDir: string | null | undefined,
@@ -1639,7 +1710,9 @@ export async function runBatch(options, overrides = {}) {
     readdirSync: overrides.readdirSync ?? readdirSync,
     copyFileSync: overrides.copyFileSync ?? copyFileSync,
     openFile: overrides.openFile ?? openFile,
-    rmSync: overrides.rmSync ?? rmSync,
+    rmSync: overrides.rmSync ?? overrides.unlinkSync ?? rmSync,
+    truncateSync: overrides.truncateSync ?? truncateSync,
+    renameSync: overrides.renameSync ?? renameSync,
     writeBatchJson: overrides.writeBatchJson ?? writeJsonAtomic,
     ownerHome: overrides.ownerHome ?? homedir(),
     ownerConfigDir: overrides.ownerConfigDir !== undefined
@@ -1717,6 +1790,35 @@ export async function runBatch(options, overrides = {}) {
   };
 
   const batchPath = join(outDir, "batch.json");
+  const runsDir = join(outDir, "runs");
+
+  function persistBatchJson(data) {
+    deps.writeBatchJson(batchPath, data, secrets);
+  }
+
+  function throwHaltedResume(haltInfo, targetBatch, publishedTokenLeaks) {
+    const runSuffix = haltInfo.runId ? ` (runId=${haltInfo.runId})` : "";
+    const msg = `Batch is halted (reason=${haltInfo.reason}${runSuffix}); refusing to resume`;
+    deps.log(redact(`[eval] abort: ${msg}`));
+    throw new BatchLeakError(msg, {
+      tokenLeakRuns: publishedTokenLeaks,
+      ownerCheck: targetBatch?.ownerCheck ?? null,
+      halted: haltInfo,
+      summary: {
+        batchPath,
+        total: planned.length,
+        ran: 0,
+        skipped: 0,
+        malformed: 0,
+        publishFailed: 0,
+        stopped: true,
+        halted: haltInfo,
+        tokenLeakRuns: publishedTokenLeaks,
+        ownerCheck: targetBatch?.ownerCheck ?? null,
+      },
+    });
+  }
+
   /** @type {Record<string, any>} */
   let batchData;
   /** @type {any} */
@@ -1731,6 +1833,60 @@ export async function runBatch(options, overrides = {}) {
         ["batch.json"],
       );
     }
+    if (!existingBatch || typeof existingBatch !== "object" || Array.isArray(existingBatch)) {
+      throw new ProvenanceMismatchError(
+        `Batch provenance mismatch (${batchPath}); differing fields: batch.json`,
+        ["batch.json"],
+      );
+    }
+
+    // Check saved halt BEFORE provenance comparison and before any swap recovery.
+    const existingHalt =
+      existingBatch.halted
+      && typeof existingBatch.halted === "object"
+      && !Array.isArray(existingBatch.halted)
+      && typeof existingBatch.halted.reason === "string"
+      && existingBatch.halted.reason.length > 0
+        ? existingBatch.halted
+        : null;
+    if (existingHalt) {
+      throwHaltedResume(existingHalt, existingBatch, []);
+    }
+
+    const preexistingOwnerLeak =
+      existingBatch.ownerLeakLatched === true || existingBatch.ownerCheck?.leak === true;
+    if (preexistingOwnerLeak) {
+      const haltInfo = {
+        reason: "owner_leak",
+        at: new Date().toISOString(),
+      };
+      existingBatch.ownerLeakLatched = true;
+      existingBatch.halted = haltInfo;
+      try {
+        persistBatchJson(existingBatch);
+      } catch {
+        // Best-effort persistence on halted resume.
+      }
+      throwHaltedResume(haltInfo, existingBatch, []);
+    }
+
+    // Look for published token leaks read-only across scheduled runIds only.
+    const publishedTokenLeaks = findPublishedTokenLeakRuns(runsDir, planned, deps.lstatSync);
+    if (publishedTokenLeaks.length > 0) {
+      const haltInfo = {
+        reason: "token_leak",
+        runId: publishedTokenLeaks[0],
+        at: new Date().toISOString(),
+      };
+      existingBatch.halted = haltInfo;
+      try {
+        persistBatchJson(existingBatch);
+      } catch {
+        // Best-effort persistence on halted resume.
+      }
+      throwHaltedResume(haltInfo, existingBatch, publishedTokenLeaks);
+    }
+
     const diffs = diffBatchProvenance(existingBatch, currentProvenance);
     if (diffs.length > 0) {
       throw new ProvenanceMismatchError(
@@ -1778,38 +1934,9 @@ export async function runBatch(options, overrides = {}) {
       auth: options.auth.kind,
       ownerBaseline: baseline,
     };
-    deps.writeBatchJson(batchPath, batchData, secrets);
-  }
-
-  function persistBatchJson(data) {
-    deps.writeBatchJson(batchPath, data, secrets);
-  }
-
-  const runsDir = join(outDir, "runs");
-  const publishedTokenLeaks = findPublishedTokenLeakRuns(
-    runsDir,
-    planned,
-    deps.lstatSync,
-    deps.readdirSync,
-  );
-  const existingHalt =
-    batchData.halted
-    && typeof batchData.halted === "object"
-    && !Array.isArray(batchData.halted)
-    && typeof batchData.halted.reason === "string"
-    && batchData.halted.reason.length > 0
-      ? batchData.halted
-      : null;
-  const preexistingOwnerLeak =
-    batchData.ownerLeakLatched === true || batchData.ownerCheck?.leak === true;
-
-  if (existingHalt || publishedTokenLeaks.length > 0 || preexistingOwnerLeak) {
-    /** @type {{ reason: string, runId?: string, at: string }} */
-    let haltInfo;
-    if (existingHalt) {
-      haltInfo = existingHalt;
-    } else if (publishedTokenLeaks.length > 0) {
-      haltInfo = {
+    const publishedTokenLeaks = findPublishedTokenLeakRuns(runsDir, planned, deps.lstatSync);
+    if (publishedTokenLeaks.length > 0) {
+      const haltInfo = {
         reason: "token_leak",
         runId: publishedTokenLeaks[0],
         at: new Date().toISOString(),
@@ -1818,41 +1945,11 @@ export async function runBatch(options, overrides = {}) {
       try {
         persistBatchJson(batchData);
       } catch {
-        // Best-effort persistence on halted resume.
+        // Best-effort persistence on halted start.
       }
-    } else {
-      haltInfo = {
-        reason: "owner_leak",
-        at: new Date().toISOString(),
-      };
-      batchData.ownerLeakLatched = true;
-      batchData.halted = haltInfo;
-      try {
-        persistBatchJson(batchData);
-      } catch {
-        // Best-effort persistence on halted resume.
-      }
+      throwHaltedResume(haltInfo, batchData, publishedTokenLeaks);
     }
-    const runSuffix = haltInfo.runId ? ` (runId=${haltInfo.runId})` : "";
-    const msg = `Batch is halted (reason=${haltInfo.reason}${runSuffix}); refusing to resume`;
-    deps.log(redact(`[eval] abort: ${msg}`));
-    throw new BatchLeakError(msg, {
-      tokenLeakRuns: publishedTokenLeaks,
-      ownerCheck: batchData.ownerCheck ?? null,
-      halted: haltInfo,
-      summary: {
-        batchPath,
-        total: planned.length,
-        ran: 0,
-        skipped: 0,
-        malformed: 0,
-        publishFailed: 0,
-        stopped: true,
-        halted: haltInfo,
-        tokenLeakRuns: publishedTokenLeaks,
-        ownerCheck: batchData.ownerCheck ?? null,
-      },
-    });
+    deps.writeBatchJson(batchPath, batchData, secrets);
   }
 
   let stopBatch = false;
@@ -2034,7 +2131,7 @@ export async function runBatch(options, overrides = {}) {
       let swept = false;
       /** @type {string[]} */
       const skippedLinks = [];
-      /** @type {string[]} */
+      /** @type {Array<string | { path: string, removed: false, error: string }>} */
       const quarantined = [];
       /** @type {Set<string>} */
       const quarantinedSet = new Set();
@@ -2053,10 +2150,38 @@ export async function runBatch(options, overrides = {}) {
       /** @type {string | null} */
       let cleanupError = null;
 
-      const recordQuarantined = (relPath) => {
-        if (!quarantinedSet.has(relPath)) {
-          quarantinedSet.add(relPath);
-          quarantined.push(relPath);
+      const recordQuarantined = (entry) => {
+        if (typeof entry === "string") {
+          const existingIdx = quarantined.findIndex(
+            (itemEntry) => typeof itemEntry === "object" && itemEntry !== null && itemEntry.path === entry,
+          );
+          if (existingIdx !== -1) {
+            quarantined[existingIdx] = entry;
+            return;
+          }
+          if (!quarantinedSet.has(entry)) {
+            quarantinedSet.add(entry);
+            quarantined.push(entry);
+          }
+          return;
+        }
+        if (entry && typeof entry === "object" && typeof entry.path === "string") {
+          if (!quarantinedSet.has(entry.path)) {
+            quarantinedSet.add(entry.path);
+            if (entry.path.endsWith(".quarantined")) {
+              quarantinedSet.add(entry.path.slice(0, -".quarantined".length));
+            }
+            quarantined.push({
+              path: entry.path,
+              removed: false,
+              error: redact(entry.error ?? "unable to delete file"),
+            });
+            deps.log(
+              redact(
+                `[eval] warning: unable to delete leaking file ${entry.path} (${join(runDir, entry.path)}) in ${item.runId}; please delete it manually (${entry.error ?? "delete failed"})`,
+              ),
+            );
+          }
         }
       };
       const recordScanError = (relPath) => {
@@ -2072,15 +2197,18 @@ export async function runBatch(options, overrides = {}) {
             readdirSync: deps.readdirSync,
             openFile: deps.openFile,
             rmSync: deps.rmSync,
+            truncateSync: deps.truncateSync,
+            renameSync: deps.renameSync,
           });
-          for (const rel of scanRes.quarantined) {
-            recordQuarantined(rel);
+          for (const entry of scanRes.quarantined) {
+            recordQuarantined(entry);
           }
           for (const errPath of scanRes.scanErrors) {
             recordScanError(errPath);
           }
           if (scanRes.leaked) {
             tokenLeaked = true;
+            setBatchHalt("token_leak", item.runId);
           }
         } catch (scanErr) {
           const msg = redact(scanErr instanceof Error ? scanErr.message : String(scanErr));
@@ -2090,6 +2218,7 @@ export async function runBatch(options, overrides = {}) {
       };
 
       try {
+        recoverInterruptedSwap(runDir, deps.lstatSync);
         if (isRetry) {
           // Persist incremented retry count BEFORE launching the retry so crashes cannot reset the cap.
           writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, secrets);
@@ -2128,6 +2257,7 @@ export async function runBatch(options, overrides = {}) {
         taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
         if (claudeRes.streamed === true && claudeRes.tokenLeaked) {
           tokenLeaked = true;
+          setBatchHalt("token_leak", item.runId);
         }
 
         // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
@@ -2150,6 +2280,7 @@ export async function runBatch(options, overrides = {}) {
           transcriptSummary = parser.end();
           if (outRes.leaked || errRes.leaked) {
             tokenLeaked = true;
+            setBatchHalt("token_leak", item.runId);
           }
         }
 

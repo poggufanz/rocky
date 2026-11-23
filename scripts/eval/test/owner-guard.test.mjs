@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import {
+  closeSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -15,7 +19,12 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { verdict } from "../analyze.mjs";
 import { ownerBaseline, ownerCheck } from "../owner-guard.mjs";
-import { BatchLeakError, runBatch, scanRunArtifactsForSecrets } from "../runner.mjs";
+import {
+  BatchLeakError,
+  ProvenanceMismatchError,
+  runBatch,
+  scanRunArtifactsForSecrets,
+} from "../runner.mjs";
 
 function makeIsolatedOwner(baseDir) {
   const ownerHome = join(baseDir, "owner-home");
@@ -1257,6 +1266,561 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       const leakErrBatch = JSON.parse(readFileSync(join(outLeakThenErr, "batch.json"), "utf8"));
       assert.equal(leakErrBatch.halted?.reason, "token_leak");
       assert.equal(leakErrBatch.ownerCheckError, "EIO on batch-end ownerCheck");
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("undeletable leaking file is truncated to zero bytes (or renamed to .quarantined and truncated), recorded with removed:false, and warned on stderr", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-undeletable-"));
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+    const token = "sk-ant-oat01-undeletable-secret-77777";
+
+    try {
+      const commonOpts = {
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [token],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      // Case 1: rm always throws EPERM after retries -> direct truncate to 0 bytes.
+      const outTrunc = join(baseTmp, "out-trunc");
+      const startedTrunc = [];
+      const logsTrunc = [];
+      let rmAttempts = 0;
+
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outTrunc },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "locked-leak.txt"), `secret=${token}\n`, "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId }) => {
+              startedTrunc.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            rmSync: () => {
+              rmAttempts += 1;
+              const err = new Error(`EPERM: locked file (${token})`);
+              err.code = "EPERM";
+              throw err;
+            },
+            log: (line) => logsTrunc.push(line),
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(startedTrunc.length, 1);
+      assert.equal(rmAttempts, 6, "deletion retries must be exhausted before fallback");
+      const truncRunDir = join(outTrunc, "runs", startedTrunc[0]);
+      const truncFile = join(truncRunDir, "final", "locked-leak.txt");
+      assert.equal(existsSync(truncFile), true);
+      assert.equal(readFileSync(truncFile, "utf8"), "", "undeletable leaking file must be truncated to zero bytes");
+      assert.equal(lstatSync(truncFile).size, 0);
+
+      const truncRunJson = JSON.parse(readFileSync(join(truncRunDir, "run.json"), "utf8"));
+      assert.equal(truncRunJson.invalid, "token_leak");
+      assert.equal(Array.isArray(truncRunJson.quarantined), true);
+      assert.equal(truncRunJson.quarantined.length, 1);
+      assert.equal(truncRunJson.quarantined[0].path, "final/locked-leak.txt");
+      assert.equal(truncRunJson.quarantined[0].removed, false);
+      assert.equal(truncRunJson.quarantined[0].error, "EPERM: locked file (<redacted>)");
+      assert.equal(truncRunJson.quarantined[0].error.includes("\n"), false, "error must be message only");
+
+      const truncBatchJson = JSON.parse(readFileSync(join(outTrunc, "batch.json"), "utf8"));
+      assert.equal(truncBatchJson.halted?.reason, "token_leak");
+      assert.ok(
+        logsTrunc.some(
+          (line) => line.includes("final/locked-leak.txt") && /delete/i.test(line) && !line.includes(token),
+        ),
+        `expected stderr naming file and asking owner to delete it, got ${JSON.stringify(logsTrunc)}`,
+      );
+
+      // Case 2: rm throws AND direct truncate throws -> rename to <name>.quarantined and truncate to 0 bytes.
+      const outRename = join(baseTmp, "out-rename");
+      const startedRename = [];
+      const logsRename = [];
+
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outRename },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "locked-leak.txt"), `secret=${token}\n`, "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId }) => {
+              startedRename.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            rmSync: () => {
+              const err = new Error("EIO: unlink denied");
+              err.code = "EIO";
+              throw err;
+            },
+            truncateSync: (targetPath, len) => {
+              if (!String(targetPath).endsWith(".quarantined")) {
+                const err = new Error("EACCES: cannot truncate in place");
+                err.code = "EACCES";
+                throw err;
+              }
+              return truncateSync(targetPath, len);
+            },
+            log: (line) => logsRename.push(line),
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(startedRename.length, 1);
+      const renameRunDir = join(outRename, "runs", startedRename[0]);
+      const origFile = join(renameRunDir, "final", "locked-leak.txt");
+      const renamedFile = join(renameRunDir, "final", "locked-leak.txt.quarantined");
+      assert.equal(existsSync(origFile), false, "original file should be renamed to .quarantined");
+      assert.equal(existsSync(renamedFile), true, ".quarantined file should exist inside the run dir");
+      assert.equal(readFileSync(renamedFile, "utf8"), "", ".quarantined file must be truncated to zero bytes");
+      assert.equal(lstatSync(renamedFile).size, 0);
+
+      const renameRunJson = JSON.parse(readFileSync(join(renameRunDir, "run.json"), "utf8"));
+      assert.equal(renameRunJson.invalid, "token_leak");
+      assert.equal(renameRunJson.quarantined.length, 1);
+      assert.equal(renameRunJson.quarantined[0].path, "final/locked-leak.txt.quarantined");
+      assert.equal(renameRunJson.quarantined[0].removed, false);
+      assert.match(renameRunJson.quarantined[0].error, /unlink denied/);
+      assert.match(renameRunJson.quarantined[0].error, /cannot truncate in place/);
+
+      const renameBatchJson = JSON.parse(readFileSync(join(outRename, "batch.json"), "utf8"));
+      assert.equal(renameBatchJson.halted?.reason, "token_leak");
+      assert.ok(
+        logsRename.some(
+          (line) => line.includes("final/locked-leak.txt.quarantined") && /delete/i.test(line),
+        ),
+        `expected stderr naming .quarantined file and asking owner to delete it, got ${JSON.stringify(logsRename)}`,
+      );
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("resume checks halt before provenance mismatch, scans scheduled runs read-only without deleting stale .prev, and leaves unrelated entries untouched", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-resume-readonly-"));
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+    const token = "sk-ant-oat01-resume-readonly-88888";
+
+    try {
+      const commonOpts = {
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [token],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      // Case 1: halted batch + changed evaluator commit -> exit 3 (BatchLeakError), NOT exit 2 (ProvenanceMismatchError).
+      const outHaltedMismatch = join(baseTmp, "out-halted-mismatch");
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outHaltedMismatch },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "leak.txt"), `tok=${token}\n`, "utf8");
+              return { runs: [], cards: 0 };
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      let mismatchPackCalls = 0;
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outHaltedMismatch },
+          makeFakeDeps(owner, {
+            getHeadCommit: () => "ccccccc000000000000000000000000000000099",
+            packArm: async (sha, dir) => {
+              mismatchPackCalls += 1;
+              return join(dir, `rocky-${sha}.tgz`);
+            },
+          }),
+        ),
+        (err) => {
+          assert.equal(err instanceof ProvenanceMismatchError, false);
+          return err instanceof BatchLeakError && err.exitCode === 3;
+        },
+      );
+      assert.equal(mismatchPackCalls, 0);
+
+      // Case 2: published leak (no saved halt) next to a stale .prev whose cleanup/access would fail,
+      // plus changed evaluator commit and an unrelated directory entry with a .prev neighbour ->
+      // still exits 3, writes halted, and deletes/moves nothing.
+      const outStalePrev = join(baseTmp, "out-stale-prev");
+      const leakStarted = [];
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outStalePrev },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "leak.txt"), `tok=${token}\n`, "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId }) => {
+              leakStarted.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      const leakedRunId = leakStarted[0];
+      const stalePrevBatchPath = join(outStalePrev, "batch.json");
+      const strippedBatch = JSON.parse(readFileSync(stalePrevBatchPath, "utf8"));
+      delete strippedBatch.halted;
+      writeFileSync(stalePrevBatchPath, `${JSON.stringify(strippedBatch, null, 2)}\n`, "utf8");
+
+      const stalePrevDir = join(outStalePrev, "runs", `${leakedRunId}.prev`);
+      const stalePrevFile = join(stalePrevDir, "stale.txt");
+      mkdirSync(stalePrevDir, { recursive: true });
+      writeFileSync(stalePrevFile, "keep-stale-prev\n", "utf8");
+
+      const unrelatedDir = join(outStalePrev, "runs", "unrelated-entry");
+      const unrelatedPrevDir = join(outStalePrev, "runs", "unrelated-entry.prev");
+      const unrelatedPrevFile = join(unrelatedPrevDir, "keep.txt");
+      mkdirSync(unrelatedDir, { recursive: true });
+      mkdirSync(unrelatedPrevDir, { recursive: true });
+      writeFileSync(unrelatedPrevFile, "keep-unrelated\n", "utf8");
+
+      // Hold an open file handle on stalePrevFile (causes rmSync to fail on win32) AND throw EACCES on lstatSync for .prev.
+      const heldFd = openSync(stalePrevFile, "r");
+      let stalePackCalls = 0;
+      const staleResumedRuns = [];
+      try {
+        await assert.rejects(
+          () => runBatch(
+            { ...commonOpts, outDir: outStalePrev },
+            makeFakeDeps(owner, {
+              getHeadCommit: () => "ddddddd000000000000000000000000000000088",
+              packArm: async (sha, dir) => {
+                stalePackCalls += 1;
+                return join(dir, `rocky-${sha}.tgz`);
+              },
+              lstatSync: (targetPath) => {
+                if (String(targetPath).includes(`${leakedRunId}.prev`)) {
+                  const err = new Error(`EACCES: simulated stale .prev error for ${targetPath}`);
+                  err.code = "EACCES";
+                  throw err;
+                }
+                return lstatSync(targetPath);
+              },
+              runClaude: async ({ runId }) => {
+                staleResumedRuns.push(runId);
+                return {
+                  stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                  stderr: "",
+                  exitCode: 0,
+                  timedOut: false,
+                };
+              },
+            }),
+          ),
+          (err) => err instanceof BatchLeakError && err.exitCode === 3,
+        );
+      } finally {
+        closeSync(heldFd);
+      }
+
+      assert.equal(stalePackCalls, 0);
+      assert.equal(staleResumedRuns.length, 0);
+      assert.equal(existsSync(stalePrevFile), true, "stale .prev must not be deleted during read-only leak check");
+      assert.equal(readFileSync(stalePrevFile, "utf8"), "keep-stale-prev\n");
+      assert.equal(existsSync(unrelatedPrevFile), true, "unrelated .prev neighbour must stay untouched");
+      assert.equal(readFileSync(unrelatedPrevFile, "utf8"), "keep-unrelated\n");
+      const haltedAfterStale = JSON.parse(readFileSync(stalePrevBatchPath, "utf8"));
+      assert.equal(haltedAfterStale.halted?.reason, "token_leak");
+      assert.equal(haltedAfterStale.halted?.runId, leakedRunId);
+
+      // Case 3: published leak sitting inside <runDir>.prev/run.json (interrupted swap) is detected read-only.
+      const outPrevLeak = join(baseTmp, "out-prev-leak");
+      await runBatch(
+        { ...commonOpts, outDir: outPrevLeak, secrets: [] },
+        makeFakeDeps(owner),
+      );
+      const prevLeakRunId = "SMOKE-none-b1";
+      const prevLeakDir = join(outPrevLeak, "runs", `${prevLeakRunId}.prev`);
+      mkdirSync(prevLeakDir, { recursive: true });
+      writeFileSync(
+        join(prevLeakDir, "run.json"),
+        `${JSON.stringify({
+          runId: prevLeakRunId,
+          taskId: "SMOKE",
+          arm: "none",
+          block: 1,
+          invalid: "token_leak",
+          retries: 0,
+        })}\n`,
+        "utf8",
+      );
+      await assert.rejects(
+        () => runBatch({ ...commonOpts, outDir: outPrevLeak, secrets: [] }, makeFakeDeps(owner)),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+      assert.equal(existsSync(join(prevLeakDir, "run.json")), true, ".prev leak must not be deleted or moved");
+
+      // Case 4: on a clean (non-halted) resume, an unrelated entry with a .prev neighbour AND a skipped
+      // scheduled run's stale .prev remain untouched (swap recovery only runs for runIds that actually run).
+      const outCleanResume = join(baseTmp, "out-clean-resume");
+      await runBatch(
+        { ...commonOpts, outDir: outCleanResume, secrets: [] },
+        makeFakeDeps(owner),
+      );
+      const cleanUnrelatedDir = join(outCleanResume, "runs", "notes");
+      const cleanUnrelatedPrev = join(outCleanResume, "runs", "notes.prev");
+      const skippedRunPrev = join(outCleanResume, "runs", "SMOKE-none-b1.prev");
+      mkdirSync(cleanUnrelatedDir, { recursive: true });
+      mkdirSync(cleanUnrelatedPrev, { recursive: true });
+      mkdirSync(skippedRunPrev, { recursive: true });
+      writeFileSync(join(cleanUnrelatedPrev, "keep.txt"), "unrelated-intact\n", "utf8");
+      writeFileSync(join(skippedRunPrev, "keep.txt"), "skipped-prev-intact\n", "utf8");
+
+      const cleanSummary = await runBatch(
+        { ...commonOpts, outDir: outCleanResume, secrets: [] },
+        makeFakeDeps(owner),
+      );
+      assert.equal(cleanSummary.ran, 0);
+      assert.equal(existsSync(join(cleanUnrelatedPrev, "keep.txt")), true);
+      assert.equal(existsSync(join(skippedRunPrev, "keep.txt")), true);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("pre-grade and finally scans set scheduler stop immediately on leak so a concurrent worker claims no new run", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-early-stop-"));
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+    const token = "sk-ant-oat01-early-stop-secret-99999";
+
+    const deferred = () => {
+      let resolve;
+      const promise = new Promise((r) => {
+        resolve = r;
+      });
+      return { promise, resolve };
+    };
+
+    try {
+      const commonOpts = {
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [token],
+        concurrency: 2,
+        k: 2,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      // Case 1: pre-grade scan sets stopBatch BEFORE accept() finishes.
+      const outPreGrade = join(baseTmp, "out-pregrade");
+      const startedPre = [];
+      const createdSandboxesPre = [];
+      const bothStartedPre = deferred();
+      const leakHitInGrader = deferred();
+      const allowGraderFinish = deferred();
+      let leakingSandboxPre = null;
+      let firstRunIdPre = null;
+      let ownerCheckCallsPre = 0;
+
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outPreGrade },
+          makeFakeDeps(owner, {
+            createSandbox: async ({ runId, root }) => {
+              createdSandboxesPre.push(runId);
+              const dir = join(root, runId);
+              const home = join(dir, "home");
+              const configDir = join(home, ".claude");
+              const rockyHome = join(dir, "rocky-home");
+              const taskDir = join(dir, "task");
+              mkdirSync(configDir, { recursive: true });
+              mkdirSync(rockyHome, { recursive: true });
+              mkdirSync(taskDir, { recursive: true });
+              return { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
+            },
+            materializeTask: async (_task, sandbox) => {
+              if (!leakingSandboxPre) {
+                leakingSandboxPre = sandbox.dir;
+                writeFileSync(join(sandbox.taskDir, "leaked.txt"), `tok=${token}\n`, "utf8");
+              }
+              writeFileSync(join(sandbox.taskDir, "clean.txt"), "ok\n", "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId, sandbox }) => {
+              const count = startedPre.push(runId);
+              if (count === 2) {
+                bothStartedPre.resolve();
+              }
+              if (sandbox.dir === leakingSandboxPre) {
+                firstRunIdPre = runId;
+                await bothStartedPre.promise;
+              } else if (count <= 2) {
+                // Wait until the leaking run has completed its pre-grade scan and is paused inside accept().
+                await leakHitInGrader.promise;
+              }
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            accept: async (_task, finalDir) => {
+              if (firstRunIdPre && finalDir.includes(firstRunIdPre)) {
+                // Pre-grade scan has already run and set stopBatch; let worker 2 finish now while worker 1 stays in accept().
+                leakHitInGrader.resolve();
+                await allowGraderFinish.promise;
+              }
+              return { solved: true, reason: "ok" };
+            },
+            ownerCheck: (base, arg) => {
+              const res = ownerCheck(base, arg);
+              ownerCheckCallsPre += 1;
+              // First ownerCheck belongs to worker 2 finishing; yield a turn so its worker loop checks stopBatch before releasing worker 1.
+              if (ownerCheckCallsPre === 1) {
+                setImmediate(() => allowGraderFinish.resolve());
+              }
+              return res;
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(
+        startedPre.length,
+        2,
+        `worker 2 must claim no new run after pre-grade scan hit, started=${JSON.stringify(startedPre)}`,
+      );
+      assert.equal(createdSandboxesPre.length, 2);
+      const firstRunPre = JSON.parse(readFileSync(join(outPreGrade, "runs", firstRunIdPre, "run.json"), "utf8"));
+      assert.equal(firstRunPre.invalid, "token_leak");
+      assert.deepEqual(firstRunPre.quarantined, ["final/leaked.txt"]);
+
+      // Case 2: finally scan (after copy throws) sets stopBatch BEFORE destroySandbox finishes.
+      const outFinally = join(baseTmp, "out-finally");
+      const startedFin = [];
+      const bothStartedFin = deferred();
+      const leakHitInCleanup = deferred();
+      const allowCleanupFinish = deferred();
+      let leakingSandboxFin = null;
+      let firstRunIdFin = null;
+      let ownerCheckCallsFin = 0;
+
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outFinally },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              if (!leakingSandboxFin) {
+                leakingSandboxFin = sandbox.dir;
+                writeFileSync(join(sandbox.taskDir, "a-token.txt"), `tok=${token}\n`, "utf8");
+                writeFileSync(join(sandbox.taskDir, "b-fail.txt"), "trigger-copy-throw\n", "utf8");
+              }
+              writeFileSync(join(sandbox.taskDir, "clean.txt"), "ok\n", "utf8");
+              return { runs: [], cards: 0 };
+            },
+            runClaude: async ({ runId, sandbox }) => {
+              const count = startedFin.push(runId);
+              if (count === 2) {
+                bothStartedFin.resolve();
+              }
+              if (sandbox.dir === leakingSandboxFin) {
+                firstRunIdFin = runId;
+                await bothStartedFin.promise;
+              } else if (count <= 2) {
+                await leakHitInCleanup.promise;
+              }
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            copyFileSync: (src, dest) => {
+              if (String(src).endsWith("b-fail.txt")) {
+                const err = new Error("EIO: copy failed after leaking file");
+                err.code = "EIO";
+                throw err;
+              }
+              return copyFileSync(src, dest);
+            },
+            destroySandbox: async (sandbox) => {
+              if (leakingSandboxFin && sandbox.dir === leakingSandboxFin) {
+                // finally scan already ran before destroySandbox; let worker 2 finish while worker 1 pauses in cleanup.
+                leakHitInCleanup.resolve();
+                await allowCleanupFinish.promise;
+              }
+              rmSync(sandbox.dir, { recursive: true, force: true });
+            },
+            ownerCheck: (base, arg) => {
+              const res = ownerCheck(base, arg);
+              ownerCheckCallsFin += 1;
+              if (ownerCheckCallsFin === 1) {
+                setImmediate(() => allowCleanupFinish.resolve());
+              }
+              return res;
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(
+        startedFin.length,
+        2,
+        `worker 2 must claim no new run after finally scan hit, started=${JSON.stringify(startedFin)}`,
+      );
+      const firstRunFin = JSON.parse(readFileSync(join(outFinally, "runs", firstRunIdFin, "run.json"), "utf8"));
+      assert.equal(firstRunFin.invalid, "token_leak");
+      assert.deepEqual(firstRunFin.quarantined, ["final/a-token.txt"]);
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }
