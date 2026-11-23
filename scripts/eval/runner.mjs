@@ -1179,8 +1179,9 @@ function readSandboxCredentialSecrets(sandbox) {
   }
 }
 
-async function redactFileInPlace(filePath, extraSecrets) {
-  if (!existsSync(filePath) || extraSecrets.length === 0) {
+export async function redactFileInPlace(filePath, extraSecrets, options = {}) {
+  const renameFn = options.renameFn ?? renameDirWithRetry;
+  if (extraSecrets.length === 0 || lstatOrNull(filePath)?.isFile() !== true) {
     return { leaked: false };
   }
   const tempPath = `${filePath}.redact-${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -1193,12 +1194,24 @@ async function redactFileInPlace(filePath, extraSecrets) {
       reader.once("close", resolveRead);
     });
     const res = await writer.end();
-    renameDirWithRetry(tempPath, filePath);
+    renameFn(tempPath, filePath);
     return res;
   } catch (error) {
+    reader.destroy();
     await writer.end().catch(() => {});
     if (existsSync(tempPath)) {
-      rmSync(tempPath, { force: true });
+      try {
+        removeTreeWithRetry(tempPath);
+      } catch {
+        // Best-effort temp cleanup.
+      }
+    }
+    if (lstatOrNull(filePath) !== null) {
+      try {
+        removeTreeWithRetry(filePath);
+      } catch {
+        // Best-effort removal so an unredacted original is not left on disk.
+      }
     }
     throw error;
   }
@@ -1624,12 +1637,15 @@ export async function runBatch(options, overrides = {}) {
     const workRunDir = isRetry ? nextDir : runDir;
     const retriesJsonPath = join(workRunDir, "retries.json");
     const runJsonPath = join(workRunDir, "run.json");
+    const stdoutPath = join(workRunDir, "transcript.jsonl");
+    const stderrPath = join(workRunDir, "stderr.txt");
     const startedAt = new Date().toISOString();
     const startMs = Date.now();
     const sandboxRunId = `${item.runId}-${randomBytes(3).toString("hex")}`;
 
     let sandbox = null;
     let runSecrets = secrets;
+    let postExitRedacted = false;
     const runRedact = (value) => redactText(value, runSecrets);
     const refreshRunSecrets = () => {
       if (options.auth?.kind !== "copy-credentials" || !sandbox) return [];
@@ -1639,6 +1655,24 @@ export async function runBatch(options, overrides = {}) {
         runSecrets = normalizeSecrets([...runSecrets, ...added]);
       }
       return added;
+    };
+    const redactStreamedFiles = async (addedSecrets) => {
+      if (addedSecrets.length === 0) return false;
+      const results = await Promise.allSettled([
+        redactFileInPlace(stdoutPath, addedSecrets),
+        redactFileInPlace(stderrPath, addedSecrets),
+      ]);
+      let leaked = false;
+      let firstError = null;
+      for (const result of results) {
+        if (result.status === "rejected") {
+          if (!firstError) firstError = result.reason;
+        } else if (result.value.leaked) {
+          leaked = true;
+        }
+      }
+      if (firstError) throw firstError;
+      return leaked;
     };
 
     let retryCountCommitted = !isRetry;
@@ -1686,8 +1720,6 @@ export async function runBatch(options, overrides = {}) {
 
       await deps.materializeTask(task, sandbox, item.arm);
 
-      const stdoutPath = join(workRunDir, "transcript.jsonl");
-      const stderrPath = join(workRunDir, "stderr.txt");
       const claudeRes = await deps.runClaude({
         runId: item.runId,
         task,
@@ -1702,25 +1734,28 @@ export async function runBatch(options, overrides = {}) {
       killFailed = Boolean(claudeRes.killFailed);
       taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
 
+      // Rebuild per-run secret set from the sandbox's copied credentials right after
+      // the agent exits (copy-credentials mode only) and re-redact already-streamed
+      // transcript/stderr in place before sweeping strays or writing any other artifact.
+      const postRunAddedSecrets = refreshRunSecrets();
+
+      let tokenLeaked = false;
+      if (claudeRes.streamed === true) {
+        tokenLeaked = Boolean(claudeRes.tokenLeaked);
+        if (postRunAddedSecrets.length > 0) {
+          const reRedactedLeak = await redactStreamedFiles(postRunAddedSecrets);
+          if (reRedactedLeak) {
+            tokenLeaked = true;
+          }
+        }
+        postExitRedacted = true;
+      }
+
       // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
       swept = true;
       strayKilled = await deps.sweepStrays(sandbox.dir);
 
-      // Rebuild per-run secret set from the sandbox's copied credentials after the agent exits
-      // so any token refreshed inside the sandbox is redacted from artifacts.
-      const postRunAddedSecrets = refreshRunSecrets();
-
       if (claudeRes.streamed === true) {
-        let tokenLeaked = Boolean(claudeRes.tokenLeaked);
-        if (postRunAddedSecrets.length > 0) {
-          const [outRe, errRe] = await Promise.all([
-            redactFileInPlace(stdoutPath, postRunAddedSecrets),
-            redactFileInPlace(stderrPath, postRunAddedSecrets),
-          ]);
-          if (outRe.leaked || errRe.leaked) {
-            tokenLeaked = true;
-          }
-        }
         invalid = classifyOutcome({
           transcript: claudeRes.transcript,
           tokenLeaked,
@@ -1737,6 +1772,7 @@ export async function runBatch(options, overrides = {}) {
         errWriter.write(rawStderr);
         const [outRes, errRes] = await Promise.all([outWriter.end(), errWriter.end()]);
         const transcript = parser.end();
+        postExitRedacted = true;
         invalid = classifyOutcome({
           transcript,
           tokenLeaked: outRes.leaked || errRes.leaked,
@@ -1752,7 +1788,15 @@ export async function runBatch(options, overrides = {}) {
 
       acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
     } catch (error) {
-      refreshRunSecrets();
+      const catchAddedSecrets = refreshRunSecrets();
+      if (!postExitRedacted && options.auth?.kind === "copy-credentials" && catchAddedSecrets.length > 0) {
+        try {
+          await redactStreamedFiles(catchAddedSecrets);
+        } catch {
+          // redactFileInPlace already removed any unredacted original on failure.
+        }
+        postExitRedacted = true;
+      }
       runError = runRedact(error instanceof Error ? error.message : String(error));
       invalid = "harness_crash";
     }

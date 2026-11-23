@@ -33,6 +33,7 @@ import {
   isValidRunJson,
   mulberry32,
   pipeReadableToRedactingWriter,
+  redactFileInPlace,
   runBatch,
   schedule,
   selectTasks,
@@ -559,6 +560,26 @@ describe("bounded streaming capture and async accept", () => {
       });
       assert.deepEqual(resNonZero, { solved: false, reason: "output-overflow" });
 
+      // Case 4: overflows stdout and then times out -> output-overflow takes precedence over timeout.
+      writeFileSync(
+        join(workDir, "overflow-timeout.mjs"),
+        `process.stdout.write("q".repeat(${limit + 64}) + "\\n", () => { setTimeout(() => {}, 30000); });\n`,
+        "utf8",
+      );
+      const taskOverflowTimeout = {
+        id: "OVFT",
+        fixture: "ovf",
+        protected: [],
+        target: { command: "node overflow-timeout.mjs" },
+        acceptLine: "OK!",
+      };
+      const resOverflowTimeout = await accept(taskOverflowTimeout, workDir, {
+        manifest: { files: {} },
+        timeoutMs: 200,
+        maxBufferBytes: limit,
+      });
+      assert.deepEqual(resOverflowTimeout, { solved: false, reason: "output-overflow" });
+
       // Verify default limit is 16 MiB.
       assert.equal(ACCEPT_MAX_BUFFER_BYTES, 16 * 1024 * 1024);
     } finally {
@@ -586,6 +607,80 @@ describe("bounded streaming capture and async accept", () => {
       assert.ok(ticks >= 2, `expected timer ticks during async timeout kill, saw ${ticks}`);
     } finally {
       clearInterval(timer);
+    }
+  });
+
+  test("accept timeout awaits injected kill promise before resolving even when kill exceeds grace or child exits early", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "rocky-accept-await-kill-"));
+    try {
+      writeFileSync(
+        join(workDir, "hang.mjs"),
+        "setTimeout(() => {}, 30000);\n",
+        "utf8",
+      );
+      const task = {
+        id: "TWAIT",
+        fixture: "twait",
+        protected: [],
+        target: { command: "node hang.mjs" },
+        acceptLine: "OK!",
+      };
+
+      // Case 1: kill promise takes longer than killGraceMs; accept must NOT resolve before kill settles.
+      let kill1Settled = false;
+      let accept1Resolved = false;
+      let resolvedBeforeKill1 = false;
+      const p1 = accept(task, workDir, {
+        manifest: { files: {} },
+        timeoutMs: 80,
+        killGraceMs: 50,
+        killTree: async (child) => {
+          await new Promise((r) => setTimeout(r, 220));
+          resolvedBeforeKill1 = accept1Resolved;
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Already exited.
+          }
+          kill1Settled = true;
+        },
+      }).then((res) => {
+        accept1Resolved = true;
+        assert.equal(kill1Settled, true, "accept resolved before killTree settled (slow kill)");
+        return res;
+      });
+      const res1 = await p1;
+      assert.equal(resolvedBeforeKill1, false);
+      assert.deepEqual(res1, { solved: false, reason: "timeout" });
+
+      // Case 2: child exits early while kill promise is still pending; accept still waits for kill to settle.
+      let kill2Settled = false;
+      let accept2Resolved = false;
+      let resolvedBeforeKill2 = false;
+      const p2 = accept(task, workDir, {
+        manifest: { files: {} },
+        timeoutMs: 80,
+        killGraceMs: 50,
+        killTree: async (child) => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Already exited.
+          }
+          await new Promise((r) => setTimeout(r, 180));
+          resolvedBeforeKill2 = accept2Resolved;
+          kill2Settled = true;
+        },
+      }).then((res) => {
+        accept2Resolved = true;
+        assert.equal(kill2Settled, true, "accept resolved before killTree settled (early child close)");
+        return res;
+      });
+      const res2 = await p2;
+      assert.equal(resolvedBeforeKill2, false);
+      assert.deepEqual(res2, { solved: false, reason: "timeout" });
+    } finally {
+      rmSync(workDir, { recursive: true, force: true });
     }
   });
 });
@@ -1707,6 +1802,129 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         assert.equal(text.includes(startupSecret), false, `startup secret leaked in ${rel}`);
         assert.equal(text.includes(refreshedSecret), false, `refreshed secret leaked in ${rel}`);
       }
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("refreshed credential re-redaction runs before sweep/artifacts, survives sweep/run crashes, and removes unredacted file on rewrite failure", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-reredact-edge-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const credsPath = join(baseTmp, ".credentials.json");
+    const startupSecret = "oauth-startup-edge-credential-value-11111";
+    const refreshedSecret = "oauth-refreshed-edge-credential-value-99999";
+
+    writeFileSync(
+      credsPath,
+      `${JSON.stringify({ claudeAiOauth: { accessToken: startupSecret } })}\n`,
+      "utf8",
+    );
+
+    try {
+      // Direct check: if redactFileInPlace fails on rename, neither temp file nor unredacted original remains.
+      const failDir = join(baseTmp, "rewrite-fail");
+      mkdirSync(failDir, { recursive: true });
+      const sensitiveFile = join(failDir, "transcript.jsonl");
+      writeFileSync(sensitiveFile, `{"tok":"${refreshedSecret}"}\n`, "utf8");
+      await assert.rejects(
+        () => redactFileInPlace(sensitiveFile, [refreshedSecret], {
+          renameFn: () => {
+            throw new Error("simulated rename failure");
+          },
+        }),
+        /simulated rename failure/,
+      );
+      assert.deepEqual(readdirSync(failDir), [], "both temp and unredacted original must be removed on rewrite failure");
+
+      let sawRedactedTranscriptInSweep = false;
+      const fakeDeps = makeFakeDeps({
+        createSandbox: async ({ runId, root, auth }) => {
+          const dir = join(root, runId);
+          const home = join(dir, "home");
+          const configDir = join(home, ".claude");
+          const rockyHome = join(dir, "rocky-home");
+          const taskDir = join(dir, "task");
+          mkdirSync(configDir, { recursive: true });
+          mkdirSync(rockyHome, { recursive: true });
+          mkdirSync(taskDir, { recursive: true });
+          if (auth?.kind === "copy-credentials") {
+            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
+          }
+          return { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
+        },
+        runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
+          writeFileSync(
+            join(sandbox.configDir, ".credentials.json"),
+            `${JSON.stringify({ claudeAiOauth: { accessToken: refreshedSecret } })}\n`,
+            "utf8",
+          );
+          const script = [
+            `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(refreshedSecret)} }) + "\\n");`,
+            `process.stderr.write("err " + ${JSON.stringify(refreshedSecret)} + "\\n");`,
+          ].join("\n");
+          const streamedRes = await spawnProcess({
+            file: process.execPath,
+            args: ["-e", script],
+            cwd: sandbox.taskDir,
+            env: process.env,
+            timeoutMs: 10_000,
+            stdoutPath,
+            stderrPath,
+            secrets,
+          });
+          if (runId === "SMOKE-before-b1") {
+            // Simulate runClaude failing after writing streamed files with refreshed credentials.
+            throw new Error(`claude crashed with ${refreshedSecret}`);
+          }
+          return streamedRes;
+        },
+        sweepStrays: async (sandboxDir) => {
+          if (sandboxDir.includes("SMOKE-after-b1")) {
+            const transcriptPath = join(outDir, "runs", "SMOKE-after-b1", "transcript.jsonl");
+            const current = readFileSync(transcriptPath, "utf8");
+            sawRedactedTranscriptInSweep = !current.includes(refreshedSecret) && current.includes("<redacted>");
+            throw new Error(`sweep failed with ${refreshedSecret}`);
+          }
+          return 0;
+        },
+      });
+
+      await runBatch(
+        {
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "copy-credentials", from: credsPath },
+          concurrency: 1,
+          k: 1,
+          seed: 7,
+          only: ["SMOKE"],
+        },
+        fakeDeps,
+      );
+
+      assert.equal(
+        sawRedactedTranscriptInSweep,
+        true,
+        "transcript.jsonl must already be re-redacted before sweepStrays runs",
+      );
+
+      for (const rel of listAllFiles(outDir)) {
+        const text = readFileSync(join(outDir, rel), "utf8");
+        assert.equal(text.includes(startupSecret), false, `startup secret leaked in ${rel}`);
+        assert.equal(text.includes(refreshedSecret), false, `refreshed secret leaked in ${rel}`);
+      }
+
+      const afterRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-after-b1", "run.json"), "utf8"));
+      assert.equal(afterRun.invalid, "harness_crash");
+      assert.match(afterRun.error, /<redacted>/);
+      const beforeRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-before-b1", "run.json"), "utf8"));
+      assert.equal(beforeRun.invalid, "harness_crash");
+      assert.match(beforeRun.error, /<redacted>/);
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }

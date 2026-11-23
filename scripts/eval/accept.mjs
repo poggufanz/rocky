@@ -23,7 +23,7 @@ const TASKS_DIR = join(EVAL_DIR, "tasks");
 const MANIFEST_PATH = join(TASKS_DIR, "manifest.json");
 const ACCEPT_TIMEOUT_MS = 120_000;
 export const ACCEPT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
-const ACCEPT_KILL_GRACE_MS = 3_000;
+const ACCEPT_KILL_GRACE_MS = 10_000;
 const WIN32_ALLOWLIST_KEYS = [
   "SystemRoot",
   "windir",
@@ -289,6 +289,11 @@ async function killTargetTree(child, env, platform = process.platform) {
  * @param {Record<string, string>} env
  * @param {number} [timeoutMs]
  * @param {number} [maxBufferBytes]
+ * @param {{
+ *   killTree?: (child: import("node:child_process").ChildProcess, env: Record<string, string>, platform: NodeJS.Platform) => Promise<void> | void,
+ *   killGraceMs?: number,
+ *   platform?: NodeJS.Platform,
+ * }} [options]
  * @returns {Promise<{ status: number, signal: NodeJS.Signals | null, stdout: string, stderr: string, timedOut: boolean, stdoutOverflow: boolean, stderrOverflow: boolean }>}
  */
 export async function runTargetCommand(
@@ -297,7 +302,11 @@ export async function runTargetCommand(
   env,
   timeoutMs = ACCEPT_TIMEOUT_MS,
   maxBufferBytes = ACCEPT_MAX_BUFFER_BYTES,
+  options = {},
 ) {
+  const killTree = options.killTree ?? killTargetTree;
+  const killGraceMs = options.killGraceMs ?? ACCEPT_KILL_GRACE_MS;
+  const platform = options.platform ?? process.platform;
   const tokens = String(command ?? "").trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) {
     throw new Error("Target command must be non-empty");
@@ -343,6 +352,13 @@ export async function runTargetCommand(
     let stderrOverflow = false;
     let timedOut = false;
     let settled = false;
+    let childClosed = false;
+    /** @type {number | null} */
+    let closeCode = null;
+    /** @type {NodeJS.Signals | null} */
+    let closeSignal = null;
+    let killInProgress = false;
+    let killSettled = false;
     /** @type {NodeJS.Timeout | null} */
     let killTimer = null;
     /** @type {NodeJS.Timeout | null} */
@@ -412,19 +428,37 @@ export async function runTargetCommand(
     });
 
     child.on("close", (code, signal) => {
+      childClosed = true;
+      closeCode = code;
+      closeSignal = signal;
+      if (killInProgress && !killSettled) {
+        return;
+      }
       settle(code, signal);
     });
 
     if (typeof timeoutMs === "number" && timeoutMs > 0) {
       killTimer = setTimeout(() => {
+        if (settled || childClosed) return;
         timedOut = true;
-        void killTargetTree(child, env, process.platform);
-        graceTimer = setTimeout(() => {
-          child.stdout.destroy();
-          child.stderr.destroy();
-          settle(124, "SIGKILL");
-        }, ACCEPT_KILL_GRACE_MS);
-        graceTimer.unref?.();
+        killInProgress = true;
+        Promise.resolve()
+          .then(() => killTree(child, env, platform))
+          .catch(() => {})
+          .finally(() => {
+            killSettled = true;
+            if (settled) return;
+            if (childClosed) {
+              settle(closeCode, closeSignal);
+              return;
+            }
+            graceTimer = setTimeout(() => {
+              child.stdout.destroy();
+              child.stderr.destroy();
+              settle(124, "SIGKILL");
+            }, killGraceMs);
+            graceTimer.unref?.();
+          });
       }, timeoutMs);
       killTimer.unref?.();
     }
@@ -438,7 +472,13 @@ export async function runTargetCommand(
  *    and print the task's exact `acceptLine` to stdout.
  * @param {any} task
  * @param {string} finalDir
- * @param {{ manifest?: any, timeoutMs?: number, maxBufferBytes?: number }} [options]
+ * @param {{
+ *   manifest?: any,
+ *   timeoutMs?: number,
+ *   maxBufferBytes?: number,
+ *   killTree?: (child: import("node:child_process").ChildProcess, env: Record<string, string>, platform: NodeJS.Platform) => Promise<void> | void,
+ *   killGraceMs?: number,
+ * }} [options]
  * @returns {Promise<{ solved: boolean, reason: string }>}
  */
 export async function accept(task, finalDir, options = {}) {
@@ -459,16 +499,20 @@ export async function accept(task, finalDir, options = {}) {
       env,
       options.timeoutMs ?? ACCEPT_TIMEOUT_MS,
       options.maxBufferBytes ?? ACCEPT_MAX_BUFFER_BYTES,
+      {
+        killTree: options.killTree,
+        killGraceMs: options.killGraceMs,
+      },
     );
   } finally {
     removeDirWithRetry(acceptTempDir);
   }
 
-  if (res.timedOut) {
-    return { solved: false, reason: "timeout" };
-  }
   if (res.stdoutOverflow) {
     return { solved: false, reason: "output-overflow" };
+  }
+  if (res.timedOut) {
+    return { solved: false, reason: "timeout" };
   }
   if (res.signal) {
     return { solved: false, reason: `signal ${res.signal}` };
