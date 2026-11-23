@@ -779,6 +779,49 @@ describe("classifyTargetRuns", () => {
         hasAccept: true,
         expected: "pass",
       },
+      {
+        tool: "Bash",
+        command:
+          "(( $(: <<A\n)\nA\n: <<B\nnpm test\nB\nprintf true)))\nprintf '%s\\n' 'eval-accept: config-override ok'",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command:
+          "(( $(: <<A\n)\nA\n: <<B\ncp config/default.json config/local.json\nB\nprintf true)))\nprintf '%s\\n' 'eval-accept: config-override ok'",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command:
+          "(( $(: <<A\n)\nA\n: <<$'B'\nnpm test\nB\nprintf true)))\nprintf '%s\\n' 'eval-accept: config-override ok'",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command: "echo $(cat <<EOF\nbody\nEOF\n); npm test",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command: "echo `cat <<EOF\nbody\nEOF\n`; npm test",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: null,
+      },
     ];
 
     for (const [index, row] of rows.entries()) {
@@ -1414,6 +1457,29 @@ describe("toolCalls and runMetrics", () => {
         },
       ]);
       assert.equal(runMetrics(arithmeticShiftNotHeredoc, staleS01, dir).staleRepeat, false);
+
+      // Heredocs inside command substitutions ($(...) or `...`) or inside arithmetic
+      // containing a command substitution are unsupported and conservatively report
+      // commandTouchesOverlay -> true (and no target match).
+      for (const cmd of [
+        "(( $(: <<A\n)\nA\n: <<B\nnpm test\nB\nprintf true)))\nprintf '%s\\n' 'eval-accept: config-override ok'",
+        "(( $(: <<A\n)\nA\n: <<B\ncp config/default.json config/local.json\nB\nprintf true)))\nprintf '%s\\n' 'eval-accept: config-override ok'",
+        "(( $(: <<A\n)\nA\n: <<$'B'\nnpm test\nB\nprintf true)))\nprintf '%s\\n' 'eval-accept: config-override ok'",
+        "echo $(cat <<EOF\nbody\nEOF\n); npm test",
+        "echo `cat <<EOF\nbody\nEOF\n`; npm test",
+      ]) {
+        const events = buildShellEvents([
+          {
+            name: "Bash",
+            command: cmd,
+            isError: false,
+            output: `${PORT_ACCEPT}\n`,
+          },
+        ]);
+        const metrics = runMetrics(events, staleS01, dir);
+        assert.equal(metrics.staleRepeat, true, `expected staleRepeat=true for: ${cmd}`);
+        assert.equal(metrics.repeatFailures, "no_attempt", `expected no_attempt for: ${cmd}`);
+      }
 
       // Without system/init cwd, paths are compared as given (no suffix false positive).
       const noInitClean = [

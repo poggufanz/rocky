@@ -175,69 +175,13 @@ function isPipeSeparator(separator) {
   return separator === "|" || separator === "|&";
 }
 
-function matchBashParensFrom(command, startIdx, parenMatch) {
-  const stack = [];
-  let quote = null;
-  let atWordStart = false;
-  for (let j = startIdx; j < command.length; j += 1) {
-    const c = command[j];
-    if (quote !== null) {
-      if (quote === '"' && c === "\\" && j + 1 < command.length) {
-        j += 1;
-      } else if (c === quote) {
-        quote = null;
-      }
-      continue;
-    }
-    if (c === "\\" && j + 1 < command.length) {
-      const next = command[j + 1];
-      if (next === "\r" && command[j + 2] === "\n") {
-        j += 2;
-      } else {
-        j += 1;
-      }
-      if (next !== "\n" && next !== "\r") {
-        atWordStart = false;
-      }
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      atWordStart = false;
-      continue;
-    }
-    if (c === "#" && atWordStart) {
-      while (j + 1 < command.length && command[j + 1] !== "\r" && command[j + 1] !== "\n") {
-        j += 1;
-      }
-      atWordStart = true;
-      continue;
-    }
-    if (c === "(") {
-      stack.push(j);
-      parenMatch.set(j, -1);
-      atWordStart = true;
-      continue;
-    }
-    if (c === ")") {
-      if (stack.length > 0) {
-        const openIdx = stack.pop();
-        parenMatch.set(openIdx, j);
-      }
-      if (stack.length === 0) break;
-      atWordStart = false;
-      continue;
-    }
-    atWordStart = c === "\r" || c === "\n" || c === ";" || c === "&" || c === "|" || UNICODE_WS_RE.test(c);
-  }
-}
-
 /**
  * Parse a shell command into top-level statements and the separator following
  * each statement, honouring shell-specific quoting, escaping, comments, and
  * line breaks in linear time. In Bash, heredoc delimiters are restricted to
  * `/^[A-Za-z0-9_.-]+$/` after removing whole-segment `'…'` / `"…"` quoting and
- * a leading `-` for `<<-`; any other delimiter form sets `unsupportedHeredoc`.
+ * a leading `-` for `<<-`; any other delimiter form, or any heredoc inside a
+ * command substitution (or arithmetic containing one), sets `unsupportedHeredoc`.
  * @param {string} command
  * @param {string} [shell]
  * @returns {{
@@ -258,10 +202,11 @@ function parseStatements(command, shell = "Bash") {
   const chunks = [];
   /** @type {Array<{ delimiter: string, stripTabs: boolean }>} */
   const pendingHeredocs = [];
-  /** @type {Map<number, number> | null} */
-  let parenMatch = null;
-  /** @type {Array<{ end: number, isArith: boolean }>} */
-  const arithStack = [];
+  let arithDepth = 0;
+  let arithHasCmdSub = false;
+  let arithHasShift = false;
+  let cmdSubDepth = 0;
+  let inBacktick = false;
   let spanStart = 0;
   let quote = null;
   let atWordStart = true;
@@ -344,34 +289,52 @@ function parseStatements(command, shell = "Bash") {
       atWordStart = true;
       continue;
     }
-    while (arithStack.length > 0 && i > arithStack[arithStack.length - 1].end) {
-      arithStack.pop();
+    if (!isPowerShell && ch === "`") {
+      inBacktick = !inBacktick;
+      if (arithDepth > 0) {
+        if (arithHasShift) return { statements: [], unsupportedHeredoc: true };
+        arithHasCmdSub = true;
+      }
+      atWordStart = false;
+      afterContinuationSep = false;
+      continue;
     }
     if (!isPowerShell && ch === "(") {
-      if (command[i + 1] === "(") {
-        if (parenMatch === null) parenMatch = new Map();
-        if (!parenMatch.has(i)) {
-          matchBashParensFrom(command, i, parenMatch);
+      if (i > 0 && command[i - 1] === "$" && command[i + 1] !== "(") {
+        if (arithDepth > 0) {
+          if (arithHasShift) return { statements: [], unsupportedHeredoc: true };
+          arithHasCmdSub = true;
         }
-        const innerClose = parenMatch.get(i + 1);
-        if (innerClose !== undefined && innerClose !== -1 && parenMatch.get(i) === innerClose + 1) {
-          arithStack.push({ end: innerClose + 1, isArith: true });
-        }
-      } else if (
-        arithStack.length > 0
-        && arithStack[arithStack.length - 1].isArith
-        && i > 0
-        && command[i - 1] === "$"
-        && parenMatch !== null
-      ) {
-        const closeIdx = parenMatch.get(i);
-        if (closeIdx !== undefined && closeIdx !== -1) {
-          arithStack.push({ end: closeIdx, isArith: false });
-        }
+        cmdSubDepth += 1;
+      } else if (arithDepth === 0 && command[i + 1] === "(") {
+        arithDepth = 2;
+        arithHasCmdSub = false;
+        arithHasShift = false;
+        i += 1;
+      } else if (arithDepth > 0 && !arithHasCmdSub) {
+        arithDepth += 1;
+      } else if (cmdSubDepth > 0) {
+        cmdSubDepth += 1;
+      } else if (arithDepth > 0) {
+        arithDepth += 1;
       }
+      atWordStart = true;
+      afterContinuationSep = false;
+      continue;
     }
-    const inArithmetic = arithStack.length > 0 && arithStack[arithStack.length - 1].isArith;
-    if (!isPowerShell && !inArithmetic && ch === "<" && command[i + 1] === "<") {
+    if (!isPowerShell && ch === ")") {
+      if (arithDepth > 0 && !arithHasCmdSub) {
+        arithDepth -= 1;
+      } else if (cmdSubDepth > 0) {
+        cmdSubDepth -= 1;
+      } else if (arithDepth > 0) {
+        arithDepth -= 1;
+      }
+      atWordStart = false;
+      afterContinuationSep = false;
+      continue;
+    }
+    if (!isPowerShell && ch === "<" && command[i + 1] === "<") {
       if (command[i + 2] === "<") {
         while (i + 1 < command.length && command[i + 1] === "<") {
           i += 1;
@@ -379,6 +342,16 @@ function parseStatements(command, shell = "Bash") {
         atWordStart = false;
         afterContinuationSep = false;
         continue;
+      }
+      if (arithDepth > 0 && !arithHasCmdSub && !inBacktick) {
+        arithHasShift = true;
+        i += 1;
+        atWordStart = false;
+        afterContinuationSep = false;
+        continue;
+      }
+      if (cmdSubDepth > 0 || inBacktick || arithDepth > 0) {
+        return { statements: [], unsupportedHeredoc: true };
       }
       let k = i + 2;
       const stripTabs = command[k] === "-";
