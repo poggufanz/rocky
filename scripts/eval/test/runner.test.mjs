@@ -25,6 +25,7 @@ import {
   COPY_CREDENTIALS_DISABLED_MESSAGE,
   DEFAULT_K,
   DEFAULT_SEED,
+  MAX_K,
   ProvenanceMismatchError,
   classifyOutcome,
   createRedactingFileWriter,
@@ -874,6 +875,54 @@ describe("runner CLI guards and resume provenance", () => {
       );
       assert.equal(res.status, 2);
       assert.match(res.stderr, /ROCKY_EVAL_OAUTH_TOKEN/);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
+  test("runner exits 2 when --k is outside 1..12", async () => {
+    assert.equal(MAX_K, 12);
+    assert.equal(schedule(["T01"], ARMS, MAX_K, DEFAULT_SEED).length, 36);
+    assert.throws(
+      () => schedule(["T01"], ARMS, 13, DEFAULT_SEED),
+      (err) => err instanceof RangeError && /1\.\.12/.test(err.message),
+    );
+    assert.throws(
+      () => schedule(["T01"], ARMS, 0, DEFAULT_SEED),
+      (err) => err instanceof RangeError && /1\.\.12/.test(err.message),
+    );
+
+    for (const badK of ["13", "0", "-1"]) {
+      const res = spawnSync(process.execPath, [runnerScript, "--k", badK], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      assert.equal(res.status, 2, `expected exit 2 for --k ${badK}, got ${res.status}`);
+      assert.match(res.stderr, /--k/);
+      assert.match(res.stderr, /1\.\.12/);
+    }
+
+    const outDir = mkdtempSync(join(tmpdir(), "rocky-runner-maxk-"));
+    try {
+      await assert.rejects(
+        () => runBatch(
+          {
+            outDir,
+            rootDir: join(outDir, "sbx"),
+            cacheDir: join(outDir, "cache"),
+            beforeRef: "31128bc",
+            afterRef: "HEAD",
+            auth: { kind: "token" },
+            concurrency: 1,
+            k: 13,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          makeFakeDeps(),
+        ),
+        (err) => err instanceof RangeError && err.exitCode === 2 && /1\.\.12/.test(err.message),
+      );
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }

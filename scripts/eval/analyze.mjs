@@ -1,13 +1,14 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARMS, DEFAULT_K, DEFAULT_SEED, mulberry32 } from "./runner.mjs";
+import { ARMS, DEFAULT_K, DEFAULT_SEED, MAX_K, mulberry32 } from "./runner.mjs";
 
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(EVAL_DIR, "tasks", "manifest.json");
 
 export const MAX_EXACT_SIGN_FLIP_N = 24;
 export const DEFAULT_SIGN_FLIP_K = DEFAULT_K;
+export const MAX_SIGN_FLIP_K = MAX_K;
 export const DEFAULT_BOOTSTRAP_RESAMPLES = 10000;
 export const DEFAULT_BOOTSTRAP_LEVEL = 0.9;
 
@@ -162,16 +163,14 @@ function gcd(a, b) {
 }
 
 function lcmUpTo(k) {
-  if (!Number.isInteger(k) || k < 1) {
-    throw new RangeError(`signFlipP k must be a positive integer, got ${String(k)}`);
+  if (!Number.isInteger(k) || k < 1 || k > MAX_SIGN_FLIP_K) {
+    throw new RangeError(
+      `signFlipP k must be a positive integer in 1..${MAX_SIGN_FLIP_K} (got ${String(k)}; lcm(1..${MAX_SIGN_FLIP_K}) = 27720 keeps per-task mean grids exact)`,
+    );
   }
   let acc = 1;
   for (let n = 2; n <= k; n += 1) {
-    const factor = n / gcd(acc, n);
-    if (factor > Math.floor(Number.MAX_SAFE_INTEGER / acc)) {
-      throw new RangeError(`signFlipP lcm(1..${k}) exceeds Number.MAX_SAFE_INTEGER`);
-    }
-    acc *= factor;
+    acc = (acc / gcd(acc, n)) * n;
   }
   return acc;
 }
@@ -179,10 +178,10 @@ function lcmUpTo(k) {
 /**
  * Exact two-sided paired sign-flip test over per-task differences.
  * Quantizes each diff onto the exact `1 / lcm(1..k)` integer grid
- * (`Math.round(d * lcm(1..k))`, default `k = 5` → `scale = 60`), drops
- * values that quantize to zero, and enumerates all `2^nEffective` sign
+ * (`Math.round(d * lcm(1..k))`, default `k = 5` → `scale = 60`, max `k = 12` → `scale = 27720`),
+ * drops values that quantize to zero, and enumerates all `2^nEffective` sign
  * assignments in exact integer arithmetic to compute `P(|sum| >= |observed|)`.
- * Throws when `nEffective > 24`, when `lcm(1..k)` overflows safe integers,
+ * Throws when `nEffective > 24`, when `k` is outside `1..12`,
  * or when `sum(|q_i|) >= Number.MAX_SAFE_INTEGER`.
  * @param {readonly number[]} diffs
  * @param {{ k?: number } | number} [options]
@@ -206,10 +205,11 @@ export function signFlipP(diffs, options = {}) {
   }
   const scale = lcmUpTo(k);
 
-  // ponytail: diffs are quantized onto the 1 / lcm(1..k) integer grid
-  // (`q_i = Math.round(d_i * lcm(1..k))`), which is exact for paired means of
-  // <= k integer counts (`a/n_a - b/n_b` with n_a, n_b in 1..k); inputs off
-  // that grid are rounded. Exactness requires sum(|q_i|) < Number.MAX_SAFE_INTEGER.
+  // ponytail: diffs are quantized onto the 1 / lcm(1..k) integer grid for
+  // k in 1..12 (at most lcm(1..12) = 27720, so float rounding on paired means
+  // `a/n_a - b/n_b` with n_a, n_b in 1..k stays far below 0.5 / scale and sums
+  // stay far below Number.MAX_SAFE_INTEGER); inputs off that grid are rounded,
+  // and k > 12 is refused here and at runner.mjs entry.
   /** @type {number[]} */
   const quantized = [];
   let sumAbs = 0;
@@ -529,6 +529,7 @@ export function verdict(batch) {
   const k = batch.k !== undefined
     ? batch.k
     : (batch.provenance?.k !== undefined ? batch.provenance.k : DEFAULT_SIGN_FLIP_K);
+  lcmUpTo(k);
   const resamples = batch.resamples ?? DEFAULT_BOOTSTRAP_RESAMPLES;
   const level = batch.level ?? DEFAULT_BOOTSTRAP_LEVEL;
 

@@ -61,11 +61,26 @@ describe("signFlipP", () => {
     // Non-zero thirds tie that fails on a 1e-9 grid (999999999 < 1000000001):
     // [1/3, 1/3, 1/3, -1, -1] -> thirds [1, 1, 1, -3, -3], |obs| = 3, exact enumeration gives 20/32 = 5/8.
     assert.deepEqual(signFlipP([1 / 3, 1 / 3, 1 / 3, -1, -1]), { p: 20 / 32, nEffective: 5 });
+    // Precomputed floating-point thirds difference (4/3 - 5/3): [-1, -1, -1, 1] in thirds, |obs| = 2 -> 10/16.
+    const precomputedThirds = [4 / 3 - 5 / 3, 4 / 3 - 5 / 3, 4 / 3 - 5 / 3, 1 / 3];
+    assert.deepEqual(signFlipP(precomputedThirds), { p: 10 / 16, nEffective: 4 });
 
-    // Caller-supplied k = 7 (scale = lcm(1..7) = 420) preserves exact sevenths ties
-    // that round off on the k = 5 (scale = 60) grid:
-    // [4/7, 4/7, 6/7, -2, -2] -> sevenths [4, 4, 6, -14, -14], |obs| = 14, exact enumeration gives 20/32 = 5/8.
+    // Caller-supplied k = 7 (scale = lcm(1..7) = 420) and max k = 12 (scale = lcm(1..12) = 27720)
+    // preserve exact sevenths and thirds ties:
+    // [4/7, 4/7, 6/7, -2, -2] -> sevenths [4, 4, 6, -14, -14], |obs| = 14 -> 20/32 = 5/8.
     assert.deepEqual(signFlipP([4 / 7, 4 / 7, 6 / 7, -2, -2], { k: 7 }), { p: 20 / 32, nEffective: 5 });
+    assert.deepEqual(signFlipP([4 / 7, 4 / 7, 6 / 7, -2, -2], { k: 12 }), { p: 20 / 32, nEffective: 5 });
+    // Seven 1/7s against -1 (sum 0 -> 1) and against +1, -1 (|obs| = 7 in sevenths -> 130/256 = 65/128;
+    // misses a tie on k = 5 because 7*9 = 63 > 60 gives 120 - 63 = 57 < 63).
+    assert.deepEqual(
+      signFlipP([1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, -1], { k: 12 }),
+      { p: 1, nEffective: 8 },
+    );
+    assert.deepEqual(
+      signFlipP([1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1, -1], { k: 12 }),
+      { p: 130 / 256, nEffective: 9 },
+    );
+    assert.deepEqual(signFlipP(precomputedThirds, { k: 12 }), { p: 10 / 16, nEffective: 4 });
 
     // Sub-grid diff rounds to zero on the lcm(1..5) = 60 grid and is dropped.
     assert.deepEqual(signFlipP([1, 1e-13]), { p: 1, nEffective: 1 });
@@ -91,12 +106,16 @@ describe("signFlipP", () => {
       /MAX_SAFE_INTEGER/,
     );
     assert.throws(
-      () => signFlipP([1], { k: 41 }),
-      /MAX_SAFE_INTEGER/,
+      () => signFlipP([1], { k: 13 }),
+      (err) => err instanceof RangeError && /1\.\.12/.test(err.message),
+    );
+    assert.throws(
+      () => signFlipP([], { k: 13 }),
+      (err) => err instanceof RangeError && /1\.\.12/.test(err.message),
     );
     assert.throws(
       () => signFlipP([1], { k: 0 }),
-      /positive integer/,
+      (err) => err instanceof RangeError && /positive integer/.test(err.message),
     );
     assert.throws(
       () => signFlipP(Array.from({ length: 25 }, () => 1)),
@@ -515,6 +534,19 @@ describe("verdict", () => {
     const fromProvenanceK = verdict({ runs, provenance: { k: 7 }, seed: 11, resamples: 100 });
     assert.equal(fromProvenanceK.claims.afterVsNone.n, 5);
     assert.equal(fromProvenanceK.claims.afterVsNone.p, 20 / 32);
+
+    const fromMaxK = verdict({ runs, k: 12, seed: 11, resamples: 100 });
+    assert.equal(fromMaxK.claims.afterVsNone.n, 5);
+    assert.equal(fromMaxK.claims.afterVsNone.p, 20 / 32);
+
+    assert.throws(
+      () => verdict({ runs, k: 13, seed: 11, resamples: 100 }),
+      (err) => err instanceof RangeError && /1\.\.12/.test(err.message),
+    );
+    assert.throws(
+      () => verdict({ runs: [], provenance: { k: 13 }, seed: 11, resamples: 100 }),
+      (err) => err instanceof RangeError && /1\.\.12/.test(err.message),
+    );
   });
 });
 

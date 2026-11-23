@@ -40,6 +40,7 @@ const MANIFEST_PATH = join(EVAL_DIR, "tasks", "manifest.json");
 
 export const ARMS = ["none", "before", "after"];
 export const DEFAULT_K = 5;
+export const MAX_K = 12;
 export const DEFAULT_SEED = 20261123;
 export const DEFAULT_CONCURRENCY = 2;
 export const RUN_TIMEOUT_MS = 20 * 60 * 1000;
@@ -72,7 +73,7 @@ const USAGE = [
   `  --concurrency <n>      Concurrent runs (default: ${DEFAULT_CONCURRENCY})`,
   "  --root <dir>           Sandbox root directory (default: <os.tmpdir>/rocky-eval)",
   "  --cache <dir>          Tarball pack cache directory (default: <out>/../pack-cache; must be outside workspace)",
-  `  --k <n>                Number of randomized blocks (default: ${DEFAULT_K})`,
+  `  --k <n>                Number of randomized blocks (1..${MAX_K}, default: ${DEFAULT_K})`,
   `  --seed <n>             PRNG seed for schedule shuffling (default: ${DEFAULT_SEED})`,
   "  --only <ids>           Comma-separated task IDs to run (default: all manifest tasks except SMOKE)",
   "  --retry-invalid        Re-run existing runs with invalid=api_error or harness_crash (up to 2 retries)",
@@ -132,8 +133,8 @@ export function schedule(taskIds, arms, k, seed) {
   if (!Array.isArray(arms)) {
     throw new Error("schedule requires an array of arms");
   }
-  if (!Number.isInteger(k) || k < 1) {
-    throw new Error(`Invalid block count k: ${String(k)}`);
+  if (!Number.isInteger(k) || k < 1 || k > MAX_K) {
+    throw new RangeError(`Invalid block count k: ${String(k)} (must be an integer in 1..${MAX_K})`);
   }
   const rng = mulberry32(seed);
   /** @type {Array<{ runId: string, taskId: string, arm: string, block: number }>} */
@@ -1498,6 +1499,13 @@ export async function runBatch(options, overrides = {}) {
 
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
   const k = options.k ?? DEFAULT_K;
+  if (!Number.isInteger(k) || k < 1 || k > MAX_K) {
+    const err = new RangeError(
+      `--k must be an integer in 1..${MAX_K} (got ${String(k)}; exact per-task mean sign-flip grids require k <= ${MAX_K})`,
+    );
+    err.exitCode = 2;
+    throw err;
+  }
   const seed = options.seed ?? DEFAULT_SEED;
   const timeoutMs = options.timeoutMs ?? RUN_TIMEOUT_MS;
   const retryInvalid = Boolean(options.retryInvalid);
@@ -1876,6 +1884,19 @@ function parsePositiveInt(raw, flagName) {
   return value;
 }
 
+function parseBlockCount(raw) {
+  if (!/^-?\d+$/.test(raw)) {
+    usageError(`--k must be an integer in 1..${MAX_K} (got ${raw})`);
+  }
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_K) {
+    usageError(
+      `--k must be an integer in 1..${MAX_K} (got ${raw}; exact per-task mean sign-flip grids require k <= ${MAX_K})`,
+    );
+  }
+  return value;
+}
+
 function parseIntStrict(raw, flagName) {
   if (!/^-?\d+$/.test(raw)) {
     usageError(`${flagName} must be an integer (got ${raw})`);
@@ -1932,7 +1953,7 @@ function parseArgs(argv) {
     else if (arg === "--auth") opts.auth = takeValue("--auth");
     else if (arg === "--from") opts.from = takeValue("--from");
     else if (arg === "--concurrency") opts.concurrency = parsePositiveInt(takeValue("--concurrency"), "--concurrency");
-    else if (arg === "--k") opts.k = parsePositiveInt(takeValue("--k"), "--k");
+    else if (arg === "--k") opts.k = parseBlockCount(takeValue("--k"));
     else if (arg === "--seed") opts.seed = parseIntStrict(takeValue("--seed"), "--seed");
     else if (arg === "--only") {
       const raw = takeValue("--only");
