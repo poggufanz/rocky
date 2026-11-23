@@ -10,6 +10,15 @@ Run all commands from the `rocky/` package root. Choose a `--root` directory wit
 
 Set `ROCKY_EVAL_OAUTH_TOKEN` in the current shell environment before running token-authenticated capture or batches (`runner.mjs` accepts `--auth token` only; `--auth copy-credentials` is disabled for batches).
 
+### Prerequisite: build this checkout
+
+Install dependencies and build this checkout before running capture, smoke, full batches, or offline scoring. The evaluator and history helper use this checkout's compiled `dist/core/fingerprint.js`, which is not tracked in git:
+
+```powershell
+npm ci
+npm run build
+```
+
 ### 1. Capture
 
 `capture.mjs` runs `npm test` twice in an inline failing repo and asks the agent to print only the seven reported environment variables (`HOME`, `CLAUDE_CONFIG_DIR`, `ROCKY_HOME`, `ROCKY_TEST_SEAMS`, `ROCKY_ATTEMPT_ARM`, `ROCKY_AGENT_SESSION`, `PATH`), never the full environment. The harness also redacts the token value from all saved artifacts and output as a second layer.
@@ -87,7 +96,7 @@ node scripts/eval/evaluate.mjs --out "C:\rocky-eval\run1"
 
 ### 5. Report
 
-Render the markdown evaluation report from `<out>/metrics.json` and `<out>/batch.json` (`--seed` and `--resamples` overrides are disallowed for `run1` and `run2`):
+Render the markdown evaluation report from `<out>/metrics.json` and `<out>/batch.json` (`--seed` and `--resamples` overrides are disallowed for `run1` and `run2`, and `run1`/`run2` also require a finished batch with `batch.json.completedAt` written on normal runner completion):
 
 ```powershell
 node scripts/eval/report.mjs `

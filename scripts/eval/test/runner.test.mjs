@@ -1319,6 +1319,8 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       assert.equal(batchJson.concurrency, 2);
       assert.equal(typeof batchJson.ownerBaseline.memoryBytes, "number");
       assert.equal(batchJson.ownerCheck.leak, false);
+      assert.equal(typeof batchJson.completedAt, "string");
+      assert.ok(batchJson.completedAt.length > 0);
 
       // 4. Artifact filtering checks: final/ without .git; rocky-home/ filtered; no home/.claude.
       const noneDir = join(outDir, "runs", "SMOKE-none-b1");

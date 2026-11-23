@@ -493,8 +493,7 @@ function meanPairedDiff(sampledTasks) {
  *   provenance?: any,
  *   label?: string,
  *   k?: number,
- *   run1InformedChange?: boolean,
- *   heldOutTrapTasks?: number,
+ *   halted?: any,
  *   ownerCheck?: { leak?: boolean, [key: string]: any } | null,
  *   ownerLeakLatched?: boolean,
  *   seed?: number,
@@ -516,13 +515,16 @@ export function verdict(batch) {
     ? batch.label
     : (typeof batch.provenance?.label === "string" ? batch.provenance.label : null);
   const normalizedLabel = label !== null ? label.trim().toLowerCase() : null;
-  const run1InformedChange =
-    (batch.run1InformedChange ?? batch.provenance?.run1InformedChange) === true;
-  const heldOutTrapTasksRaw = batch.heldOutTrapTasks ?? batch.provenance?.heldOutTrapTasks;
-  const heldOutTrapTasks =
-    typeof heldOutTrapTasksRaw === "number" && Number.isFinite(heldOutTrapTasksRaw)
-      ? heldOutTrapTasksRaw
-      : null;
+
+  const rawHalted = batch.halted !== undefined ? batch.halted : batch.provenance?.halted;
+  const halted = Boolean(
+    rawHalted === true
+    || (typeof rawHalted === "string" && rawHalted.trim().length > 0)
+    || (rawHalted && typeof rawHalted === "object" && !Array.isArray(rawHalted)),
+  );
+  const haltInfo = rawHalted && typeof rawHalted === "object" && !Array.isArray(rawHalted)
+    ? rawHalted
+    : (halted ? { reason: typeof rawHalted === "string" ? rawHalted : "halted" } : null);
 
   const seed = typeof batch.seed === "number"
     ? batch.seed
@@ -601,11 +603,12 @@ export function verdict(batch) {
   for (const arm of arms) {
     armValid[arm] =
       !ownerLeak
+      && !halted
       && (leaksByArm[arm] ?? 0) === 0
       && !(arm === "after" && notDeliveredExceeded);
   }
   const anyLeak = ownerLeak || leakRuns.length > 0;
-  const batchValid = !notDeliveredExceeded && !anyLeak;
+  const batchValid = !notDeliveredExceeded && !anyLeak && !halted;
 
   // Claims: trap tasks only, paired per-task differences on repeatFailures.
   const trapRuns = runs.filter((run) => taskKindOf(run, kindMap) === "trap");
@@ -646,6 +649,12 @@ export function verdict(batch) {
   }
 
   function authorizeClaim(comparisonKey, trigger) {
+    if (comparisonKey === "beforeVsNone") {
+      return {
+        authorized: false,
+        authorizationNote: "descriptive only: no claim rule for this comparison",
+      };
+    }
     if (!batchValid) {
       return { authorized: false, authorizationNote: "batch invalid" };
     }
@@ -656,18 +665,11 @@ export function verdict(batch) {
       };
     }
     if (normalizedLabel === "run2") {
-      if (comparisonKey === "afterVsBefore" && run1InformedChange) {
-        if (heldOutTrapTasks === null || heldOutTrapTasks < 10) {
-          return {
-            authorized: false,
-            authorizationNote: "run-1-informed change requires >= 10 held-out trap tasks",
-          };
-        }
+      if (comparisonKey === "afterVsBefore") {
         return {
-          authorized: trigger,
-          authorizationNote: trigger
-            ? "authorized (held-out trap tasks >= 10)"
-            : "statistical trigger not met",
+          authorized: false,
+          authorizationNote:
+            "run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked",
         };
       }
       return {
@@ -797,12 +799,13 @@ export function verdict(batch) {
       : null;
   const turnVetoed = medianTurnRise !== null && medianTurnRise >= VETO_MEDIAN_TURN_RISE;
 
+  const rawVetoed = Boolean(solvedVetoed || turnVetoed);
   const veto = {
     solvedDrop,
     medianTurnRise,
     solvedVetoed,
     turnVetoed,
-    vetoed: Boolean(solvedVetoed || turnVetoed),
+    vetoed: batchValid ? rawVetoed : null,
     noneSolvedMean,
     afterSolvedMean,
     noneMedianTurns,
@@ -841,6 +844,7 @@ export function verdict(batch) {
       invalidTotal: invalidAfterTrapTotal,
     },
     batchValid,
+    halted: haltInfo,
     armValid,
     excluded,
     leaks: {

@@ -26,7 +26,7 @@ export const POSITIVE_CONTROL_SOURCE =
   "note text in a tool result or a delivered note row in the run's advisories.jsonl";
 
 export const RUN_BOUNDARY_RULE =
-  "Run-1 per-task results serve only for veto and positive control. If the note template, selection logic, or attempts read model is changed after run 1 using run-1 transcripts, a run-2 `after − before` claim requires at least 10 new trap tasks frozen before that change; without a new frozen trap set, that run-2 comparison is descriptive only.";
+  "Run-1 per-task results serve only for veto and positive control. If the note template, selection logic, or attempts read model is changed after run 1 using run-1 transcripts, a run-2 `after − before` claim requires at least 10 new trap tasks frozen before that change; without a new frozen trap set, that run-2 comparison is descriptive only. Because this harness does not yet verify a held-out trap set frozen before any run-1-informed change, run-2 `after − before` is always reported as descriptive only here.";
 
 export const PREREGISTERED_LABELS = new Set(["run1", "run2"]);
 
@@ -201,6 +201,7 @@ export function renderReport({
   const provenanceRows = [
     ["Label", label],
     ["Started at", prov.startedAt ?? "n/a"],
+    ["Completed at", prov.completedAt ?? "n/a"],
     ["Model", prov.model ?? "n/a"],
     ["Claude version", prov.claudeVersion ?? "n/a"],
     ["Claude flags", Array.isArray(prov.claudeFlags) ? `\`${prov.claudeFlags.join(" ")}\`` : "n/a"],
@@ -278,6 +279,10 @@ export function renderReport({
     );
   } else {
     lines.push("- Owner check: not attached to batch (default: no owner leak).");
+  }
+  if (v.halted) {
+    const haltRunSuffix = v.halted.runId ? ` (runId=${v.halted.runId})` : "";
+    lines.push(`- Batch halted: reason=${v.halted.reason ?? "halted"}${haltRunSuffix}.`);
   }
   lines.push(`- Overall batch validity: **${v.batchValid ? "valid" : "invalid"}**.`);
   lines.push("");
@@ -419,8 +424,9 @@ export function renderReport({
   } else {
     verdictSummary = "Not vetoed — harm thresholds not exceeded.";
   }
+  const vetoedText = v.batchValid ? String(v.veto.vetoed) : "not decided (batch invalid)";
   lines.push(`- **Batch valid:** ${v.batchValid}`);
-  lines.push(`- **Vetoed:** ${v.veto.vetoed}`);
+  lines.push(`- **Vetoed:** ${vetoedText}`);
   lines.push(`- **Verdict:** ${verdictSummary}`);
   lines.push("");
 
@@ -444,8 +450,6 @@ export function renderReport({
  *   seed?: number,
  *   resamples?: number,
  *   level?: number,
- *   run1InformedChange?: boolean,
- *   heldOutTrapTasks?: number,
  * }} options
  */
 export function generateReport(outDir, options) {
@@ -476,6 +480,12 @@ export function generateReport(outDir, options) {
     if (typeof provenance.seed !== "number" || !Number.isFinite(provenance.seed)) {
       throw createExitError(`batch.json in ${resolvedOut} must contain a finite numeric seed for "${options.label}"`, 2);
     }
+    if (typeof provenance.completedAt !== "string" || provenance.completedAt.trim().length === 0) {
+      throw createExitError(
+        `batch.json in ${resolvedOut} is missing completedAt (runner did not finish normally); refusing to report "${options.label}"`,
+        2,
+      );
+    }
   }
 
   const seed = preregistered
@@ -496,8 +506,6 @@ export function generateReport(outDir, options) {
     tasks: manifest.tasks,
     provenance,
     label: options.label,
-    run1InformedChange: options.run1InformedChange ?? provenance.run1InformedChange,
-    heldOutTrapTasks: options.heldOutTrapTasks ?? provenance.heldOutTrapTasks,
     ownerCheck,
     seed,
     resamples,
@@ -619,8 +627,9 @@ function main() {
     throw err;
   }
   const { destPath, verdict: v } = result;
+  const vetoedSummary = v.batchValid ? String(v.veto.vetoed) : "not-decided";
   process.stdout.write(
-    `wrote ${destPath} (batchValid=${v.batchValid} vetoed=${v.veto.vetoed})\n`,
+    `wrote ${destPath} (batchValid=${v.batchValid} vetoed=${vetoedSummary})\n`,
   );
 }
 

@@ -1906,6 +1906,7 @@ export async function runBatch(options, overrides = {}) {
       };
       existingBatch.ownerLeakLatched = true;
       existingBatch.halted = haltInfo;
+      delete existingBatch.completedAt;
       try {
         persistBatchJson(existingBatch);
       } catch {
@@ -1923,6 +1924,7 @@ export async function runBatch(options, overrides = {}) {
         at: new Date().toISOString(),
       };
       existingBatch.halted = haltInfo;
+      delete existingBatch.completedAt;
       try {
         persistBatchJson(existingBatch);
       } catch {
@@ -2006,6 +2008,7 @@ export async function runBatch(options, overrides = {}) {
 
   function setBatchHalt(reason, runId) {
     stopBatch = true;
+    delete batchData.completedAt;
     const existingReason = batchData.halted?.reason;
     const isLeakReason = reason === "token_leak" || reason === "owner_leak";
     const existingIsLeak = existingReason === "token_leak" || existingReason === "owner_leak";
@@ -2128,10 +2131,19 @@ export async function runBatch(options, overrides = {}) {
         summary: emptySummary,
       });
     }
+    if (!stopBatch && !batchData.halted) {
+      batchData.completedAt = new Date().toISOString();
+      persistBatchJson(batchData);
+    }
     deps.log(
       redact(`[eval] 0 runs to execute (${skipped} skipped, ${malformed} malformed).`),
     );
     return emptySummary;
+  }
+
+  if (batchData.completedAt !== undefined) {
+    delete batchData.completedAt;
+    persistBatchJson(batchData);
   }
 
   // Pack both Rocky arms once, sequentially, before any run starts.
@@ -2520,6 +2532,10 @@ export async function runBatch(options, overrides = {}) {
       halted: batchData.halted ?? null,
       summary,
     });
+  }
+  if (!stopBatch && !batchData.halted) {
+    batchData.completedAt = new Date().toISOString();
+    persistBatchJson(batchData);
   }
   return summary;
 }

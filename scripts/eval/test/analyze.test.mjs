@@ -379,7 +379,7 @@ describe("verdict", () => {
       }),
     );
 
-    // Valid run2 with trigger -> authorized true.
+    // Valid run2 with trigger -> afterVsNone authorized true; afterVsBefore and beforeVsNone stay descriptive.
     const run2Res = verdict({ runs, label: "run2", seed: 20261123, resamples: 500 });
     assert.equal(run2Res.batchValid, true);
     assert.equal(run2Res.claims.afterVsNone.n, 6);
@@ -389,10 +389,22 @@ describe("verdict", () => {
     assert.equal(run2Res.claims.afterVsNone.trigger, true);
     assert.equal(run2Res.claims.afterVsNone.authorized, true);
     assert.equal(run2Res.claims.afterVsNone.claimed, true);
-    assert.equal(run2Res.claims.afterVsBefore.authorized, true);
-    assert.equal(run2Res.claims.beforeVsNone.authorized, true);
+    assert.equal(run2Res.claims.afterVsBefore.trigger, true);
+    assert.equal(run2Res.claims.afterVsBefore.authorized, false);
+    assert.equal(run2Res.claims.afterVsBefore.claimed, false);
+    assert.equal(
+      run2Res.claims.afterVsBefore.authorizationNote,
+      "run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked",
+    );
+    assert.equal(run2Res.claims.beforeVsNone.trigger, true);
+    assert.equal(run2Res.claims.beforeVsNone.authorized, false);
+    assert.equal(run2Res.claims.beforeVsNone.claimed, false);
+    assert.equal(
+      run2Res.claims.beforeVsNone.authorizationNote,
+      "descriptive only: no claim rule for this comparison",
+    );
 
-    // Valid run1 with trigger -> trigger true, authorized false with run1 note.
+    // Valid run1 with trigger -> trigger true, authorized false with run1 note (beforeVsNone keeps no-claim-rule note).
     const run1Res = verdict({ runs, label: "run1", seed: 20261123, resamples: 500 });
     assert.equal(run1Res.batchValid, true);
     assert.equal(run1Res.claims.afterVsNone.trigger, true);
@@ -401,6 +413,11 @@ describe("verdict", () => {
     assert.equal(
       run1Res.claims.afterVsNone.authorizationNote,
       "run 1 serves veto and positive control only",
+    );
+    assert.equal(run1Res.claims.beforeVsNone.authorized, false);
+    assert.equal(
+      run1Res.claims.beforeVsNone.authorizationNote,
+      "descriptive only: no claim rule for this comparison",
     );
 
     // Invalid batch (leak) on run2 with trigger -> trigger true, authorized false with batch invalid note.
@@ -411,30 +428,12 @@ describe("verdict", () => {
     assert.equal(invalidRun2.claims.afterVsNone.authorized, false);
     assert.equal(invalidRun2.claims.afterVsNone.claimed, false);
     assert.equal(invalidRun2.claims.afterVsNone.authorizationNote, "batch invalid");
-
-    // run2 with run1InformedChange=true blocks afterVsBefore unless heldOutTrapTasks >= 10.
-    const changedTooFew = verdict({
-      runs,
-      label: "run2",
-      run1InformedChange: true,
-      heldOutTrapTasks: 9,
-      seed: 20261123,
-      resamples: 500,
-    });
-    assert.equal(changedTooFew.claims.afterVsNone.authorized, true);
-    assert.equal(changedTooFew.claims.afterVsBefore.trigger, true);
-    assert.equal(changedTooFew.claims.afterVsBefore.authorized, false);
-    assert.match(changedTooFew.claims.afterVsBefore.authorizationNote, /10 held-out trap tasks/);
-
-    const changedEnough = verdict({
-      runs,
-      label: "run2",
-      run1InformedChange: true,
-      heldOutTrapTasks: 10,
-      seed: 20261123,
-      resamples: 500,
-    });
-    assert.equal(changedEnough.claims.afterVsBefore.authorized, true);
+    assert.equal(invalidRun2.claims.afterVsBefore.authorized, false);
+    assert.equal(invalidRun2.claims.beforeVsNone.authorized, false);
+    assert.equal(
+      invalidRun2.claims.beforeVsNone.authorizationNote,
+      "descriptive only: no claim rule for this comparison",
+    );
 
     // Lower trap solved rate blocks trigger and authorization even when p <= 0.05 and downward.
     const lowSolvedRuns = runs.map((r) =>
@@ -517,6 +516,27 @@ describe("verdict", () => {
     });
     assert.equal(latchedProvenance.batchValid, false);
     assert.equal(latchedProvenance.leaks.ownerLeak, true);
+
+    // Any batch.halted reason (top-level or provenance) marks batchValid false and leaves veto undecided.
+    const haltedTopLevel = verdict({
+      runs: baseRuns,
+      halted: { reason: "owner_check_error", at: "2026-11-23T02:10:00.000Z" },
+      resamples: 100,
+    });
+    assert.equal(haltedTopLevel.batchValid, false);
+    assert.equal(haltedTopLevel.halted?.reason, "owner_check_error");
+    assert.equal(haltedTopLevel.veto.vetoed, null);
+    assert.equal(haltedTopLevel.claims.afterVsNone.authorized, false);
+
+    const haltedProvenance = verdict({
+      runs: baseRuns,
+      provenance: { halted: { reason: "token_leak", runId: "T01-none-b1", at: "2026-11-23T02:10:00.000Z" } },
+      label: "run2",
+      resamples: 100,
+    });
+    assert.equal(haltedProvenance.batchValid, false);
+    assert.equal(haltedProvenance.halted?.reason, "token_leak");
+    assert.equal(haltedProvenance.veto.vetoed, null);
   });
 
   test("verdict passes batch k to signFlipP for exact per-task mean ties", () => {
@@ -682,6 +702,29 @@ describe("report.mjs", () => {
         "utf8",
       );
 
+      // Missing completedAt -> run1 and run2 both exit 2.
+      const run1Incomplete = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run1", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(run1Incomplete.status, 2);
+      assert.match(run1Incomplete.stderr, /completedAt/);
+
+      const run2Incomplete = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run2", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(run2Incomplete.status, 2);
+      assert.match(run2Incomplete.stderr, /completedAt/);
+
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({ v: 1, seed: 20261123, k: 1, taskIds: trapIds, completedAt: "2026-11-23T03:00:00.000Z" }, null, 2)}\n`,
+        "utf8",
+      );
+
       // Preregistered label run1 rejects --resamples 500 and --seed overrides (exit 2).
       const run1OverrideResamples = spawnSync(
         process.execPath,
@@ -712,8 +755,12 @@ describe("report.mjs", () => {
         run1Md,
         /\| afterVsNone \(after - none\) \|.*\| yes \| no \| run 1 serves veto and positive control only \|/,
       );
+      assert.match(
+        run1Md,
+        /\| beforeVsNone \(before - none\) \|.*\| yes \| no \| descriptive only: no claim rule for this comparison \|/,
+      );
 
-      // Valid run2 with statistical trigger -> Trigger yes, Claimed yes.
+      // Valid run2 with statistical trigger -> afterVsNone Claimed yes; afterVsBefore and beforeVsNone Claimed no.
       const run2Ok = spawnSync(
         process.execPath,
         [reportScript, "--out", dir, "--label", "run2", "--dest", dest],
@@ -722,16 +769,29 @@ describe("report.mjs", () => {
       assert.equal(run2Ok.status, 0, run2Ok.stderr);
       const run2Md = readFileSync(dest, "utf8");
       assert.match(run2Md, /\| afterVsNone \(after - none\) \|.*\| yes \| yes \| authorized \|/);
+      assert.match(
+        run2Md,
+        /\| afterVsBefore \(after - before\) \|.*\| yes \| no \| run 2 after\u2212before is descriptive until a held-out trap set frozen before any run-1-informed change is checked \|/,
+      );
+      assert.match(
+        run2Md,
+        /\| beforeVsNone \(before - none\) \|.*\| yes \| no \| descriptive only: no claim rule for this comparison \|/,
+      );
 
-      // Invalid batch (3/10 undelivered, 2 api_error) -> report shows both 3/10 and 1/8, Claimed no.
+      // Invalid batch (3/10 undelivered, 2 api_error) WITH veto thresholds exceeded:
+      // report prints raw veto numbers & triggers, Vetoed: not decided (batch invalid), and every Claimed is no.
       const invalidMetrics = { ...metricsJson };
       for (const id of ["T07", "T08", "T09", "T10"]) {
         invalidMetrics[`${id}-none-b1`] = makeRun({ taskId: id, arm: "none", repeatFailures: 3, solved: true });
+        invalidMetrics[`${id}-before-b1`] = makeRun({ taskId: id, arm: "before", repeatFailures: 2, solved: true });
         invalidMetrics[`${id}-after-b1`] = makeRun({ taskId: id, arm: "after", repeatFailures: 0, solved: true, noteDelivered: true });
       }
       invalidMetrics["T01-after-b1"] = makeRun({ taskId: "T01", arm: "after", repeatFailures: 0, solved: true, noteDelivered: false });
       invalidMetrics["T02-after-b1"] = makeRun({ taskId: "T02", arm: "after", invalid: "api_error", repeatFailures: 0, solved: false, noteDelivered: false });
       invalidMetrics["T03-after-b1"] = makeRun({ taskId: "T03", arm: "after", invalid: "api_error", repeatFailures: 0, solved: false, noteDelivered: false });
+      // Add pooled control runs hitting BOTH harm veto thresholds (solvedDrop = 1.0 >= 0.2, medianTurnRise = 4 >= 3).
+      invalidMetrics["C01-none-b1"] = makeRun({ taskId: "C01", arm: "none", solved: true, numTurns: 4 });
+      invalidMetrics["C01-after-b1"] = makeRun({ taskId: "C01", arm: "after", solved: false, numTurns: 8 });
       writeFileSync(join(dir, "metrics.json"), `${JSON.stringify(invalidMetrics, null, 2)}\n`, "utf8");
 
       const invalidRun2 = spawnSync(
@@ -744,6 +804,48 @@ describe("report.mjs", () => {
       assert.match(invalidMd, /3\/10 \(30\.0%\)/);
       assert.match(invalidMd, /1\/8 \(12\.5%\)/);
       assert.match(invalidMd, /\| afterVsNone \(after - none\) \|.*\| yes \| no \| batch invalid \|/);
+      assert.match(invalidMd, /\| afterVsBefore \(after - before\) \|.*\| yes \| no \| batch invalid \|/);
+      assert.match(
+        invalidMd,
+        /\| beforeVsNone \(before - none\) \|.*\| yes \| no \| descriptive only: no claim rule for this comparison \|/,
+      );
+      assert.match(invalidMd, /\| solvedDrop \(none - after\) \| 1\.000 \| >= 0\.200 \| yes \|/);
+      assert.match(invalidMd, /\| medianTurnRise \(after - none, numTurns\) \| 4 \| >= 3 \| yes \|/);
+      assert.match(invalidMd, /- \*\*Batch valid:\*\* false/);
+      assert.match(invalidMd, /- \*\*Vetoed:\*\* not decided \(batch invalid\)/);
+      assert.doesNotMatch(invalidMd, /- \*\*Vetoed:\*\* true/);
+
+      // Halted batch (e.g. owner_check_error) without completedAt:
+      // run1 refuses with exit 2; non-preregistered label renders Batch valid: false and Vetoed: not decided (batch invalid).
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({
+          v: 1,
+          seed: 20261123,
+          k: 1,
+          taskIds: trapIds,
+          halted: { reason: "owner_check_error", at: "2026-11-23T02:15:00.000Z" },
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      const haltedRun1 = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run1", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(haltedRun1.status, 2);
+      assert.match(haltedRun1.stderr, /completedAt/);
+
+      const haltedDev = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "dev", "--dest", dest, "--resamples", "200"],
+        { encoding: "utf8" },
+      );
+      assert.equal(haltedDev.status, 0, haltedDev.stderr);
+      const haltedMd = readFileSync(dest, "utf8");
+      assert.match(haltedMd, /Batch halted: reason=owner_check_error/);
+      assert.match(haltedMd, /- \*\*Batch valid:\*\* false/);
+      assert.match(haltedMd, /- \*\*Vetoed:\*\* not decided \(batch invalid\)/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

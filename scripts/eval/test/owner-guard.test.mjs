@@ -416,6 +416,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       assert.equal(haltedBatch.halted?.reason, "token_leak");
       assert.equal(haltedBatch.halted?.runId, firstRunId);
       assert.equal(typeof haltedBatch.halted?.at, "string");
+      assert.equal("completedAt" in haltedBatch, false);
 
       // Resume of a halted batch (even with --retry-invalid) exits 3 before packing, starting zero runs.
       const beforeRetryCount = startedRuns.length;
@@ -747,6 +748,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       assert.equal(batchAfterClean.ownerBaseline.memoryPath, memPath);
       assert.equal(batchAfterClean.ownerCheck.leak, false);
       assert.equal(batchAfterClean.ownerCheck.appendedUnderEvalRoot, 0);
+      assert.equal(typeof batchAfterClean.completedAt, "string");
 
       // Resume must NOT take a new baseline; reuses the stored one even if memory grew outside evalRoot.
       writeFileSync(
@@ -798,6 +800,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
 
       const leakedBatch = JSON.parse(readFileSync(join(outDirLeak, "batch.json"), "utf8"));
       assert.equal(leakedBatch.ownerCheck.leak, true);
+      assert.equal("completedAt" in leakedBatch, false);
       assert.equal(leakedBatch.ownerCheck.appendedUnderEvalRoot, 1);
       assert.equal(existsSync(join(outDirLeak, "runs", startedLeakRuns[0], "run.json")), true);
 
