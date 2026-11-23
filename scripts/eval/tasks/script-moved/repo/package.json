@@ -1,0 +1,9 @@
+{
+  "name": "eval-script-moved",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/b.mjs && node test/run.mjs"
+  }
+}

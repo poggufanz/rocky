@@ -1,0 +1,338 @@
+[
+  {
+    "id": "T01",
+    "kind": "trap",
+    "fixture": "env-name-typo",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: DATABASE_URL is not set",
+    "acceptLine": "eval-accept: env-name-typo ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T02",
+    "kind": "trap",
+    "fixture": "config-override",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: port must be a number, got \"80a\"",
+    "acceptLine": "eval-accept: config-override ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T03",
+    "kind": "trap",
+    "fixture": "dist-overwritten",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "TypeError: total is not a function",
+    "acceptLine": "eval-accept: dist-overwritten ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T04",
+    "kind": "trap",
+    "fixture": "generated-source",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: unknown field \"email\"",
+    "acceptLine": "eval-accept: generated-source ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T05",
+    "kind": "trap",
+    "fixture": "cjs-named-export",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "SyntaxError: Named export 'parse' not found",
+    "acceptLine": "eval-accept: cjs-named-export ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T06",
+    "kind": "trap",
+    "fixture": "cli-flag-renamed",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^npm run format\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: unknown option '--fix'",
+    "acceptLine": "eval-accept: cli-flag-renamed ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T07",
+    "kind": "trap",
+    "fixture": "env-file-missing",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node --env-file-if-exists=app\\.env test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: API_TOKEN is required",
+    "acceptLine": "eval-accept: env-file-missing ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T08",
+    "kind": "trap",
+    "fixture": "path-with-space",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node .*scripts/run"]
+    },
+    "trapLine": "Error: Cannot find module '<path>'",
+    "acceptLine": "eval-accept: path-with-space ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T09",
+    "kind": "trap",
+    "fixture": "stale-cache",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "AssertionError: expected 3 rows, got 2",
+    "acceptLine": "eval-accept: stale-cache ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "T10",
+    "kind": "trap",
+    "fixture": "rate-key-case",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "AssertionError: expected total 110, got 100",
+    "acceptLine": "eval-accept: rate-key-case ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "C01",
+    "kind": "control",
+    "fixture": "env-name-typo",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: DATABASE_URL is not set",
+    "acceptLine": "eval-accept: env-name-typo ok",
+    "history": null,
+    "protected": ["test/"]
+  },
+  {
+    "id": "C02",
+    "kind": "control",
+    "fixture": "config-override",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: port must be a number, got \"80a\"",
+    "acceptLine": "eval-accept: config-override ok",
+    "history": null,
+    "protected": ["test/"]
+  },
+  {
+    "id": "C03",
+    "kind": "control",
+    "fixture": "dist-overwritten",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "TypeError: total is not a function",
+    "acceptLine": "eval-accept: dist-overwritten ok",
+    "history": null,
+    "protected": ["test/"]
+  },
+  {
+    "id": "C04",
+    "kind": "control",
+    "fixture": "generated-source",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: unknown field \"email\"",
+    "acceptLine": "eval-accept: generated-source ok",
+    "history": null,
+    "protected": ["test/"]
+  },
+  {
+    "id": "C05",
+    "kind": "control",
+    "fixture": "cjs-named-export",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "SyntaxError: Named export 'parse' not found",
+    "acceptLine": "eval-accept: cjs-named-export ok",
+    "history": null,
+    "protected": ["test/"]
+  },
+  {
+    "id": "C06",
+    "kind": "control",
+    "fixture": "cli-flag-renamed",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^npm run format\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: unknown option '--fix'",
+    "acceptLine": "eval-accept: cli-flag-renamed ok",
+    "history": null,
+    "protected": ["test/"]
+  },
+  {
+    "id": "S01",
+    "kind": "stale",
+    "fixture": "config-override-moved",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: port must be a number, got \"80a\"",
+    "acceptLine": "eval-accept: config-override-moved ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "S02",
+    "kind": "stale",
+    "fixture": "dist-now-rebuilt",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "TypeError: total is not a function",
+    "acceptLine": "eval-accept: dist-now-rebuilt ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "S03",
+    "kind": "stale",
+    "fixture": "script-moved",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node scripts/[ab]\\.mjs\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: missing input file",
+    "acceptLine": "eval-accept: script-moved ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "S04",
+    "kind": "stale",
+    "fixture": "cache-moved",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "AssertionError: expected 3 rows, got 2",
+    "acceptLine": "eval-accept: cache-moved ok",
+    "history": {
+      "wrong": ["wrong-1", "wrong-2"],
+      "fix": "fix"
+    },
+    "protected": ["test/"]
+  },
+  {
+    "id": "SMOKE",
+    "kind": "smoke",
+    "fixture": "smoke",
+    "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+    "target": {
+      "command": "npm test",
+      "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
+    },
+    "trapLine": "Error: capture-probe",
+    "acceptLine": "eval-accept: smoke ok",
+    "history": null,
+    "protected": ["test/"]
+  }
+]

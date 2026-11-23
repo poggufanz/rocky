@@ -1,0 +1,10 @@
+{
+  "name": "eval-dist-rebuilt",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretest": "node scripts/build.mjs",
+    "test": "node test/run.mjs"
+  }
+}
