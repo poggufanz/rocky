@@ -752,6 +752,24 @@ describe("report.mjs", () => {
         v2Built.markdown,
         /\| Task set sha256 \| `2222222222222222222222222222222222222222222222222222222222222222` \|/,
       );
+
+      // Missing saved taskSetSha256 renders n/a while keeping the v1 label fallback (and v2 when set="v2").
+      const withoutDigest = { ...batchJson };
+      delete withoutDigest.taskSetSha256;
+      delete withoutDigest.set;
+      writeFileSync(join(dir, "batch.json"), `${JSON.stringify(withoutDigest, null, 2)}\n`, "utf8");
+      const legacyNoDigest = generateReport(dir, { label: "dev", resamples: 500 });
+      assert.match(legacyNoDigest.markdown, /\| Task set \| v1 \|/);
+      assert.match(legacyNoDigest.markdown, /\| Task set sha256 \| n\/a \|/);
+
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({ ...withoutDigest, set: "v2" }, null, 2)}\n`,
+        "utf8",
+      );
+      const v2NoDigest = generateReport(dir, { label: "dev", resamples: 500 });
+      assert.match(v2NoDigest.markdown, /\| Task set \| v2 \|/);
+      assert.match(v2NoDigest.markdown, /\| Task set sha256 \| n\/a \|/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

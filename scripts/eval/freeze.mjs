@@ -75,15 +75,17 @@ export function serializeTasksJson(tasks) {
   return `${formatTasksJsonValue(tasks, 0)}\n`;
 }
 
-function computeTaskSetSha256(setName, rawTasks, diskFiles, files) {
+export function computeTaskSetSha256(setName, rawTasks, diskFiles, files) {
   const setTasks = rawTasks
     .filter((task) => task.set === setName)
     .map(({ set: _set, ...rest }) => rest);
   const setFixtures = new Set(setTasks.map((task) => task.fixture));
   const setTasksJsonHash = sha256Buffer(Buffer.from(serializeTasksJson(setTasks), "utf8"));
   const setFiles = diskFiles.filter((rel) => {
-    if (rel === "tasks.json" || !rel.includes("/")) return true;
-    const topDir = rel.slice(0, rel.indexOf("/"));
+    if (rel === ".gitignore" || rel === "tasks.json") return true;
+    const slashIdx = rel.indexOf("/");
+    if (slashIdx === -1) return false;
+    const topDir = rel.slice(0, slashIdx);
     return setFixtures.has(topDir);
   });
   const hashLines = setFiles
@@ -227,7 +229,7 @@ async function withTempWorkDir(prefix, fn) {
   }
 }
 
-export function computeManifest() {
+export function computeManifest(options = {}) {
   const gitEnv = buildToolEnv(process.env, process.platform);
   const diskFiles = listDiskFilesUnderTasks();
   checkForbiddenFixtureNames(diskFiles);
@@ -238,6 +240,18 @@ export function computeManifest() {
   const files = {};
   for (const rel of diskFiles) {
     files[rel] = sha256Buffer(readFileSync(join(TASKS_DIR, rel)));
+  }
+  if (options.extraFiles && typeof options.extraFiles === "object") {
+    for (const [rel, digest] of Object.entries(options.extraFiles)) {
+      if (typeof rel === "string" && rel.length > 0 && typeof digest === "string") {
+        if (!Object.prototype.hasOwnProperty.call(files, rel)) {
+          diskFiles.push(rel);
+        }
+        files[rel] = digest;
+      }
+    }
+    diskFiles.sort(sortCodePoint);
+    checkForbiddenFixtureNames(diskFiles);
   }
 
   const rawTasks = JSON.parse(readFileSync(TASKS_JSON_PATH, "utf8"));

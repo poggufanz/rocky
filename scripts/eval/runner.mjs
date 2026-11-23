@@ -214,9 +214,14 @@ export function parseArms(rawArms) {
   if (rawArms === undefined || rawArms === null) {
     return [...ARMS];
   }
+  if (typeof rawArms === "string" && rawArms.trim().length === 0) {
+    const err = new Error(`--arms requires at least one arm (${ARMS.join(", ")})`);
+    /** @type {any} */ (err).exitCode = 2;
+    throw err;
+  }
   const parts = Array.isArray(rawArms)
-    ? rawArms.map((item) => String(item).trim()).filter(Boolean)
-    : String(rawArms).split(",").map((item) => item.trim()).filter(Boolean);
+    ? rawArms.map((item) => (typeof item === "string" ? item.trim() : String(item ?? "").trim()))
+    : String(rawArms).split(",").map((item) => item.trim());
   if (parts.length === 0) {
     const err = new Error(`--arms requires at least one arm (${ARMS.join(", ")})`);
     /** @type {any} */ (err).exitCode = 2;
@@ -225,15 +230,23 @@ export function parseArms(rawArms) {
   const selected = [];
   const seen = new Set();
   for (const arm of parts) {
+    if (arm.length === 0) {
+      const err = new Error(`Empty arm in --arms (expected subset of ${ARMS.join(",")})`);
+      /** @type {any} */ (err).exitCode = 2;
+      throw err;
+    }
     if (!ARMS.includes(arm)) {
       const err = new Error(`Invalid arm in --arms: ${arm} (expected subset of ${ARMS.join(",")})`);
       /** @type {any} */ (err).exitCode = 2;
       throw err;
     }
-    if (!seen.has(arm)) {
-      seen.add(arm);
-      selected.push(arm);
+    if (seen.has(arm)) {
+      const err = new Error(`Duplicate arm in --arms: ${arm}`);
+      /** @type {any} */ (err).exitCode = 2;
+      throw err;
     }
+    seen.add(arm);
+    selected.push(arm);
   }
   return selected;
 }
@@ -636,7 +649,9 @@ export function diffBatchProvenance(existing, current) {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
     return ["batch.json"];
   }
-  if (existing.set !== undefined && current.set !== undefined && existing.set !== current.set) {
+  const existingSet = existing.set === undefined ? "v1" : existing.set;
+  const currentSet = current.set === undefined ? "v1" : current.set;
+  if (existingSet !== currentSet) {
     diffs.push("set");
   }
   const scalarFields = [
@@ -654,7 +669,7 @@ export function diffBatchProvenance(existing, current) {
       diffs.push(field);
     }
   }
-  const arrayFields = ["claudeFlags", "taskIds"];
+  const arrayFields = ["claudeFlags", "arms", "taskIds"];
   for (const field of arrayFields) {
     const a = existing[field];
     const b = current[field];
@@ -664,17 +679,6 @@ export function diffBatchProvenance(existing, current) {
       && a.every((val, idx) => val === b[idx]);
     if (!same) {
       diffs.push(field);
-    }
-  }
-  if (existing.arms !== undefined && current.arms !== undefined) {
-    const a = existing.arms;
-    const b = current.arms;
-    const sameArms = Array.isArray(a)
-      && Array.isArray(b)
-      && a.length === b.length
-      && a.every((val, idx) => val === b[idx]);
-    if (!sameArms) {
-      diffs.push("arms");
     }
   }
   return diffs;
