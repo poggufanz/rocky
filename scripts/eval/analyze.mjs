@@ -1,16 +1,16 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARMS, DEFAULT_SEED, mulberry32 } from "./runner.mjs";
+import { ARMS, DEFAULT_K, DEFAULT_SEED, mulberry32 } from "./runner.mjs";
 
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(EVAL_DIR, "tasks", "manifest.json");
 
 export const MAX_EXACT_SIGN_FLIP_N = 24;
+export const DEFAULT_SIGN_FLIP_K = DEFAULT_K;
 export const DEFAULT_BOOTSTRAP_RESAMPLES = 10000;
 export const DEFAULT_BOOTSTRAP_LEVEL = 0.9;
 
-const SIGN_FLIP_GRID_SCALE = 1e9;
 const CLAIM_P_THRESHOLD = 0.05;
 const VETO_SOLVED_DROP_NUM = 1;
 const VETO_SOLVED_DROP_DEN = 5;
@@ -150,23 +150,66 @@ function compareStrings(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+function gcd(a, b) {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x;
+}
+
+function lcmUpTo(k) {
+  if (!Number.isInteger(k) || k < 1) {
+    throw new RangeError(`signFlipP k must be a positive integer, got ${String(k)}`);
+  }
+  let acc = 1;
+  for (let n = 2; n <= k; n += 1) {
+    const factor = n / gcd(acc, n);
+    if (factor > Math.floor(Number.MAX_SAFE_INTEGER / acc)) {
+      throw new RangeError(`signFlipP lcm(1..${k}) exceeds Number.MAX_SAFE_INTEGER`);
+    }
+    acc *= factor;
+  }
+  return acc;
+}
+
 /**
  * Exact two-sided paired sign-flip test over per-task differences.
- * Quantizes each diff onto a 1e-9 integer grid (`Math.round(d * 1e9)`), drops
+ * Quantizes each diff onto the exact `1 / lcm(1..k)` integer grid
+ * (`Math.round(d * lcm(1..k))`, default `k = 5` → `scale = 60`), drops
  * values that quantize to zero, and enumerates all `2^nEffective` sign
  * assignments in exact integer arithmetic to compute `P(|sum| >= |observed|)`.
- * Throws when `nEffective > 24` or when `sum(|q_i|) >= Number.MAX_SAFE_INTEGER`.
+ * Throws when `nEffective > 24`, when `lcm(1..k)` overflows safe integers,
+ * or when `sum(|q_i|) >= Number.MAX_SAFE_INTEGER`.
  * @param {readonly number[]} diffs
+ * @param {{ k?: number } | number} [options]
  * @returns {{ p: number, nEffective: number }}
  */
-export function signFlipP(diffs) {
+export function signFlipP(diffs, options = {}) {
   if (!Array.isArray(diffs)) {
     throw new TypeError("signFlipP requires an array of finite numbers");
   }
 
-  // ponytail: diffs are quantized onto a 1e-9 integer grid (`Math.round(d * 1e9)`),
-  // so inputs not on a 1e-9 grid are rounded (fine for k-run means of integer counts
-  // over small k). Exactness requires sum(|q_i|) < Number.MAX_SAFE_INTEGER.
+  let k = DEFAULT_SIGN_FLIP_K;
+  if (typeof options === "number") {
+    k = options;
+  } else if (options !== undefined) {
+    if (options === null || typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("signFlipP options must be an object or positive integer k");
+    }
+    if (options.k !== undefined) {
+      k = options.k;
+    }
+  }
+  const scale = lcmUpTo(k);
+
+  // ponytail: diffs are quantized onto the 1 / lcm(1..k) integer grid
+  // (`q_i = Math.round(d_i * lcm(1..k))`), which is exact for paired means of
+  // <= k integer counts (`a/n_a - b/n_b` with n_a, n_b in 1..k); inputs off
+  // that grid are rounded. Exactness requires sum(|q_i|) < Number.MAX_SAFE_INTEGER.
   /** @type {number[]} */
   const quantized = [];
   let sumAbs = 0;
@@ -175,7 +218,13 @@ export function signFlipP(diffs) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new TypeError(`signFlipP received non-finite diff at index ${i}: ${String(value)}`);
     }
-    const q = Math.round(value * SIGN_FLIP_GRID_SCALE);
+    const scaled = value * scale;
+    if (!Number.isFinite(scaled)) {
+      throw new RangeError(
+        `signFlipP quantized diff at index ${i} exceeds Number.MAX_SAFE_INTEGER`,
+      );
+    }
+    const q = Math.round(scaled);
     if (!Number.isSafeInteger(q)) {
       throw new RangeError(
         `signFlipP quantized diff at index ${i} exceeds Number.MAX_SAFE_INTEGER`,
@@ -443,6 +492,7 @@ function meanPairedDiff(sampledTasks) {
  *   tasks?: readonly any[] | Record<string, any> | Map<string, any>,
  *   provenance?: any,
  *   label?: string,
+ *   k?: number,
  *   run1InformedChange?: boolean,
  *   heldOutTrapTasks?: number,
  *   ownerCheck?: { leak?: boolean, [key: string]: any } | null,
@@ -476,6 +526,9 @@ export function verdict(batch) {
   const seed = typeof batch.seed === "number"
     ? batch.seed
     : (typeof batch.provenance?.seed === "number" ? batch.provenance.seed : DEFAULT_SEED);
+  const k = batch.k !== undefined
+    ? batch.k
+    : (batch.provenance?.k !== undefined ? batch.provenance.k : DEFAULT_SIGN_FLIP_K);
   const resamples = batch.resamples ?? DEFAULT_BOOTSTRAP_RESAMPLES;
   const level = batch.level ?? DEFAULT_BOOTSTRAP_LEVEL;
 
@@ -642,7 +695,7 @@ export function verdict(batch) {
     }
 
     const diffs = paired.map((item) => item.diff);
-    const { p, nEffective } = signFlipP(diffs);
+    const { p, nEffective } = signFlipP(diffs, { k });
     const meanDiff = paired.length > 0 ? mean(diffs) : null;
 
     /** @type {"downward" | "upward" | "flat" | "none"} */

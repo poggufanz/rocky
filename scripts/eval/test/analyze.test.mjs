@@ -50,33 +50,53 @@ describe("signFlipP", () => {
     assert.deepEqual(b, { p: 1, nEffective: 1 });
   });
 
-  test("signFlipP quantizes on a 1e-9 integer grid, drops sub-grid zeros, preserves exact ties, and enforces ceilings", () => {
+  test("signFlipP quantizes on the exact lcm(1..k) grid, preserves thirds/sevenths ties, drops sub-grid zeros, and enforces ceilings", () => {
     assert.deepEqual(signFlipP([]), { p: 1, nEffective: 0 });
     assert.deepEqual(signFlipP([0, -0, 0]), { p: 1, nEffective: 0 });
     assert.deepEqual(signFlipP([-1, -1, -1, -1, -1, -1]), { p: 2 / 64, nEffective: 6 });
 
-    // Sub-grid diff rounds to zero on the 1e-9 integer grid and is dropped.
+    // Exact thirds on default k = 5 (scale = lcm(1..5) = 60):
+    // [1/3, 1/3, 1/3, -1] -> thirds [1, 1, 1, -3], observed sum 0, all 16/16 sign flips tie or exceed 0.
+    assert.deepEqual(signFlipP([1 / 3, 1 / 3, 1 / 3, -1]), { p: 1, nEffective: 4 });
+    // Non-zero thirds tie that fails on a 1e-9 grid (999999999 < 1000000001):
+    // [1/3, 1/3, 1/3, -1, -1] -> thirds [1, 1, 1, -3, -3], |obs| = 3, exact enumeration gives 20/32 = 5/8.
+    assert.deepEqual(signFlipP([1 / 3, 1 / 3, 1 / 3, -1, -1]), { p: 20 / 32, nEffective: 5 });
+
+    // Caller-supplied k = 7 (scale = lcm(1..7) = 420) preserves exact sevenths ties
+    // that round off on the k = 5 (scale = 60) grid:
+    // [4/7, 4/7, 6/7, -2, -2] -> sevenths [4, 4, 6, -14, -14], |obs| = 14, exact enumeration gives 20/32 = 5/8.
+    assert.deepEqual(signFlipP([4 / 7, 4 / 7, 6 / 7, -2, -2], { k: 7 }), { p: 20 / 32, nEffective: 5 });
+
+    // Sub-grid diff rounds to zero on the lcm(1..5) = 60 grid and is dropped.
     assert.deepEqual(signFlipP([1, 1e-13]), { p: 1, nEffective: 1 });
 
     // Mixed-magnitude vector with 2*EPSILON: sub-grid entry drops (nEffective = 8);
-    // exact integer enumeration over all 2^8 = 256 sign vectors counts 14/256 = 0.0546875.
+    // exact integer enumeration over all 2^8 = 256 sign vectors counts 14/256 = 7/128 = 0.0546875.
     assert.deepEqual(
       signFlipP([-1.25, 2 * Number.EPSILON, -0.25, -0.5, -0.5, -0.75, -0.75, -0.25, 0.5]),
-      { p: 14 / 256, nEffective: 8 },
+      { p: 7 / 128, nEffective: 8 },
     );
 
-    // Floating-point tie: 0.1 + 0.2 - 0.3 = 0 on the 1e-9 integer grid.
+    // Floating-point tie: 0.1 + 0.2 - 0.3 = 0 on the lcm(1..5) = 60 grid ([6, 12, -18]).
     const fp = signFlipP([0.1, 0.2, -0.3]);
     assert.equal(fp.nEffective, 3);
     assert.equal(fp.p, 1);
 
     assert.throws(
-      () => signFlipP([5e6, 5e6]),
+      () => signFlipP([1e14, 1e14]),
       /MAX_SAFE_INTEGER/,
     );
     assert.throws(
-      () => signFlipP([1e7]),
+      () => signFlipP([2e14]),
       /MAX_SAFE_INTEGER/,
+    );
+    assert.throws(
+      () => signFlipP([1], { k: 41 }),
+      /MAX_SAFE_INTEGER/,
+    );
+    assert.throws(
+      () => signFlipP([1], { k: 0 }),
+      /positive integer/,
     );
     assert.throws(
       () => signFlipP(Array.from({ length: 25 }, () => 1)),
@@ -456,6 +476,45 @@ describe("verdict", () => {
     assert.equal(ownerLeak.batchValid, false);
     assert.equal(ownerLeak.armValid.none, false);
     assert.equal(ownerLeak.armValid.after, false);
+  });
+
+  test("verdict passes batch k to signFlipP for exact per-task mean ties", () => {
+    const runs = [];
+    // 5 trap tasks with 7 runs per arm giving per-task diffs (after - none) = [4/7, 4/7, 6/7, -2, -2].
+    const specs = [
+      { taskId: "T01", afterOnes: 4, noneVal: 0 },
+      { taskId: "T02", afterOnes: 4, noneVal: 0 },
+      { taskId: "T03", afterOnes: 6, noneVal: 0 },
+      { taskId: "T04", afterOnes: 0, noneVal: 2 },
+      { taskId: "T05", afterOnes: 0, noneVal: 2 },
+    ];
+    for (const spec of specs) {
+      for (let block = 1; block <= 7; block += 1) {
+        runs.push(
+          makeRun({
+            taskId: spec.taskId,
+            arm: "after",
+            block,
+            repeatFailures: block <= spec.afterOnes ? 1 : 0,
+            noteDelivered: true,
+          }),
+          makeRun({
+            taskId: spec.taskId,
+            arm: "none",
+            block,
+            repeatFailures: spec.noneVal,
+          }),
+        );
+      }
+    }
+
+    const fromBatchK = verdict({ runs, k: 7, seed: 11, resamples: 100 });
+    assert.equal(fromBatchK.claims.afterVsNone.n, 5);
+    assert.equal(fromBatchK.claims.afterVsNone.p, 20 / 32);
+
+    const fromProvenanceK = verdict({ runs, provenance: { k: 7 }, seed: 11, resamples: 100 });
+    assert.equal(fromProvenanceK.claims.afterVsNone.n, 5);
+    assert.equal(fromProvenanceK.claims.afterVsNone.p, 20 / 32);
   });
 });
 
