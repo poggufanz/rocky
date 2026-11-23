@@ -402,7 +402,7 @@
       "command": "npm test",
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
-    "trapLine": "AssertionError: case 2: expected 30 got 15",
+    "trapLine": "AssertionError: case 2: expected 14 got 6",
     "acceptLine": "eval-accept: page-slice ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
@@ -438,7 +438,7 @@
       "command": "npm test",
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
-    "trapLine": "AssertionError: case 2: expected 22 got 21",
+    "trapLine": "AssertionError: case 2: expected 219 got 237",
     "acceptLine": "eval-accept: version-rank ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
@@ -528,7 +528,7 @@
       "command": "npm test",
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
-    "trapLine": "AssertionError: case 2: expected 3 got 4",
+    "trapLine": "AssertionError: case 2: expected 12 got 13",
     "acceptLine": "eval-accept: csv-columns ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
@@ -600,7 +600,7 @@
       "command": "npm test",
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
-    "trapLine": "AssertionError: case 2: expected 30 got 15",
+    "trapLine": "AssertionError: case 2: expected 14 got 6",
     "acceptLine": "eval-accept: page-slice-moved ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
@@ -618,7 +618,7 @@
       "command": "npm test",
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
-    "trapLine": "AssertionError: case 2: expected 3 got 4",
+    "trapLine": "AssertionError: case 2: expected 12 got 13",
     "acceptLine": "eval-accept: csv-columns-moved ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],

@@ -203,6 +203,11 @@ function extractFailingLine(stderr) {
   return lines[0] ?? "";
 }
 
+function parseCaseIndex(line) {
+  const match = /\bcase\s+(\d+)\b/i.exec(String(line ?? ""));
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
 function listOverlayFiles(overlayDir) {
   /** @type {string[]} */
   const out = [];
@@ -420,7 +425,14 @@ export async function validateTaskBehaviors(manifest, options = {}) {
 
           const initialRawLine = extractFailingLine(initial.stderr);
           const initialNormLine = normalizeLine(initialRawLine);
+          const initialCaseIndex = task.set === "v2" ? parseCaseIndex(initialRawLine) : null;
+          if (task.set === "v2" && initialCaseIndex === null) {
+            throw new Error(
+              `${task.id}: initial failing line missing parseable case index: "${initialRawLine}"`,
+            );
+          }
           let prevRawLine = initialRawLine;
+          let prevCaseIndex = initialCaseIndex;
           let prevLabel = "initial";
 
           for (const wrongName of task.history.wrong) {
@@ -437,10 +449,24 @@ export async function validateTaskBehaviors(manifest, options = {}) {
                 `${task.id}: wrong overlay ${wrongName} failing line normalized differently from initial: "${initialNormLine}" vs "${wrongNormLine}"`,
               );
             }
-            if (task.set === "v2" && wrongRawLine === prevRawLine) {
-              throw new Error(
-                `${task.id}: wrong overlay ${wrongName} raw failing line did not change from ${prevLabel}: "${wrongRawLine}"`,
-              );
+            if (task.set === "v2") {
+              if (wrongRawLine === prevRawLine) {
+                throw new Error(
+                  `${task.id}: wrong overlay ${wrongName} raw failing line did not change from ${prevLabel}: "${wrongRawLine}"`,
+                );
+              }
+              const wrongCaseIndex = parseCaseIndex(wrongRawLine);
+              if (wrongCaseIndex === null) {
+                throw new Error(
+                  `${task.id}: wrong overlay ${wrongName} failing line missing parseable case index: "${wrongRawLine}"`,
+                );
+              }
+              if (wrongCaseIndex <= prevCaseIndex) {
+                throw new Error(
+                  `${task.id}: wrong overlay ${wrongName} case index did not advance from ${prevLabel}: case ${prevCaseIndex} -> case ${wrongCaseIndex} ("${wrongRawLine}")`,
+                );
+              }
+              prevCaseIndex = wrongCaseIndex;
             }
             prevRawLine = wrongRawLine;
             prevLabel = wrongName;

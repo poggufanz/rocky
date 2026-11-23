@@ -1,8 +1,9 @@
 export function runWithRetries(maxAttempts, task) {
-  for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+  const limit = Math.max(1, maxAttempts);
+  for (let attempt = 0; attempt <= limit; attempt += 1) {
     if (task(attempt)) {
       return { ok: true, attempts: attempt + 1 };
     }
   }
-  return { ok: false, attempts: maxAttempts + 1 };
+  return { ok: false, attempts: limit + 1 };
 }

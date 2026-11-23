@@ -8,6 +8,14 @@ export const cases = [
     expected: 3000,
   },
   {
+    input: {
+      defaults: { cache: { ttl: [60, 120] }, retries: [1, 2] },
+      override: { retries: [5] },
+      field: "cache.ttl",
+    },
+    expected: 180,
+  },
+  {
     input: { defaults: { retries: [1, 2, 4, 8] }, override: { retries: [5, 10] }, field: "retries" },
     expected: 15,
   },
@@ -16,7 +24,11 @@ export const cases = [
     expected: 0,
   },
   {
-    input: { defaults: { nested: { weights: [10, 20, 30, 40] } }, override: { nested: { weights: [7] } }, field: "nested.weights" },
-    expected: 7,
+    input: {
+      defaults: { pool: { base: 50, weights: [10, 20, 30, 40] } },
+      override: { pool: { weights: [7] } },
+      field: "pool",
+    },
+    expected: 57,
   },
 ];

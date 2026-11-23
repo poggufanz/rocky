@@ -1,21 +1,33 @@
 import { deepMerge } from "./merge.js";
 
-function readField(obj, dottedPath) {
+function readSection(obj, dottedPath) {
   let cur = obj;
   for (const part of dottedPath.split(".")) {
-    if (cur == null) return [];
+    if (cur == null) return null;
     cur = cur[part];
   }
-  return Array.isArray(cur) ? cur : [];
+  return cur;
+}
+
+function sumValues(node) {
+  if (typeof node === "number") return node;
+  if (Array.isArray(node)) {
+    let total = 0;
+    for (const v of node) total += sumValues(v);
+    return total;
+  }
+  if (node && typeof node === "object") {
+    let total = 0;
+    for (const v of Object.values(node)) total += sumValues(v);
+    return total;
+  }
+  return 0;
 }
 
 export function mergedSettingScore(pair, onResult) {
   const merged = deepMerge(pair.defaults, pair.override);
-  const values = readField(merged, pair.field);
-  let total = 0;
-  for (const v of values) {
-    total += Number(v) || 0;
-  }
+  const target = readSection(merged, pair.field);
+  const total = sumValues(target);
   if (typeof onResult === "function") onResult(total);
   return total;
 }

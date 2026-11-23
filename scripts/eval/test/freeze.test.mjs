@@ -175,6 +175,10 @@ describe("freeze manifest task sets", () => {
           const msg = err instanceof Error ? err.message : String(err);
           assert.ok(msg.includes("W99"), `expected task id in error, got: ${msg}`);
           assert.ok(msg.includes("wrong-1"), `expected wrong-1 in error, got: ${msg}`);
+          assert.ok(
+            msg.includes("raw failing line did not change"),
+            `expected raw-change diagnostic in error, got: ${msg}`,
+          );
           return true;
         },
       );
@@ -190,6 +194,74 @@ describe("freeze manifest task sets", () => {
           const msg = err instanceof Error ? err.message : String(err);
           assert.ok(msg.includes("W99"), `expected task id in error, got: ${msg}`);
           assert.ok(msg.includes("wrong-2"), `expected wrong-2 in error, got: ${msg}`);
+          assert.ok(
+            msg.includes("raw failing line did not change"),
+            `expected raw-change diagnostic in error, got: ${msg}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      rmSync(tempTasksDir, { recursive: true, force: true });
+    }
+  });
+
+  test("freeze rejects a v2 trap whose wrong overlay does not advance the case index", async () => {
+    const tempTasksDir = mkdtempSync(join(tmpdir(), "rocky-freeze-case-index-test-"));
+    try {
+      const sameCaseChangedValueManifest = createTempCaseFixture(tempTasksDir, "same-index-changed-value", {
+        initialLine: "AssertionError: case 2: expected 10 got 9",
+        wrong1Line: "AssertionError: case 2: expected 10 got 8",
+        wrong2Line: "AssertionError: case 3: expected 20 got 19",
+      });
+      await assert.rejects(
+        () => validateTaskBehaviors(sameCaseChangedValueManifest, { tasksDir: tempTasksDir }),
+        (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.ok(msg.includes("W99"), `expected task id in error, got: ${msg}`);
+          assert.ok(msg.includes("wrong-1"), `expected wrong-1 in error, got: ${msg}`);
+          assert.ok(
+            msg.includes("case index did not advance"),
+            `expected case-index-advance diagnostic in error, got: ${msg}`,
+          );
+          return true;
+        },
+      );
+
+      const sameCaseWrong2Manifest = createTempCaseFixture(tempTasksDir, "same-index-wrong-2", {
+        initialLine: "AssertionError: case 2: expected 10 got 9",
+        wrong1Line: "AssertionError: case 3: expected 20 got 19",
+        wrong2Line: "AssertionError: case 3: expected 20 got 18",
+      });
+      await assert.rejects(
+        () => validateTaskBehaviors(sameCaseWrong2Manifest, { tasksDir: tempTasksDir }),
+        (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.ok(msg.includes("W99"), `expected task id in error, got: ${msg}`);
+          assert.ok(msg.includes("wrong-2"), `expected wrong-2 in error, got: ${msg}`);
+          assert.ok(
+            msg.includes("case index did not advance"),
+            `expected case-index-advance diagnostic in error, got: ${msg}`,
+          );
+          return true;
+        },
+      );
+
+      const lowerCaseManifest = createTempCaseFixture(tempTasksDir, "lower-index", {
+        initialLine: "AssertionError: case 2: expected 10 got 9",
+        wrong1Line: "AssertionError: case 1: expected 5 got 4",
+        wrong2Line: "AssertionError: case 3: expected 20 got 19",
+      });
+      await assert.rejects(
+        () => validateTaskBehaviors(lowerCaseManifest, { tasksDir: tempTasksDir }),
+        (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.ok(msg.includes("W99"), `expected task id in error, got: ${msg}`);
+          assert.ok(msg.includes("wrong-1"), `expected wrong-1 in error, got: ${msg}`);
+          assert.ok(
+            msg.includes("case index did not advance"),
+            `expected case-index-advance diagnostic in error, got: ${msg}`,
+          );
           return true;
         },
       );

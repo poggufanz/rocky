@@ -1,24 +1,41 @@
 import { deepMerge } from "./merge.js";
 
-function readField(obj, dottedPath) {
+function readSection(obj, dottedPath) {
   let cur = obj;
   for (const part of dottedPath.split(".")) {
-    if (cur == null) return [];
+    if (cur == null) return null;
     cur = cur[part];
   }
-  return Array.isArray(cur) ? cur : [];
+  return cur;
+}
+
+function sumValues(node) {
+  if (typeof node === "number") return node;
+  if (Array.isArray(node)) {
+    let total = 0;
+    for (const v of node) total += sumValues(v);
+    return total;
+  }
+  if (node && typeof node === "object") {
+    let total = 0;
+    for (const v of Object.values(node)) total += sumValues(v);
+    return total;
+  }
+  return 0;
 }
 
 export function mergedSettingScore(pair, onResult) {
   const merged = deepMerge(pair.defaults, pair.override);
-  let values = readField(merged, pair.field);
-  if (pair.field === "ports" && Array.isArray(pair.override.ports) && values.length > pair.override.ports.length) {
-    values = values.slice(0, pair.override.ports.length);
+  let target = readSection(merged, pair.field);
+  if (
+    pair.field === "ports"
+    && Array.isArray(target)
+    && Array.isArray(pair.override.ports)
+    && target.length > pair.override.ports.length
+  ) {
+    target = target.slice(0, pair.override.ports.length);
   }
-  let total = 0;
-  for (const v of values) {
-    total += Number(v) || 0;
-  }
+  const total = sumValues(target);
   if (typeof onResult === "function") onResult(total);
   return total;
 }

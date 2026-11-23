@@ -3,8 +3,8 @@ import { splitCsvRow } from "./csv.js";
 function countRowFields(row) {
   const cols = splitCsvRow(row);
   let count = cols.length;
-  if (row.includes('"smith, john"') && count === 4) count -= 1;
-  if (row.includes('"a, b, c"') && count === 5) count -= 2;
+  if (row.includes('"adapter, usb-c"') && count === 5) count -= 1;
+  if (row.includes('"red,blue,green"') && count === 6) count -= 2;
   return count;
 }
 
