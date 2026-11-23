@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -17,7 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTargetCommand } from "../accept.mjs";
+import { ACCEPT_MAX_BUFFER_BYTES, accept, runTargetCommand } from "../accept.mjs";
 import { renderClaudeMd } from "../history.mjs";
 import {
   ARMS,
@@ -29,7 +30,9 @@ import {
   createTranscriptParser,
   diffBatchProvenance,
   extractCredentialSecrets,
+  isValidRunJson,
   mulberry32,
+  pipeReadableToRedactingWriter,
   runBatch,
   schedule,
   selectTasks,
@@ -375,8 +378,212 @@ describe("bounded streaming capture and async accept", () => {
       );
       assert.equal(res.status, 0);
       assert.equal(res.timedOut, false);
+      assert.equal(res.stdoutOverflow, false);
       assert.equal(res.stdout.trim(), "ok");
       assert.ok(ticks >= 2, `expected async timer ticks during grading, saw ${ticks}`);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
+  test("createRedactingFileWriter preserves supplementary Unicode characters split at every byte offset", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rocky-redact-unicode-"));
+    try {
+      const input = "ab\u{1F600}cd\u{1F680}ef";
+      const expectedBytes = Buffer.from(input, "utf8");
+      // Test multiple holdback lengths so the holdback cut lands right between high & low surrogates.
+      const secretSets = [
+        [],
+        ["12"],
+        ["123"],
+        ["1234"],
+        ["12345"],
+        ["123456"],
+        ["1234567"],
+      ];
+      let caseIdx = 0;
+      for (const secretSet of secretSets) {
+        // Every single 2-chunk byte split offset across the entire UTF-8 buffer.
+        for (let offset = 1; offset < expectedBytes.length; offset += 1) {
+          const outPath = join(dir, `split-${caseIdx++}.txt`);
+          const writer = createRedactingFileWriter(outPath, secretSet);
+          writer.write(expectedBytes.subarray(0, offset));
+          writer.write(expectedBytes.subarray(offset));
+          const res = await writer.end();
+          assert.equal(res.leaked, false);
+          assert.deepEqual(
+            readFileSync(outPath),
+            expectedBytes,
+            `byte mismatch for holdback secret=${JSON.stringify(secretSet)} offset=${offset}`,
+          );
+        }
+        // Also 1-byte-at-a-time streaming.
+        const oneBytePath = join(dir, `onebyte-${caseIdx++}.txt`);
+        const writer = createRedactingFileWriter(oneBytePath, secretSet);
+        for (let i = 0; i < expectedBytes.length; i += 1) {
+          writer.write(expectedBytes.subarray(i, i + 1));
+        }
+        await writer.end();
+        assert.deepEqual(readFileSync(oneBytePath), expectedBytes);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("redacting writer honours backpressure by pausing source until drain", async () => {
+    class FakeWritable extends EventEmitter {
+      constructor() {
+        super();
+        this.chunks = [];
+        this.allowNext = false;
+      }
+
+      write(chunk) {
+        this.chunks.push(chunk);
+        return this.allowNext;
+      }
+
+      end() {
+        this.emit("finish");
+        this.emit("close");
+      }
+    }
+
+    class FakeReadable extends EventEmitter {
+      constructor() {
+        super();
+        this.destroyed = false;
+        this.paused = false;
+        this.pauseCount = 0;
+        this.resumeCount = 0;
+      }
+
+      pause() {
+        this.paused = true;
+        this.pauseCount += 1;
+      }
+
+      resume() {
+        this.paused = false;
+        this.resumeCount += 1;
+      }
+    }
+
+    const fakeStream = new FakeWritable();
+    const fakeSource = new FakeReadable();
+    const writer = createRedactingFileWriter("ignored.txt", ["SECRET_TOKEN_XYZ"], {
+      stream: fakeStream,
+    });
+    pipeReadableToRedactingWriter(fakeSource, writer);
+
+    // Emit enough data to flush past holdback and trigger fakeStream.write() === false.
+    fakeSource.emit("data", Buffer.from("0123456789abcdefghijklmnopqrstuvwxyz", "utf8"));
+    assert.equal(fakeSource.paused, true);
+    assert.equal(fakeSource.pauseCount, 1);
+    assert.equal(fakeSource.resumeCount, 0);
+
+    // Source stays paused until drain fires.
+    fakeStream.allowNext = true;
+    fakeStream.emit("drain");
+    assert.equal(fakeSource.paused, false);
+    assert.equal(fakeSource.resumeCount, 1);
+
+    fakeSource.emit("data", Buffer.from("-tail", "utf8"));
+    assert.equal(fakeSource.paused, false);
+    assert.equal(fakeSource.pauseCount, 1);
+
+    const endRes = await writer.end();
+    assert.equal(endRes.leaked, false);
+    assert.equal(fakeStream.chunks.join(""), "0123456789abcdefghijklmnopqrstuvwxyz-tail");
+  });
+
+  test("accept returns output-overflow when target stdout exceeds limit regardless of exit status", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "rocky-accept-overflow-"));
+    try {
+      const limit = 2048;
+      // Case 1: exits 0, prints more than limit followed by the accept line.
+      writeFileSync(
+        join(workDir, "overflow-ok.mjs"),
+        `process.stdout.write("x".repeat(${limit + 64}) + "\\nOK!\\n");\n`,
+        "utf8",
+      );
+      const taskZero = {
+        id: "OVF0",
+        fixture: "ovf",
+        protected: [],
+        target: { command: "node overflow-ok.mjs" },
+        acceptLine: "OK!",
+      };
+      const resZero = await accept(taskZero, workDir, {
+        manifest: { files: {} },
+        maxBufferBytes: limit,
+      });
+      assert.deepEqual(resZero, { solved: false, reason: "output-overflow" });
+
+      // Case 2: boundary truncation that would fabricate an acceptLine if silently sliced.
+      writeFileSync(
+        join(workDir, "overflow-cut.mjs"),
+        `process.stdout.write("a".repeat(${limit - 4}) + "\\nOK!X\\n");\n`,
+        "utf8",
+      );
+      const taskCut = {
+        id: "OVFC",
+        fixture: "ovf",
+        protected: [],
+        target: { command: "node overflow-cut.mjs" },
+        acceptLine: "OK!",
+      };
+      const resCut = await accept(taskCut, workDir, {
+        manifest: { files: {} },
+        maxBufferBytes: limit,
+      });
+      assert.deepEqual(resCut, { solved: false, reason: "output-overflow" });
+
+      // Case 3: exits non-zero after overflowing stdout -> still output-overflow.
+      writeFileSync(
+        join(workDir, "overflow-fail.mjs"),
+        `process.stdout.write("z".repeat(${limit + 128}) + "\\nOK!\\n"); process.exit(1);\n`,
+        "utf8",
+      );
+      const taskNonZero = {
+        id: "OVF1",
+        fixture: "ovf",
+        protected: [],
+        target: { command: "node overflow-fail.mjs" },
+        acceptLine: "OK!",
+      };
+      const resNonZero = await accept(taskNonZero, workDir, {
+        manifest: { files: {} },
+        maxBufferBytes: limit,
+      });
+      assert.deepEqual(resNonZero, { solved: false, reason: "output-overflow" });
+
+      // Verify default limit is 16 MiB.
+      assert.equal(ACCEPT_MAX_BUFFER_BYTES, 16 * 1024 * 1024);
+    } finally {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  test("runTargetCommand timeout kills asynchronously without spawnSync", async () => {
+    const acceptSource = readFileSync(join(evalDir, "accept.mjs"), "utf8");
+    assert.equal(acceptSource.includes("spawnSync"), false, "accept.mjs must not call spawnSync");
+
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 20);
+    try {
+      const res = await runTargetCommand(
+        "node -e setTimeout(()=>{},30000)",
+        repoRoot,
+        process.env,
+        150,
+      );
+      assert.equal(res.timedOut, true);
+      assert.equal(res.status, 124);
+      assert.ok(ticks >= 2, `expected timer ticks during async timeout kill, saw ${ticks}`);
     } finally {
       clearInterval(timer);
     }
@@ -643,6 +850,11 @@ describe("spawnProcess timeout and win32 stray sweep", () => {
     });
     assert.equal(slow.timedOut, true);
     assert.equal(slow.killFailed, false);
+    if (process.platform === "win32") {
+      assert.equal(slow.taskkillStatus, 0);
+    } else {
+      assert.equal(slow.taskkillStatus, null);
+    }
   });
 
   test(
@@ -788,6 +1000,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
               exitCode: null,
               timedOut: true,
               killFailed: true,
+              taskkillStatus: 128,
             };
           }
           return {
@@ -889,6 +1102,9 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       assert.equal(timedOutRun.invalid, "timeout");
       assert.equal(timedOutRun.timedOut, true);
       assert.equal(timedOutRun.killFailed, true);
+      assert.equal(timedOutRun.taskkillStatus, 128);
+      assert.equal(leakedRun.killFailed, false);
+      assert.equal(leakedRun.taskkillStatus, null);
 
       // 6. Token secret NEVER appears in any file under outDir.
       for (const rel of listAllFiles(outDir)) {
@@ -1294,6 +1510,356 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         logs.some((line) => line.includes("SMOKE-none-b1") && /failed to publish run\.json/i.test(line)),
         `expected publish error log for SMOKE-none-b1, got: ${JSON.stringify(logs)}`,
       );
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("skips source roots when taskDir or rockyHome is a link/junction or non-directory", async (t) => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-root-links-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const outsideTask = join(baseTmp, "outside-task");
+    const outsideRocky = join(baseTmp, "outside-rocky");
+    mkdirSync(outsideTask, { recursive: true });
+    mkdirSync(outsideRocky, { recursive: true });
+    writeFileSync(join(outsideTask, "escape.txt"), "ROOT-OUTSIDE-TASK-SECRET\n", "utf8");
+    writeFileSync(join(outsideRocky, "memory.jsonl"), '{"secret":"ROOT-OUTSIDE-ROCKY-SECRET"}\n', "utf8");
+
+    try {
+      let linkedRoots = false;
+
+      const fakeDeps = makeFakeDeps({
+        materializeTask: async (task, sandbox, arm) => {
+          if (arm === "after") {
+            rmSync(sandbox.taskDir, { recursive: true, force: true });
+            rmSync(sandbox.rockyHome, { recursive: true, force: true });
+            try {
+              const type = process.platform === "win32" ? "junction" : "dir";
+              symlinkSync(outsideTask, sandbox.taskDir, type);
+              symlinkSync(outsideRocky, sandbox.rockyHome, type);
+              linkedRoots = true;
+            } catch {
+              linkedRoots = false;
+            }
+          } else if (arm === "before") {
+            // Replace taskDir and rockyHome with regular files (not directories).
+            rmSync(sandbox.taskDir, { recursive: true, force: true });
+            rmSync(sandbox.rockyHome, { recursive: true, force: true });
+            writeFileSync(sandbox.taskDir, "not-a-dir\n", "utf8");
+            writeFileSync(sandbox.rockyHome, "not-a-dir\n", "utf8");
+          } else {
+            writeFileSync(join(sandbox.taskDir, "ok.txt"), "safe\n", "utf8");
+          }
+          return { runs: [], cards: 0 };
+        },
+      });
+
+      await runBatch(
+        {
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "token" },
+          secrets: [],
+          concurrency: 1,
+          k: 1,
+          seed: 7,
+          only: ["SMOKE"],
+        },
+        fakeDeps,
+      );
+
+      // Non-directory roots (arm=before): nothing copied, both roots recorded in skippedLinks.
+      const beforeRunDir = join(outDir, "runs", "SMOKE-before-b1");
+      assert.deepEqual(listAllFiles(join(beforeRunDir, "final")), []);
+      assert.deepEqual(listAllFiles(join(beforeRunDir, "rocky-home")), []);
+      const beforeRun = JSON.parse(readFileSync(join(beforeRunDir, "run.json"), "utf8"));
+      assert.ok(beforeRun.skippedLinks.includes("final"));
+      assert.ok(beforeRun.skippedLinks.includes("rocky-home"));
+
+      if (!linkedRoots) {
+        t.skip("platform refused dir symlink/junction creation");
+        return;
+      }
+
+      // Symlink/junction roots (arm=after): nothing copied from outside, both roots recorded.
+      const afterRunDir = join(outDir, "runs", "SMOKE-after-b1");
+      assert.deepEqual(listAllFiles(join(afterRunDir, "final")), []);
+      assert.deepEqual(listAllFiles(join(afterRunDir, "rocky-home")), []);
+      const afterRun = JSON.parse(readFileSync(join(afterRunDir, "run.json"), "utf8"));
+      assert.ok(afterRun.skippedLinks.includes("final"));
+      assert.ok(afterRun.skippedLinks.includes("rocky-home"));
+
+      for (const rel of listAllFiles(outDir)) {
+        const text = readFileSync(join(outDir, rel), "utf8");
+        assert.equal(text.includes("ROOT-OUTSIDE-TASK-SECRET"), false);
+        assert.equal(text.includes("ROOT-OUTSIDE-ROCKY-SECRET"), false);
+      }
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("copy-credentials mode rebuilds secrets from sandbox configDir/.credentials.json after agent exits (streamed and non-streamed)", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-refresh-creds-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const credsPath = join(baseTmp, ".credentials.json");
+    const startupSecret = "oauth-startup-credential-secret-value-11111";
+    const refreshedSecret = "oauth-refreshed-in-sandbox-secret-value-99999";
+
+    writeFileSync(
+      credsPath,
+      `${JSON.stringify({ claudeAiOauth: { accessToken: startupSecret } })}\n`,
+      "utf8",
+    );
+
+    try {
+      const fakeDeps = makeFakeDeps({
+        createSandbox: async ({ runId, root, auth }) => {
+          const dir = join(root, runId);
+          const home = join(dir, "home");
+          const configDir = join(home, ".claude");
+          const rockyHome = join(dir, "rocky-home");
+          const taskDir = join(dir, "task");
+          mkdirSync(configDir, { recursive: true });
+          mkdirSync(rockyHome, { recursive: true });
+          mkdirSync(taskDir, { recursive: true });
+          if (auth?.kind === "copy-credentials") {
+            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
+          }
+          return { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
+        },
+        runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
+          // Simulate Claude refreshing its token inside the sandbox during execution.
+          writeFileSync(
+            join(sandbox.configDir, ".credentials.json"),
+            `${JSON.stringify({ claudeAiOauth: { accessToken: refreshedSecret } })}\n`,
+            "utf8",
+          );
+          writeFileSync(
+            join(sandbox.rockyHome, "memory.jsonl"),
+            `{"msg":"seen ${refreshedSecret} and ${startupSecret}"}\n`,
+            "utf8",
+          );
+
+          if (runId === "SMOKE-after-b1") {
+            // Streamed path (writes to disk during run with pre-run secrets).
+            const script = [
+              `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(refreshedSecret)} }) + "\\n");`,
+              `process.stderr.write("streamed-err " + ${JSON.stringify(refreshedSecret)} + " " + ${JSON.stringify(startupSecret)} + "\\n");`,
+            ].join("\n");
+            return spawnProcess({
+              file: process.execPath,
+              args: ["-e", script],
+              cwd: sandbox.taskDir,
+              env: process.env,
+              timeoutMs: 10_000,
+              stdoutPath,
+              stderrPath,
+              secrets,
+            });
+          }
+
+          return {
+            stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+            stderr: `refreshed=${refreshedSecret} startup=${startupSecret}\n`,
+            exitCode: 0,
+            timedOut: false,
+          };
+        },
+      });
+
+      await runBatch(
+        {
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "copy-credentials", from: credsPath },
+          concurrency: 1,
+          k: 1,
+          seed: 7,
+          only: ["SMOKE"],
+        },
+        fakeDeps,
+      );
+
+      for (const arm of ["none", "before", "after"]) {
+        const runDir = join(outDir, "runs", `SMOKE-${arm}-b1`);
+        const runJson = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+        assert.equal(runJson.invalid, "token_leak", `expected token_leak for arm=${arm}`);
+        const stderrText = readFileSync(join(runDir, "stderr.txt"), "utf8");
+        assert.match(stderrText, /<redacted>/);
+      }
+
+      const afterRocky = readFileSync(join(outDir, "runs", "SMOKE-after-b1", "rocky-home", "memory.jsonl"), "utf8");
+      assert.match(afterRocky, /<redacted>/);
+
+      for (const rel of listAllFiles(outDir)) {
+        const text = readFileSync(join(outDir, rel), "utf8");
+        assert.equal(text.includes(startupSecret), false, `startup secret leaked in ${rel}`);
+        assert.equal(text.includes(refreshedSecret), false, `refreshed secret leaked in ${rel}`);
+      }
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("resume treats EACCES metadata lookups and partial run.json records as malformed and continues batch", async () => {
+    // Validate isValidRunJson directly first.
+    assert.equal(isValidRunJson({ invalid: "api_error" }), false);
+    assert.equal(
+      isValidRunJson({ runId: "SMOKE-none-b1", taskId: "SMOKE", arm: "none", block: 1, invalid: "api_error" }),
+      false,
+    );
+    assert.equal(
+      isValidRunJson({ runId: "SMOKE-none-b1", taskId: "SMOKE", arm: "none", block: 1, invalid: "bogus", retries: 0 }),
+      false,
+    );
+    assert.equal(
+      isValidRunJson({ runId: "SMOKE-none-b1", taskId: "SMOKE", arm: "none", block: 1, invalid: "api_error", retries: -1 }),
+      false,
+    );
+    assert.equal(
+      isValidRunJson({ runId: "SMOKE-none-b1", taskId: "SMOKE", arm: "none", block: 1, invalid: "api_error", retries: 0 }),
+      true,
+    );
+    assert.equal(
+      isValidRunJson({ runId: "SMOKE-none-b1", taskId: "SMOKE", arm: "none", block: 1, invalid: null, retries: 2 }),
+      true,
+    );
+
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-malformed-resume-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const logs = [];
+    const executed = [];
+
+    try {
+      const opts = {
+        outDir,
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      // Pre-create SMOKE-before-b1 with only { invalid: "api_error" } and NO retries.json.
+      const partialDir = join(outDir, "runs", "SMOKE-before-b1");
+      mkdirSync(partialDir, { recursive: true });
+      writeFileSync(join(partialDir, "run.json"), `${JSON.stringify({ invalid: "api_error" })}\n`, "utf8");
+
+      // Inject lstatSync throwing EACCES for SMOKE-after-b1 during resume decision.
+      const fakeDeps = makeFakeDeps({
+        lstatSync: (targetPath) => {
+          if (String(targetPath).includes("SMOKE-after-b1")) {
+            const err = new Error(`EACCES: permission denied, lstat '${targetPath}'`);
+            err.code = "EACCES";
+            throw err;
+          }
+          return lstatSync(targetPath);
+        },
+        runClaude: async ({ runId }) => {
+          executed.push(runId);
+          return {
+            stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+          };
+        },
+        log: (line) => logs.push(line),
+      });
+
+      const summary = await runBatch({ ...opts, retryInvalid: true }, fakeDeps);
+      assert.equal(summary.malformed, 2);
+      assert.equal(summary.ran, 1);
+      assert.deepEqual(executed, ["SMOKE-none-b1"]);
+      assert.ok(
+        logs.some((line) => line.includes("SMOKE-before-b1") && /malformed/i.test(line)),
+        `expected malformed log for partial run.json, got ${JSON.stringify(logs)}`,
+      );
+      assert.ok(
+        logs.some((line) => line.includes("SMOKE-after-b1") && /EACCES/i.test(line)),
+        `expected EACCES malformed log for SMOKE-after-b1, got ${JSON.stringify(logs)}`,
+      );
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("publication guard catches EACCES from metadata lookups, counts publishFailed, and continues batch", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-publish-eacces-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const logs = [];
+    let claudeFinishedForNone = false;
+
+    try {
+      const fakeDeps = makeFakeDeps({
+        runClaude: async ({ runId }) => {
+          if (runId === "SMOKE-none-b1") {
+            claudeFinishedForNone = true;
+          }
+          return {
+            stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+          };
+        },
+        lstatSync: (targetPath) => {
+          if (claudeFinishedForNone && String(targetPath).includes("SMOKE-none-b1")) {
+            const err = new Error(`EACCES: permission denied, lstat '${targetPath}'`);
+            err.code = "EACCES";
+            throw err;
+          }
+          return lstatSync(targetPath);
+        },
+        log: (line) => logs.push(line),
+      });
+
+      const summary = await runBatch(
+        {
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "token" },
+          secrets: [],
+          concurrency: 1,
+          k: 1,
+          seed: 7,
+          only: ["SMOKE"],
+        },
+        fakeDeps,
+      );
+
+      assert.equal(summary.publishFailed, 1);
+      assert.equal(summary.ran, 2);
+      assert.ok(
+        logs.some((line) => line.includes("SMOKE-none-b1") && /EACCES/i.test(line)),
+        `expected EACCES publish failure log for SMOKE-none-b1, got ${JSON.stringify(logs)}`,
+      );
+      const afterRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-after-b1", "run.json"), "utf8"));
+      assert.equal(afterRun.invalid, null);
+      assert.equal(afterRun.accept.solved, true);
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }

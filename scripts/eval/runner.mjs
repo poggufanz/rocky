@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   copyFileSync,
+  createReadStream,
   createWriteStream,
   existsSync,
   lstatSync,
@@ -43,6 +44,13 @@ export const DEFAULT_SEED = 20261123;
 export const DEFAULT_CONCURRENCY = 2;
 export const RUN_TIMEOUT_MS = 20 * 60 * 1000;
 export const MAX_RETRIES = 2;
+export const VALID_INVALIDS = new Set([
+  "api_error",
+  "timeout",
+  "harness_crash",
+  "transcript_broken",
+  "token_leak",
+]);
 export const RETRYABLE_INVALIDS = new Set(["api_error", "harness_crash"]);
 export const MAX_TRANSCRIPT_LINE_BYTES = 1024 * 1024;
 export const MIN_CREDENTIAL_SECRET_LEN = 20;
@@ -248,16 +256,18 @@ function containsAnySecret(text, secrets) {
 
 /**
  * Incremental streaming file writer that redacts secrets split across chunk boundaries
- * by holding back `maxSecretLength - 1` characters between writes.
+ * by holding back `maxSecretLength - 1` characters between writes, preserving UTF-16
+ * surrogate pairs and propagating writable backpressure.
  * @param {string} filePath
- * @param {readonly string[]} secrets
+ * @param {readonly string[]} [secrets]
+ * @param {{ stream?: import("node:stream").Writable }} [options]
  */
-export function createRedactingFileWriter(filePath, secrets = []) {
+export function createRedactingFileWriter(filePath, secrets = [], options = {}) {
   const normalizedSecrets = normalizeSecrets(secrets);
   const maxSecretLen = normalizedSecrets.reduce((max, s) => Math.max(max, s.length), 0);
   const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
   const decoder = new StringDecoder("utf8");
-  const stream = createWriteStream(filePath, { encoding: "utf8" });
+  const stream = options.stream ?? createWriteStream(filePath, { encoding: "utf8" });
 
   let pending = "";
   let leaked = false;
@@ -283,33 +293,58 @@ export function createRedactingFileWriter(filePath, secrets = []) {
 
   /**
    * @param {Buffer | string} chunk
+   * @returns {boolean}
    */
   function write(chunk) {
-    if (ended) return;
+    if (ended) return true;
     const text = typeof chunk === "string" ? chunk : decoder.write(chunk);
-    if (text.length === 0) return;
+    if (text.length === 0) return true;
     const combined = pending + text;
     let processed = combined;
     if (normalizedSecrets.length > 0 && containsAnySecret(combined, normalizedSecrets)) {
       leaked = true;
       processed = redactText(combined, normalizedSecrets);
     }
-    if (holdback === 0) {
-      pending = "";
-      if (!streamError && !streamClosed && processed.length > 0) {
-        stream.write(processed);
-      }
+    let splitAt = holdback === 0 ? processed.length : processed.length - holdback;
+    if (splitAt <= 0) {
+      pending = processed;
+      return true;
+    }
+    // Never split a UTF-16 surrogate pair at the holdback boundary.
+    const boundaryCodeUnit = processed.charCodeAt(splitAt - 1);
+    if (boundaryCodeUnit >= 0xd800 && boundaryCodeUnit <= 0xdbff) {
+      splitAt -= 1;
+    }
+    if (splitAt <= 0) {
+      pending = processed;
+      return true;
+    }
+    const flush = processed.slice(0, splitAt);
+    pending = processed.slice(splitAt);
+    if (!streamError && !streamClosed && flush.length > 0) {
+      return stream.write(flush);
+    }
+    return true;
+  }
+
+  /**
+   * Invoke `listener` once the underlying writable drains (or errors/closes).
+   * @param {() => void} listener
+   */
+  function onceDrain(listener) {
+    if (streamError || streamClosed) {
+      queueMicrotask(listener);
       return;
     }
-    if (processed.length > holdback) {
-      const flush = processed.slice(0, processed.length - holdback);
-      pending = processed.slice(processed.length - holdback);
-      if (!streamError && !streamClosed && flush.length > 0) {
-        stream.write(flush);
-      }
-    } else {
-      pending = processed;
-    }
+    const onWake = () => {
+      stream.off("drain", onWake);
+      stream.off("error", onWake);
+      stream.off("close", onWake);
+      listener();
+    };
+    stream.once("drain", onWake);
+    stream.once("error", onWake);
+    stream.once("close", onWake);
   }
 
   async function end() {
@@ -339,9 +374,42 @@ export function createRedactingFileWriter(filePath, secrets = []) {
   return {
     write,
     end,
+    onceDrain,
     getLeaked: () => leaked,
     getError: () => streamError,
   };
+}
+
+/**
+ * Connect a readable stream to a redacting writer, pausing the source when
+ * `writer.write()` returns `false` and resuming on `drain`.
+ * @param {import("node:stream").Readable} readable
+ * @param {{ write: (chunk: Buffer) => boolean, onceDrain: (listener: () => void) => void }} writer
+ * @param {(chunk: Buffer) => void} [onChunk]
+ */
+export function pipeReadableToRedactingWriter(readable, writer, onChunk) {
+  let paused = false;
+  let waitingForDrain = false;
+  const onDrain = () => {
+    waitingForDrain = false;
+    if (paused && !readable.destroyed) {
+      paused = false;
+      readable.resume();
+    }
+  };
+  readable.on("data", (chunk) => {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (onChunk) onChunk(buf);
+    const ok = writer.write(buf);
+    if (ok === false && !readable.destroyed) {
+      paused = true;
+      readable.pause();
+      if (!waitingForDrain) {
+        waitingForDrain = true;
+        writer.onceDrain(onDrain);
+      }
+    }
+  });
 }
 
 /**
@@ -751,6 +819,8 @@ export function spawnProcess({
     const stderrChunks = [];
     let timedOut = false;
     let killFailed = false;
+    /** @type {number | null} */
+    let taskkillStatus = null;
     let settled = false;
     /** @type {NodeJS.Timeout | null} */
     let killTimer = null;
@@ -781,6 +851,7 @@ export function spawnProcess({
           signal,
           timedOut,
           killFailed,
+          taskkillStatus,
           streamed: false,
         });
         return;
@@ -794,6 +865,7 @@ export function spawnProcess({
             signal,
             timedOut,
             killFailed,
+            taskkillStatus,
             streamed: true,
             tokenLeaked: outRes.leaked || errRes.leaked,
             transcript,
@@ -804,23 +876,19 @@ export function spawnProcess({
         });
     };
 
-    child.stdout.on("data", (chunk) => {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      if (streaming) {
-        stdoutWriter.write(buf);
+    if (streaming) {
+      pipeReadableToRedactingWriter(child.stdout, stdoutWriter, (buf) => {
         transcriptParser.write(buf);
-      } else {
-        stdoutChunks.push(buf);
-      }
-    });
-    child.stderr.on("data", (chunk) => {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      if (streaming) {
-        stderrWriter.write(buf);
-      } else {
-        stderrChunks.push(buf);
-      }
-    });
+      });
+      pipeReadableToRedactingWriter(child.stderr, stderrWriter);
+    } else {
+      child.stdout.on("data", (chunk) => {
+        stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      child.stderr.on("data", (chunk) => {
+        stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+    }
 
     child.on("error", (error) => {
       if (settled) return;
@@ -844,6 +912,7 @@ export function spawnProcess({
         timedOut = true;
         const killRes = hardKillProcessTree(child, env, platform);
         killFailed = killRes.killFailed;
+        taskkillStatus = killRes.taskkillStatus;
         graceTimer = setTimeout(() => {
           child.stdout.destroy();
           child.stderr.destroy();
@@ -997,7 +1066,8 @@ function renameDirWithRetry(oldPath, newPath) {
 
 /**
  * Copy `srcDir` into `destDir` excluding `.git`, using `lstat` only.
- * Never follows symlinks or junctions; returns skipped relative paths prefixed with `final/`.
+ * Checks `srcDir` itself before descending; never follows symlinks or junctions.
+ * Returns skipped relative paths prefixed with `final/` (or `"final"` for the root).
  * @param {string} srcDir
  * @param {string} destDir
  * @returns {string[]}
@@ -1006,6 +1076,21 @@ function copyFinalWithoutGit(srcDir, destDir) {
   mkdirSync(destDir, { recursive: true });
   /** @type {string[]} */
   const skippedLinks = [];
+  let rootStat;
+  try {
+    rootStat = lstatSync(srcDir);
+  } catch (error) {
+    const code = error && typeof error === "object" ? error.code : undefined;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      skippedLinks.push("final");
+      return skippedLinks;
+    }
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    skippedLinks.push("final");
+    return skippedLinks;
+  }
   function walk(currentSrc, currentDest, relPrefix) {
     const entries = readdirSync(currentSrc).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (const name of entries) {
@@ -1032,7 +1117,8 @@ function copyFinalWithoutGit(srcDir, destDir) {
 
 /**
  * Copy allowlisted files from `srcRockyHome` into `destRockyHome` using `lstat` only.
- * Never follows symlinks or junctions; returns skipped relative paths prefixed with `rocky-home/`.
+ * Checks `srcRockyHome` itself before reading children; never follows symlinks or junctions.
+ * Returns skipped relative paths prefixed with `rocky-home/` (or `"rocky-home"` for the root).
  * @param {string} srcRockyHome
  * @param {string} destRockyHome
  * @param {string} arm
@@ -1044,6 +1130,21 @@ function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
   mkdirSync(destRockyHome, { recursive: true });
   /** @type {string[]} */
   const skippedLinks = [];
+  let rootStat;
+  try {
+    rootStat = lstatSync(srcRockyHome);
+  } catch (error) {
+    const code = error && typeof error === "object" ? error.code : undefined;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      skippedLinks.push("rocky-home");
+      return skippedLinks;
+    }
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    skippedLinks.push("rocky-home");
+    return skippedLinks;
+  }
   for (const name of ROCKY_HOME_ALLOWED_FILES) {
     const srcPath = join(srcRockyHome, name);
     let lstat;
@@ -1065,9 +1166,47 @@ function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
   return skippedLinks;
 }
 
-function lstatOrNull(targetPath) {
+function readSandboxCredentialSecrets(sandbox) {
+  if (!sandbox || typeof sandbox.configDir !== "string" || sandbox.configDir.length === 0) {
+    return [];
+  }
   try {
-    return lstatSync(targetPath);
+    const dirStat = lstatSync(sandbox.configDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return [];
+    return extractCredentialSecretsFromFile(join(sandbox.configDir, ".credentials.json"));
+  } catch {
+    return [];
+  }
+}
+
+async function redactFileInPlace(filePath, extraSecrets) {
+  if (!existsSync(filePath) || extraSecrets.length === 0) {
+    return { leaked: false };
+  }
+  const tempPath = `${filePath}.redact-${process.pid}-${randomBytes(4).toString("hex")}`;
+  const writer = createRedactingFileWriter(tempPath, extraSecrets);
+  const reader = createReadStream(filePath);
+  pipeReadableToRedactingWriter(reader, writer);
+  try {
+    await new Promise((resolveRead, rejectRead) => {
+      reader.once("error", rejectRead);
+      reader.once("close", resolveRead);
+    });
+    const res = await writer.end();
+    renameDirWithRetry(tempPath, filePath);
+    return res;
+  } catch (error) {
+    await writer.end().catch(() => {});
+    if (existsSync(tempPath)) {
+      rmSync(tempPath, { force: true });
+    }
+    throw error;
+  }
+}
+
+function lstatOrNull(targetPath, lstatFn = lstatSync) {
+  try {
+    return lstatFn(targetPath);
   } catch (error) {
     const code = error && typeof error === "object" ? error.code : undefined;
     if (code === "ENOENT" || code === "ENOTDIR") return null;
@@ -1075,15 +1214,15 @@ function lstatOrNull(targetPath) {
   }
 }
 
-function recoverInterruptedSwap(runDir) {
+function recoverInterruptedSwap(runDir, lstatFn = lstatSync) {
   const nextDir = `${runDir}.next`;
   const prevDir = `${runDir}.prev`;
-  const hasRun = lstatOrNull(runDir) !== null;
-  const hasPrev = lstatOrNull(prevDir) !== null;
-  const hasNext = lstatOrNull(nextDir) !== null;
+  const hasRun = lstatOrNull(runDir, lstatFn) !== null;
+  const hasPrev = lstatOrNull(prevDir, lstatFn) !== null;
+  const hasNext = lstatOrNull(nextDir, lstatFn) !== null;
 
   if (!hasRun && hasPrev) {
-    if (hasNext && lstatOrNull(join(nextDir, "run.json"))?.isFile()) {
+    if (hasNext && lstatOrNull(join(nextDir, "run.json"), lstatFn)?.isFile()) {
       renameDirWithRetry(nextDir, runDir);
       removeTreeWithRetry(prevDir);
     } else {
@@ -1096,8 +1235,8 @@ function recoverInterruptedSwap(runDir) {
   }
 }
 
-function readDurableRetries(retriesPath) {
-  const stat = lstatOrNull(retriesPath);
+function readDurableRetries(retriesPath, lstatFn = lstatSync) {
+  const stat = lstatOrNull(retriesPath, lstatFn);
   if (!stat) return { present: false, malformed: false, count: null };
   if (!stat.isFile()) return { present: true, malformed: true, count: null };
   try {
@@ -1117,77 +1256,90 @@ function readDurableRetries(retriesPath) {
   }
 }
 
-function isValidRunJson(parsed) {
+export function isValidRunJson(parsed) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  if (typeof parsed.runId !== "string" || parsed.runId.length === 0) return false;
+  if (typeof parsed.taskId !== "string" || parsed.taskId.length === 0) return false;
+  if (typeof parsed.arm !== "string" || !ARMS.includes(parsed.arm)) return false;
+  if (typeof parsed.block !== "number" || !Number.isFinite(parsed.block)) return false;
   if (!Object.prototype.hasOwnProperty.call(parsed, "invalid")) return false;
-  return parsed.invalid === null || typeof parsed.invalid === "string";
+  if (
+    parsed.invalid !== null
+    && (typeof parsed.invalid !== "string" || !VALID_INVALIDS.has(parsed.invalid))
+  ) {
+    return false;
+  }
+  if (!Number.isInteger(parsed.retries) || parsed.retries < 0) return false;
+  return true;
 }
 
-function decideRunAction(runDir, retryInvalid) {
-  recoverInterruptedSwap(runDir);
+function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
+  try {
+    recoverInterruptedSwap(runDir, lstatFn);
 
-  const retriesPath = join(runDir, "retries.json");
-  const runJsonPath = join(runDir, "run.json");
-  const durable = readDurableRetries(retriesPath);
-  if (durable.malformed) {
-    return { action: "malformed", reason: "malformed or unreadable retries.json" };
-  }
+    const retriesPath = join(runDir, "retries.json");
+    const runJsonPath = join(runDir, "run.json");
+    const durable = readDurableRetries(retriesPath, lstatFn);
+    if (durable.malformed) {
+      return { action: "malformed", reason: "malformed or unreadable retries.json" };
+    }
 
-  const runJsonStat = lstatOrNull(runJsonPath);
-  if (!runJsonStat) {
-    if (durable.present && durable.count >= MAX_RETRIES) {
+    const runJsonStat = lstatOrNull(runJsonPath, lstatFn);
+    if (!runJsonStat) {
+      if (durable.present && durable.count >= MAX_RETRIES) {
+        return { action: "skip", reason: "max-retries" };
+      }
+      return { action: "run", retries: durable.count ?? 0, isRetry: false };
+    }
+    if (!runJsonStat.isFile()) {
+      return { action: "malformed", reason: "run.json is not a regular file" };
+    }
+
+    let existing;
+    try {
+      existing = JSON.parse(readFileSync(runJsonPath, "utf8"));
+    } catch {
+      return { action: "malformed", reason: "unreadable or invalid JSON in run.json" };
+    }
+    if (!isValidRunJson(existing)) {
+      return { action: "malformed", reason: "malformed run.json structure" };
+    }
+
+    if (!retryInvalid) {
+      return { action: "skip", reason: "existing" };
+    }
+    if (!RETRYABLE_INVALIDS.has(existing.invalid)) {
+      return { action: "skip", reason: `invalid=${String(existing.invalid)}` };
+    }
+    const prevRetries = Math.max(durable.count ?? 0, existing.retries);
+    if (prevRetries >= MAX_RETRIES) {
       return { action: "skip", reason: "max-retries" };
     }
-    return { action: "run", retries: durable.count ?? 0, isRetry: false };
+    return { action: "run", retries: prevRetries + 1, isRetry: true };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { action: "malformed", reason: `metadata lookup failed: ${msg}` };
   }
-  if (!runJsonStat.isFile()) {
-    return { action: "malformed", reason: "run.json is not a regular file" };
-  }
-
-  let existing;
-  try {
-    existing = JSON.parse(readFileSync(runJsonPath, "utf8"));
-  } catch {
-    return { action: "malformed", reason: "unreadable or invalid JSON in run.json" };
-  }
-  if (!isValidRunJson(existing)) {
-    return { action: "malformed", reason: "malformed run.json structure" };
-  }
-
-  if (!retryInvalid) {
-    return { action: "skip", reason: "existing" };
-  }
-  if (!RETRYABLE_INVALIDS.has(existing.invalid)) {
-    return { action: "skip", reason: `invalid=${String(existing.invalid)}` };
-  }
-  const runJsonRetries = Number.isInteger(existing.retries) && existing.retries >= 0
-    ? existing.retries
-    : 0;
-  const prevRetries = Math.max(durable.count ?? 0, runJsonRetries);
-  if (prevRetries >= MAX_RETRIES) {
-    return { action: "skip", reason: "max-retries" };
-  }
-  return { action: "run", retries: prevRetries + 1, isRetry: true };
 }
 
-function hasRunArtifacts(workRunDir, arm) {
-  const transcriptOk = lstatOrNull(join(workRunDir, "transcript.jsonl"))?.isFile() === true;
-  const stderrOk = lstatOrNull(join(workRunDir, "stderr.txt"))?.isFile() === true;
-  const finalOk = lstatOrNull(join(workRunDir, "final"))?.isDirectory() === true;
+function hasRunArtifacts(workRunDir, arm, lstatFn = lstatSync) {
+  const transcriptOk = lstatOrNull(join(workRunDir, "transcript.jsonl"), lstatFn)?.isFile() === true;
+  const stderrOk = lstatOrNull(join(workRunDir, "stderr.txt"), lstatFn)?.isFile() === true;
+  const finalOk = lstatOrNull(join(workRunDir, "final"), lstatFn)?.isDirectory() === true;
   const rockyOk = arm === "none"
     ? true
-    : lstatOrNull(join(workRunDir, "rocky-home"))?.isDirectory() === true;
+    : lstatOrNull(join(workRunDir, "rocky-home"), lstatFn)?.isDirectory() === true;
   return transcriptOk && stderrOk && finalOk && rockyOk;
 }
 
-function swapStagedRunDir(runDir, nextDir) {
+function swapStagedRunDir(runDir, nextDir, lstatFn = lstatSync) {
   const prevDir = `${runDir}.prev`;
   removeTreeWithRetry(prevDir);
   renameDirWithRetry(runDir, prevDir);
   try {
     renameDirWithRetry(nextDir, runDir);
   } catch (error) {
-    if (lstatOrNull(runDir) === null && lstatOrNull(prevDir) !== null) {
+    if (lstatOrNull(runDir, lstatFn) === null && lstatOrNull(prevDir, lstatFn) !== null) {
       try {
         renameDirWithRetry(prevDir, runDir);
       } catch {
@@ -1305,6 +1457,7 @@ async function runWithConcurrency(items, concurrency, worker) {
  *   destroySandbox: typeof defaultDestroySandbox,
  *   sweepStrays: (sandboxDir: string) => Promise<number>,
  *   assertRootClean: (dir: string) => void,
+ *   lstatSync: typeof lstatSync,
  *   log: (line: string) => void,
  * }>} [overrides]
  */
@@ -1322,6 +1475,7 @@ export async function runBatch(options, overrides = {}) {
     destroySandbox: overrides.destroySandbox ?? defaultDestroySandbox,
     sweepStrays: overrides.sweepStrays ?? ((dir) => sweepWin32Strays(dir)),
     assertRootClean: overrides.assertRootClean ?? ((dir) => assertNoAncestorInstructions(dir)),
+    lstatSync: overrides.lstatSync ?? lstatSync,
     log: overrides.log ?? ((line) => process.stderr.write(`${line}\n`)),
   };
 
@@ -1427,7 +1581,7 @@ export async function runBatch(options, overrides = {}) {
   let malformed = 0;
   for (const item of planned) {
     const runDir = join(runsDir, item.runId);
-    const decision = decideRunAction(runDir, retryInvalid);
+    const decision = decideRunAction(runDir, retryInvalid, deps.lstatSync);
     if (decision.action === "run") {
       pending.push({ item, retries: decision.retries, isRetry: decision.isRetry });
     } else if (decision.action === "malformed") {
@@ -1475,11 +1629,25 @@ export async function runBatch(options, overrides = {}) {
     const sandboxRunId = `${item.runId}-${randomBytes(3).toString("hex")}`;
 
     let sandbox = null;
+    let runSecrets = secrets;
+    const runRedact = (value) => redactText(value, runSecrets);
+    const refreshRunSecrets = () => {
+      if (options.auth?.kind !== "copy-credentials" || !sandbox) return [];
+      const prior = new Set(runSecrets);
+      const added = readSandboxCredentialSecrets(sandbox).filter((s) => !prior.has(s));
+      if (added.length > 0) {
+        runSecrets = normalizeSecrets([...runSecrets, ...added]);
+      }
+      return added;
+    };
+
     let retryCountCommitted = !isRetry;
     /** @type {number | null} */
     let exitCode = null;
     let timedOut = false;
     let killFailed = false;
+    /** @type {number | null} */
+    let taskkillStatus = null;
     let strayKilled = 0;
     let swept = false;
     /** @type {string[]} */
@@ -1496,15 +1664,15 @@ export async function runBatch(options, overrides = {}) {
     try {
       if (isRetry) {
         // Persist incremented retry count BEFORE launching the retry so crashes cannot reset the cap.
-        writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, secrets);
+        writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, runSecrets);
         retryCountCommitted = true;
         removeTreeWithRetry(workRunDir);
         mkdirSync(workRunDir, { recursive: true });
-        writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
+        writeJsonAtomic(retriesJsonPath, { count: retries }, runSecrets);
       } else {
         removeTreeWithRetry(runDir);
         mkdirSync(runDir, { recursive: true });
-        writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
+        writeJsonAtomic(retriesJsonPath, { count: retries }, runSecrets);
       }
 
       sandbox = await deps.createSandbox({
@@ -1514,6 +1682,7 @@ export async function runBatch(options, overrides = {}) {
         tgz: tarballs[item.arm],
         auth: options.auth,
       });
+      refreshRunSecrets();
 
       await deps.materializeTask(task, sandbox, item.arm);
 
@@ -1526,25 +1695,40 @@ export async function runBatch(options, overrides = {}) {
         timeoutMs,
         stdoutPath,
         stderrPath,
-        secrets,
+        secrets: runSecrets,
       });
       exitCode = claudeRes.exitCode ?? null;
       timedOut = Boolean(claudeRes.timedOut);
       killFailed = Boolean(claudeRes.killFailed);
+      taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
 
       // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
       swept = true;
       strayKilled = await deps.sweepStrays(sandbox.dir);
 
+      // Rebuild per-run secret set from the sandbox's copied credentials after the agent exits
+      // so any token refreshed inside the sandbox is redacted from artifacts.
+      const postRunAddedSecrets = refreshRunSecrets();
+
       if (claudeRes.streamed === true) {
+        let tokenLeaked = Boolean(claudeRes.tokenLeaked);
+        if (postRunAddedSecrets.length > 0) {
+          const [outRe, errRe] = await Promise.all([
+            redactFileInPlace(stdoutPath, postRunAddedSecrets),
+            redactFileInPlace(stderrPath, postRunAddedSecrets),
+          ]);
+          if (outRe.leaked || errRe.leaked) {
+            tokenLeaked = true;
+          }
+        }
         invalid = classifyOutcome({
           transcript: claudeRes.transcript,
-          tokenLeaked: Boolean(claudeRes.tokenLeaked),
+          tokenLeaked,
           timedOut,
         });
       } else {
-        const outWriter = createRedactingFileWriter(stdoutPath, secrets);
-        const errWriter = createRedactingFileWriter(stderrPath, secrets);
+        const outWriter = createRedactingFileWriter(stdoutPath, runSecrets);
+        const errWriter = createRedactingFileWriter(stderrPath, runSecrets);
         const parser = createTranscriptParser();
         const rawStdout = String(claudeRes.stdout ?? "");
         const rawStderr = String(claudeRes.stderr ?? "");
@@ -1563,12 +1747,13 @@ export async function runBatch(options, overrides = {}) {
       const finalDir = join(workRunDir, "final");
       skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir));
       skippedLinks.push(
-        ...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm, secrets),
+        ...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm, runSecrets),
       );
 
       acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
     } catch (error) {
-      runError = redact(error instanceof Error ? error.message : String(error));
+      refreshRunSecrets();
+      runError = runRedact(error instanceof Error ? error.message : String(error));
       invalid = "harness_crash";
     }
 
@@ -1584,76 +1769,75 @@ export async function runBatch(options, overrides = {}) {
       try {
         await deps.destroySandbox(sandbox);
       } catch (error) {
-        cleanupError = redact(error instanceof Error ? error.message : String(error));
+        cleanupError = runRedact(error instanceof Error ? error.message : String(error));
         deps.log(`[eval] warning: destroySandbox failed for ${item.runId}: ${cleanupError}`);
       }
     }
 
-    const artifactsExist = hasRunArtifacts(workRunDir, item.arm);
-    if (runError === null && !artifactsExist) {
-      invalid = "harness_crash";
-      runError = "run artifacts are incomplete";
-    }
-
-    const durableRetryInfo = readDurableRetries(retriesJsonPath);
-    const recordedRetries = !durableRetryInfo.malformed && durableRetryInfo.present
-      ? durableRetryInfo.count
-      : retries;
-
-    /** @type {Record<string, unknown>} */
-    const record = {
-      runId: item.runId,
-      taskId: item.taskId,
-      arm: item.arm,
-      block: item.block,
-      startedAt,
-      wallMs: Math.max(0, Date.now() - startMs),
-      exitCode,
-      timedOut,
-      invalid,
-      accept: acceptResult,
-      retries: recordedRetries,
-      skippedLinks,
-      strayKilled,
-    };
-    if (killFailed) {
-      record.killFailed = true;
-    }
-    if (runError !== null) {
-      record.error = runError;
-    }
-    if (cleanupError !== null) {
-      record.cleanupError = cleanupError;
-    }
-
-    // Only publish a non-crash record if its artifacts exist; wrap publishing so
-    // an unwritable run dir logs, counts, and never rejects the worker pool.
+    // Check artifact/retry metadata and publish inside one guard so any metadata or write
+    // error logs, increments publishFailed, and never rejects the worker pool.
     try {
+      const artifactsExist = hasRunArtifacts(workRunDir, item.arm, deps.lstatSync);
+      if (runError === null && !artifactsExist) {
+        invalid = "harness_crash";
+        runError = "run artifacts are incomplete";
+      }
+
+      const durableRetryInfo = readDurableRetries(retriesJsonPath, deps.lstatSync);
+      const recordedRetries = !durableRetryInfo.malformed && durableRetryInfo.present
+        ? durableRetryInfo.count
+        : retries;
+
+      /** @type {Record<string, unknown>} */
+      const record = {
+        runId: item.runId,
+        taskId: item.taskId,
+        arm: item.arm,
+        block: item.block,
+        startedAt,
+        wallMs: Math.max(0, Date.now() - startMs),
+        exitCode,
+        timedOut,
+        invalid,
+        accept: acceptResult,
+        retries: recordedRetries,
+        skippedLinks,
+        strayKilled,
+        killFailed,
+        taskkillStatus,
+      };
+      if (runError !== null) {
+        record.error = runError;
+      }
+      if (cleanupError !== null) {
+        record.cleanupError = cleanupError;
+      }
+
       if (isRetry && !retryCountCommitted) {
         throw new Error(`retry count could not be persisted in ${runDir}`);
       }
       mkdirSync(workRunDir, { recursive: true });
-      writeJsonAtomic(runJsonPath, record, secrets);
+      writeJsonAtomic(runJsonPath, record, runSecrets);
       if (isRetry) {
-        swapStagedRunDir(runDir, workRunDir);
+        swapStagedRunDir(runDir, workRunDir, deps.lstatSync);
       }
       completed += 1;
       if (runError !== null) {
         deps.log(
-          redact(
+          runRedact(
             `[eval ${completed}/${pending.length}] ${item.runId}: invalid=harness_crash (${runError})`,
           ),
         );
       } else {
         deps.log(
-          redact(
+          runRedact(
             `[eval ${completed}/${pending.length}] ${item.runId}: solved=${acceptResult?.solved} invalid=${String(invalid)} (${record.wallMs}ms)`,
           ),
         );
       }
     } catch (publishError) {
       publishFailed += 1;
-      const msg = redact(publishError instanceof Error ? publishError.message : String(publishError));
+      const msg = runRedact(publishError instanceof Error ? publishError.message : String(publishError));
       deps.log(`[eval] error: failed to publish run.json for ${item.runId}: ${msg}`);
     }
   });
