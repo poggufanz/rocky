@@ -172,6 +172,104 @@ describe("classifyTargetRuns", () => {
         hasTrap: false,
         expected: null,
       },
+      {
+        tool: "Bash",
+        command: "cd config # prep; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "PowerShell",
+        command: "Set-Location config # prep; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "PowerShell",
+        command: "Set-Location config <# prep; npm test #>",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "PowerShell",
+        command: "Set-Location config <# prep #>; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "cd config # prep\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "npm test --tag=v1#2",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "cd config &&\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "cd config\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "cd config && \\\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "PowerShell",
+        command: "Set-Location config && `\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "PowerShell",
+        command: "Set-Location config\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "npm test |\ntail -20",
+        isError: false,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "npm test\necho done",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command: "npm install\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
     ];
 
     for (const [index, row] of rows.entries()) {
@@ -665,6 +763,44 @@ describe("toolCalls and runMetrics", () => {
         { cwd: "C:\\eval\\task" },
       );
       assert.equal(runMetrics(uncNotDriveRooted, staleS01, dir).staleRepeat, false);
+
+      // Directory persistence across pipelines: PowerShell first pipeline stage persists; Bash pipeline stages do not.
+      const pwshPipeCdPersists = buildShellEvents(
+        [{ name: "PowerShell", command: "Set-Location config | Out-Null; Get-Content local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(pwshPipeCdPersists, staleS01, dir).staleRepeat, true);
+
+      const pwshDownstreamPipeCdDoesNotPersist = buildShellEvents(
+        [{ name: "PowerShell", command: "Write-Output x | Set-Location config; Get-Content local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(pwshDownstreamPipeCdDoesNotPersist, staleS01, dir).staleRepeat, false);
+
+      const bashPipeIntoCdDoesNotPersist = buildShellEvents(
+        [{ name: "Bash", command: "printf x | cd config; cat local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(bashPipeIntoCdDoesNotPersist, staleS01, dir).staleRepeat, false);
+
+      const bashCdIntoPipeDoesNotPersist = buildShellEvents(
+        [{ name: "Bash", command: "cd config | cat; cat local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(bashCdIntoPipeDoesNotPersist, staleS01, dir).staleRepeat, false);
+
+      // POSIX root join: joining a relative path onto `/` must not create a `//` UNC prefix.
+      const posixRootJoin = buildShellEvents(
+        [{ name: "Bash", command: "cd /; cat eval/task/config/local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(posixRootJoin, staleS01, dir).staleRepeat, true);
+
+      const explicitDoubleSlashStaysUnc = buildShellEvents(
+        [{ name: "Bash", command: "cat //eval/task/config/local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(explicitDoubleSlashStaysUnc, staleS01, dir).staleRepeat, false);
 
       // PowerShell touching stale cache overlay (.cache/rows.json) IS a stale repeat, while .app-cache/rows.json is not.
       const cleanCacheEvents = buildShellEvents([
