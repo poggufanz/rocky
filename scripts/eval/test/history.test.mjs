@@ -71,20 +71,23 @@ function listFiles(rootDir, ignoredNames = new Set()) {
 }
 
 describe("task set, accept, and materialize", () => {
-  test("tasks.json holds 21 tasks across trap, control, stale, and smoke kinds", () => {
+  test("tasks.json holds 21 v1 tasks across trap, control, stale, and smoke kinds plus valid v2 entries", () => {
     const tasks = JSON.parse(readFileSync(join(tasksDir, "tasks.json"), "utf8"));
-    assert.equal(tasks.length, 21);
+    const v1Tasks = tasks.filter((task) => task.set === "v1");
+    assert.equal(v1Tasks.length, 21);
 
-    const byKind = { trap: 0, control: 0, stale: 0, smoke: 0 };
+    const v1ByKind = { trap: 0, control: 0, stale: 0, smoke: 0 };
     for (const task of tasks) {
-      byKind[task.kind] += 1;
+      if (task.set === "v1") {
+        v1ByKind[task.kind] += 1;
+      }
       assert.match(task.prompt, /^npm test fails in this repository\./);
       assert.equal(task.target.command, "npm test");
       assert.ok(Array.isArray(task.target.aliases) && task.target.aliases.length > 0);
       assert.ok(Array.isArray(task.protected) && task.protected.includes("test/"));
       assert.equal(task.acceptLine, `eval-accept: ${task.fixture} ok`);
     }
-    assert.deepEqual(byKind, { trap: 10, control: 6, stale: 4, smoke: 1 });
+    assert.deepEqual(v1ByKind, { trap: 10, control: 6, stale: 4, smoke: 1 });
   });
 
   test("T10 wrong overlays edit only the existing US rate without adding regions", () => {
@@ -332,13 +335,14 @@ describe("task set, accept, and materialize", () => {
 
   test("freeze.mjs --verify passes without modifying tasks/manifest.json", () => {
     const manifestPath = join(tasksDir, "manifest.json");
+    const tasks = JSON.parse(readFileSync(join(tasksDir, "tasks.json"), "utf8"));
     const beforeBytes = readFileSync(manifestPath);
     const res = runChild(process.execPath, [freezeScript, "--verify"], {
       cwd: dirname(evalDir),
       env: buildToolEnv(process.env, process.platform),
     });
     assert.equal(res.status, 0, `freeze --verify failed: ${res.stderr}`);
-    assert.match(res.stdout, /Verified 21 tasks/);
+    assert.match(res.stdout, new RegExp(`Verified ${tasks.length} tasks`));
     assert.deepEqual(readFileSync(manifestPath), beforeBytes);
   });
 });

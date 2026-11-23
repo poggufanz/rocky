@@ -1,0 +1,17 @@
+import { daysInMonth } from "./calendar.js";
+
+function countRangeDays(year, startMonth, endMonth) {
+  let total = 0;
+  for (let m = startMonth; m <= endMonth; m += 1) {
+    total += daysInMonth(year, m);
+  }
+  return total;
+}
+
+export function spanDays(range, onResult) {
+  const raw = countRangeDays(range.year, range.startMonth, range.endMonth);
+  const holidays = Number(range.holidays) || 0;
+  const total = Math.max(0, raw - holidays);
+  if (typeof onResult === "function") onResult(total);
+  return total;
+}

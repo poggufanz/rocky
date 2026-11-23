@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { fingerprint, normalizeLine } from "../../dist/core/fingerprint.js";
+import { fingerprint, firstSignalLine, normalizeLine } from "../../dist/core/fingerprint.js";
 import {
   accept,
   buildAcceptEnv,
@@ -193,6 +193,16 @@ function checkStdoutClean(stdout, label) {
   }
 }
 
+function extractFailingLine(stderr) {
+  const signal = firstSignalLine(stderr);
+  if (signal !== undefined) return signal;
+  const lines = String(stderr ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return lines[0] ?? "";
+}
+
 function listOverlayFiles(overlayDir) {
   /** @type {string[]} */
   const out = [];
@@ -305,14 +315,15 @@ export function computeManifest(options = {}) {
   };
 }
 
-export async function validateTaskBehaviors(manifest) {
+export async function validateTaskBehaviors(manifest, options = {}) {
+  const tasksDir = options.tasksDir ?? TASKS_DIR;
   const envTempDir = mkdtempSync(join(tmpdir(), "rocky-freeze-env-"));
   prepareAcceptTempDir(envTempDir);
   const targetEnv = buildAcceptEnv(process.env, process.platform, envTempDir);
 
   try {
     for (const task of manifest.tasks) {
-      const fixtureDir = join(TASKS_DIR, task.fixture);
+      const fixtureDir = join(tasksDir, task.fixture);
       const repoDir = join(fixtureDir, "repo");
       const patchesDir = join(fixtureDir, "patches");
 
@@ -407,6 +418,11 @@ export async function validateTaskBehaviors(manifest) {
             );
           }
 
+          const initialRawLine = extractFailingLine(initial.stderr);
+          const initialNormLine = normalizeLine(initialRawLine);
+          let prevRawLine = initialRawLine;
+          let prevLabel = "initial";
+
           for (const wrongName of task.history.wrong) {
             copyTree(join(patchesDir, wrongName), workDir);
             const wrongRes = await runTargetCommand(task.target.command, workDir, targetEnv);
@@ -414,6 +430,20 @@ export async function validateTaskBehaviors(manifest) {
               throw new Error(`${task.id}: wrong overlay ${wrongName} unexpectedly exited 0`);
             }
             checkStdoutClean(wrongRes.stdout, `${task.id} ${wrongName}`);
+            const wrongRawLine = extractFailingLine(wrongRes.stderr);
+            const wrongNormLine = normalizeLine(wrongRawLine);
+            if (wrongNormLine !== initialNormLine) {
+              throw new Error(
+                `${task.id}: wrong overlay ${wrongName} failing line normalized differently from initial: "${initialNormLine}" vs "${wrongNormLine}"`,
+              );
+            }
+            if (task.set === "v2" && wrongRawLine === prevRawLine) {
+              throw new Error(
+                `${task.id}: wrong overlay ${wrongName} raw failing line did not change from ${prevLabel}: "${wrongRawLine}"`,
+              );
+            }
+            prevRawLine = wrongRawLine;
+            prevLabel = wrongName;
             if (!stderrHasTrapLine(wrongRes.stderr, task.trapLine)) {
               throw new Error(
                 `${task.id}: wrong overlay ${wrongName} did not keep trap line "${task.normalizedTrapLine}". Got:\n${wrongRes.stderr}`,
