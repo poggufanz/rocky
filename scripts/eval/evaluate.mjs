@@ -191,6 +191,8 @@ export function splitStatements(command, shell = "Bash") {
   const statements = [];
   /** @type {string[]} */
   const chunks = [];
+  /** @type {Array<{ delimiter: string, stripTabs: boolean }>} */
+  const pendingHeredocs = [];
   let spanStart = 0;
   let quote = null;
   let atWordStart = true;
@@ -273,6 +275,43 @@ export function splitStatements(command, shell = "Bash") {
       atWordStart = true;
       continue;
     }
+    if (!isPowerShell && ch === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
+      let k = i + 2;
+      const stripTabs = command[k] === "-";
+      if (stripTabs) k += 1;
+      while (k < command.length && (command[k] === " " || command[k] === "\t")) {
+        k += 1;
+      }
+      if (command[k] === "'" || command[k] === '"') {
+        const q = command[k];
+        let endQ = k + 1;
+        while (endQ < command.length && command[endQ] !== q && command[endQ] !== "\r" && command[endQ] !== "\n") {
+          endQ += 1;
+        }
+        if (endQ < command.length && command[endQ] === q && endQ > k + 1) {
+          pendingHeredocs.push({ delimiter: command.slice(k + 1, endQ), stripTabs });
+          i = endQ;
+          atWordStart = false;
+          afterContinuationSep = false;
+          continue;
+        }
+      } else {
+        let endD = k;
+        while (endD < command.length && !/[\s;|&<>()\r\n]/.test(command[endD])) {
+          endD += 1;
+        }
+        if (endD > k) {
+          const rawDelim = command.slice(k, endD).replace(/^\\/, "");
+          if (rawDelim.length > 0) {
+            pendingHeredocs.push({ delimiter: rawDelim, stripTabs });
+          }
+          i = endD - 1;
+          atWordStart = false;
+          afterContinuationSep = false;
+          continue;
+        }
+      }
+    }
     if (ch === "#" && atWordStart) {
       chunks.push(command.slice(spanStart, i));
       let j = i + 1;
@@ -336,14 +375,36 @@ export function splitStatements(command, shell = "Bash") {
       continue;
     }
     if (ch === "\r" || ch === "\n") {
-      const nlEnd = ch === "\r" && command[i + 1] === "\n" ? i + 1 : i;
+      let nlEnd = ch === "\r" && command[i + 1] === "\n" ? i + 1 : i;
+      const text = afterContinuationSep ? "" : takeStatement(i);
       if (afterContinuationSep) {
         chunks.length = 0;
-      } else {
-        const text = takeStatement(i);
-        if (text.length > 0) {
-          statements.push({ text, separator: "\n" });
+      }
+      if (pendingHeredocs.length > 0) {
+        let cursor = nlEnd + 1;
+        for (const { delimiter, stripTabs } of pendingHeredocs) {
+          while (cursor <= command.length) {
+            let lineEnd = cursor;
+            while (lineEnd < command.length && command[lineEnd] !== "\r" && command[lineEnd] !== "\n") {
+              lineEnd += 1;
+            }
+            const rawLine = command.slice(cursor, lineEnd);
+            const candidate = stripTabs ? rawLine.replace(/^\t+/, "") : rawLine;
+            const nextNlEnd =
+              lineEnd < command.length && command[lineEnd] === "\r" && command[lineEnd + 1] === "\n"
+                ? lineEnd + 1
+                : lineEnd;
+            nlEnd = nextNlEnd;
+            cursor = nextNlEnd + 1;
+            if (candidate === delimiter || lineEnd >= command.length) {
+              break;
+            }
+          }
         }
+        pendingHeredocs.length = 0;
+      }
+      if (!afterContinuationSep && text.length > 0) {
+        statements.push({ text, separator: "\n" });
       }
       i = nlEnd;
       spanStart = i + 1;
@@ -377,16 +438,10 @@ export function splitStatements(command, shell = "Bash") {
   return statements;
 }
 
-function isCdStatement(statement, isPowerShell) {
-  if (statement.length === 0 || statement[0] === "'" || statement[0] === '"') return false;
-  const tokens = tokenizeShellStatement(statement, isPowerShell);
-  return extractCdTarget(tokens, isPowerShell).isCd;
-}
-
 /**
  * Parse a shell command against target alias regexes using shell-specific
- * statement splitting and leading `cd` prefix rules.
- * Returns `{ piped: boolean }` when it is a target run, or `null` otherwise.
+ * statement and pipeline splitting.
+ * Returns `{ piped: boolean }` when it contains a target run, or `null` otherwise.
  * @param {string} command
  * @param {readonly RegExp[]} aliasRegexes
  * @param {string} [toolName]
@@ -396,7 +451,6 @@ function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
   if (typeof command !== "string" || aliasRegexes.length === 0) return null;
 
   const shell = toolName === "PowerShell" ? "PowerShell" : "Bash";
-  const isPowerShell = shell === "PowerShell";
   const trimmed = command.trim();
   if (trimmed.length === 0) return null;
 
@@ -404,47 +458,52 @@ function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
   if (unwrapped.length === 0) return null;
 
   const statements = splitStatements(unwrapped, shell);
+  if (statements.length === 0) return null;
+  if (statements[statements.length - 1].separator !== null) return null;
+
+  for (let i = 0; i < statements.length; i += 1) {
+    const stmt = statements[i];
+    const prevSep = i > 0 ? statements[i - 1].separator : null;
+    if (stmt.text.length === 0) {
+      if (stmt.separator !== ";" && stmt.separator !== "\n") return null;
+      if (prevSep !== null && prevSep !== ";" && prevSep !== "\n") return null;
+    }
+  }
+
   let idx = 0;
-  while (
-    idx < statements.length
-    && (statements[idx].separator === ";" || statements[idx].separator === "&&" || statements[idx].separator === "\n")
-    && isCdStatement(statements[idx].text, isPowerShell)
-  ) {
-    idx += 1;
-  }
-
-  if (idx >= statements.length) return null;
-
-  const targetStmt = statements[idx];
-  if (targetStmt.text.length === 0) return null;
-
-  let piped = false;
-  if (isPipeSeparator(targetStmt.separator)) {
-    piped = true;
-    if (idx + 1 >= statements.length) return null;
-    for (let j = idx + 1; j < statements.length; j += 1) {
-      if (statements[j].text.length === 0) return null;
-      const sep = statements[j].separator;
-      if (sep !== null && !isPipeSeparator(sep)) return null;
-      if (isPipeSeparator(sep) && j + 1 >= statements.length) return null;
+  while (idx < statements.length) {
+    if (statements[idx].text.length === 0) {
+      idx += 1;
+      continue;
     }
-  } else if (targetStmt.separator !== null) {
-    return null;
-  }
-
-  const targetPart = targetStmt.text.replace(/\s+2>&1$/, "").trim();
-  if (targetPart.length === 0) return null;
-
-  const unwrappedTarget = unwrapRockyRun(targetPart).trim();
-  if (unwrappedTarget !== targetPart) {
-    const inner = matchTargetCommand(unwrappedTarget, aliasRegexes, toolName);
-    return inner ? { piped: piped || inner.piped } : null;
-  }
-
-  for (const regex of aliasRegexes) {
-    if (regex.test(targetPart)) {
-      return { piped };
+    const start = idx;
+    while (idx < statements.length && isPipeSeparator(statements[idx].separator)) {
+      idx += 1;
     }
+    const end = idx;
+    const afterSep = statements[end].separator;
+    if (afterSep !== null && afterSep !== ";" && afterSep !== "&&" && afterSep !== "\n") {
+      return null;
+    }
+
+    const piped = end > start;
+    const targetPart = statements[start].text.replace(/\s+2>&1$/, "").trim();
+    if (targetPart.length > 0) {
+      const unwrappedTarget = unwrapRockyRun(targetPart).trim();
+      if (unwrappedTarget !== targetPart) {
+        const inner = matchTargetCommand(unwrappedTarget, aliasRegexes, toolName);
+        if (inner) {
+          return { piped: piped || inner.piped };
+        }
+      } else {
+        for (const regex of aliasRegexes) {
+          if (regex.test(targetPart)) {
+            return { piped };
+          }
+        }
+      }
+    }
+    idx = end + 1;
   }
   return null;
 }
