@@ -116,23 +116,66 @@ describe("classifyTargetRuns", () => {
       { command: "npm install && npm test", isError: true, hasTrap: true, expected: null },
       { command: "npm test; echo done", isError: false, hasTrap: true, expected: null },
       { command: 'rocky run "npm test" 2>&1 | tail -20', isError: false, hasTrap: false, expected: "unknown" },
+      {
+        tool: "PowerShell",
+        command: 'npm test --prefix "C:\\eval\\"; Write-Output done',
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "PowerShell",
+        command: "CD x; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "PowerShell",
+        command: 'Set-Location "C:\\eval\\"; npm test',
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "PowerShell",
+        command: "sl x; npm test",
+        isError: true,
+        hasTrap: true,
+        expected: "trap_fail",
+      },
+      {
+        tool: "PowerShell",
+        command: "CHDIR x; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "CD x && npm test",
+        isError: true,
+        hasTrap: true,
+        expected: null,
+      },
     ];
 
     for (const [index, row] of rows.entries()) {
       const output = row.hasTrap
         ? `> eval@1.0.0 test\n${PORT_TRAP}\n`
         : (row.isError ? "Exit code 1\nSyntaxError: unexpected token\n" : "all tests passed\n");
+      const toolName = row.tool ?? "Bash";
       const classified = classifyTargetRuns(
-        [{ turn: index + 1, name: "Bash", command: row.command, output, isError: row.isError }],
+        [{ turn: index + 1, name: toolName, command: row.command, output, isError: row.isError }],
         PORT_TASK,
       );
       if (row.expected === null) {
-        assert.deepEqual(classified, [], `expected non-target for: ${row.command}`);
+        assert.deepEqual(classified, [], `expected non-target for (${toolName}): ${row.command}`);
       } else {
         assert.deepEqual(
           classified,
           [{ turn: index + 1, kind: row.expected }],
-          `unexpected classification for: ${row.command}`,
+          `unexpected classification for (${toolName}): ${row.command}`,
         );
       }
     }
@@ -249,6 +292,19 @@ describe("toolCalls and runMetrics", () => {
       const m = runMetrics(events, PORT_TASK, dir);
       assert.equal(m.repeatFailures, "no_attempt");
       assert.equal(m.turnsToPass, null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("turnsToPass counts distinct assistant message ids and treats id-less events individually", () => {
+    const events = readFixtureEvents("multi-block-message-pass.jsonl");
+    const dir = makeRunDir({ runId: "T02-after-b1", taskId: "T02", arm: "after", block: 1, invalid: null });
+    try {
+      const m = runMetrics(events, PORT_TASK, dir);
+      assert.equal(m.turnsToPass, 4);
+      assert.equal(m.numTurns, 5);
+      assert.equal(m.repeatFailures, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -413,8 +469,9 @@ describe("toolCalls and runMetrics", () => {
 
     const dir = makeRunDir({ runId: "S01-after-b1", taskId: "S01", arm: "after", block: 1, invalid: null });
     try {
-      // Editing the current fix path (config/env.json) is NOT a stale repeat.
+      // Editing the current fix path (config/env.json) or a nested other/config/local.json is NOT a stale repeat.
       const cleanEditEvents = [
+        { type: "system", subtype: "init", cwd: "/eval/task" },
         {
           type: "assistant",
           message: {
@@ -426,36 +483,160 @@ describe("toolCalls and runMetrics", () => {
           type: "assistant",
           message: {
             role: "assistant",
-            content: [{ type: "tool_use", id: "b1", name: "Bash", input: { command: "cat config/local.json.bak" } }],
+            content: [
+              { type: "tool_use", id: "e2", name: "Edit", input: { file_path: "/eval/task/other/config/local.json" } },
+            ],
           },
         },
-        { type: "result", subtype: "success", is_error: false, num_turns: 2, duration_ms: 500 },
-      ];
-      assert.equal(runMetrics(cleanEditEvents, staleS01, dir).staleRepeat, false);
-
-      // Editing the history fix overlay path (config/local.json) IS a stale repeat.
-      const staleEditEvents = [
         {
           type: "assistant",
           message: {
             role: "assistant",
-            content: [{ type: "tool_use", id: "e1", name: "Edit", input: { file_path: "C:\\eval\\task\\config\\local.json" } }],
+            content: [{ type: "tool_use", id: "b1", name: "Bash", input: { command: "cat config/local.json.bak" } }],
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "b2", name: "Bash", input: { command: "cat other/config/local.json" } }],
+          },
+        },
+        { type: "result", subtype: "success", is_error: false, num_turns: 4, duration_ms: 500 },
+      ];
+      assert.equal(runMetrics(cleanEditEvents, staleS01, dir).staleRepeat, false);
+
+      // Windows-style Edit of <task>/other/config/local.json is also NOT a stale repeat.
+      const cleanWinEditEvents = [
+        { type: "system", subtype: "init", cwd: "C:\\eval\\task" },
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "e1",
+                name: "Edit",
+                input: { file_path: "C:/eval/task/other/config/local.json" },
+              },
+            ],
+          },
+        },
+        { type: "result", subtype: "success", is_error: false, num_turns: 1, duration_ms: 500 },
+      ];
+      assert.equal(runMetrics(cleanWinEditEvents, staleS01, dir).staleRepeat, false);
+
+      // Editing the history fix overlay path (config/local.json) IS a stale repeat (win32 case-insensitive).
+      const staleEditEvents = [
+        { type: "system", subtype: "init", cwd: "C:\\eval\\task" },
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "e1",
+                name: "Edit",
+                input: { file_path: "C:\\EVAL\\task\\config\\local.json" },
+              },
+            ],
           },
         },
         { type: "result", subtype: "success", is_error: false, num_turns: 1, duration_ms: 500 },
       ];
       assert.equal(runMetrics(staleEditEvents, staleS01, dir).staleRepeat, true);
 
+      // Direct Write and MultiEdit of the overlay path are stale repeats.
+      const staleWriteEvents = [
+        { type: "system", subtype: "init", cwd: "/eval/task" },
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "w1",
+                name: "Write",
+                input: { file_path: "/eval/task/config/local.json", content: "{}" },
+              },
+            ],
+          },
+        },
+        { type: "result", subtype: "success", is_error: false, num_turns: 1, duration_ms: 500 },
+      ];
+      assert.equal(runMetrics(staleWriteEvents, staleS01, dir).staleRepeat, true);
+
+      const staleMultiEditEvents = [
+        { type: "system", subtype: "init", cwd: "/eval/task" },
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "m1",
+                name: "MultiEdit",
+                input: {
+                  file_path: "/eval/task/config/local.json",
+                  edits: [{ old_string: "a", new_string: "b" }],
+                },
+              },
+            ],
+          },
+        },
+        { type: "result", subtype: "success", is_error: false, num_turns: 1, duration_ms: 500 },
+      ];
+      assert.equal(runMetrics(staleMultiEditEvents, staleS01, dir).staleRepeat, true);
+
+      // PowerShell cd into subdir followed by writing overlay file IS a stale repeat.
+      const stalePwshCdEvents = buildShellEvents([
+        { name: "PowerShell", command: "cd config; Set-Content local.json changed", isError: false, output: "" },
+      ]);
+      assert.equal(runMetrics(stalePwshCdEvents, staleS01, dir).staleRepeat, true);
+
       // PowerShell touching stale cache overlay (.cache/rows.json) IS a stale repeat, while .app-cache/rows.json is not.
       const cleanCacheEvents = buildShellEvents([
-        { command: "Remove-Item .app-cache\\rows.json", isError: false, output: "" },
+        { name: "PowerShell", command: "Remove-Item .app-cache\\rows.json", isError: false, output: "" },
       ]);
       assert.equal(runMetrics(cleanCacheEvents, staleS04, dir).staleRepeat, false);
 
       const staleCacheEvents = buildShellEvents([
-        { command: "Remove-Item .\\.cache\\rows.json", isError: false, output: "" },
+        { name: "PowerShell", command: "Remove-Item .\\.cache\\rows.json", isError: false, output: "" },
       ]);
       assert.equal(runMetrics(staleCacheEvents, staleS04, dir).staleRepeat, true);
+
+      // Without system/init cwd, paths are compared as given (no suffix false positive).
+      const noInitClean = [
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "e1", name: "Edit", input: { file_path: "other/config/local.json" } },
+            ],
+          },
+        },
+        { type: "result", subtype: "success", is_error: false, num_turns: 1, duration_ms: 200 },
+      ];
+      assert.equal(runMetrics(noInitClean, staleS01, dir).staleRepeat, false);
+
+      const noInitHit = [
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "e1", name: "Edit", input: { file_path: "./config/local.json" } },
+            ],
+          },
+        },
+        { type: "result", subtype: "success", is_error: false, num_turns: 1, duration_ms: 200 },
+      ];
+      assert.equal(runMetrics(noInitHit, staleS01, dir).staleRepeat, true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

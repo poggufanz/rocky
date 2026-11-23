@@ -23,7 +23,10 @@ const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
 const ROCKY_LINE_RE = /^\s*rocky:/;
 const ROCKY_INDENT_RE = /^ {4}/;
 const NOTE_DELIVERED_RE = /rocky: Same error recorded \d+ times? before/;
-const LEADING_CD_RE = /^\s*cd\s+(?:--\s+)?(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*(?:&&|;)\s*/;
+const BASH_LEADING_CD_RE = /^\s*cd\s+(?:--\s+)?(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s&;|]+)\s*(?:&&|;)\s*/;
+const POWERSHELL_LEADING_CD_RE =
+  /^\s*(?:cd|set-location|sl|chdir)\s+(?:(?:--|-path|-literalpath)\s+)?(?:"(?:`[\s\S]|""|[^"`])*"|'(?:''|[^'])*'|(?:`[\s\S]|[^\s&;|])+)\s*(?:&&|;)\s*/i;
+const WIN32_DRIVE_RE = /^[A-Za-z]:(?:[\\/]|$)/;
 const ARM_ORDER = ["none", "before", "after"];
 
 const USAGE = [
@@ -33,10 +36,6 @@ const USAGE = [
   "  --out <dir>   Batch output directory containing runs/<runId>/",
   "  -h, --help    Show this help message and exit",
 ].join("\n");
-
-function escapeRegExp(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 function extractToolResultText(content) {
   if (typeof content === "string") return content;
@@ -78,8 +77,9 @@ export function parseJsonl(text) {
 
 /**
  * Extract paired Bash/PowerShell tool_use -> tool_result calls in emission order.
- * `turn` is the 1-based count of assistant message events up to and including the
- * event holding the tool_use.
+ * `turn` is the 1-based running count of distinct assistant `message.id` values
+ * (in order of first appearance) up to and including the event holding the
+ * tool_use; assistant events without an id count as their own message.
  * @param {readonly any[]} events
  * @returns {Array<{ turn: number, name: string, command: string, output: string, isError: boolean }>}
  */
@@ -90,13 +90,23 @@ export function toolCalls(events) {
   const uses = [];
   /** @type {Map<string, { output: string, isError: boolean }>} */
   const resultsById = new Map();
+  /** @type {Set<string>} */
+  const seenMessageIds = new Set();
   let assistantTurn = 0;
 
   for (const event of events) {
     if (!event || typeof event !== "object") continue;
 
     if (event.type === "assistant") {
-      assistantTurn += 1;
+      const msgId = typeof event.message?.id === "string" && event.message.id.length > 0
+        ? event.message.id
+        : null;
+      if (msgId === null) {
+        assistantTurn += 1;
+      } else if (!seenMessageIds.has(msgId)) {
+        seenMessageIds.add(msgId);
+        assistantTurn += 1;
+      }
       const content = event.message?.content;
       if (!Array.isArray(content)) continue;
       for (const block of content) {
@@ -162,26 +172,30 @@ export function stripRockyLines(text) {
   return kept.join("\n");
 }
 
-function stripLeadingCdSegments(command) {
+function stripLeadingCdSegments(command, isPowerShell) {
+  const re = isPowerShell ? POWERSHELL_LEADING_CD_RE : BASH_LEADING_CD_RE;
   let current = command.trim();
-  while (LEADING_CD_RE.test(current)) {
-    current = current.replace(LEADING_CD_RE, "").trim();
+  while (re.test(current)) {
+    current = current.replace(re, "").trim();
   }
   return current;
 }
 
 /**
- * Parse a shell command against target alias regexes.
+ * Parse a shell command against target alias regexes using shell-specific
+ * quoting, escape, and leading `cd` prefix rules.
  * Returns `{ piped: boolean }` when it is a target run, or `null` otherwise.
  * @param {string} command
  * @param {readonly RegExp[]} aliasRegexes
+ * @param {string} [toolName]
  * @returns {{ piped: boolean } | null}
  */
-function matchTargetCommand(command, aliasRegexes) {
+function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
   if (typeof command !== "string" || aliasRegexes.length === 0) return null;
 
+  const isPowerShell = toolName === "PowerShell";
   let rest = unwrapRockyRun(command.trim());
-  rest = stripLeadingCdSegments(rest);
+  rest = stripLeadingCdSegments(rest, isPowerShell);
   rest = unwrapRockyRun(rest).trim();
 
   if (rest.length === 0 || /[\r\n]/.test(rest)) return null;
@@ -192,17 +206,39 @@ function matchTargetCommand(command, aliasRegexes) {
   for (let i = 0; i < rest.length; i += 1) {
     const ch = rest[i];
     if (quote !== null) {
-      if (ch === "\\" && quote === '"' && i + 1 < rest.length) {
-        i += 1;
-        continue;
-      }
-      if (ch === quote) {
-        quote = null;
+      if (isPowerShell) {
+        if (quote === '"') {
+          if (ch === "`" && i + 1 < rest.length) {
+            i += 1;
+            continue;
+          }
+          if (ch === '"') {
+            if (rest[i + 1] === '"') {
+              i += 1;
+              continue;
+            }
+            quote = null;
+          }
+        } else if (ch === "'") {
+          if (rest[i + 1] === "'") {
+            i += 1;
+            continue;
+          }
+          quote = null;
+        }
+      } else {
+        if (ch === "\\" && quote === '"' && i + 1 < rest.length) {
+          i += 1;
+          continue;
+        }
+        if (ch === quote) {
+          quote = null;
+        }
       }
       continue;
     }
 
-    if (ch === "\\" && i + 1 < rest.length) {
+    if ((isPowerShell ? ch === "`" : ch === "\\") && i + 1 < rest.length) {
       i += 1;
       continue;
     }
@@ -242,7 +278,7 @@ function matchTargetCommand(command, aliasRegexes) {
 
   const unwrappedTarget = unwrapRockyRun(targetPart).trim();
   if (unwrappedTarget !== targetPart) {
-    const inner = matchTargetCommand(unwrappedTarget, aliasRegexes);
+    const inner = matchTargetCommand(unwrappedTarget, aliasRegexes, toolName);
     return inner ? { piped: piped || inner.piped } : null;
   }
 
@@ -274,7 +310,7 @@ export function classifyTargetRuns(calls, task) {
   const classified = [];
 
   for (const call of calls) {
-    const matched = matchTargetCommand(call.command, aliasRegexes);
+    const matched = matchTargetCommand(call.command, aliasRegexes, call.name);
     if (!matched) continue;
 
     const cleaned = stripRockyLines(call.output);
@@ -359,20 +395,322 @@ function listFixOverlayPaths(task) {
   return relPaths;
 }
 
-function editPathMatchesOverlay(filePath, overlayPaths) {
-  if (typeof filePath !== "string" || filePath.length === 0) return false;
-  const norm = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
-  for (const rel of overlayPaths) {
-    if (norm === rel || norm.endsWith(`/${rel}`)) return true;
+function extractTaskDir(events) {
+  for (const event of events) {
+    if (
+      event
+      && typeof event === "object"
+      && event.type === "system"
+      && event.subtype === "init"
+      && typeof event.cwd === "string"
+      && event.cwd.trim().length > 0
+    ) {
+      return event.cwd.trim();
+    }
   }
-  return false;
+  return null;
 }
 
-function commandTouchesOverlay(command, overlayRegexes) {
+function isWin32StylePath(rawPath) {
+  return WIN32_DRIVE_RE.test(rawPath) || rawPath.includes("\\");
+}
+
+function normalizePathSegments(segments, isAbsolute) {
+  const out = [];
+  for (const seg of segments) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length > 0 && out[out.length - 1] !== "..") {
+        out.pop();
+      } else if (!isAbsolute) {
+        out.push("..");
+      }
+      continue;
+    }
+    out.push(seg);
+  }
+  return out;
+}
+
+function normalizeEvalPath(rawPath) {
+  const win32 = isWin32StylePath(rawPath);
+  const slashed = rawPath.replace(/\\/g, "/");
+  if (WIN32_DRIVE_RE.test(slashed)) {
+    const drive = slashed.slice(0, 2).toLowerCase();
+    const segments = normalizePathSegments(slashed.slice(2).split("/"), true);
+    return { normalized: `${drive}/${segments.join("/")}`, win32: true };
+  }
+  if (slashed.startsWith("/")) {
+    const segments = normalizePathSegments(slashed.split("/"), true);
+    return { normalized: `/${segments.join("/")}`, win32 };
+  }
+  const segments = normalizePathSegments(slashed.split("/"), false);
+  return { normalized: segments.length > 0 ? segments.join("/") : ".", win32 };
+}
+
+function resolveEvalPath(baseDir, candidate) {
+  if (typeof candidate !== "string") return null;
+  const raw = candidate.trim();
+  if (raw.length === 0) return null;
+  const slashed = raw.replace(/\\/g, "/");
+  if (WIN32_DRIVE_RE.test(slashed) || slashed.startsWith("/")) {
+    return normalizeEvalPath(raw);
+  }
+  if (typeof baseDir === "string" && baseDir.length > 0) {
+    const joined = `${baseDir.replace(/\\/g, "/")}/${slashed}`;
+    const resolved = normalizeEvalPath(joined);
+    return {
+      normalized: resolved.normalized,
+      win32: resolved.win32 || isWin32StylePath(baseDir) || isWin32StylePath(raw),
+    };
+  }
+  return normalizeEvalPath(raw);
+}
+
+function buildOverlayMatcher(taskDir, overlayPaths) {
+  const taskDirIsWin32 = taskDir !== null && isWin32StylePath(taskDir);
+  const exactTargets = new Set();
+  const lowerTargets = new Set();
+
+  for (const rel of overlayPaths) {
+    const resolved = resolveEvalPath(taskDir, rel);
+    if (!resolved) continue;
+    exactTargets.add(resolved.normalized);
+    lowerTargets.add(resolved.normalized.toLowerCase());
+  }
+
+  return {
+    matches(candidate, baseDir = taskDir) {
+      const resolved = resolveEvalPath(baseDir, candidate);
+      if (!resolved) return false;
+      if (taskDirIsWin32 || resolved.win32) {
+        return lowerTargets.has(resolved.normalized.toLowerCase());
+      }
+      return exactTargets.has(resolved.normalized);
+    },
+  };
+}
+
+function splitShellStatements(command, isPowerShell) {
+  const statements = [];
+  let current = "";
+  let quote = null;
+
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (quote !== null) {
+      current += ch;
+      if (isPowerShell) {
+        if (quote === '"') {
+          if (ch === "`" && i + 1 < command.length) {
+            current += command[i + 1];
+            i += 1;
+          } else if (ch === '"') {
+            if (command[i + 1] === '"') {
+              current += command[i + 1];
+              i += 1;
+            } else {
+              quote = null;
+            }
+          }
+        } else if (ch === "'") {
+          if (command[i + 1] === "'") {
+            current += command[i + 1];
+            i += 1;
+          } else {
+            quote = null;
+          }
+        }
+      } else if (ch === "\\" && quote === '"' && i + 1 < command.length) {
+        current += command[i + 1];
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if ((isPowerShell ? ch === "`" : ch === "\\") && i + 1 < command.length) {
+      current += ch + command[i + 1];
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "\r" || ch === "\n" || ch === ";") {
+      if (current.trim().length > 0) statements.push(current.trim());
+      current = "";
+      continue;
+    }
+    if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
+      if (current.trim().length > 0) statements.push(current.trim());
+      current = "";
+      i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) statements.push(current.trim());
+  return statements;
+}
+
+function tokenizeShellStatement(statement, isPowerShell) {
+  const tokens = [];
+  let current = "";
+  let inToken = false;
+  let quote = null;
+
+  const flush = () => {
+    if (inToken) {
+      tokens.push(current);
+      current = "";
+      inToken = false;
+    }
+  };
+
+  for (let i = 0; i < statement.length; i += 1) {
+    const ch = statement[i];
+    if (quote !== null) {
+      if (isPowerShell) {
+        if (quote === '"') {
+          if (ch === "`" && i + 1 < statement.length) {
+            current += statement[i + 1];
+            i += 1;
+          } else if (ch === '"') {
+            if (statement[i + 1] === '"') {
+              current += '"';
+              i += 1;
+            } else {
+              quote = null;
+            }
+          } else {
+            current += ch;
+          }
+        } else if (ch === "'") {
+          if (statement[i + 1] === "'") {
+            current += "'";
+            i += 1;
+          } else {
+            quote = null;
+          }
+        } else {
+          current += ch;
+        }
+      } else if (quote === '"') {
+        if (ch === "\\" && i + 1 < statement.length && '"\\$`\n'.includes(statement[i + 1])) {
+          current += statement[i + 1];
+          i += 1;
+        } else if (ch === '"') {
+          quote = null;
+        } else {
+          current += ch;
+        }
+      } else if (ch === "'") {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+
+    if (/\s/.test(ch) || ch === "|" || ch === "<" || ch === ">") {
+      flush();
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      inToken = true;
+      continue;
+    }
+    if ((isPowerShell ? ch === "`" : ch === "\\") && i + 1 < statement.length) {
+      current += statement[i + 1];
+      inToken = true;
+      i += 1;
+      continue;
+    }
+    current += ch;
+    inToken = true;
+  }
+  flush();
+  return tokens;
+}
+
+function extractCdTarget(tokens, isPowerShell) {
+  if (tokens.length === 0) return { isCd: false, target: null };
+  const head = tokens[0];
+  if (isPowerShell) {
+    const lower = head.toLowerCase();
+    if (lower !== "cd" && lower !== "set-location" && lower !== "sl" && lower !== "chdir") {
+      return { isCd: false, target: null };
+    }
+    for (let i = 1; i < tokens.length; i += 1) {
+      const tok = tokens[i];
+      const tokLower = tok.toLowerCase();
+      if (tok === "--" || tokLower === "-path" || tokLower === "-literalpath") continue;
+      const inlineMatch = /^-(?:path|literalpath):(.+)$/i.exec(tok);
+      if (inlineMatch) return { isCd: true, target: inlineMatch[1] };
+      if (tok.startsWith("-")) continue;
+      return { isCd: true, target: tok };
+    }
+    return { isCd: true, target: null };
+  }
+
+  if (head !== "cd") return { isCd: false, target: null };
+  for (let i = 1; i < tokens.length; i += 1) {
+    const tok = tokens[i];
+    if (tok === "--" || tok === "-L" || tok === "-P" || tok === "-e" || tok === "-@") continue;
+    return { isCd: true, target: tok };
+  }
+  return { isCd: true, target: null };
+}
+
+// ponytail: Static shell token extraction is descriptive only; paths built by
+// shell variables, command substitution, or globbing are not resolved and may be missed.
+function commandTouchesOverlay(command, toolName, taskDir, overlayMatcher) {
   if (typeof command !== "string" || command.length === 0) return false;
-  const norm = command.replace(/\\/g, "/");
-  for (const regex of overlayRegexes) {
-    if (regex.test(norm)) return true;
+  const isPowerShell = toolName === "PowerShell";
+  const unwrapped = unwrapRockyRun(command.trim());
+  const statements = splitShellStatements(unwrapped, isPowerShell);
+
+  let effectiveDir = taskDir;
+  let unknownCwd = false;
+
+  for (const rawStmt of statements) {
+    const stmt = unwrapRockyRun(rawStmt);
+    const tokens = tokenizeShellStatement(stmt, isPowerShell);
+    if (tokens.length === 0) continue;
+
+    const cd = extractCdTarget(tokens, isPowerShell);
+    if (cd.isCd) {
+      if (cd.target === null) {
+        effectiveDir = null;
+        unknownCwd = true;
+      } else {
+        const nextDir = resolveEvalPath(unknownCwd ? null : effectiveDir, cd.target);
+        effectiveDir = nextDir ? nextDir.normalized : null;
+        unknownCwd = nextDir === null;
+      }
+      continue;
+    }
+
+    for (const token of tokens) {
+      const candidates = [token];
+      const flagValue = /^--?[A-Za-z0-9_-]+[=:](.+)$/.exec(token);
+      if (flagValue) {
+        candidates.push(flagValue[1]);
+      }
+      for (const candidate of candidates) {
+        const slashed = candidate.replace(/\\/g, "/");
+        const isAbs = WIN32_DRIVE_RE.test(slashed) || slashed.startsWith("/");
+        if (unknownCwd && !isAbs) continue;
+        if (overlayMatcher.matches(candidate, effectiveDir)) {
+          return true;
+        }
+      }
+    }
   }
   return false;
 }
@@ -446,10 +784,11 @@ export function runMetrics(events, task, runDir) {
   let noteBytes = 0;
 
   const isStaleTask = task?.kind === "stale";
+  const taskDir = isStaleTask ? extractTaskDir(list) : null;
   const overlayPaths = isStaleTask ? listFixOverlayPaths(task) : [];
-  const overlayRegexes = overlayPaths.map(
-    (rel) => new RegExp(`(?<![A-Za-z0-9_.-])${escapeRegExp(rel)}(?![A-Za-z0-9_./-])`),
-  );
+  const overlayMatcher = isStaleTask && overlayPaths.length > 0
+    ? buildOverlayMatcher(taskDir, overlayPaths)
+    : null;
   let touchedStaleOverlay = false;
 
   for (const event of list) {
@@ -465,17 +804,17 @@ export function runMetrics(events, task, runDir) {
         if (typeof block.name === "string" && block.name.startsWith("mcp__rocky__")) {
           hasMcpRockyUse = true;
         }
-        if (isStaleTask && !touchedStaleOverlay && overlayPaths.length > 0) {
+        if (overlayMatcher && !touchedStaleOverlay) {
           if (EDIT_TOOLS.has(block.name)) {
             for (const filePath of extractEditFilePaths(block)) {
-              if (editPathMatchesOverlay(filePath, overlayPaths)) {
+              if (overlayMatcher.matches(filePath, taskDir)) {
                 touchedStaleOverlay = true;
                 break;
               }
             }
           } else if (SHELL_TOOLS.has(block.name)) {
             const cmd = typeof block.input?.command === "string" ? block.input.command : "";
-            if (commandTouchesOverlay(cmd, overlayRegexes)) {
+            if (commandTouchesOverlay(cmd, block.name, taskDir, overlayMatcher)) {
               touchedStaleOverlay = true;
             }
           }
