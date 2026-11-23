@@ -188,6 +188,20 @@ describe("classifyTargetRuns", () => {
       },
       {
         tool: "PowerShell",
+        command: "Set-Location config\u00A0# prep; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command: "cd config\u00A0# prep; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "PowerShell",
         command: "Set-Location config <# prep; npm test #>",
         isError: false,
         hasTrap: false,
@@ -266,6 +280,76 @@ describe("classifyTargetRuns", () => {
       {
         tool: "Bash",
         command: "npm install\nnpm test",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command: "npm test; # done",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "npm test\n# done",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "PowerShell",
+        command: "npm test; # done",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "PowerShell",
+        command: "npm test\n# done",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "npm test; ; # done\n",
+        isError: false,
+        hasTrap: false,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "npm test && # done",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command: "npm test |& tail",
+        isError: false,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "npm test |& tail",
+        isError: false,
+        hasTrap: true,
+        expected: "trap_fail",
+      },
+      {
+        tool: "Bash",
+        command: "npm test |&\ntail",
+        isError: false,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "PowerShell",
+        command: "npm test |& tail",
         isError: false,
         hasTrap: false,
         expected: null,
@@ -788,6 +872,18 @@ describe("toolCalls and runMetrics", () => {
         { cwd: "/eval/task" },
       );
       assert.equal(runMetrics(bashCdIntoPipeDoesNotPersist, staleS01, dir).staleRepeat, false);
+
+      const bashPipeStderrIntoCdDoesNotPersist = buildShellEvents(
+        [{ name: "Bash", command: "printf x |& cd config; cat local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(bashPipeStderrIntoCdDoesNotPersist, staleS01, dir).staleRepeat, false);
+
+      const bashCdIntoPipeStderrDoesNotPersist = buildShellEvents(
+        [{ name: "Bash", command: "cd config |& cat; cat local.json", isError: false, output: "" }],
+        { cwd: "/eval/task" },
+      );
+      assert.equal(runMetrics(bashCdIntoPipeStderrDoesNotPersist, staleS01, dir).staleRepeat, false);
 
       // POSIX root join: joining a relative path onto `/` must not create a `//` UNC prefix.
       const posixRootJoin = buildShellEvents(

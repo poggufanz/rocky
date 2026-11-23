@@ -24,6 +24,7 @@ const ROCKY_LINE_RE = /^\s*rocky:/;
 const ROCKY_INDENT_RE = /^ {4}/;
 const NOTE_DELIVERED_RE = /rocky: Same error recorded \d+ times? before/;
 const WIN32_DRIVE_RE = /^[A-Za-z]:(?:[\\/]|$)/;
+const UNICODE_WS_RE = /\s/u;
 const ARM_ORDER = ["none", "before", "after"];
 
 const USAGE = [
@@ -169,20 +170,24 @@ export function stripRockyLines(text) {
   return kept.join("\n");
 }
 
+function isPipeSeparator(separator) {
+  return separator === "|" || separator === "|&";
+}
+
 /**
  * Split a shell command into top-level statements and the separator following
  * each statement, honouring shell-specific quoting, escaping, comments, and
  * line breaks in linear time.
  * @param {string} command
  * @param {string} [shell]
- * @returns {Array<{ text: string, separator: ";" | "&&" | "||" | "|" | "&" | "\n" | null }>}
+ * @returns {Array<{ text: string, separator: ";" | "&&" | "||" | "|" | "|&" | "&" | "\n" | null }>}
  */
 export function splitStatements(command, shell = "Bash") {
   if (typeof command !== "string" || command.length === 0) return [];
 
   const isPowerShell = typeof shell === "string" && shell.toLowerCase() === "powershell";
   const escapeChar = isPowerShell ? "`" : "\\";
-  /** @type {Array<{ text: string, separator: ";" | "&&" | "||" | "|" | "&" | "\n" | null }>} */
+  /** @type {Array<{ text: string, separator: ";" | "&&" | "||" | "|" | "|&" | "&" | "\n" | null }>} */
   const statements = [];
   /** @type {string[]} */
   const chunks = [];
@@ -279,7 +284,7 @@ export function splitStatements(command, shell = "Bash") {
       atWordStart = true;
       continue;
     }
-    if (ch === " " || ch === "\t") {
+    if (ch !== "\r" && ch !== "\n" && UNICODE_WS_RE.test(ch)) {
       atWordStart = true;
       continue;
     }
@@ -318,6 +323,10 @@ export function splitStatements(command, shell = "Bash") {
         statements.push({ text: takeStatement(i), separator: "||" });
         i += 1;
         spanStart = i + 1;
+      } else if (!isPowerShell && command[i + 1] === "&") {
+        statements.push({ text: takeStatement(i), separator: "|&" });
+        i += 1;
+        spanStart = i + 1;
       } else {
         statements.push({ text: takeStatement(i), separator: "|" });
         spanStart = i + 1;
@@ -349,6 +358,21 @@ export function splitStatements(command, shell = "Bash") {
   const tail = takeStatement(command.length);
   if (tail.length > 0) {
     statements.push({ text: tail, separator: null });
+  }
+  while (
+    statements.length > 0
+    && statements[statements.length - 1].text.length === 0
+    && (statements[statements.length - 1].separator === ";"
+      || statements[statements.length - 1].separator === "\n")
+  ) {
+    statements.pop();
+  }
+  if (
+    statements.length > 0
+    && (statements[statements.length - 1].separator === ";"
+      || statements[statements.length - 1].separator === "\n")
+  ) {
+    statements[statements.length - 1].separator = null;
   }
   return statements;
 }
@@ -395,19 +419,16 @@ function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
   if (targetStmt.text.length === 0) return null;
 
   let piped = false;
-  if (targetStmt.separator === "|") {
+  if (isPipeSeparator(targetStmt.separator)) {
     piped = true;
     if (idx + 1 >= statements.length) return null;
     for (let j = idx + 1; j < statements.length; j += 1) {
       if (statements[j].text.length === 0) return null;
       const sep = statements[j].separator;
-      if (sep !== null && sep !== "|" && !(sep === "\n" && j === statements.length - 1)) return null;
-      if (sep === "|" && j + 1 >= statements.length) return null;
+      if (sep !== null && !isPipeSeparator(sep)) return null;
+      if (isPipeSeparator(sep) && j + 1 >= statements.length) return null;
     }
-  } else if (
-    targetStmt.separator !== null
-    && !(targetStmt.separator === "\n" && idx === statements.length - 1)
-  ) {
+  } else if (targetStmt.separator !== null) {
     return null;
   }
 
@@ -781,8 +802,8 @@ function commandTouchesOverlay(command, toolName, taskDir, overlayMatcher) {
     const cd = extractCdTarget(tokens, isPowerShell);
     if (cd.isCd) {
       const persistsDir = isPowerShell
-        ? prevSeparator !== "|"
-        : (prevSeparator !== "|" && separator !== "|");
+        ? !isPipeSeparator(prevSeparator)
+        : (!isPipeSeparator(prevSeparator) && !isPipeSeparator(separator));
       if (persistsDir) {
         if (cd.target === null) {
           effectiveDir = null;
