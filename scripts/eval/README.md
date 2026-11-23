@@ -2,33 +2,113 @@
 
 Sandboxed A/B harness for running Claude Code against isolated Rocky installations (`none`, `before`, and `after` arms) without inheriting host agent config, Rocky state, or ancestor instruction files.
 
-## Running capture
+See [`docs/attempt-memory-eval-preregistration.md`](../../docs/attempt-memory-eval-preregistration.md) for the frozen pre-registration protocol, task table, metric definitions, and decision rules.
 
-Choose a `--root` directory with no `CLAUDE.md`, `AGENTS.md`, or `.claude` in the root or any ancestor (for example `C:\rocky-eval` on Windows or `/tmp/rocky-eval` on POSIX), and an `--out` directory outside this repository and its enclosing workspace.
+## How to run
+
+Run all commands from the `rocky/` package root. Choose a `--root` directory with no `CLAUDE.md`, `AGENTS.md`, or `.claude` in the root or any ancestor (for example `"C:\rocky-eval\sbx"` on Windows or `"/tmp/rocky-eval/sbx"` on POSIX), and `--out` / `--cache` directories outside this repository and its enclosing workspace.
+
+Set `ROCKY_EVAL_OAUTH_TOKEN` in the current shell environment before running token-authenticated capture or batches (`runner.mjs` accepts `--auth token` only; `--auth copy-credentials` is disabled for batches).
+
+### 1. Capture
 
 `capture.mjs` runs `npm test` twice in an inline failing repo and asks the agent to print only the seven reported environment variables (`HOME`, `CLAUDE_CONFIG_DIR`, `ROCKY_HOME`, `ROCKY_TEST_SEAMS`, `ROCKY_ATTEMPT_ARM`, `ROCKY_AGENT_SESSION`, `PATH`), never the full environment. The harness also redacts the token value from all saved artifacts and output as a second layer.
 
-Token auth (reads `ROCKY_EVAL_OAUTH_TOKEN` from the current environment and passes it into the sandbox as `CLAUDE_CODE_OAUTH_TOKEN` only):
+Token auth (passes `ROCKY_EVAL_OAUTH_TOKEN` into the sandbox as `CLAUDE_CODE_OAUTH_TOKEN` only):
 
-```bash
-node scripts/eval/capture.mjs \
-  --root C:\rocky-eval \
-  --arm after \
-  --commit origin/main \
-  --auth token \
-  --out C:\rocky-eval\capture-after
+```powershell
+node scripts/eval/capture.mjs `
+  --root "C:\rocky-eval\sbx" `
+  --arm after `
+  --commit origin/main `
+  --auth token `
+  --out "C:\rocky-eval\capture-after"
 ```
 
-Copy-credentials auth (copies only `.credentials.json` into the sandbox config dir):
+Copy-credentials auth (capture/sandbox debugging only; copies only `.credentials.json` into the sandbox config dir):
 
-```bash
-node scripts/eval/capture.mjs \
-  --root C:\rocky-eval \
-  --arm none \
-  --auth copy-credentials \
-  --from C:\Users\<you>\.claude\.credentials.json \
-  --out C:\rocky-eval\capture-none
+```powershell
+node scripts/eval/capture.mjs `
+  --root "C:\rocky-eval\sbx" `
+  --arm none `
+  --auth copy-credentials `
+  --from "C:\Users\<you>\.claude\.credentials.json" `
+  --out "C:\rocky-eval\capture-none"
 ```
+
+### 2. Smoke batch
+
+Verify the end-to-end runner, sandbox isolation, and owner guard on the excluded `SMOKE` task before launching a full batch:
+
+```powershell
+node scripts/eval/runner.mjs `
+  --out "C:\rocky-eval\smoke" `
+  --root "C:\rocky-eval\sbx" `
+  --before "31128bc" `
+  --after "<after-sha>" `
+  --auth token `
+  --only SMOKE `
+  --k 1 `
+  --concurrency 1
+```
+
+### 3. Full batch
+
+Runs the 20 frozen non-smoke tasks across all three arms with default `k = 5`, `seed = 20261123`, and `concurrency = 2` (300 runs total):
+
+```powershell
+node scripts/eval/runner.mjs `
+  --out "C:\rocky-eval\run1" `
+  --root "C:\rocky-eval\sbx" `
+  --before "31128bc" `
+  --after "<after-sha>" `
+  --auth token
+```
+
+To retry existing runs marked `api_error` or `harness_crash` (up to 2 retries per run) using the same provenance:
+
+```powershell
+node scripts/eval/runner.mjs `
+  --out "C:\rocky-eval\run1" `
+  --root "C:\rocky-eval\sbx" `
+  --before "31128bc" `
+  --after "<after-sha>" `
+  --auth token `
+  --retry-invalid
+```
+
+### 4. Evaluate
+
+Score every run in `<out>/runs/` offline and write `<out>/metrics.json`:
+
+```powershell
+node scripts/eval/evaluate.mjs --out "C:\rocky-eval\run1"
+```
+
+### 5. Report
+
+Render the markdown evaluation report from `<out>/metrics.json` and `<out>/batch.json` (`--seed` and `--resamples` overrides are disallowed for `run1` and `run2`):
+
+```powershell
+node scripts/eval/report.mjs `
+  --out "C:\rocky-eval\run1" `
+  --label run1 `
+  --dest "C:\rocky-eval\run1\report-run1.md"
+```
+
+### 6. Eval tests and manifest verification
+
+Eval harness unit tests run with `node --test "scripts/eval/test/*.test.mjs"` (and `node scripts/eval/freeze.mjs --verify` verifies the frozen task manifest).
+
+## What stays local
+
+Keep all runtime eval outputs outside this repository and its enclosing workspace; never commit them because they can contain host paths or raw sandbox output:
+
+- raw transcripts (`runs/<runId>/transcript.jsonl`) and subprocess stderr logs (`runs/<runId>/stderr.txt`);
+- per-run sandboxes under `--root` (deleted after each run) and packed arm tarballs in `--cache`;
+- saved final repository copies (`runs/<runId>/final/`) and sandbox Rocky state copies (`runs/<runId>/rocky-home/`);
+- batch/run metadata (`batch.json`, `run.json`, `retries.json`) and scored `metrics.json`;
+- rendered markdown reports before they are reviewed and copied into `docs/evals/`.
 
 ## Harness facts (captured 2026-11-23)
 

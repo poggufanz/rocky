@@ -1,0 +1,181 @@
+# Controlled attempt-memory evaluation: pre-registration
+
+**Frozen:** 2026-11-23
+**Status:** Pre-registered before run 1 of the controlled three-arm evaluation.
+
+This document pre-registers the controlled evaluation protocol comparing no Rocky (`none`), Rocky before attempt memory (`before`), and Rocky with attempt memory (`after`). All tasks are synthetic, so this evaluation does not replace the pre-registered field measurement (`docs/attempt-notes-preregistration.md`); its primary role is early harm veto and reproducible controlled measurement. It makes no causal claims and publishes no projected effect sizes.
+
+## Schedule of runs
+
+The task set, metric definitions, and decision rules are identical across both scheduled runs and are frozen before run 1:
+
+- **Run 1:** runs after the evaluation harness pull request merges to `main`, measuring the prior-attempts note before daily field use. A harm veto in run 1 turns the prior-attempts note default OFF before daily use.
+- **Run 2:** runs after the remaining attempt-memory changes merge to `main`, using that merge commit as the `after` arm.
+- **Optional exploratory arm (run 2 only):** an `after+fixtouch` arm may be added in run 2 if opt-in fix-touch default activation is considered; its results are labelled **exploratory**.
+
+## Arms and commits
+
+All three arms use the same model, task prompt, and turn limit.
+
+| Arm | Rocky commit | Setup and behavior | `CLAUDE.md` composition |
+| --- | --- | --- | --- |
+| `none` | None | No hooks, no MCP server, `rocky` stripped from sandbox `PATH`, empty `ROCKY_HOME`. Skips history replay. | `base.md` only |
+| `before` | `31128bc` (`31128bc46ca7aa0bdf10c6d35e8fce353163c1d0`) | Pre-attempt-memory baseline on `main`, installed in the sandbox with `rocky setup --harness claude-code --yes` and `rocky setup --agent-hooks`. Runs history replay on trap and stale tasks. | `base.md` + blank line + `rocky-section.md` |
+| `after` | Run 1: merge commit of the eval harness PR on `main` (contains `c44a1e2` / `c44a1e2b1dc10ed28fd0c39143e0e5fcb6967845`; `src/` is unchanged by the harness PR). Run 2: final attempt-memory merge commit on `main`. | Installed in the sandbox the same way as `before`. Prior-attempts note forced to `shown` via `ROCKY_TEST_SEAMS=1` and `ROCKY_ATTEMPT_ARM=shown`; fix-touch remains OFF. Runs history replay on trap and stale tasks. | `base.md` + blank line + `rocky-section.md` |
+
+For run 1, the batch must start only after the harness PR merges to `main`, and the run-1 report records the exact merge commit SHA.
+
+### Arm `CLAUDE.md` hashes
+
+Computed from `renderClaudeMd(arm)` in `scripts/eval/history.mjs` (UTF-8, trailing LF):
+
+| Arm | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `none` | 111 | `5024d0e1b0da16e3b5fa41694f1d8c4049aa31d8fd80f1e81565f0977ac46fe7` |
+| `before` | 916 | `bfe0c7f099f78760b16a580cb63bffd1a13e31a15b1e1bce01ca77ffb7af80c8` |
+| `after` | 916 | `bfe0c7f099f78760b16a580cb63bffd1a13e31a15b1e1bce01ca77ffb7af80c8` |
+
+## Harness parameters
+
+Frozen from the 2026-11-23 harness capture on Windows 11 with Claude Code `2.1.330 (Claude Code)` (`scripts/eval/README.md`, `scripts/eval/sandbox.mjs`, `scripts/eval/runner.mjs`):
+
+- **Model (`MODEL`):** `claude-sonnet-5-5`
+- **CLI flags (`CLAUDE_FLAGS`):**
+  ```text
+  -p --output-format stream-json --verbose --max-turns 30 --model claude-sonnet-5-5 --effort high --allowedTools Bash,PowerShell,Edit,Write,Read,Glob,Grep,mcp__rocky__* --
+  ```
+  The task prompt is appended after the trailing `--`. `--setting-sources` and `--strict-mcp-config` are not passed; sandbox isolation cuts off host settings while preserving the user-scoped MCP entry registered by `rocky setup` inside the sandbox.
+- **Max turns:** `30` (`--max-turns 30`).
+- **Per-run timeout:** `20 minutes` (`1,200,000 ms`).
+- **Authentication:** batches run on `--auth token` only (reading `ROCKY_EVAL_OAUTH_TOKEN` from the host environment and passing it into the sandbox as `CLAUDE_CODE_OAUTH_TOKEN`). `--auth copy-credentials` is disabled for batches (exits `2`).
+- **Blocks (`k`):** `5` randomized blocks per `(task, arm)` (`20 × 3 × 5 = 300` runs for the full non-smoke set). The harness bounds `k` to integers in `1..12` so exact paired-mean sign-flip grids stay exact up to `lcm(1..12) = 27720`.
+- **Randomization seed:** `20261123` (`mulberry32`). Within each block `1..k`, tasks are shuffled and then arms are shuffled per task, interleaving arms rather than running one arm at a time.
+- **Concurrency:** `2` (default).
+
+## Frozen task set
+
+All tasks are synthetic, zero-dependency Node.js fixture repositories under `scripts/eval/tasks/` and are never drawn from the owner's `memory.jsonl`.
+
+- **Manifest `taskSetSha256`:** `3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a`
+- **Manifest contents:** 21 tasks (10 trap, 6 control, 4 stale, 1 smoke), 138 tracked files, frozen `2026-11-23T00:54:12.505Z`, verified via `node scripts/eval/freeze.mjs --verify`.
+- **Shared task prompt:** `"npm test fails in this repository. Find the cause and fix it so \`npm test\` passes. Do not edit files under test/."`
+- **Categories:**
+  - **Trap (`T01`–`T10`):** failing repo with tempting wrong paths. In `before` and `after`, history replay runs the arm's `rocky run` on the initial failure, two wrong patches (`wrong-1`, `wrong-2`) that reproduce the trap line, and a passing `fix` patch, writing matching change-card fixtures, then resets the repo to the initial trap state. Arm `none` skips history replay.
+  - **Control (`C01`–`C06`):** same failure shapes with empty memory (`history: null`), measuring overhead or harm when Rocky has nothing to report.
+  - **Stale (`S01`–`S04`):** history replay runs against `history-repo/` where an older `fix` patch once passed, then the repo is materialized from `repo/` where the codebase has moved and that older fix no longer works. Measures whether stale memory misleads the agent.
+  - **Smoke (`SMOKE`):** harness sanity probe only; excluded from default batches and never analyzed or included in verdicts.
+
+| ID | Kind | Fixture | Target command | Normalized trap line | Accept line | History | Protected |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `T01` | `trap` | `env-name-typo` | `npm test` | `error: database_url is not set` | `eval-accept: env-name-typo ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T02` | `trap` | `config-override` | `npm test` | `error: port must be a number, got "#a"` | `eval-accept: config-override ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T03` | `trap` | `dist-overwritten` | `npm test` | `typeerror: total is not a function` | `eval-accept: dist-overwritten ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T04` | `trap` | `generated-source` | `npm test` | `error: unknown field "email"` | `eval-accept: generated-source ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T05` | `trap` | `cjs-named-export` | `npm test` | `syntaxerror: named export 'parse' not found` | `eval-accept: cjs-named-export ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T06` | `trap` | `cli-flag-renamed` | `npm test` | `error: unknown option '--fix'` | `eval-accept: cli-flag-renamed ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T07` | `trap` | `env-file-missing` | `npm test` | `error: api_token is required` | `eval-accept: env-file-missing ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T08` | `trap` | `path-with-space` | `npm test` | `error: cannot find module '<path>'` | `eval-accept: path-with-space ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T09` | `trap` | `stale-cache` | `npm test` | `assertionerror: expected # rows, got #` | `eval-accept: stale-cache ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `T10` | `trap` | `rate-key-case` | `npm test` | `assertionerror: expected total #, got #` | `eval-accept: rate-key-case ok` | `wrong-1`, `wrong-2` -> `fix` | `test/` |
+| `C01` | `control` | `env-name-typo` | `npm test` | `error: database_url is not set` | `eval-accept: env-name-typo ok` | none | `test/` |
+| `C02` | `control` | `config-override` | `npm test` | `error: port must be a number, got "#a"` | `eval-accept: config-override ok` | none | `test/` |
+| `C03` | `control` | `dist-overwritten` | `npm test` | `typeerror: total is not a function` | `eval-accept: dist-overwritten ok` | none | `test/` |
+| `C04` | `control` | `generated-source` | `npm test` | `error: unknown field "email"` | `eval-accept: generated-source ok` | none | `test/` |
+| `C05` | `control` | `cjs-named-export` | `npm test` | `syntaxerror: named export 'parse' not found` | `eval-accept: cjs-named-export ok` | none | `test/` |
+| `C06` | `control` | `cli-flag-renamed` | `npm test` | `error: unknown option '--fix'` | `eval-accept: cli-flag-renamed ok` | none | `test/` |
+| `S01` | `stale` | `config-override-moved` | `npm test` | `error: port must be a number, got "#a"` | `eval-accept: config-override-moved ok` | `wrong-1`, `wrong-2` -> `fix` (stale) | `test/` |
+| `S02` | `stale` | `dist-now-rebuilt` | `npm test` | `typeerror: total is not a function` | `eval-accept: dist-now-rebuilt ok` | `wrong-1`, `wrong-2` -> `fix` (stale) | `test/` |
+| `S03` | `stale` | `script-moved` | `npm test` | `error: missing input file` | `eval-accept: script-moved ok` | `wrong-1`, `wrong-2` -> `fix` (stale) | `test/` |
+| `S04` | `stale` | `cache-moved` | `npm test` | `assertionerror: expected # rows, got #` | `eval-accept: cache-moved ok` | `wrong-1`, `wrong-2` -> `fix` (stale) | `test/` |
+| `SMOKE` | `smoke` | `smoke` | `npm test` | `error: capture-probe` | `eval-accept: smoke ok` | none (not analyzed) | `test/` |
+
+Each task's target command alias patterns are frozen in `scripts/eval/tasks/tasks.json` and `scripts/eval/tasks/manifest.json`.
+
+## Metric definitions
+
+All transcript metrics are computed offline by `scripts/eval/evaluate.mjs` identically across all three arms using the repository's own `dist/core/fingerprint.js` (`normalizeLine` and `unwrapRockyRun`), so scoring never depends on an arm's own capture path.
+
+- **Pre-processing and target-run classification:**
+  - `stripRockyLines` removes every line matching `/^\s*rocky:/` and any immediately following continuation lines indented by 4 or more spaces before error matching.
+  - Shell calls (`Bash` and `PowerShell` `tool_use` paired with `tool_result`) are matched to the task's frozen target aliases after unwrapping `rocky run`, splitting shell statements, allowing leading `cd` statements, stripping trailing `2>&1`, and noting whether the target statement is piped.
+  - **Trap signature:** one normalized stderr line produced via `normalizeLine` from `dist/core/fingerprint.js` (not a whole multi-line fingerprint). A matched target call is classified as `trap_fail` if any line of its stripped output normalizes equal to the task's `normalizedTrapLine`; else `pass` if not piped and `is_error === false`; else `other_fail` if `is_error === true`; else `unknown`.
+- **Quality condition (`solved`):** graded by `scripts/eval/accept.mjs` on the run's saved `final/` repository copy outside the sandbox. `solved` is `true` only when:
+  1. every protected file matches its manifest SHA-256 and no unexpected files exist under protected directories (`test/`); and
+  2. executing the task's target command without a shell under a minimal allowlisted environment (Rocky-stripped `PATH` plus Windows system variables `SystemRoot`, `windir`, `ComSpec`, `PATHEXT`, `SystemDrive` on `win32`; isolated temporary `TEMP`/`TMP`/`HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA`/`NPM_CONFIG_CACHE`; 120 s timeout; 16 MiB stream buffer cap) exits `0` without timeout, signal, or overflow **and** prints the task's exact `acceptLine` from its protected test on stdout.
+- **Primary efficiency metric (`repeatFailures`):** count of `trap_fail` target calls occurring after the first `trap_fail` and before the first `pass` target call (or the turn limit). Lower is better. A run that never executes a matching target call is recorded as `"no_attempt"` (not `0`), excluded from numeric means, and counted separately.
+- **Secondary metrics:**
+  - `turnsToPass`: 1-based running count of distinct assistant `message.id` values (in order of first appearance; assistant events without an id count individually) up to and including the event holding the first passing target `tool_use`, or `null` if no target call passed.
+  - `numTurns`: `num_turns` from the transcript's final `result` event (`0` if absent). Used for the harm-veto `medianTurnRise` check.
+  - `wallMs`: `duration_ms` from the final `result` event (`0` if absent).
+  - `noteBytes`: sum of UTF-8 byte lengths of `/^\s*rocky:/` lines in tool results (lane 1), plus `row.bytes` from delivered `tool-result` note rows in `rocky-home/advisories.jsonl` (lane 2).
+- **Control tasks:** `solved` and `numTurns` (pooled with stale tasks for the harm veto).
+- **Stale tasks:** `solved`, `numTurns`, and `staleRepeat` (descriptive only; feeds no claim or veto), indicating whether any `Edit`/`Write`/`MultiEdit` call or statically parsed shell command token touched a path belonging to the stale `patches/<history.fix>` overlay.
+
+## Exclusion and retry rules
+
+A run is marked invalid (`invalid !== null`) in `run.json` for one of five reasons:
+
+| Reason | Condition | Retryable |
+| --- | --- | --- |
+| `token_leak` | `ROCKY_EVAL_OAUTH_TOKEN` detected in stdout, stderr, or any saved run artifact (`transcript.jsonl`, `stderr.txt`, `final/**`, `rocky-home/*`). Leaking files are deleted or quarantined and the batch halts immediately. | No |
+| `timeout` | Claude subprocess exceeded `RUN_TIMEOUT_MS` (20 minutes) and was terminated. | No |
+| `transcript_broken` | Transcript has zero non-empty lines, any malformed JSONL line, or no `result` event. | No |
+| `api_error` | Final `result` event has `is_error === true`, or a `subtype` other than `"success"` and `"error_max_turns"`. Hitting `--max-turns 30` with `subtype: "error_max_turns"` and `is_error: false` is a valid run. | Yes |
+| `harness_crash` | Sandbox setup, history materialization, subprocess launch, artifact staging, or acceptance threw an error, or required artifacts are missing. | Yes |
+
+- Invalid runs are excluded from numeric metric means and paired comparisons; counts and reasons are reported per arm.
+- With `--retry-invalid`, only `api_error` and `harness_crash` runs are retried, up to a durable cap of `2` retries per run (`retries.json` is written before launch so crashes cannot reset the cap).
+- Resuming a batch into an existing `--out` directory refuses to proceed if saved `batch.json` provenance differs (other than `concurrency` and `--retry-invalid`) or if the batch was previously halted.
+
+## Isolation, leak rules, and owner-activity ruling
+
+- **Sandbox isolation:** every run runs in a fresh directory under `--root` (refused if `CLAUDE.md`, `AGENTS.md`, or `.claude` exists in `--root` or any lexical or canonical ancestor), with `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`, and `ROCKY_HOME` pointing inside the sandbox, host Rocky shims stripped from `PATH`, and host `CLAUDE*`/`ROCKY_*`/`ANTHROPIC_*`/`NODE_OPTIONS` variables scrubbed. `--out` and `--cache` must lie outside the repository and its enclosing workspace.
+- **Arm `none` leak check:** `ROCKY_HOME` must remain empty, and the transcript must contain no `mcp__rocky__*` tool uses and no `/^\s*rocky:/` output lines. Any violation flags `none-arm-rocky`.
+- **Owner-activity ruling (`scripts/eval/owner-guard.mjs`):**
+  - Before the batch starts, the runner snapshots the byte offset of the owner's `memory.jsonl` and the SHA-256 and mtime of the owner's Claude `settings.json` (`~/.claude/settings.json` and `$CLAUDE_CONFIG_DIR/settings.json` if distinct).
+  - After each completed run and at batch end, the runner reads only records appended to the owner's `memory.jsonl` after the baseline offset (or from offset `0` if truncated/rotated, disclosing `memoryTruncated: true`). Only appended records whose `cwd` lies under the eval `--root` count as an owner leak (`appendedUnderEvalRoot > 0`), compared case-insensitively on Windows in both raw normalized and canonical (`realpath`) form. Normal owner activity outside the eval root is permitted and does not invalidate the batch.
+  - For owner `settings.json`, a content (`sha256`) change is an owner leak (`settingsChanged`); an mtime-only change with unchanged `sha256` is reported (`settingsTouched`) and is not a leak.
+- **Batch halt and validity:** any owner leak, token leak, or owner-check error latches a halt in `batch.json`, stops new runs from starting, blocks resume, and exits with code `3`. A single run-level leak invalidates that arm, and any leak (run-level or owner leak) makes the entire batch invalid (`batchValid = false`), authorizing no claims.
+
+## Positive-control rule
+
+- **Source:** for an `after` run, `noteDelivered` is `true` if either (a) a transcript tool result matches `/rocky: Same error recorded \d+ times? before/` (lane 1), **or** (b) the run's `rocky-home/advisories.jsonl` contains a row with `kind === "note"`, `arm === "shown"`, and `delivered === true` (lane 2). This dual source reflects the 2026-11-23 harness capture, which showed that lane-2 tool-result hook `additionalContext` is not echoed into Claude Code's `stream-json` transcript even when delivered.
+- **Threshold:** an `after` run on a trap task with `noteDelivered === false` is counted as `not_delivered`. Batch validity is governed by the `not_delivered` rate across **all** `after` trap runs (including invalid runs; the valid-only subset is also disclosed). If strictly more than `20%` of `after` trap runs are `not_delivered` (`notDeliveredCount * 5 > afterTrapTotal`), the `after` arm and batch are invalid (`batchValid = false`) and no claims may be made.
+
+## Analysis method
+
+- Compute per-task, per-arm arithmetic means of `repeatFailures` and `solved` across valid runs (excluding invalid runs and `"no_attempt"`).
+- On trap tasks only, compute paired per-task differences for `after − none`, `after − before`, and `before − none` across tasks with at least one valid numeric run in both arms.
+- **Exact sign-flip test (`scripts/eval/analyze.mjs`):**
+  - Quantize each paired per-task difference onto the exact integer grid `1 / lcm(1..k)` (`Math.round(diff * lcm(1..k))`; for `k = 5`, `1 / 60`).
+  - Drop differences that quantize to `0`; let `n` (effective) be the number of remaining non-zero trap tasks.
+  - Enumerate all `2^n` sign assignments in exact integer arithmetic to compute the two-sided p-value `P(|Σ| ≥ |obs|)`. Exact enumeration supports up to `24` non-zero tasks.
+  - Report `n` (effective) and `nPaired` for every comparison. With `n` non-zero tasks, the smallest possible two-sided p-value is `2 / 2^n` (at `n = 5`, `p = 0.0625`, so a `p ≤ 0.05` claim is impossible; 10 trap tasks leave room for up to 4 ties).
+- **Descriptive bootstrap interval:** report a two-stage 90% percentile bootstrap confidence interval (`10,000` resamples, seeded with the batch seed `20261123`; stage 1 resamples paired trap tasks with replacement, stage 2 resamples runs within each sampled task with replacement). Seed and resample overrides are disallowed by `report.mjs` for `run1` and `run2`.
+
+## Decision rules and run-boundary rule (binding English translation)
+
+The two subsections below are the binding English translation of the pre-registered decision rules and run-boundary rule in the attempt-memory design specification; all numeric thresholds are exact.
+
+### Decision rules
+
+- **"Rocky helps"** may be claimed only if, for `after − none` on the primary metric (`repeatFailures`), the two-sided exact sign-flip test gives `p ≤ 0.05` in the downward direction (`meanDiff < 0`), and the mean `solved` rate of `after` on trap tasks is not lower than that of `none` (subject to batch validity and the run-boundary rule below).
+- **"This change helps"** is claimed under the same rule for `after − before`.
+- **Harm veto** (point estimate, pooling valid control and stale runs, `none` vs `after`): if the mean `solved` rate of `after` drops by `≥ 0.2` compared with `none` (evaluated in exact rational arithmetic as `noneSolvedMean − afterSolvedMean ≥ 1/5`), **or** the median turn count (`numTurns`) rises by `≥ 3` (`afterMedianTurns − noneMedianTurns ≥ 3`), the prior-attempts note is turned default **OFF** without waiting for the field measurement. The default-OFF change flips the note to on only when `ROCKY_ATTEMPT_ADVISORY === "on"`. The veto applies in both run 1 and run 2.
+- Outside a veto, the default remains decided by the pre-registered field measurement (`docs/attempt-notes-preregistration.md`).
+- Null results are written as-is.
+
+### Run-boundary rule and claim authorization
+
+- **Run 1 never authorizes a claim:** run-1 per-task results serve only for veto and positive control. The run-1 report shows the statistical trigger (`Trigger`) alongside `Claimed: no`.
+- **Invalid batches claim nothing:** when `batchValid = false` (due to any leak or `> 20%` `not_delivered`), all comparisons report `Claimed: no` and no veto decision is recorded.
+- **Run 2 after a run-1-informed change:** if the note template, selection logic, or `attempts.ts` read model is changed after run 1 with reference to run-1 transcripts, a run-2 `after − before` claim requires at least `10` new trap tasks frozen before that change. Without a new frozen trap set, that run-2 comparison is descriptive only (`Claimed: no`). This is an evolve/held-out split at Rocky's scale.
+- **Unlabeled or exploratory runs:** any report label other than `run1` or `run2` is descriptive only (`Claimed: no`).
+
+## Link to field measurement
+
+Counting for the pre-registered field measurement (`docs/attempt-notes-preregistration.md`) begins once run 1 passes without a harm veto (and the owner's global build contains the prior-attempts note).
+
+## Reporting and local artifacts
+
+`scripts/eval/report.mjs` renders a markdown report from `metrics.json` and `batch.json` containing full provenance (model, `claude --version`, `CLAUDE_FLAGS`, arm and evaluator commits, `taskSetSha256`, per-arm `CLAUDE.md` SHA-256s, seed, `k`, concurrency, auth mode, scheduled tasks, bootstrap parameters), excluded runs, leak and owner-check results, positive-control rates, per-task × arm metrics, descriptive `staleRepeat` rates, paired comparisons, harm veto and verdict, and the run-boundary rule. Raw transcripts, sandboxes, `final/` copies, and `metrics.json` stay local outside the repository because they can carry host paths; only curated markdown reports are copied into `docs/evals/`.
