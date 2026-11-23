@@ -2,9 +2,9 @@
 
 > **Rescore note:**
 > - **Evaluator version and attribution rule:** Re-scored offline from the existing `run1` transcripts using `scripts/eval/evaluate.mjs` at this commit. Target attribution rule:
->   - A call whose only statement is the target (after `cd` prefixes and `rocky run` unwrapping, unpiped) keeps exit-status classification (`trap_fail` on trap line, `pass` on zero exit status, `other_fail` on nonzero exit status).
->   - Any other matched shape (leading non-`cd` statements, trailing statements, pipes, `rocky run "<chain>"`) is classified from output evidence only: the task's exact trap line → `trap_fail`; the task's exact protected acceptance line (`acceptLine`) → `pass`; neither → `unknown`. Exit status of the whole call is never used for these shapes.
->   - A target that may not have executed (behind `&&` after a non-`cd` statement, or anywhere in an `||` chain) with no trap/accept evidence classifies as `unknown` (never `other_fail`) and does not turn a run from `no_attempt` into an attempt.
+>   - A call whose only statement is the target (after `cd` prefixes and `rocky run` unwrapping, unpiped) keeps exit-status classification (`trap_fail` on normalized trap line, `pass` on zero exit status, `other_fail` on nonzero exit status).
+>   - Any other matched shape (leading non-`cd` statements, trailing statements, pipes, `;`, `&&`, `||`, `rocky run "<chain>"`) is classified from output evidence only using exact line equality (no normalization): the task's exact trap line → `trap_fail`; the task's exact protected acceptance line (`acceptLine`) → `pass`; neither → `unknown`. Exit status of the whole call is never used for these shapes.
+>   - An `unknown` from a target that may not have executed (behind `&&` after a non-`cd` statement, or anywhere in an `||` chain) never moves a run off `no_attempt`.
 >   - The `Evaluator commit` row in Provenance below reflects the original `batch.json` capture timestamp (`653780f2df98f9196cde7090db2e050f281dc19b`).
 > - **Pre-registered verdict:** The pre-registered verdict stays the one recorded in the original report ([`2026-11-23-attempt-memory-ab-run1.md`](./2026-11-23-attempt-memory-ab-run1.md)): **Not vetoed — harm thresholds not exceeded** (`batchValid: true`, `vetoed: false`). All veto inputs (`solved` and `numTurns` for every run; `solvedDrop = 0.000`, `medianTurnRise = 1`) are unchanged.
 > - **Metrics that moved:**

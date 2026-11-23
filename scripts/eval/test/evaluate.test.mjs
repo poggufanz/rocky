@@ -402,6 +402,20 @@ describe("classifyTargetRuns", () => {
       },
       {
         tool: "Bash",
+        command: "npm test",
+        isError: true,
+        output: '> eval@1.0.0 test\nError: port must be a number, got "90a"\n',
+        expected: "trap_fail",
+      },
+      {
+        tool: "Bash",
+        command: "npm test; false",
+        isError: true,
+        output: '> eval@1.0.0 test\nError: port must be a number, got "90a"\n',
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
         command: "false && npm test",
         isError: true,
         hasTrap: false,
@@ -412,7 +426,29 @@ describe("classifyTargetRuns", () => {
         command: "npm test || true",
         isError: false,
         hasTrap: false,
-        expected: null,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "true || npm test",
+        isError: false,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "npm test || true",
+        isError: false,
+        hasTrap: true,
+        expected: "trap_fail",
+      },
+      {
+        tool: "Bash",
+        command: "false || npm test",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: "pass",
       },
       // Shapes seen in run-1 eval transcripts:
       {
@@ -703,14 +739,32 @@ describe("classifyTargetRuns", () => {
         hasTrap: false,
         expected: null,
       },
+      {
+        tool: "Bash",
+        command: "cat <<$'E\\x4fF'\nE\\x4fF\nnpm test\neval-accept: config-override ok\nEOF",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: null,
+      },
+      {
+        tool: "Bash",
+        command: "cat <<EOF\\\nMORE\nEOF\nnpm test\neval-accept: config-override ok\nEOFMORE",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: null,
+      },
     ];
 
     for (const [index, row] of rows.entries()) {
-      const output = row.hasTrap
-        ? `> eval@1.0.0 test\n${PORT_TRAP}\n`
-        : (row.hasAccept
-          ? `> eval@1.0.0 test\n${PORT_ACCEPT}\n`
-          : (row.isError ? "Exit code 1\nSyntaxError: unexpected token\n" : "all tests passed\n"));
+      const output = typeof row.output === "string"
+        ? row.output
+        : (row.hasTrap
+          ? `> eval@1.0.0 test\n${PORT_TRAP}\n`
+          : (row.hasAccept
+            ? `> eval@1.0.0 test\n${PORT_ACCEPT}\n`
+            : (row.isError ? "Exit code 1\nSyntaxError: unexpected token\n" : "all tests passed\n")));
       const toolName = row.tool ?? "Bash";
       const classified = classifyTargetRuns(
         [{ turn: index + 1, name: toolName, command: row.command, output, isError: row.isError }],
@@ -861,12 +915,22 @@ describe("toolCalls and runMetrics", () => {
       { command: "ls -la", isError: false, output: "package.json\n" },
       { command: "false && npm test", isError: true, output: "Exit code 1\n" },
       { command: "npm install && npm test", isError: false, output: "ok\n" },
+      { command: "true || npm test", isError: false, output: "ok\n" },
+      { command: "npm test || true", isError: false, output: "ok\n" },
     ]);
     const dir = makeRunDir({ runId: "T02-none-b1", taskId: "T02", arm: "none", block: 1, invalid: null });
     try {
       const m = runMetrics(events, PORT_TASK, dir);
       assert.equal(m.repeatFailures, "no_attempt");
       assert.equal(m.turnsToPass, null);
+
+      const orAttemptEvents = buildShellEvents([
+        { command: "npm test || true", isError: false, output: `> eval@1.0.0 test\n${PORT_TRAP}\n` },
+        { command: "false || npm test", isError: false, output: `> eval@1.0.0 test\n${PORT_ACCEPT}\n` },
+      ]);
+      const orMetrics = runMetrics(orAttemptEvents, PORT_TASK, dir);
+      assert.equal(orMetrics.repeatFailures, 0);
+      assert.equal(orMetrics.turnsToPass, 2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1278,6 +1342,28 @@ describe("toolCalls and runMetrics", () => {
         },
       ]);
       assert.equal(runMetrics(partialQuoteHeredocBody, staleS01, dir).staleRepeat, false);
+
+      // Unsupported heredoc delimiters ($'...', backslash-newline continuation)
+      // conservatively report commandTouchesOverlay -> true.
+      const ansiCHeredocUnsupported = buildShellEvents([
+        {
+          name: "Bash",
+          command: "cat <<$'E\\x4fF'\nE\\x4fF\nnpm test\neval-accept: config-override ok\nEOF",
+          isError: false,
+          output: "",
+        },
+      ]);
+      assert.equal(runMetrics(ansiCHeredocUnsupported, staleS01, dir).staleRepeat, true);
+
+      const continuedHeredocUnsupported = buildShellEvents([
+        {
+          name: "Bash",
+          command: "cat <<EOF\\\nMORE\nEOF\nnpm test\neval-accept: config-override ok\nEOFMORE",
+          isError: false,
+          output: "",
+        },
+      ]);
+      assert.equal(runMetrics(continuedHeredocUnsupported, staleS01, dir).staleRepeat, true);
 
       // Without system/init cwd, paths are compared as given (no suffix false positive).
       const noInitClean = [
