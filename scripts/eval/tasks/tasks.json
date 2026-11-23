@@ -1,6 +1,7 @@
 [
   {
     "id": "T01",
+    "set": "v1",
     "kind": "trap",
     "fixture": "env-name-typo",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -18,6 +19,7 @@
   },
   {
     "id": "T02",
+    "set": "v1",
     "kind": "trap",
     "fixture": "config-override",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -35,6 +37,7 @@
   },
   {
     "id": "T03",
+    "set": "v1",
     "kind": "trap",
     "fixture": "dist-overwritten",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -52,6 +55,7 @@
   },
   {
     "id": "T04",
+    "set": "v1",
     "kind": "trap",
     "fixture": "generated-source",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -69,6 +73,7 @@
   },
   {
     "id": "T05",
+    "set": "v1",
     "kind": "trap",
     "fixture": "cjs-named-export",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -86,6 +91,7 @@
   },
   {
     "id": "T06",
+    "set": "v1",
     "kind": "trap",
     "fixture": "cli-flag-renamed",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -103,6 +109,7 @@
   },
   {
     "id": "T07",
+    "set": "v1",
     "kind": "trap",
     "fixture": "env-file-missing",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -120,6 +127,7 @@
   },
   {
     "id": "T08",
+    "set": "v1",
     "kind": "trap",
     "fixture": "path-with-space",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -137,6 +145,7 @@
   },
   {
     "id": "T09",
+    "set": "v1",
     "kind": "trap",
     "fixture": "stale-cache",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -154,6 +163,7 @@
   },
   {
     "id": "T10",
+    "set": "v1",
     "kind": "trap",
     "fixture": "rate-key-case",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -171,6 +181,7 @@
   },
   {
     "id": "C01",
+    "set": "v1",
     "kind": "control",
     "fixture": "env-name-typo",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -185,6 +196,7 @@
   },
   {
     "id": "C02",
+    "set": "v1",
     "kind": "control",
     "fixture": "config-override",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -199,6 +211,7 @@
   },
   {
     "id": "C03",
+    "set": "v1",
     "kind": "control",
     "fixture": "dist-overwritten",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -213,6 +226,7 @@
   },
   {
     "id": "C04",
+    "set": "v1",
     "kind": "control",
     "fixture": "generated-source",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -227,6 +241,7 @@
   },
   {
     "id": "C05",
+    "set": "v1",
     "kind": "control",
     "fixture": "cjs-named-export",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -241,6 +256,7 @@
   },
   {
     "id": "C06",
+    "set": "v1",
     "kind": "control",
     "fixture": "cli-flag-renamed",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -255,6 +271,7 @@
   },
   {
     "id": "S01",
+    "set": "v1",
     "kind": "stale",
     "fixture": "config-override-moved",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -272,6 +289,7 @@
   },
   {
     "id": "S02",
+    "set": "v1",
     "kind": "stale",
     "fixture": "dist-now-rebuilt",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -289,6 +307,7 @@
   },
   {
     "id": "S03",
+    "set": "v1",
     "kind": "stale",
     "fixture": "script-moved",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -306,6 +325,7 @@
   },
   {
     "id": "S04",
+    "set": "v1",
     "kind": "stale",
     "fixture": "cache-moved",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -323,6 +343,7 @@
   },
   {
     "id": "SMOKE",
+    "set": "v1",
     "kind": "smoke",
     "fixture": "smoke",
     "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",

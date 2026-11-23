@@ -51,6 +51,7 @@ Verify the end-to-end runner, sandbox isolation, and owner guard on the excluded
 
 ```powershell
 node scripts/eval/runner.mjs `
+  --set v1 `
   --out "C:\rocky-eval\smoke" `
   --root "C:\rocky-eval\sbx" `
   --before "31128bc" `
@@ -67,6 +68,7 @@ Runs the 20 frozen non-smoke tasks across all three arms with default `k = 5`, `
 
 ```powershell
 node scripts/eval/runner.mjs `
+  --set v1 `
   --out "C:\rocky-eval\run1" `
   --root "C:\rocky-eval\sbx" `
   --before "31128bc" `
@@ -78,6 +80,7 @@ To retry existing runs marked `api_error` or `harness_crash` (up to 2 retries pe
 
 ```powershell
 node scripts/eval/runner.mjs `
+  --set v1 `
   --out "C:\rocky-eval\run1" `
   --root "C:\rocky-eval\sbx" `
   --before "31128bc" `

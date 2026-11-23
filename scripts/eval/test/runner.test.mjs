@@ -186,6 +186,76 @@ describe("schedule and mulberry32", () => {
       ],
     );
   });
+
+  test("schedule with --arms none gives one run per task and block", async () => {
+    const tasks = ["T01", "T02", "T03", "T04"];
+    const first = schedule(tasks, ["none"], 3, 20261124);
+    const second = schedule(tasks, ["none"], 3, 20261124);
+
+    assert.equal(first.length, 12);
+    assert.ok(first.every((entry) => entry.arm === "none"));
+    assert.deepEqual(first, second);
+
+    for (let block = 1; block <= 3; block += 1) {
+      const inBlock = first.filter((entry) => entry.block === block);
+      assert.equal(inBlock.length, 4);
+      assert.deepEqual(
+        inBlock.map((entry) => entry.taskId).sort(),
+        tasks,
+      );
+      for (const entry of inBlock) {
+        assert.equal(entry.runId, `${entry.taskId}-none-b${block}`);
+      }
+    }
+
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-single-arm-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const executed = [];
+    try {
+      await runBatch(
+        {
+          set: "v1",
+          arms: ["none"],
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "token" },
+          secrets: [],
+          concurrency: 2,
+          k: 3,
+          seed: 20261124,
+          only: tasks,
+        },
+        makeFakeDeps({
+          runClaude: async ({ runId }) => {
+            executed.push(runId);
+            return {
+              stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+              stderr: "",
+              exitCode: 0,
+              timedOut: false,
+            };
+          },
+        }),
+      );
+
+      assert.equal(executed.length, 12);
+      const batchJson = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal(batchJson.set, "v1");
+      assert.equal(
+        batchJson.taskSetSha256,
+        "3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a",
+      );
+      assert.deepEqual(batchJson.arms, ["none"]);
+      assert.equal(batchJson.scheduledRuns, 12);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("task selection, provenance diff, and outcome classification", () => {
@@ -732,6 +802,44 @@ describe("bounded streaming capture and async accept", () => {
 });
 
 describe("runner CLI guards and resume provenance", () => {
+  test("runner requires --set", () => {
+    const bare = spawnSync(process.execPath, [runnerScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(bare.status, 2);
+    assert.match(bare.stderr, /--set/);
+
+    const outDir = mkdtempSync(join(tmpdir(), "rocky-runner-noset-"));
+    try {
+      const res = spawnSync(
+        process.execPath,
+        [
+          runnerScript,
+          "--out",
+          outDir,
+          "--before",
+          "31128bc",
+          "--after",
+          "HEAD",
+          "--auth",
+          "token",
+        ],
+        {
+          cwd: repoRoot,
+          env: { ...process.env, ROCKY_EVAL_OAUTH_TOKEN: "dummy-token" },
+          encoding: "utf8",
+          windowsHide: true,
+        },
+      );
+      assert.equal(res.status, 2);
+      assert.match(res.stderr, /--set/);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
   test("runner prints usage and exits 0 on --help", () => {
     const res = spawnSync(process.execPath, [runnerScript, "--help"], {
       cwd: repoRoot,
@@ -790,6 +898,7 @@ describe("runner CLI guards and resume provenance", () => {
       await assert.rejects(
         () => runBatch(
           {
+            set: "v1",
             outDir,
             rootDir: join(outDir, "sbx"),
             cacheDir: join(outDir, "cache"),
@@ -815,7 +924,7 @@ describe("runner CLI guards and resume provenance", () => {
   });
 
   test("runner refuses an out dir inside the repo", () => {
-    const res = spawnSync(process.execPath, [runnerScript, "--out", "."], {
+    const res = spawnSync(process.execPath, [runnerScript, "--set", "v1", "--out", "."], {
       cwd: repoRoot,
       encoding: "utf8",
       windowsHide: true,
@@ -826,7 +935,7 @@ describe("runner CLI guards and resume provenance", () => {
 
   test("runner refuses an out dir in the enclosing workspace", () => {
     const sibling = join(dirname(repoRoot), "tmp-runner-out");
-    const res = spawnSync(process.execPath, [runnerScript, "--out", sibling], {
+    const res = spawnSync(process.execPath, [runnerScript, "--set", "v1", "--out", sibling], {
       cwd: repoRoot,
       encoding: "utf8",
       windowsHide: true,
@@ -843,6 +952,8 @@ describe("runner CLI guards and resume provenance", () => {
         process.execPath,
         [
           runnerScript,
+          "--set",
+          "v1",
           "--out",
           outDir,
           "--cache",
@@ -877,6 +988,8 @@ describe("runner CLI guards and resume provenance", () => {
         process.execPath,
         [
           runnerScript,
+          "--set",
+          "v1",
           "--out",
           outDir,
           "--before",
@@ -923,6 +1036,7 @@ describe("runner CLI guards and resume provenance", () => {
       await assert.rejects(
         () => runBatch(
           {
+            set: "v1",
             outDir,
             rootDir: join(outDir, "sbx"),
             cacheDir: join(outDir, "cache"),
@@ -951,6 +1065,8 @@ describe("runner CLI guards and resume provenance", () => {
         process.execPath,
         [
           runnerScript,
+          "--set",
+          "v1",
           "--out",
           outDir,
           "--root",
@@ -1015,6 +1131,7 @@ describe("runner CLI guards and resume provenance", () => {
         join(outDir, "batch.json"),
         `${JSON.stringify({
           v: 1,
+          set: "v1",
           claudeVersion: "2.1.330 (Claude Code)",
           model: MODEL,
           claudeFlags: [...CLAUDE_FLAGS],
@@ -1049,6 +1166,8 @@ describe("runner CLI guards and resume provenance", () => {
           process.execPath,
           [
             runnerScript,
+            "--set",
+            "v1",
             "--out",
             outDir,
             "--root",
@@ -1272,6 +1391,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       });
 
       const baseOpts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1460,6 +1580,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
       await runBatch(
         {
+          set: "v1",
           outDir,
           rootDir,
           cacheDir,
@@ -1520,6 +1641,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         },
       });
       const opts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1588,6 +1710,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       });
 
       const opts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1684,6 +1807,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -1781,6 +1905,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
       await runBatch(
         {
+          set: "v1",
           outDir,
           rootDir,
           cacheDir,
@@ -1836,6 +1961,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const common = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
@@ -1962,6 +2088,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const common = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
@@ -2088,6 +2215,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -2144,6 +2272,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const opts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -2249,6 +2378,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -2304,6 +2434,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -2343,6 +2474,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const common = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",

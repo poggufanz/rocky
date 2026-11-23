@@ -1,10 +1,11 @@
 {
   "v": 1,
-  "frozenAt": "2026-11-23T00:54:12.505Z",
-  "evaluatorCommit": "e6d059e96a91bb5761c3703ce8cb929f45c6d373",
+  "frozenAt": "2026-11-23T17:15:21.569Z",
+  "evaluatorCommit": "c075c4368194790b2067eede27c66da7c073112f",
   "tasks": [
     {
       "id": "T01",
+      "set": "v1",
       "kind": "trap",
       "fixture": "env-name-typo",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -31,6 +32,7 @@
     },
     {
       "id": "T02",
+      "set": "v1",
       "kind": "trap",
       "fixture": "config-override",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -57,6 +59,7 @@
     },
     {
       "id": "T03",
+      "set": "v1",
       "kind": "trap",
       "fixture": "dist-overwritten",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -83,6 +86,7 @@
     },
     {
       "id": "T04",
+      "set": "v1",
       "kind": "trap",
       "fixture": "generated-source",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -109,6 +113,7 @@
     },
     {
       "id": "T05",
+      "set": "v1",
       "kind": "trap",
       "fixture": "cjs-named-export",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -135,6 +140,7 @@
     },
     {
       "id": "T06",
+      "set": "v1",
       "kind": "trap",
       "fixture": "cli-flag-renamed",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -162,6 +168,7 @@
     },
     {
       "id": "T07",
+      "set": "v1",
       "kind": "trap",
       "fixture": "env-file-missing",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -188,6 +195,7 @@
     },
     {
       "id": "T08",
+      "set": "v1",
       "kind": "trap",
       "fixture": "path-with-space",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -214,6 +222,7 @@
     },
     {
       "id": "T09",
+      "set": "v1",
       "kind": "trap",
       "fixture": "stale-cache",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -240,6 +249,7 @@
     },
     {
       "id": "T10",
+      "set": "v1",
       "kind": "trap",
       "fixture": "rate-key-case",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -266,6 +276,7 @@
     },
     {
       "id": "C01",
+      "set": "v1",
       "kind": "control",
       "fixture": "env-name-typo",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -286,6 +297,7 @@
     },
     {
       "id": "C02",
+      "set": "v1",
       "kind": "control",
       "fixture": "config-override",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -306,6 +318,7 @@
     },
     {
       "id": "C03",
+      "set": "v1",
       "kind": "control",
       "fixture": "dist-overwritten",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -326,6 +339,7 @@
     },
     {
       "id": "C04",
+      "set": "v1",
       "kind": "control",
       "fixture": "generated-source",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -346,6 +360,7 @@
     },
     {
       "id": "C05",
+      "set": "v1",
       "kind": "control",
       "fixture": "cjs-named-export",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -366,6 +381,7 @@
     },
     {
       "id": "C06",
+      "set": "v1",
       "kind": "control",
       "fixture": "cli-flag-renamed",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -387,6 +403,7 @@
     },
     {
       "id": "S01",
+      "set": "v1",
       "kind": "stale",
       "fixture": "config-override-moved",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -413,6 +430,7 @@
     },
     {
       "id": "S02",
+      "set": "v1",
       "kind": "stale",
       "fixture": "dist-now-rebuilt",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -439,6 +457,7 @@
     },
     {
       "id": "S03",
+      "set": "v1",
       "kind": "stale",
       "fixture": "script-moved",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -466,6 +485,7 @@
     },
     {
       "id": "S04",
+      "set": "v1",
       "kind": "stale",
       "fixture": "cache-moved",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -492,6 +512,7 @@
     },
     {
       "id": "SMOKE",
+      "set": "v1",
       "kind": "smoke",
       "fixture": "smoke",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -649,7 +670,11 @@
     "stale-cache/repo/scripts/clean.mjs": "ac6ba3601f89267af5abe380502157aaf6d8c96b8f5a9542d4e4201e4c1e593f",
     "stale-cache/repo/src/load.js": "227a340f409f2ca342a678a82a7d9bb7d356285815dfe3d17398b8a041a1f088",
     "stale-cache/repo/test/run.mjs": "5a8e431c624cdde9539ac4d7c79b01dfd827de0eff5b8428b2044d25c358b50b",
-    "tasks.json": "3fc5b55c62738049c8e916ffc6c9e99d0a7a78e2283b03bd661aa76b25ea0001"
+    "tasks.json": "1dcfb8db705350589c315af01ae1078ba637ee23d9e67cc9e5d38fb39241e0c8"
+  },
+  "taskSets": {
+    "v1": "3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a",
+    "v2": "a42f5fc546270131cd933ae71f6e0e95e36e52b3d0864f49ca9d7b6b2c7b0fca"
   },
   "taskSetSha256": "3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a"
 }

@@ -193,6 +193,12 @@ export function renderReport({
   lines.push("## Provenance");
   lines.push("");
   const prov = provenance && typeof provenance === "object" ? provenance : {};
+  const taskSet = typeof prov.set === "string" && prov.set.length > 0 ? prov.set : "v1";
+  const taskSetHash =
+    prov.taskSetSha256
+    ?? manifest?.taskSets?.[taskSet]
+    ?? (taskSet === "v1" ? manifest?.taskSetSha256 : null)
+    ?? null;
   const claudeMdHashes = prov.claudeMdSha256 && typeof prov.claudeMdSha256 === "object"
     ? Object.entries(prov.claudeMdSha256)
       .map(([arm, hash]) => `${arm}=\`${hash}\``)
@@ -208,7 +214,8 @@ export function renderReport({
     ["Before commit", prov.beforeSha ? `\`${prov.beforeSha}\` (${prov.beforeRef ?? "n/a"})` : "n/a"],
     ["After commit", prov.afterSha ? `\`${prov.afterSha}\` (${prov.afterRef ?? "n/a"})` : "n/a"],
     ["Evaluator commit", prov.evaluatorCommit ? `\`${prov.evaluatorCommit}\`` : "n/a"],
-    ["Task set sha256", prov.taskSetSha256 ? `\`${prov.taskSetSha256}\`` : "n/a"],
+    ["Task set", taskSet],
+    ["Task set sha256", taskSetHash ? `\`${taskSetHash}\`` : "n/a"],
     ["CLAUDE.md sha256", claudeMdHashes],
     ["Seed", prov.seed !== undefined ? String(prov.seed) : "n/a"],
     ["Blocks (k)", prov.k !== undefined ? String(prov.k) : "n/a"],
