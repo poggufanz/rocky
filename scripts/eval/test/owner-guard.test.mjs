@@ -394,15 +394,28 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       const firstRunId = startedRuns[0];
       const runJson = JSON.parse(readFileSync(join(outDir, "runs", firstRunId, "run.json"), "utf8"));
       assert.equal(runJson.invalid, "token_leak");
+      assert.equal(existsSync(join(outDir, "runs", firstRunId, "final", "a-token.txt")), false);
+      assert.deepEqual(runJson.quarantined, ["final/a-token.txt"]);
       assert.match(runJson.error, /simulated copy failure/);
       assert.ok(
         logs.some((line) => line.includes(firstRunId) && /token_leak/i.test(line)),
         `expected stderr line naming ${firstRunId}, got ${JSON.stringify(logs)}`,
       );
 
-      // --retry-invalid must NEVER retry token_leak.
+      const haltedBatch = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal(haltedBatch.halted?.reason, "token_leak");
+      assert.equal(haltedBatch.halted?.runId, firstRunId);
+      assert.equal(typeof haltedBatch.halted?.at, "string");
+
+      // Resume of a halted batch (even with --retry-invalid) exits 3 before packing, starting zero runs.
       const beforeRetryCount = startedRuns.length;
+      let resumePackCalls = 0;
+      const resumeLogs = [];
       const retryDeps = makeFakeDeps(owner, {
+        packArm: async (sha, dir) => {
+          resumePackCalls += 1;
+          return join(dir, `rocky-${sha}.tgz`);
+        },
         runClaude: async ({ runId }) => {
           startedRuns.push(runId);
           return {
@@ -412,28 +425,37 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
             timedOut: false,
           };
         },
+        log: (line) => resumeLogs.push(line),
       });
-      await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "token" },
-          secrets: [token],
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-          retryInvalid: true,
-        },
-        retryDeps,
+      await assert.rejects(
+        () => runBatch(
+          {
+            outDir,
+            rootDir,
+            cacheDir,
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "token" },
+            secrets: [token],
+            concurrency: 1,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+            retryInvalid: true,
+          },
+          retryDeps,
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
       );
+      assert.equal(resumePackCalls, 0, "halted resume must not pack arms");
       assert.equal(
-        startedRuns.filter((id) => id === firstRunId).length,
+        startedRuns.length,
         beforeRetryCount,
-        "token_leak run must never be retried by --retry-invalid",
+        "halted resume must start zero runs",
+      );
+      assert.ok(
+        resumeLogs.some((line) => /token_leak/.test(line)),
+        `expected halted resume stderr naming token_leak, got ${JSON.stringify(resumeLogs)}`,
       );
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
@@ -467,7 +489,9 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
         },
       });
       assert.equal(directRes.leaked, true);
+      assert.deepEqual(directRes.quarantined, ["final/b-leak.txt"]);
       assert.deepEqual(directRes.scanErrors, ["final/a-bad.txt"]);
+      assert.equal(existsSync(join(directDir, "final", "b-leak.txt")), false);
 
       // End-to-end through runBatch: records scanErrors and marks token_leak.
       const deps = makeFakeDeps(owner, {
@@ -524,6 +548,8 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       const firstRunId = startedRuns[0];
       const runJson = JSON.parse(readFileSync(join(outDir, "runs", firstRunId, "run.json"), "utf8"));
       assert.equal(runJson.invalid, "token_leak");
+      assert.deepEqual(runJson.quarantined, ["final/b-leaked.txt"]);
+      assert.equal(existsSync(join(outDir, "runs", firstRunId, "final", "b-leaked.txt")), false);
       assert.deepEqual(runJson.scanErrors, ["final/a-unreadable.txt"]);
 
       // Also verify token_leak overrides timeout when a timed-out run leaves a token in final/.
@@ -570,6 +596,8 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       const timeoutRunJson = JSON.parse(readFileSync(join(outTimeout, "runs", timeoutRuns[0], "run.json"), "utf8"));
       assert.equal(timeoutRunJson.timedOut, true);
       assert.equal(timeoutRunJson.invalid, "token_leak");
+      assert.deepEqual(timeoutRunJson.quarantined, ["final/timeout-leak.txt"]);
+      assert.equal(existsSync(join(outTimeout, "runs", timeoutRuns[0], "final", "timeout-leak.txt")), false);
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }
@@ -787,6 +815,448 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       });
       assert.equal(v.batchValid, false);
       assert.equal(v.leaks.ownerLeak, true);
+      assert.equal(leakedBatch.ownerLeakLatched, true);
+      assert.equal(leakedBatch.halted?.reason, "owner_leak");
+
+      // Resume of the owner-leak halted batch exits 3 before packing, starting zero runs.
+      let packCallsOnHalted = 0;
+      const resumedRuns = [];
+      const resumeLogs = [];
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outDirLeak },
+          makeFakeDeps(owner, {
+            packArm: async (sha, dir) => {
+              packCallsOnHalted += 1;
+              return join(dir, `rocky-${sha}.tgz`);
+            },
+            runClaude: async ({ runId }) => {
+              resumedRuns.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            log: (line) => resumeLogs.push(line),
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+      assert.equal(packCallsOnHalted, 0);
+      assert.equal(resumedRuns.length, 0);
+      assert.ok(resumeLogs.some((line) => /owner_leak/.test(line)));
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("scans and quarantines copied artifacts before grading even when acceptance command would delete the file", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-pregrade-scan-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+    const token = "sk-ant-oat01-pregrade-delete-secret-44444";
+    const startedRuns = [];
+    let sawTokenFileInGrader = null;
+    let graderCalled = false;
+
+    try {
+      const deps = makeFakeDeps(owner, {
+        materializeTask: async (_task, sandbox) => {
+          writeFileSync(join(sandbox.taskDir, "ephemeral-token.txt"), `secret=${token}\n`, "utf8");
+          writeFileSync(join(sandbox.taskDir, "clean.txt"), "ok\n", "utf8");
+          return { runs: [], cards: 0 };
+        },
+        runClaude: async ({ runId, stdoutPath, stderrPath }) => {
+          startedRuns.push(runId);
+          // Also verify that if a raw token somehow landed in stderr.txt unredacted, it is quarantined too.
+          writeFileSync(
+            stdoutPath,
+            `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+            "utf8",
+          );
+          writeFileSync(stderrPath, `raw-unredacted=${token}\n`, "utf8");
+          return {
+            exitCode: 0,
+            timedOut: false,
+            streamed: true,
+            tokenLeaked: false,
+            transcript: {
+              nonEmptyLines: 1,
+              malformedLineCount: 0,
+              oversizedLineCount: 0,
+              lastResult: { subtype: "success", is_error: false },
+            },
+          };
+        },
+        accept: async (_task, finalDir) => {
+          graderCalled = true;
+          const target = join(finalDir, "ephemeral-token.txt");
+          sawTokenFileInGrader = existsSync(target);
+          // Acceptance command attempts to delete the file; under the old order this hid the leak.
+          rmSync(target, { force: true });
+          return { solved: true, reason: "ok" };
+        },
+      });
+
+      await assert.rejects(
+        () => runBatch(
+          {
+            outDir,
+            rootDir,
+            cacheDir,
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "token" },
+            secrets: [token],
+            concurrency: 1,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          deps,
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(startedRuns.length, 1);
+      assert.equal(graderCalled, true, "grader should still run after pre-grade scan");
+      assert.equal(
+        sawTokenFileInGrader,
+        false,
+        "leaking file must be quarantined BEFORE acceptance grader runs",
+      );
+
+      const firstRunDir = join(outDir, "runs", startedRuns[0]);
+      const runJson = JSON.parse(readFileSync(join(firstRunDir, "run.json"), "utf8"));
+      assert.equal(runJson.invalid, "token_leak");
+      assert.equal("error" in runJson, false, "quarantined stderr.txt must not trigger incomplete-artifacts error");
+      assert.deepEqual(runJson.quarantined, ["stderr.txt", "final/ephemeral-token.txt"]);
+      assert.equal(existsSync(join(firstRunDir, "stderr.txt")), false);
+      assert.equal(existsSync(join(firstRunDir, "final", "ephemeral-token.txt")), false);
+      assert.equal(existsSync(join(firstRunDir, "final", "clean.txt")), true);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("resume refuses a batch with a published token_leak run even when batch.json.halted is absent", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-resume-published-leak-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+    const token = "sk-ant-oat01-resume-published-55555";
+
+    try {
+      const commonOpts = {
+        outDir,
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [token],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      // Run a leaking batch, then remove `halted` from batch.json to simulate a crash before batch.json update.
+      await assert.rejects(
+        () => runBatch(
+          commonOpts,
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "leak.txt"), `tok=${token}\n`, "utf8");
+              return { runs: [], cards: 0 };
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      const batchPath = join(outDir, "batch.json");
+      const tampered = JSON.parse(readFileSync(batchPath, "utf8"));
+      delete tampered.halted;
+      writeFileSync(batchPath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+
+      let packCalls = 0;
+      const startedRuns = [];
+      const logs = [];
+      await assert.rejects(
+        () => runBatch(
+          commonOpts,
+          makeFakeDeps(owner, {
+            packArm: async (sha, dir) => {
+              packCalls += 1;
+              return join(dir, `rocky-${sha}.tgz`);
+            },
+            runClaude: async ({ runId }) => {
+              startedRuns.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            log: (line) => logs.push(line),
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(packCalls, 0);
+      assert.equal(startedRuns.length, 0);
+      assert.ok(logs.some((line) => /token_leak/.test(line)));
+      const recovered = JSON.parse(readFileSync(batchPath, "utf8"));
+      assert.equal(recovered.halted?.reason, "token_leak");
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("dirty ownerCheck followed by a clean final check latches ownerLeakLatched and verdict marks batch invalid", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-latched-owner-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+    const settingsPath = join(owner.ownerHome, ".claude", "settings.json");
+    const originalSettings = '{"theme":"dark"}\n';
+    writeFileSync(settingsPath, originalSettings, "utf8");
+
+    try {
+      let checkCount = 0;
+      const startedRuns = [];
+
+      await assert.rejects(
+        () => runBatch(
+          {
+            outDir,
+            rootDir,
+            cacheDir,
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "token" },
+            secrets: [],
+            concurrency: 1,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          makeFakeDeps(owner, {
+            runClaude: async ({ runId }) => {
+              startedRuns.push(runId);
+              // Dirty settings during run 1.
+              writeFileSync(settingsPath, '{"theme":"tampered"}\n', "utf8");
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            ownerCheck: (base, arg) => {
+              checkCount += 1;
+              if (checkCount === 2) {
+                // Restore original settings before the final batch-end check so latest snapshot is clean.
+                writeFileSync(settingsPath, originalSettings, "utf8");
+              }
+              return ownerCheck(base, arg);
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(startedRuns.length, 1);
+      assert.equal(checkCount, 2);
+
+      const batchJson = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      // Latest snapshot is clean, while ownerLeakLatched preserves the earlier confirmed leak.
+      assert.equal(batchJson.ownerCheck.leak, false);
+      assert.equal(batchJson.ownerLeakLatched, true);
+      assert.equal(batchJson.halted?.reason, "owner_leak");
+
+      const v = verdict({
+        runs: [
+          {
+            taskId: "T01",
+            arm: "none",
+            block: 1,
+            invalid: null,
+            solved: true,
+            repeatFailures: 0,
+            turnsToPass: 2,
+            numTurns: 3,
+            wallMs: 500,
+            noteBytes: 0,
+            noteDelivered: null,
+            staleRepeat: null,
+            leak: [],
+          },
+        ],
+        provenance: batchJson,
+        resamples: 100,
+      });
+      assert.equal(v.batchValid, false);
+      assert.equal(v.leaks.ownerLeak, true);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("ownerCheck throw or persistence failure stops scheduling, records error, sets halt, and keeps exit 3 even after a known leak", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-guard-check-err-"));
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const owner = makeIsolatedOwner(baseTmp);
+    const token = "sk-ant-oat01-owner-err-secret-66666";
+
+    try {
+      const commonOpts = {
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [token],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      // Case 1: injected ownerCheck throw stops scheduling after run 1, records redacted error, sets halted, exits 3.
+      const outThrow = join(baseTmp, "out-throw");
+      const startedThrow = [];
+      const throwLogs = [];
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outThrow },
+          makeFakeDeps(owner, {
+            runClaude: async ({ runId }) => {
+              startedThrow.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            ownerCheck: () => {
+              throw new Error(`EACCES reading owner memory (${token})`);
+            },
+            log: (line) => throwLogs.push(line),
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+
+      assert.equal(startedThrow.length, 1, "ownerCheck throw must stop further runs from starting");
+      const throwBatch = JSON.parse(readFileSync(join(outThrow, "batch.json"), "utf8"));
+      assert.equal(throwBatch.ownerCheckError, "EACCES reading owner memory (<redacted>)");
+      assert.equal(throwBatch.halted?.reason, "owner_check_error");
+      assert.equal(throwBatch.halted?.runId, startedThrow[0]);
+      assert.equal(typeof throwBatch.halted?.at, "string");
+      assert.ok(throwLogs.some((line) => /owner_check_error/.test(line)));
+
+      // Resuming the owner_check_error halted batch starts zero runs and exits 3.
+      let resumePackCalls = 0;
+      const resumeStarted = [];
+      const resumeLogs = [];
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outThrow },
+          makeFakeDeps(owner, {
+            packArm: async (sha, dir) => {
+              resumePackCalls += 1;
+              return join(dir, `rocky-${sha}.tgz`);
+            },
+            runClaude: async ({ runId }) => {
+              resumeStarted.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            log: (line) => resumeLogs.push(line),
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+      assert.equal(resumePackCalls, 0);
+      assert.equal(resumeStarted.length, 0);
+      assert.ok(resumeLogs.some((line) => /owner_check_error/.test(line)));
+
+      // Case 2: persisting ownerCheck fails once -> stops scheduling, records error + halt, exits 3.
+      const outPersist = join(baseTmp, "out-persist");
+      const startedPersist = [];
+      let batchWriteCount = 0;
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outPersist },
+          makeFakeDeps(owner, {
+            runClaude: async ({ runId }) => {
+              startedPersist.push(runId);
+              return {
+                stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+            },
+            writeBatchJson: (targetPath, data) => {
+              batchWriteCount += 1;
+              if (batchWriteCount === 2) {
+                // Fail the first post-run ownerCheck persistence; allow the error-halt persist afterward.
+                throw new Error("ENOSPC: simulated batch.json write error");
+              }
+              mkdirSync(join(targetPath, ".."), { recursive: true });
+              writeFileSync(targetPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+      assert.equal(startedPersist.length, 1, "ownerCheck persist failure must stop further runs");
+      const persistBatch = JSON.parse(readFileSync(join(outPersist, "batch.json"), "utf8"));
+      assert.match(persistBatch.ownerCheckError, /ENOSPC/);
+      assert.equal(persistBatch.halted?.reason, "owner_check_error");
+
+      // Case 3: already-known token_leak followed by batch-end ownerCheck throw keeps exit 3 and token_leak halt.
+      const outLeakThenErr = join(baseTmp, "out-leak-then-err");
+      let leakCheckCalls = 0;
+      await assert.rejects(
+        () => runBatch(
+          { ...commonOpts, outDir: outLeakThenErr },
+          makeFakeDeps(owner, {
+            materializeTask: async (_task, sandbox) => {
+              writeFileSync(join(sandbox.taskDir, "leak.txt"), `tok=${token}\n`, "utf8");
+              return { runs: [], cards: 0 };
+            },
+            ownerCheck: (base, arg) => {
+              leakCheckCalls += 1;
+              if (leakCheckCalls >= 2) {
+                throw new Error("EIO on batch-end ownerCheck");
+              }
+              return ownerCheck(base, arg);
+            },
+          }),
+        ),
+        (err) => err instanceof BatchLeakError && err.exitCode === 3,
+      );
+      const leakErrBatch = JSON.parse(readFileSync(join(outLeakThenErr, "batch.json"), "utf8"));
+      assert.equal(leakErrBatch.halted?.reason, "token_leak");
+      assert.equal(leakErrBatch.ownerCheckError, "EIO on batch-end ownerCheck");
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }

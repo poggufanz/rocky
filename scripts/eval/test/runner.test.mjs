@@ -1797,7 +1797,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
     }
   });
 
-  test("voids token-mode runs when token appears in copied final/ or rocky-home/ artifacts and preserves plain copies", async () => {
+  test("voids token-mode runs and quarantines leaking files in final/ and rocky-home/ while preserving clean copies", async () => {
     const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-token-scan-"));
     const rootDir = join(baseTmp, "sbx");
     const cacheDir = join(baseTmp, "cache");
@@ -1818,7 +1818,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         only: ["SMOKE"],
       };
 
-      // Case 1: token in copied final/ file voids the run as token_leak, stops batch (exit 3), copy is plain.
+      // Case 1: token in copied final/ file quarantines (deletes) the file, records it, voids run as token_leak, stops batch (exit 3).
       const outFinal = join(baseTmp, "out-final");
       await assert.rejects(
         () => runBatch(
@@ -1841,10 +1841,15 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       const noneDir = join(outFinal, "runs", "SMOKE-none-b1");
       const noneRun = JSON.parse(readFileSync(join(noneDir, "run.json"), "utf8"));
       assert.equal(noneRun.invalid, "token_leak");
-      assert.equal(readFileSync(join(noneDir, "final", "nested", "leaked.txt"), "utf8"), `saved=${token}\n`);
+      assert.equal(existsSync(join(noneDir, "final", "nested", "leaked.txt")), false);
+      assert.deepEqual(noneRun.quarantined, ["final/nested/leaked.txt"]);
       assert.deepEqual(readFileSync(join(noneDir, "final", "bin.dat")), binaryPayload);
+      for (const rel of listAllFiles(outFinal)) {
+        const text = readFileSync(join(outFinal, rel), "utf8");
+        assert.equal(text.includes(token), false, `raw token survived in ${rel}`);
+      }
 
-      // Case 2: token in copied rocky-home/memory.jsonl voids the run as token_leak, stops batch (exit 3), copy is plain.
+      // Case 2: token in copied rocky-home/memory.jsonl quarantines (deletes) the file, records it, voids run as token_leak, stops batch (exit 3).
       const outRocky = join(baseTmp, "out-rocky");
       await assert.rejects(
         () => runBatch(
@@ -1869,10 +1874,12 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       const beforeDir = join(outRocky, "runs", "SMOKE-before-b1");
       const beforeRun = JSON.parse(readFileSync(join(beforeDir, "run.json"), "utf8"));
       assert.equal(beforeRun.invalid, "token_leak");
-      assert.equal(
-        readFileSync(join(beforeDir, "rocky-home", "memory.jsonl"), "utf8"),
-        `{"cmd":"echo ${token}"}\n`,
-      );
+      assert.equal(existsSync(join(beforeDir, "rocky-home", "memory.jsonl")), false);
+      assert.deepEqual(beforeRun.quarantined, ["rocky-home/memory.jsonl"]);
+      for (const rel of listAllFiles(outRocky)) {
+        const text = readFileSync(join(outRocky, rel), "utf8");
+        assert.equal(text.includes(token), false, `raw token survived in ${rel}`);
+      }
 
       // Case 3: clean artifacts complete all runs normally.
       const outClean = join(baseTmp, "out-clean");
@@ -1892,20 +1899,26 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       const afterDir = join(outClean, "runs", "SMOKE-after-b1");
       const afterRun = JSON.parse(readFileSync(join(afterDir, "run.json"), "utf8"));
       assert.equal(afterRun.invalid, null);
+      assert.equal("quarantined" in afterRun, false);
 
-      // Direct check: scanRunArtifactsForSecrets also catches a token spanning a 64 KiB boundary in transcript.jsonl.
+      // Direct check: scanRunArtifactsForSecrets catches and quarantines a token spanning a 64 KiB boundary in transcript.jsonl.
       const boundaryDir = join(baseTmp, "boundary-scan");
       mkdirSync(boundaryDir, { recursive: true });
       const padding = "x".repeat(64 * 1024 - 10);
-      writeFileSync(join(boundaryDir, "transcript.jsonl"), `${padding}${token}tail\n`, "utf8");
-      assert.deepEqual(await scanRunArtifactsForSecrets(boundaryDir, "none", [token]), {
-        leaked: true,
-        scanErrors: [],
-      });
+      const boundaryTranscript = join(boundaryDir, "transcript.jsonl");
+      writeFileSync(boundaryTranscript, `${padding}${token}tail\n`, "utf8");
       assert.deepEqual(await scanRunArtifactsForSecrets(boundaryDir, "none", ["not-present-token"]), {
         leaked: false,
+        quarantined: [],
         scanErrors: [],
       });
+      assert.equal(existsSync(boundaryTranscript), true);
+      assert.deepEqual(await scanRunArtifactsForSecrets(boundaryDir, "none", [token]), {
+        leaked: true,
+        quarantined: ["transcript.jsonl"],
+        scanErrors: [],
+      });
+      assert.equal(existsSync(boundaryTranscript), false);
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }
@@ -1959,6 +1972,8 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
       const noneRun = JSON.parse(readFileSync(join(outFinal, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
       assert.equal(noneRun.invalid, "token_leak");
+      assert.equal(existsSync(join(outFinal, "runs", "SMOKE-none-b1", "final", "leaked.txt")), false);
+      assert.deepEqual(noneRun.quarantined, ["final/leaked.txt"]);
       assert.equal(noneRun.accept, null);
       assert.match(noneRun.error, /grader boom with <redacted>/);
       assert.equal(noneRun.error.includes(token), false);

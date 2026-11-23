@@ -496,6 +496,7 @@ function meanPairedDiff(sampledTasks) {
  *   run1InformedChange?: boolean,
  *   heldOutTrapTasks?: number,
  *   ownerCheck?: { leak?: boolean, [key: string]: any } | null,
+ *   ownerLeakLatched?: boolean,
  *   seed?: number,
  *   resamples?: number,
  *   level?: number,
@@ -570,7 +571,11 @@ export function verdict(batch) {
   }
 
   const effectiveOwnerCheck = batch.ownerCheck ?? batch.provenance?.ownerCheck ?? null;
-  const ownerLeak = Boolean(effectiveOwnerCheck && effectiveOwnerCheck.leak === true);
+  const ownerLeakLatched =
+    batch.ownerLeakLatched === true || batch.provenance?.ownerLeakLatched === true;
+  const ownerLeak = Boolean(
+    ownerLeakLatched || (effectiveOwnerCheck && effectiveOwnerCheck.leak === true),
+  );
   const validRuns = runs.filter((run) => !isInvalidRun(run));
 
   // Positive control: all `after` trap runs (including invalid runs); `not_delivered` = `noteDelivered === false`.

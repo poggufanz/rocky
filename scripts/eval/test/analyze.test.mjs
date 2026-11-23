@@ -495,6 +495,28 @@ describe("verdict", () => {
     assert.equal(ownerLeak.batchValid, false);
     assert.equal(ownerLeak.armValid.none, false);
     assert.equal(ownerLeak.armValid.after, false);
+
+    const latchedTopLevel = verdict({
+      runs: baseRuns,
+      ownerLeakLatched: true,
+      ownerCheck: { leak: false, appendedUnderEvalRoot: 0, settingsChanged: [] },
+      resamples: 100,
+    });
+    assert.equal(latchedTopLevel.batchValid, false);
+    assert.equal(latchedTopLevel.leaks.ownerLeak, true);
+    assert.equal(latchedTopLevel.armValid.none, false);
+    assert.equal(latchedTopLevel.armValid.after, false);
+
+    const latchedProvenance = verdict({
+      runs: baseRuns,
+      provenance: {
+        ownerLeakLatched: true,
+        ownerCheck: { leak: false, appendedUnderEvalRoot: 0, settingsChanged: [] },
+      },
+      resamples: 100,
+    });
+    assert.equal(latchedProvenance.batchValid, false);
+    assert.equal(latchedProvenance.leaks.ownerLeak, true);
   });
 
   test("verdict passes batch k to signFlipP for exact per-task mean ties", () => {

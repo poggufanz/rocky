@@ -100,7 +100,7 @@ export class ProvenanceMismatchError extends Error {
 export class BatchLeakError extends Error {
   /**
    * @param {string} message
-   * @param {{ tokenLeakRuns?: string[], ownerCheck?: any, summary?: any }} [details]
+   * @param {{ tokenLeakRuns?: string[], ownerCheck?: any, halted?: any, summary?: any }} [details]
    */
   constructor(message, details = {}) {
     super(message);
@@ -108,6 +108,7 @@ export class BatchLeakError extends Error {
     this.exitCode = 3;
     this.tokenLeakRuns = details.tokenLeakRuns ?? [];
     this.ownerCheck = details.ownerCheck ?? null;
+    this.halted = details.halted ?? null;
     this.summary = details.summary ?? null;
   }
 }
@@ -1016,6 +1017,22 @@ function removeTreeWithRetry(target) {
   if (existsSync(target) && lastError) throw lastError;
 }
 
+function removeFileWithRetry(target, rmFn = rmSync) {
+  let lastError;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      rmFn(target, { force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      const code = error && typeof error === "object" ? error.code : undefined;
+      if (code !== "EBUSY" && code !== "EPERM" && code !== "EACCES") throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75 * (attempt + 1));
+    }
+  }
+  if (lastError) throw lastError;
+}
+
 function renameDirWithRetry(oldPath, newPath) {
   let lastError;
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -1074,8 +1091,10 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile)
 /**
  * Scan saved run artifacts (`transcript.jsonl`, `stderr.txt`, `final/**`, and `rocky-home/*`)
  * for any secret value using bounded chunked byte scans without following symlinks.
- * Records unreadable files/directories as relative paths in `scanErrors` and continues
- * scanning all remaining artifacts.
+ * Every file containing a secret is deleted from `workRunDir` and its POSIX-style
+ * relative path is recorded in `quarantined` (never contents).
+ * Records unreadable or unremovable files/directories as relative paths in `scanErrors`
+ * and continues scanning all remaining artifacts.
  * @param {string} workRunDir
  * @param {string} arm
  * @param {readonly string[]} secrets
@@ -1083,22 +1102,44 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile)
  *   lstatSync?: typeof lstatSync,
  *   readdirSync?: typeof readdirSync,
  *   openFile?: typeof openFile,
+ *   rmSync?: typeof rmSync,
  * }} [io]
- * @returns {Promise<{ leaked: boolean, scanErrors: string[] }>}
+ * @returns {Promise<{ leaked: boolean, quarantined: string[], scanErrors: string[] }>}
  */
 export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = {}) {
   const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
   if (secretBuffers.length === 0) {
-    return { leaked: false, scanErrors: [] };
+    return { leaked: false, quarantined: [], scanErrors: [] };
   }
 
   const lstatFn = io.lstatSync ?? lstatSync;
   const readdirFn = io.readdirSync ?? readdirSync;
   const openFn = io.openFile ?? openFile;
+  const rmFn = io.rmSync ?? rmSync;
 
   let leaked = false;
   /** @type {string[]} */
+  const quarantined = [];
+  /** @type {string[]} */
   const scanErrors = [];
+
+  async function scanAndQuarantineFile(filePath, relPath) {
+    let containsSecret = false;
+    try {
+      containsSecret = await fileContainsAnySecret(filePath, secretBuffers, openFn);
+    } catch {
+      scanErrors.push(relPath);
+      return;
+    }
+    if (!containsSecret) return;
+    leaked = true;
+    try {
+      removeFileWithRetry(filePath, rmFn);
+      quarantined.push(relPath);
+    } catch {
+      scanErrors.push(relPath);
+    }
+  }
 
   async function scanSingleFile(filePath, relPath) {
     let stat;
@@ -1109,13 +1150,7 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
       return;
     }
     if (!stat || stat.isSymbolicLink() || !stat.isFile()) return;
-    try {
-      if (await fileContainsAnySecret(filePath, secretBuffers, openFn)) {
-        leaked = true;
-      }
-    } catch {
-      scanErrors.push(relPath);
-    }
+    await scanAndQuarantineFile(filePath, relPath);
   }
 
   async function scanTree(dirPath, relPrefix, recursive) {
@@ -1152,13 +1187,7 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
           await scanTree(fullPath, relPath, true);
         }
       } else if (stat.isFile()) {
-        try {
-          if (await fileContainsAnySecret(fullPath, secretBuffers, openFn)) {
-            leaked = true;
-          }
-        } catch {
-          scanErrors.push(relPath);
-        }
+        await scanAndQuarantineFile(fullPath, relPath);
       }
     }
   }
@@ -1169,7 +1198,7 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
   await scanTree(join(workRunDir, "final"), "final", true);
   await scanTree(join(workRunDir, "rocky-home"), "rocky-home", false);
 
-  return { leaked, scanErrors };
+  return { leaked, quarantined, scanErrors };
 }
 
 /**
@@ -1398,14 +1427,57 @@ function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
   }
 }
 
-function hasRunArtifacts(workRunDir, arm, lstatFn = lstatSync) {
-  const transcriptOk = lstatOrNull(join(workRunDir, "transcript.jsonl"), lstatFn)?.isFile() === true;
-  const stderrOk = lstatOrNull(join(workRunDir, "stderr.txt"), lstatFn)?.isFile() === true;
+function hasRunArtifacts(workRunDir, arm, lstatFn = lstatSync, quarantinedSet = null) {
+  const transcriptOk =
+    lstatOrNull(join(workRunDir, "transcript.jsonl"), lstatFn)?.isFile() === true
+    || quarantinedSet?.has("transcript.jsonl") === true;
+  const stderrOk =
+    lstatOrNull(join(workRunDir, "stderr.txt"), lstatFn)?.isFile() === true
+    || quarantinedSet?.has("stderr.txt") === true;
   const finalOk = lstatOrNull(join(workRunDir, "final"), lstatFn)?.isDirectory() === true;
   const rockyOk = arm === "none"
     ? true
     : lstatOrNull(join(workRunDir, "rocky-home"), lstatFn)?.isDirectory() === true;
   return transcriptOk && stderrOk && finalOk && rockyOk;
+}
+
+function findPublishedTokenLeakRuns(runsDir, planned, lstatFn = lstatSync, readdirFn = readdirSync) {
+  /** @type {Set<string>} */
+  const leakedIds = new Set();
+  /** @type {Set<string>} */
+  const candidateNames = new Set();
+  for (const item of planned) {
+    candidateNames.add(item.runId);
+  }
+  try {
+    const rootStat = lstatOrNull(runsDir, lstatFn);
+    if (rootStat && !rootStat.isSymbolicLink() && rootStat.isDirectory()) {
+      for (const entry of readdirFn(runsDir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+        if (!entry.endsWith(".next") && !entry.endsWith(".prev")) {
+          candidateNames.add(entry);
+        }
+      }
+    }
+  } catch {
+    // Best-effort scan; fall back to planned runIds.
+  }
+
+  for (const name of Array.from(candidateNames).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const runDir = join(runsDir, name);
+    try {
+      recoverInterruptedSwap(runDir, lstatFn);
+      const runJsonPath = join(runDir, "run.json");
+      const stat = lstatOrNull(runJsonPath, lstatFn);
+      if (!stat || stat.isSymbolicLink() || !stat.isFile()) continue;
+      const parsed = JSON.parse(readFileSync(runJsonPath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.invalid === "token_leak") {
+        leakedIds.add(typeof parsed.runId === "string" && parsed.runId.length > 0 ? parsed.runId : name);
+      }
+    } catch {
+      // Ignore unreadable or malformed run dirs here; decideRunAction handles them.
+    }
+  }
+  return Array.from(leakedIds);
 }
 
 function swapStagedRunDir(runDir, nextDir, lstatFn = lstatSync) {
@@ -1539,6 +1611,8 @@ async function runWithConcurrency(items, concurrency, worker, shouldStop = () =>
  *   readdirSync: typeof readdirSync,
  *   copyFileSync: typeof copyFileSync,
  *   openFile: typeof openFile,
+ *   rmSync: typeof rmSync,
+ *   writeBatchJson: (targetPath: string, data: any, secrets: readonly string[]) => void,
  *   ownerHome: string,
  *   ownerConfigDir: string | null | undefined,
  *   ownerRockyHome: string | null | undefined,
@@ -1565,6 +1639,8 @@ export async function runBatch(options, overrides = {}) {
     readdirSync: overrides.readdirSync ?? readdirSync,
     copyFileSync: overrides.copyFileSync ?? copyFileSync,
     openFile: overrides.openFile ?? openFile,
+    rmSync: overrides.rmSync ?? rmSync,
+    writeBatchJson: overrides.writeBatchJson ?? writeJsonAtomic,
     ownerHome: overrides.ownerHome ?? homedir(),
     ownerConfigDir: overrides.ownerConfigDir !== undefined
       ? overrides.ownerConfigDir
@@ -1702,34 +1778,164 @@ export async function runBatch(options, overrides = {}) {
       auth: options.auth.kind,
       ownerBaseline: baseline,
     };
-    writeJsonAtomic(batchPath, batchData, secrets);
+    deps.writeBatchJson(batchPath, batchData, secrets);
+  }
+
+  function persistBatchJson(data) {
+    deps.writeBatchJson(batchPath, data, secrets);
+  }
+
+  const runsDir = join(outDir, "runs");
+  const publishedTokenLeaks = findPublishedTokenLeakRuns(
+    runsDir,
+    planned,
+    deps.lstatSync,
+    deps.readdirSync,
+  );
+  const existingHalt =
+    batchData.halted
+    && typeof batchData.halted === "object"
+    && !Array.isArray(batchData.halted)
+    && typeof batchData.halted.reason === "string"
+    && batchData.halted.reason.length > 0
+      ? batchData.halted
+      : null;
+  const preexistingOwnerLeak =
+    batchData.ownerLeakLatched === true || batchData.ownerCheck?.leak === true;
+
+  if (existingHalt || publishedTokenLeaks.length > 0 || preexistingOwnerLeak) {
+    /** @type {{ reason: string, runId?: string, at: string }} */
+    let haltInfo;
+    if (existingHalt) {
+      haltInfo = existingHalt;
+    } else if (publishedTokenLeaks.length > 0) {
+      haltInfo = {
+        reason: "token_leak",
+        runId: publishedTokenLeaks[0],
+        at: new Date().toISOString(),
+      };
+      batchData.halted = haltInfo;
+      try {
+        persistBatchJson(batchData);
+      } catch {
+        // Best-effort persistence on halted resume.
+      }
+    } else {
+      haltInfo = {
+        reason: "owner_leak",
+        at: new Date().toISOString(),
+      };
+      batchData.ownerLeakLatched = true;
+      batchData.halted = haltInfo;
+      try {
+        persistBatchJson(batchData);
+      } catch {
+        // Best-effort persistence on halted resume.
+      }
+    }
+    const runSuffix = haltInfo.runId ? ` (runId=${haltInfo.runId})` : "";
+    const msg = `Batch is halted (reason=${haltInfo.reason}${runSuffix}); refusing to resume`;
+    deps.log(redact(`[eval] abort: ${msg}`));
+    throw new BatchLeakError(msg, {
+      tokenLeakRuns: publishedTokenLeaks,
+      ownerCheck: batchData.ownerCheck ?? null,
+      halted: haltInfo,
+      summary: {
+        batchPath,
+        total: planned.length,
+        ran: 0,
+        skipped: 0,
+        malformed: 0,
+        publishFailed: 0,
+        stopped: true,
+        halted: haltInfo,
+        tokenLeakRuns: publishedTokenLeaks,
+        ownerCheck: batchData.ownerCheck ?? null,
+      },
+    });
   }
 
   let stopBatch = false;
-  let ownerLeakDetected = false;
+  let ownerLeakLatched = false;
+  let ownerCheckFailed = false;
   /** @type {string[]} */
   const tokenLeakRuns = [];
   /** @type {any} */
   let latestOwnerCheck = batchData.ownerCheck ?? null;
 
-  function runAndRecordOwnerCheck(contextLabel) {
-    const check = deps.ownerCheck(baseline, { evalRoot: rootDir, platform });
+  function setBatchHalt(reason, runId) {
+    stopBatch = true;
+    const existingReason = batchData.halted?.reason;
+    const isLeakReason = reason === "token_leak" || reason === "owner_leak";
+    const existingIsLeak = existingReason === "token_leak" || existingReason === "owner_leak";
+    if (!batchData.halted || (!existingIsLeak && isLeakReason)) {
+      /** @type {{ reason: string, runId?: string, at: string }} */
+      const nextHalt = {
+        reason,
+        at: new Date().toISOString(),
+      };
+      if (typeof runId === "string" && runId.length > 0) {
+        nextHalt.runId = runId;
+      }
+      batchData.halted = nextHalt;
+    }
+  }
+
+  function runAndRecordOwnerCheck(contextLabel, runId) {
+    let check;
+    try {
+      check = deps.ownerCheck(baseline, { evalRoot: rootDir, platform });
+    } catch (checkError) {
+      const msg = redact(checkError instanceof Error ? checkError.message : String(checkError));
+      ownerCheckFailed = true;
+      if (!batchData.ownerCheckError) {
+        batchData.ownerCheckError = msg;
+      }
+      setBatchHalt("owner_check_error", runId);
+      deps.log(`[eval] abort: owner_check_error (${contextLabel}): ${msg}`);
+      try {
+        persistBatchJson(batchData);
+      } catch (persistError) {
+        const persistMsg = redact(
+          persistError instanceof Error ? persistError.message : String(persistError),
+        );
+        deps.log(`[eval] warning: failed to persist batch.json after owner_check_error: ${persistMsg}`);
+      }
+      return null;
+    }
+
     latestOwnerCheck = check;
     batchData.ownerCheck = check;
-    writeJsonAtomic(batchPath, batchData, secrets);
     if (check && check.leak === true) {
-      ownerLeakDetected = true;
-      stopBatch = true;
+      ownerLeakLatched = true;
+      batchData.ownerLeakLatched = true;
+      setBatchHalt("owner_leak", runId);
       deps.log(
         redact(
           `[eval] abort: owner leak detected (${contextLabel}): appendedUnderEvalRoot=${check.appendedUnderEvalRoot ?? 0}, settingsChanged=${Array.isArray(check.settingsChanged) ? check.settingsChanged.length : 0}`,
         ),
       );
     }
+
+    try {
+      persistBatchJson(batchData);
+    } catch (persistError) {
+      const msg = redact(persistError instanceof Error ? persistError.message : String(persistError));
+      ownerCheckFailed = true;
+      if (!batchData.ownerCheckError) {
+        batchData.ownerCheckError = msg;
+      }
+      setBatchHalt("owner_check_error", runId);
+      deps.log(`[eval] abort: owner_check_error (persisting batch.json ${contextLabel}): ${msg}`);
+      try {
+        persistBatchJson(batchData);
+      } catch {
+        // Keep halt and exit 3 in memory even if disk persistence remains broken.
+      }
+    }
     return check;
   }
 
-  const runsDir = join(outDir, "runs");
   mkdirSync(runsDir, { recursive: true });
 
   /** @type {Array<{ item: typeof planned[number], retries: number, isRetry: boolean }>} */
@@ -1759,14 +1965,27 @@ export async function runBatch(options, overrides = {}) {
       malformed,
       publishFailed: 0,
       stopped: stopBatch,
+      halted: batchData.halted ?? null,
       tokenLeakRuns,
       ownerCheck: latestOwnerCheck,
     };
-    if (ownerLeakDetected) {
-      throw new BatchLeakError(
-        `Batch stopped due to owner leak (appendedUnderEvalRoot=${latestOwnerCheck?.appendedUnderEvalRoot ?? 0}, settingsChanged=${latestOwnerCheck?.settingsChanged?.length ?? 0})`,
-        { tokenLeakRuns, ownerCheck: latestOwnerCheck, summary: emptySummary },
-      );
+    if (ownerLeakLatched || ownerCheckFailed) {
+      /** @type {string[]} */
+      const reasons = [];
+      if (ownerLeakLatched) {
+        reasons.push(
+          `owner_leak (appendedUnderEvalRoot=${latestOwnerCheck?.appendedUnderEvalRoot ?? 0}, settingsChanged=${latestOwnerCheck?.settingsChanged?.length ?? 0})`,
+        );
+      }
+      if (ownerCheckFailed) {
+        reasons.push(`owner_check_error (${batchData.ownerCheckError ?? "unknown error"})`);
+      }
+      throw new BatchLeakError(`Batch stopped due to ${reasons.join("; ")}`, {
+        tokenLeakRuns,
+        ownerCheck: latestOwnerCheck,
+        halted: batchData.halted ?? null,
+        summary: emptySummary,
+      });
     }
     deps.log(
       redact(`[eval] 0 runs to execute (${skipped} skipped, ${malformed} malformed).`),
@@ -1816,7 +2035,13 @@ export async function runBatch(options, overrides = {}) {
       /** @type {string[]} */
       const skippedLinks = [];
       /** @type {string[]} */
+      const quarantined = [];
+      /** @type {Set<string>} */
+      const quarantinedSet = new Set();
+      /** @type {string[]} */
       const scanErrors = [];
+      /** @type {Set<string>} */
+      const scanErrorsSet = new Set();
       /** @type {string[] | null} */
       let noneRockyHomeEntries = item.arm === "none" ? [] : null;
       /** @type {{ solved: boolean, reason: string } | null} */
@@ -1827,6 +2052,42 @@ export async function runBatch(options, overrides = {}) {
       let runError = null;
       /** @type {string | null} */
       let cleanupError = null;
+
+      const recordQuarantined = (relPath) => {
+        if (!quarantinedSet.has(relPath)) {
+          quarantinedSet.add(relPath);
+          quarantined.push(relPath);
+        }
+      };
+      const recordScanError = (relPath) => {
+        if (!scanErrorsSet.has(relPath)) {
+          scanErrorsSet.add(relPath);
+          scanErrors.push(relPath);
+        }
+      };
+      const runArtifactScan = async () => {
+        try {
+          const scanRes = await scanRunArtifactsForSecrets(workRunDir, item.arm, secrets, {
+            lstatSync: deps.lstatSync,
+            readdirSync: deps.readdirSync,
+            openFile: deps.openFile,
+            rmSync: deps.rmSync,
+          });
+          for (const rel of scanRes.quarantined) {
+            recordQuarantined(rel);
+          }
+          for (const errPath of scanRes.scanErrors) {
+            recordScanError(errPath);
+          }
+          if (scanRes.leaked) {
+            tokenLeaked = true;
+          }
+        } catch (scanErr) {
+          const msg = redact(scanErr instanceof Error ? scanErr.message : String(scanErr));
+          recordScanError(".");
+          deps.log(`[eval] warning: artifact scan failed for ${item.runId}: ${msg}`);
+        }
+      };
 
       try {
         if (isRetry) {
@@ -1901,6 +2162,9 @@ export async function runBatch(options, overrides = {}) {
           ...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm, deps.copyFileSync),
         );
 
+        // Scan and quarantine copied artifacts BEFORE grading can alter or delete them.
+        await runArtifactScan();
+
         invalid = classifyOutcome({
           transcript: transcriptSummary,
           tokenLeaked,
@@ -1924,24 +2188,8 @@ export async function runBatch(options, overrides = {}) {
           invalid = "harness_crash";
         }
       } finally {
-        // Always scan whatever artifacts exist, even if copying or grading threw.
-        try {
-          const scanRes = await scanRunArtifactsForSecrets(workRunDir, item.arm, secrets, {
-            lstatSync: deps.lstatSync,
-            readdirSync: deps.readdirSync,
-            openFile: deps.openFile,
-          });
-          if (scanRes.scanErrors.length > 0) {
-            scanErrors.push(...scanRes.scanErrors);
-          }
-          if (scanRes.leaked) {
-            tokenLeaked = true;
-          }
-        } catch (scanErr) {
-          const msg = redact(scanErr instanceof Error ? scanErr.message : String(scanErr));
-          scanErrors.push(".");
-          deps.log(`[eval] warning: artifact scan failed for ${item.runId}: ${msg}`);
-        }
+        // Always scan and quarantine whatever artifacts exist, even if copying or grading threw.
+        await runArtifactScan();
         if (tokenLeaked) {
           invalid = "token_leak";
         }
@@ -1960,7 +2208,7 @@ export async function runBatch(options, overrides = {}) {
       // Check artifact/retry metadata and publish inside one guard so any metadata or write
       // error logs, increments publishFailed, and never rejects the worker pool.
       try {
-        const artifactsExist = hasRunArtifacts(workRunDir, item.arm, deps.lstatSync);
+        const artifactsExist = hasRunArtifacts(workRunDir, item.arm, deps.lstatSync, quarantinedSet);
         if (runError === null && !artifactsExist) {
           if (invalid !== "token_leak") {
             invalid = "harness_crash";
@@ -1993,6 +2241,9 @@ export async function runBatch(options, overrides = {}) {
         };
         if (item.arm === "none") {
           record.noneRockyHomeEntries = noneRockyHomeEntries ?? [];
+        }
+        if (quarantined.length > 0) {
+          record.quarantined = quarantined;
         }
         if (scanErrors.length > 0) {
           record.scanErrors = scanErrors;
@@ -2034,18 +2285,19 @@ export async function runBatch(options, overrides = {}) {
 
       if (invalid === "token_leak") {
         tokenLeakRuns.push(item.runId);
-        stopBatch = true;
+        setBatchHalt("token_leak", item.runId);
         deps.log(
           redact(`[eval] abort: token_leak in ${item.runId}; stopping batch (no new runs will start)`),
         );
+        try {
+          persistBatchJson(batchData);
+        } catch (persistError) {
+          const msg = redact(persistError instanceof Error ? persistError.message : String(persistError));
+          deps.log(`[eval] warning: failed to persist halted state in batch.json: ${msg}`);
+        }
       }
 
-      try {
-        runAndRecordOwnerCheck(`after ${item.runId}`);
-      } catch (checkError) {
-        const msg = redact(checkError instanceof Error ? checkError.message : String(checkError));
-        deps.log(`[eval] warning: ownerCheck failed after ${item.runId}: ${msg}`);
-      }
+      runAndRecordOwnerCheck(`after ${item.runId}`, item.runId);
     },
     () => stopBatch,
   );
@@ -2065,23 +2317,28 @@ export async function runBatch(options, overrides = {}) {
     malformed,
     publishFailed,
     stopped: stopBatch,
+    halted: batchData.halted ?? null,
     tokenLeakRuns,
     ownerCheck: latestOwnerCheck,
   };
-  if (tokenLeakRuns.length > 0 || ownerLeakDetected) {
+  if (tokenLeakRuns.length > 0 || ownerLeakLatched || ownerCheckFailed) {
     /** @type {string[]} */
     const reasons = [];
     if (tokenLeakRuns.length > 0) {
       reasons.push(`token_leak in ${tokenLeakRuns.join(", ")}`);
     }
-    if (ownerLeakDetected) {
+    if (ownerLeakLatched) {
       reasons.push(
-        `owner leak (appendedUnderEvalRoot=${latestOwnerCheck?.appendedUnderEvalRoot ?? 0}, settingsChanged=${latestOwnerCheck?.settingsChanged?.length ?? 0})`,
+        `owner_leak (appendedUnderEvalRoot=${latestOwnerCheck?.appendedUnderEvalRoot ?? 0}, settingsChanged=${latestOwnerCheck?.settingsChanged?.length ?? 0})`,
       );
+    }
+    if (ownerCheckFailed) {
+      reasons.push(`owner_check_error (${batchData.ownerCheckError ?? "unknown error"})`);
     }
     throw new BatchLeakError(`Batch stopped due to ${reasons.join("; ")}`, {
       tokenLeakRuns,
       ownerCheck: latestOwnerCheck,
+      halted: batchData.halted ?? null,
       summary,
     });
   }
