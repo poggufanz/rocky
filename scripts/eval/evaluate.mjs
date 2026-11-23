@@ -26,6 +26,7 @@ const NOTE_DELIVERED_RE = /rocky: Same error recorded \d+ times? before/;
 const WIN32_DRIVE_RE = /^[A-Za-z]:(?:[\\/]|$)/;
 const UNICODE_WS_RE = /\s/u;
 const HEREDOC_DELIMITER_RE = /^[A-Za-z0-9_.-]+$/;
+const HEREDOC_SHAPED_RE = /^<<-?[ \t]*['"]?[A-Za-z_]/;
 const ARM_ORDER = ["none", "before", "after"];
 
 const USAGE = [
@@ -180,8 +181,8 @@ function isPipeSeparator(separator) {
  * each statement, honouring shell-specific quoting, escaping, comments, and
  * line breaks in linear time. In Bash, heredoc delimiters are restricted to
  * `/^[A-Za-z0-9_.-]+$/` after removing whole-segment `'…'` / `"…"` quoting and
- * a leading `-` for `<<-`; any other delimiter form, or any heredoc inside a
- * command substitution (or arithmetic containing one), sets `unsupportedHeredoc`.
+ * a leading `-` for `<<-`; any other delimiter form, or any call mixing a
+ * heredoc-shaped `<<` with a command substitution, sets `unsupportedHeredoc`.
  * @param {string} command
  * @param {string} [shell]
  * @returns {{
@@ -195,6 +196,35 @@ function parseStatements(command, shell = "Bash") {
   }
 
   const isPowerShell = typeof shell === "string" && shell.toLowerCase() === "powershell";
+  // Accepted cost: an identifier shift (`$(( x << y ))`) in a call that also contains a substitution becomes unsupported.
+  if (!isPowerShell) {
+    let inSingle = false;
+    let hasHeredoc = false;
+    let hasSub = false;
+    for (let i = 0; i < command.length; i += 1) {
+      const ch = command[i];
+      if (inSingle) {
+        if (ch === "'") inSingle = false;
+      } else if (ch === "\\") {
+        i += 1;
+      } else if (ch === "'") {
+        inSingle = true;
+      } else if (ch === "`" || (ch === "$" && command[i + 1] === "(" && command[i + 2] !== "(")) {
+        hasSub = true;
+      } else if (ch === "<" && command[i + 1] === "<") {
+        if (command[i + 2] === "<") {
+          while (command[i + 1] === "<") i += 1;
+        } else if (HEREDOC_SHAPED_RE.test(command.slice(i))) {
+          hasHeredoc = true;
+          i += 1;
+        }
+      }
+      if (hasHeredoc && hasSub) {
+        return { statements: [], unsupportedHeredoc: true };
+      }
+    }
+  }
+
   const escapeChar = isPowerShell ? "`" : "\\";
   /** @type {Array<{ text: string, separator: ";" | "&&" | "||" | "|" | "|&" | "&" | "\n" | null }>} */
   const statements = [];
@@ -203,10 +233,6 @@ function parseStatements(command, shell = "Bash") {
   /** @type {Array<{ delimiter: string, stripTabs: boolean }>} */
   const pendingHeredocs = [];
   let arithDepth = 0;
-  let arithHasCmdSub = false;
-  let arithHasShift = false;
-  let cmdSubDepth = 0;
-  let inBacktick = false;
   let spanStart = 0;
   let quote = null;
   let atWordStart = true;
@@ -289,32 +315,10 @@ function parseStatements(command, shell = "Bash") {
       atWordStart = true;
       continue;
     }
-    if (!isPowerShell && ch === "`") {
-      inBacktick = !inBacktick;
-      if (arithDepth > 0) {
-        if (arithHasShift) return { statements: [], unsupportedHeredoc: true };
-        arithHasCmdSub = true;
-      }
-      atWordStart = false;
-      afterContinuationSep = false;
-      continue;
-    }
     if (!isPowerShell && ch === "(") {
-      if (i > 0 && command[i - 1] === "$" && command[i + 1] !== "(") {
-        if (arithDepth > 0) {
-          if (arithHasShift) return { statements: [], unsupportedHeredoc: true };
-          arithHasCmdSub = true;
-        }
-        cmdSubDepth += 1;
-      } else if (arithDepth === 0 && command[i + 1] === "(") {
+      if (arithDepth === 0 && command[i + 1] === "(") {
         arithDepth = 2;
-        arithHasCmdSub = false;
-        arithHasShift = false;
         i += 1;
-      } else if (arithDepth > 0 && !arithHasCmdSub) {
-        arithDepth += 1;
-      } else if (cmdSubDepth > 0) {
-        cmdSubDepth += 1;
       } else if (arithDepth > 0) {
         arithDepth += 1;
       }
@@ -323,13 +327,7 @@ function parseStatements(command, shell = "Bash") {
       continue;
     }
     if (!isPowerShell && ch === ")") {
-      if (arithDepth > 0 && !arithHasCmdSub) {
-        arithDepth -= 1;
-      } else if (cmdSubDepth > 0) {
-        cmdSubDepth -= 1;
-      } else if (arithDepth > 0) {
-        arithDepth -= 1;
-      }
+      if (arithDepth > 0) arithDepth -= 1;
       atWordStart = false;
       afterContinuationSep = false;
       continue;
@@ -343,15 +341,11 @@ function parseStatements(command, shell = "Bash") {
         afterContinuationSep = false;
         continue;
       }
-      if (arithDepth > 0 && !arithHasCmdSub && !inBacktick) {
-        arithHasShift = true;
+      if (arithDepth > 0) {
         i += 1;
         atWordStart = false;
         afterContinuationSep = false;
         continue;
-      }
-      if (cmdSubDepth > 0 || inBacktick || arithDepth > 0) {
-        return { statements: [], unsupportedHeredoc: true };
       }
       let k = i + 2;
       const stripTabs = command[k] === "-";
