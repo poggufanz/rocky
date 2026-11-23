@@ -1201,6 +1201,12 @@ function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm) {
   return skippedLinks;
 }
 
+function listNoneRockyHomeEntries(srcRockyHome, lstatFn = lstatSync) {
+  const stat = lstatOrNull(srcRockyHome, lstatFn);
+  if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) return [];
+  return readdirSync(srcRockyHome).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 function lstatOrNull(targetPath, lstatFn = lstatSync) {
   try {
     return lstatFn(targetPath);
@@ -1645,6 +1651,8 @@ export async function runBatch(options, overrides = {}) {
     let swept = false;
     /** @type {string[]} */
     const skippedLinks = [];
+    /** @type {string[] | null} */
+    let noneRockyHomeEntries = item.arm === "none" ? [] : null;
     /** @type {{ solved: boolean, reason: string } | null} */
     let acceptResult = null;
     /** @type {null | "api_error" | "timeout" | "harness_crash" | "transcript_broken" | "token_leak"} */
@@ -1720,6 +1728,9 @@ export async function runBatch(options, overrides = {}) {
 
       const finalDir = join(workRunDir, "final");
       skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir));
+      if (item.arm === "none") {
+        noneRockyHomeEntries = listNoneRockyHomeEntries(sandbox.rockyHome, deps.lstatSync);
+      }
       skippedLinks.push(...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm));
 
       if (await scanRunArtifactsForSecrets(workRunDir, item.arm, secrets)) {
@@ -1794,6 +1805,9 @@ export async function runBatch(options, overrides = {}) {
         killFailed,
         taskkillStatus,
       };
+      if (item.arm === "none") {
+        record.noneRockyHomeEntries = noneRockyHomeEntries ?? [];
+      }
       if (runError !== null) {
         record.error = runError;
       }

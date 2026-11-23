@@ -2110,4 +2110,57 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       rmSync(baseTmp, { recursive: true, force: true });
     }
   });
+
+  test("arm none records sorted noneRockyHomeEntries in run.json while before and after omit it", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-none-entries-"));
+    const outEmpty = join(baseTmp, "out-empty");
+    const outLeaked = join(baseTmp, "out-leaked");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+
+    try {
+      const common = {
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      await runBatch({ ...common, outDir: outEmpty }, makeFakeDeps());
+      const emptyNone = JSON.parse(readFileSync(join(outEmpty, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
+      const emptyBefore = JSON.parse(readFileSync(join(outEmpty, "runs", "SMOKE-before-b1", "run.json"), "utf8"));
+      const emptyAfter = JSON.parse(readFileSync(join(outEmpty, "runs", "SMOKE-after-b1", "run.json"), "utf8"));
+      assert.deepEqual(emptyNone.noneRockyHomeEntries, []);
+      assert.equal("noneRockyHomeEntries" in emptyBefore, false);
+      assert.equal("noneRockyHomeEntries" in emptyAfter, false);
+
+      await runBatch(
+        { ...common, outDir: outLeaked },
+        makeFakeDeps({
+          runClaude: async ({ runId, sandbox }) => {
+            if (runId === "SMOKE-none-b1") {
+              writeFileSync(join(sandbox.rockyHome, "memory.jsonl"), "{}\n", "utf8");
+              writeFileSync(join(sandbox.rockyHome, "advisories.jsonl"), "{}\n", "utf8");
+            }
+            return {
+              stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+              stderr: "",
+              exitCode: 0,
+              timedOut: false,
+            };
+          },
+        }),
+      );
+      const leakedNone = JSON.parse(readFileSync(join(outLeaked, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
+      assert.deepEqual(leakedNone.noneRockyHomeEntries, ["advisories.jsonl", "memory.jsonl"]);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
 });
