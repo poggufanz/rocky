@@ -10,6 +10,7 @@ export const MAX_EXACT_SIGN_FLIP_N = 24;
 export const DEFAULT_BOOTSTRAP_RESAMPLES = 10000;
 export const DEFAULT_BOOTSTRAP_LEVEL = 0.9;
 
+const SIGN_FLIP_GRID_SCALE = 1e9;
 const CLAIM_P_THRESHOLD = 0.05;
 const VETO_SOLVED_DROP_NUM = 1;
 const VETO_SOLVED_DROP_DEN = 5;
@@ -151,9 +152,10 @@ function compareStrings(a, b) {
 
 /**
  * Exact two-sided paired sign-flip test over per-task differences.
- * Drops exact zeros and enumerates all `2^nEffective` sign assignments,
- * computing `P(|sum| >= |observed|)`.
- * Throws when `nEffective > 24`.
+ * Quantizes each diff onto a 1e-9 integer grid (`Math.round(d * 1e9)`), drops
+ * values that quantize to zero, and enumerates all `2^nEffective` sign
+ * assignments in exact integer arithmetic to compute `P(|sum| >= |observed|)`.
+ * Throws when `nEffective > 24` or when `sum(|q_i|) >= Number.MAX_SAFE_INTEGER`.
  * @param {readonly number[]} diffs
  * @returns {{ p: number, nEffective: number }}
  */
@@ -162,19 +164,37 @@ export function signFlipP(diffs) {
     throw new TypeError("signFlipP requires an array of finite numbers");
   }
 
+  // ponytail: diffs are quantized onto a 1e-9 integer grid (`Math.round(d * 1e9)`),
+  // so inputs not on a 1e-9 grid are rounded (fine for k-run means of integer counts
+  // over small k). Exactness requires sum(|q_i|) < Number.MAX_SAFE_INTEGER.
   /** @type {number[]} */
-  const nonZero = [];
+  const quantized = [];
+  let sumAbs = 0;
   for (let i = 0; i < diffs.length; i += 1) {
     const value = diffs[i];
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new TypeError(`signFlipP received non-finite diff at index ${i}: ${String(value)}`);
     }
-    if (value !== 0) {
-      nonZero.push(value);
+    const q = Math.round(value * SIGN_FLIP_GRID_SCALE);
+    if (!Number.isSafeInteger(q)) {
+      throw new RangeError(
+        `signFlipP quantized diff at index ${i} exceeds Number.MAX_SAFE_INTEGER`,
+      );
     }
+    if (q === 0) {
+      continue;
+    }
+    const absQ = Math.abs(q);
+    if (absQ >= Number.MAX_SAFE_INTEGER - sumAbs) {
+      throw new RangeError(
+        `signFlipP sum of quantized magnitudes must stay below Number.MAX_SAFE_INTEGER`,
+      );
+    }
+    sumAbs += absQ;
+    quantized.push(q);
   }
 
-  const nEffective = nonZero.length;
+  const nEffective = quantized.length;
   if (nEffective === 0) {
     return { p: 1, nEffective: 0 };
   }
@@ -185,33 +205,27 @@ export function signFlipP(diffs) {
   }
 
   let observed = 0;
-  let minAbs = Number.POSITIVE_INFINITY;
-  for (const v of nonZero) {
-    observed += v;
-    const absV = Math.abs(v);
-    if (absV < minAbs) {
-      minAbs = absV;
-    }
+  for (const q of quantized) {
+    observed += q;
   }
-  const tol = 1e-9 * minAbs;
-  const threshold = Math.abs(observed) - tol;
+  const target = Math.abs(observed);
 
   // Sign vectors come in negated pairs with identical |sum|, so fixing the
   // first sign to +1 halves the enumeration without changing the exact ratio.
   let extremeCount = 0;
   function walk(index, acc) {
     if (index === nEffective) {
-      if (Math.abs(acc) >= threshold) {
+      if (Math.abs(acc) >= target) {
         extremeCount += 1;
       }
       return;
     }
-    const v = nonZero[index];
-    walk(index + 1, acc + v);
-    walk(index + 1, acc - v);
+    const q = quantized[index];
+    walk(index + 1, acc + q);
+    walk(index + 1, acc - q);
   }
 
-  walk(1, nonZero[0]);
+  walk(1, quantized[0]);
   const halfTotal = 2 ** (nEffective - 1);
   return { p: extremeCount / halfTotal, nEffective };
 }

@@ -50,19 +50,34 @@ describe("signFlipP", () => {
     assert.deepEqual(b, { p: 1, nEffective: 1 });
   });
 
-  test("signFlipP handles empty, all-zero, floating-point ties, scale-aware tail, and rejects >24 non-zero diffs", () => {
+  test("signFlipP quantizes on a 1e-9 integer grid, drops sub-grid zeros, preserves exact ties, and enforces ceilings", () => {
     assert.deepEqual(signFlipP([]), { p: 1, nEffective: 0 });
     assert.deepEqual(signFlipP([0, -0, 0]), { p: 1, nEffective: 0 });
     assert.deepEqual(signFlipP([-1, -1, -1, -1, -1, -1]), { p: 2 / 64, nEffective: 6 });
 
-    // Near-but-unequal tail: only (+1 + 1e-13) and its negation reach |obs|, so p = 2/4 = 0.5.
-    assert.deepEqual(signFlipP([1, 1e-13]), { p: 0.5, nEffective: 2 });
+    // Sub-grid diff rounds to zero on the 1e-9 integer grid and is dropped.
+    assert.deepEqual(signFlipP([1, 1e-13]), { p: 1, nEffective: 1 });
 
-    // Floating-point tie: 0.1 + 0.2 - 0.3 = 0 mathematically; ULP noise must not break the tie.
+    // Mixed-magnitude vector with 2*EPSILON: sub-grid entry drops (nEffective = 8);
+    // exact integer enumeration over all 2^8 = 256 sign vectors counts 14/256 = 0.0546875.
+    assert.deepEqual(
+      signFlipP([-1.25, 2 * Number.EPSILON, -0.25, -0.5, -0.5, -0.75, -0.75, -0.25, 0.5]),
+      { p: 14 / 256, nEffective: 8 },
+    );
+
+    // Floating-point tie: 0.1 + 0.2 - 0.3 = 0 on the 1e-9 integer grid.
     const fp = signFlipP([0.1, 0.2, -0.3]);
     assert.equal(fp.nEffective, 3);
     assert.equal(fp.p, 1);
 
+    assert.throws(
+      () => signFlipP([5e6, 5e6]),
+      /MAX_SAFE_INTEGER/,
+    );
+    assert.throws(
+      () => signFlipP([1e7]),
+      /MAX_SAFE_INTEGER/,
+    );
     assert.throws(
       () => signFlipP(Array.from({ length: 25 }, () => 1)),
       /2\^24.*feasible bound.*10 trap tasks/,
