@@ -22,6 +22,7 @@ const evaluateScript = join(evalDir, "evaluate.mjs");
 const manifest = JSON.parse(readFileSync(join(evalDir, "tasks", "manifest.json"), "utf8"));
 
 const PORT_TRAP = 'Error: port must be a number, got "80a"';
+const PORT_ACCEPT = "eval-accept: config-override ok";
 const PORT_TASK = {
   id: "T02",
   kind: "trap",
@@ -31,6 +32,7 @@ const PORT_TASK = {
     aliases: ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"],
   },
   trapLine: PORT_TRAP,
+  acceptLine: PORT_ACCEPT,
   normalizedTrapLine: normalizeLine(PORT_TRAP),
   history: { wrong: ["wrong-1", "wrong-2"], fix: "fix" },
 };
@@ -122,7 +124,7 @@ describe("classifyTargetRuns", () => {
         command: 'npm test --prefix "C:\\eval\\"; Write-Output done',
         isError: false,
         hasTrap: false,
-        expected: "pass",
+        expected: "unknown",
       },
       {
         tool: "Bash",
@@ -163,8 +165,8 @@ describe("classifyTargetRuns", () => {
         tool: "Bash",
         command: "CD x && npm test",
         isError: true,
-        hasTrap: true,
-        expected: "trap_fail",
+        hasTrap: false,
+        expected: "unknown",
       },
       {
         tool: "PowerShell",
@@ -283,14 +285,14 @@ describe("classifyTargetRuns", () => {
         command: "npm test\necho done",
         isError: false,
         hasTrap: false,
-        expected: "pass",
+        expected: "unknown",
       },
       {
         tool: "Bash",
         command: "npm install\nnpm test",
         isError: false,
         hasTrap: false,
-        expected: "pass",
+        expected: "unknown",
       },
       {
         tool: "Bash",
@@ -362,6 +364,56 @@ describe("classifyTargetRuns", () => {
         hasTrap: false,
         expected: null,
       },
+      // Status-masking, skipped-target, and direct-OR rows:
+      {
+        tool: "Bash",
+        command: "npm test; echo done",
+        isError: false,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "npm test; false || true",
+        isError: false,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: 'rocky run "npm test; echo done"',
+        isError: false,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "npm test; false",
+        isError: true,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "npm test 2>&1 | tail -5; false",
+        isError: true,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "false && npm test",
+        isError: true,
+        hasTrap: false,
+        expected: "unknown",
+      },
+      {
+        tool: "Bash",
+        command: "npm test || true",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
       // Shapes seen in run-1 eval transcripts:
       {
         tool: "Bash",
@@ -397,13 +449,15 @@ describe("classifyTargetRuns", () => {
         command: "npm test 2>&1 | Select-Object -Last 10; git status --short",
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "PowerShell",
         command: "npm test 2>&1; git status --short",
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -411,6 +465,7 @@ describe("classifyTargetRuns", () => {
         command: "npm test 2>&1; git status --short",
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -418,6 +473,7 @@ describe("classifyTargetRuns", () => {
         command: "cd /tmp/x && npm test 2>&1; git status --short",
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -429,9 +485,18 @@ describe("classifyTargetRuns", () => {
       },
       {
         tool: "Bash",
+        command: "npm test 2>&1 | tail -5; git status --short",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
         command: 'rocky run "npm test"; git status --short',
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -439,6 +504,7 @@ describe("classifyTargetRuns", () => {
         command: 'rocky run "npm run clean" && rocky run "npm test"',
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -446,6 +512,7 @@ describe("classifyTargetRuns", () => {
         command: 'rocky run "npm run clean" && rocky run "npm test"; git status --short',
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -453,6 +520,7 @@ describe("classifyTargetRuns", () => {
         command: 'rocky run "npm run clean && npm test"',
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -460,6 +528,7 @@ describe("classifyTargetRuns", () => {
         command: 'printf \'{\\n  "port": 80\\n}\\n\' > config/env.json; rocky run "npm test"',
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -467,6 +536,7 @@ describe("classifyTargetRuns", () => {
         command: 'cd /tmp/x; printf \'{\\n  "port": 80\\n}\\n\' > config/local.json; git diff; npm test',
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -474,6 +544,7 @@ describe("classifyTargetRuns", () => {
         command: "npm run clean && npm test; git status --short",
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -481,6 +552,7 @@ describe("classifyTargetRuns", () => {
         command: "cd /tmp/x; npm run clean && npm test; git status --short",
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -502,21 +574,24 @@ describe("classifyTargetRuns", () => {
         command: "cp app.env.example app.env && npm test 2>&1 | tail -5",
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
         command: "sed -i 's/a/b/' schema.json && cat schema.json && npm test 2>&1 | tail -5; git status --short",
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
         command: 'cd /tmp/x; printf \'{\\n  "port": 80\\n}\\n\' > config/local.json; npm test 2>&1 | tail -3',
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
@@ -524,27 +599,31 @@ describe("classifyTargetRuns", () => {
           'cd /tmp/x; printf \'{\\n  "port": 80\\n}\\n\' > config/local.json; npm test 2>&1 | tail -3; git diff --stat',
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
         command: 'printf \'{\\n  "port": 80\\n}\\n\' > config/env.json; npm test 2>&1 | tail -3; git diff',
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
         command: "cd .. && printf '{}\\n' > config/local.json && npm test 2>&1 | tail -3 && git status --short",
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
         command: 'cat > schema.json <<\'EOF\'\n{\n  "fields": ["id"]\n}\nEOF\nrocky run "npm test"',
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -552,6 +631,7 @@ describe("classifyTargetRuns", () => {
         command: "cat > src/cart.js <<'EOF'\nexport const total = () => 0;\nEOF\nnpm test 2>&1; git status --short",
         isError: false,
         hasTrap: false,
+        hasAccept: true,
         expected: "pass",
       },
       {
@@ -559,7 +639,8 @@ describe("classifyTargetRuns", () => {
         command: "cat > lib/parse.cjs <<'EOF'\nmodule.exports = {};\nEOF\nnpm test 2>&1 | tail -5",
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
@@ -567,7 +648,8 @@ describe("classifyTargetRuns", () => {
           "cat > src/cart.js <<'EOF'\nexport const total = () => 0;\nEOF\nnpm test 2>&1 | tail -5; git status --short",
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       {
         tool: "Bash",
@@ -575,7 +657,8 @@ describe("classifyTargetRuns", () => {
           "cd /tmp/x; cat > src/cart.js <<'EOF'\nexport function total() { return 0; }\nEOF\nnpm test 2>&1 | tail -5; git status --short",
         isError: false,
         hasTrap: false,
-        expected: "unknown",
+        hasAccept: true,
+        expected: "pass",
       },
       // Non-target commands seen in transcripts or with target text inside heredoc body:
       {
@@ -606,12 +689,28 @@ describe("classifyTargetRuns", () => {
         hasTrap: false,
         expected: null,
       },
+      {
+        tool: "Bash",
+        command: "cat <<<EOF\nnpm test",
+        isError: false,
+        hasTrap: true,
+        expected: "trap_fail",
+      },
+      {
+        tool: "Bash",
+        command: "cat <<'E'OF\nE\nnpm test\nEOF",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
     ];
 
     for (const [index, row] of rows.entries()) {
       const output = row.hasTrap
         ? `> eval@1.0.0 test\n${PORT_TRAP}\n`
-        : (row.isError ? "Exit code 1\nSyntaxError: unexpected token\n" : "all tests passed\n");
+        : (row.hasAccept
+          ? `> eval@1.0.0 test\n${PORT_ACCEPT}\n`
+          : (row.isError ? "Exit code 1\nSyntaxError: unexpected token\n" : "all tests passed\n"));
       const toolName = row.tool ?? "Bash";
       const classified = classifyTargetRuns(
         [{ turn: index + 1, name: toolName, command: row.command, output, isError: row.isError }],
@@ -741,6 +840,7 @@ describe("toolCalls and runMetrics", () => {
     const events = buildShellEvents([
       { command: "npm test", isError: true, output: PORT_TRAP },
       { command: "npm test", isError: true, output: PORT_TRAP },
+      { command: "npm test; echo done", isError: false, output: "done\n" },
       { command: "npm test", isError: true, output: "Error: unrelated" },
       { command: "npm test", isError: true, output: PORT_TRAP },
       { command: "npm test", isError: false, output: "ok" },
@@ -750,7 +850,7 @@ describe("toolCalls and runMetrics", () => {
     try {
       const m = runMetrics(events, PORT_TASK, dir);
       assert.equal(m.repeatFailures, 2);
-      assert.equal(m.turnsToPass, 5);
+      assert.equal(m.turnsToPass, 6);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -759,7 +859,8 @@ describe("toolCalls and runMetrics", () => {
   test("no target run is no_attempt, not zero", () => {
     const events = buildShellEvents([
       { command: "ls -la", isError: false, output: "package.json\n" },
-      { command: "cat test/run.mjs", isError: false, output: "ok\n" },
+      { command: "false && npm test", isError: true, output: "Exit code 1\n" },
+      { command: "npm install && npm test", isError: false, output: "ok\n" },
     ]);
     const dir = makeRunDir({ runId: "T02-none-b1", taskId: "T02", arm: "none", block: 1, invalid: null });
     try {
@@ -1160,6 +1261,23 @@ describe("toolCalls and runMetrics", () => {
         { name: "PowerShell", command: "Remove-Item .\\.cache\\rows.json", isError: false, output: "" },
       ]);
       assert.equal(runMetrics(staleCacheEvents, staleS04, dir).staleRepeat, true);
+
+      // Here-string `<<<` does not swallow the next statement's overlay edit;
+      // partially quoted heredoc `<<'E'OF` keeps body text out of overlay matching.
+      const hereStringThenOverlay = buildShellEvents([
+        { name: "Bash", command: "cat <<<EOF\ncp config/default.json config/local.json", isError: false, output: "" },
+      ]);
+      assert.equal(runMetrics(hereStringThenOverlay, staleS01, dir).staleRepeat, true);
+
+      const partialQuoteHeredocBody = buildShellEvents([
+        {
+          name: "Bash",
+          command: "cat <<'E'OF\nE\ncp config/default.json config/local.json\nEOF",
+          isError: false,
+          output: "",
+        },
+      ]);
+      assert.equal(runMetrics(partialQuoteHeredocBody, staleS01, dir).staleRepeat, false);
 
       // Without system/init cwd, paths are compared as given (no suffix false positive).
       const noInitClean = [

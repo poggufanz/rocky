@@ -275,41 +275,75 @@ export function splitStatements(command, shell = "Bash") {
       atWordStart = true;
       continue;
     }
-    if (!isPowerShell && ch === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
+    if (!isPowerShell && ch === "<" && command[i + 1] === "<") {
+      if (command[i + 2] === "<") {
+        while (i + 1 < command.length && command[i + 1] === "<") {
+          i += 1;
+        }
+        atWordStart = false;
+        afterContinuationSep = false;
+        continue;
+      }
       let k = i + 2;
       const stripTabs = command[k] === "-";
       if (stripTabs) k += 1;
       while (k < command.length && (command[k] === " " || command[k] === "\t")) {
         k += 1;
       }
-      if (command[k] === "'" || command[k] === '"') {
-        const q = command[k];
-        let endQ = k + 1;
-        while (endQ < command.length && command[endQ] !== q && command[endQ] !== "\r" && command[endQ] !== "\n") {
-          endQ += 1;
-        }
-        if (endQ < command.length && command[endQ] === q && endQ > k + 1) {
-          pendingHeredocs.push({ delimiter: command.slice(k + 1, endQ), stripTabs });
-          i = endQ;
-          atWordStart = false;
-          afterContinuationSep = false;
-          continue;
-        }
-      } else {
-        let endD = k;
-        while (endD < command.length && !/[\s;|&<>()\r\n]/.test(command[endD])) {
-          endD += 1;
-        }
-        if (endD > k) {
-          const rawDelim = command.slice(k, endD).replace(/^\\/, "");
-          if (rawDelim.length > 0) {
-            pendingHeredocs.push({ delimiter: rawDelim, stripTabs });
+      let endD = k;
+      let delim = "";
+      let delimQuote = null;
+      while (endD < command.length) {
+        const c = command[endD];
+        if (delimQuote === null) {
+          if (/[\s;|&<>()\r\n]/.test(c)) break;
+          if (c === "$" && (command[endD + 1] === "'" || command[endD + 1] === '"')) {
+            delimQuote = command[endD + 1];
+            endD += 2;
+            continue;
           }
-          i = endD - 1;
-          atWordStart = false;
-          afterContinuationSep = false;
-          continue;
+          if (c === "'" || c === '"') {
+            delimQuote = c;
+            endD += 1;
+            continue;
+          }
+          if (c === "\\" && endD + 1 < command.length) {
+            const nextC = command[endD + 1];
+            if (nextC === "\r" || nextC === "\n") break;
+            delim += nextC;
+            endD += 2;
+            continue;
+          }
+          delim += c;
+          endD += 1;
+        } else if (delimQuote === "'") {
+          if (c === "\r" || c === "\n") break;
+          if (c === "'") {
+            delimQuote = null;
+          } else {
+            delim += c;
+          }
+          endD += 1;
+        } else {
+          if (c === "\r" || c === "\n") break;
+          if (c === '"') {
+            delimQuote = null;
+            endD += 1;
+          } else if (c === "\\" && endD + 1 < command.length && '"\\$`'.includes(command[endD + 1])) {
+            delim += command[endD + 1];
+            endD += 2;
+          } else {
+            delim += c;
+            endD += 1;
+          }
         }
+      }
+      if (endD > k && delimQuote === null) {
+        pendingHeredocs.push({ delimiter: delim, stripTabs });
+        i = endD - 1;
+        atWordStart = false;
+        afterContinuationSep = false;
+        continue;
       }
     }
     if (ch === "#" && atWordStart) {
@@ -438,19 +472,31 @@ export function splitStatements(command, shell = "Bash") {
   return statements;
 }
 
+function isCdStatement(statement, isPowerShell) {
+  if (statement.length === 0 || statement[0] === "'" || statement[0] === '"') return false;
+  const tokens = tokenizeShellStatement(statement, isPowerShell);
+  return extractCdTarget(tokens, isPowerShell).isCd;
+}
+
 /**
  * Parse a shell command against target alias regexes using shell-specific
  * statement and pipeline splitting.
- * Returns `{ piped: boolean }` when it contains a target run, or `null` otherwise.
+ * Returns `{ solo: boolean, conditional: boolean }` when it contains a target
+ * run, or `null` otherwise:
+ * - `solo`: true iff the target is the only statement (after `cd` prefixes and
+ *   `rocky run` unwrapping) and is unpiped.
+ * - `conditional`: true iff the target is behind `&&` after a non-`cd`
+ *   statement (so a failed prefix can skip target execution).
  * @param {string} command
  * @param {readonly RegExp[]} aliasRegexes
  * @param {string} [toolName]
- * @returns {{ piped: boolean } | null}
+ * @returns {{ solo: boolean, conditional: boolean } | null}
  */
 function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
   if (typeof command !== "string" || aliasRegexes.length === 0) return null;
 
   const shell = toolName === "PowerShell" ? "PowerShell" : "Bash";
+  const isPowerShell = shell === "PowerShell";
   const trimmed = command.trim();
   if (trimmed.length === 0) return null;
 
@@ -470,6 +516,8 @@ function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
     }
   }
 
+  let allLeadingAreCd = true;
+  let hasNonCdInAndChain = false;
   let idx = 0;
   while (idx < statements.length) {
     if (statements[idx].text.length === 0) {
@@ -478,6 +526,9 @@ function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
     }
     const start = idx;
     while (idx < statements.length && isPipeSeparator(statements[idx].separator)) {
+      if (statements[idx].text.length === 0 || idx + 1 >= statements.length || statements[idx + 1].text.length === 0) {
+        return null;
+      }
       idx += 1;
     }
     const end = idx;
@@ -487,25 +538,114 @@ function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
     }
 
     const piped = end > start;
+    let hasTrailing = false;
+    for (let j = end + 1; j < statements.length; j += 1) {
+      if (statements[j].text.length > 0) {
+        hasTrailing = true;
+        break;
+      }
+    }
+
     const targetPart = statements[start].text.replace(/\s+2>&1$/, "").trim();
     if (targetPart.length > 0) {
       const unwrappedTarget = unwrapRockyRun(targetPart).trim();
       if (unwrappedTarget !== targetPart) {
         const inner = matchTargetCommand(unwrappedTarget, aliasRegexes, toolName);
         if (inner) {
-          return { piped: piped || inner.piped };
+          return {
+            solo: allLeadingAreCd && !piped && !hasTrailing && inner.solo,
+            conditional: hasNonCdInAndChain || inner.conditional,
+          };
         }
       } else {
         for (const regex of aliasRegexes) {
           if (regex.test(targetPart)) {
-            return { piped };
+            return {
+              solo: allLeadingAreCd && !piped && !hasTrailing,
+              conditional: hasNonCdInAndChain,
+            };
           }
         }
       }
     }
+
+    const isSimpleCd = !piped && isCdStatement(statements[start].text, isPowerShell);
+    if (!isSimpleCd) {
+      allLeadingAreCd = false;
+      if (afterSep === "&&") {
+        hasNonCdInAndChain = true;
+      }
+    }
+    if (afterSep === ";" || afterSep === "\n") {
+      hasNonCdInAndChain = false;
+    }
     idx = end + 1;
   }
   return null;
+}
+
+// Target attribution rule:
+// - A call whose only statement is the target (after `cd` prefixes and `rocky run`
+//   unwrapping, unpiped) keeps exit-status classification (`trap_fail` on trap line,
+//   `pass` on zero status, `other_fail` on nonzero status).
+// - Any other matched shape (leading non-`cd` statements, trailing statements,
+//   pipes, `rocky run "<chain>"`) is classified from output evidence only:
+//   exact trap line -> `trap_fail`; exact accept line -> `pass`; neither -> `unknown`.
+// - A target that may not have executed (behind `&&` after a non-`cd` statement,
+//   or in an `||` chain) with no trap/accept evidence classifies as `unknown`
+//   (never `other_fail`) and does not turn `no_attempt` into an attempt.
+function classifyTargetCalls(calls, task) {
+  if (!Array.isArray(calls) || !task) return [];
+
+  const aliases = Array.isArray(task.target?.aliases) ? task.target.aliases : [];
+  const aliasRegexes = aliases.map((pattern) => new RegExp(pattern));
+  const normalizedTrap =
+    typeof task.normalizedTrapLine === "string" && task.normalizedTrapLine.length > 0
+      ? task.normalizedTrapLine
+      : (typeof task.trapLine === "string" ? normalizeLine(task.trapLine) : "");
+  const acceptLine = typeof task.acceptLine === "string" ? task.acceptLine : "";
+
+  /** @type {Array<{ turn: number, kind: "trap_fail" | "other_fail" | "pass" | "unknown", attempted: boolean }>} */
+  const classified = [];
+
+  for (const call of calls) {
+    const matched = matchTargetCommand(call.command, aliasRegexes, call.name);
+    if (!matched) continue;
+
+    const cleaned = stripRockyLines(call.output);
+    const lines = cleaned.split(/\r?\n/);
+    const hasTrap =
+      normalizedTrap.length > 0
+      && lines.some((line) => normalizeLine(line) === normalizedTrap);
+    const hasAccept =
+      acceptLine.length > 0
+      && lines.some((line) => line === acceptLine);
+
+    /** @type {"trap_fail" | "other_fail" | "pass" | "unknown"} */
+    let kind;
+    if (matched.solo) {
+      if (hasTrap) {
+        kind = "trap_fail";
+      } else if (call.isError === false) {
+        kind = "pass";
+      } else if (call.isError === true) {
+        kind = "other_fail";
+      } else {
+        kind = "unknown";
+      }
+    } else if (hasTrap) {
+      kind = "trap_fail";
+    } else if (hasAccept) {
+      kind = "pass";
+    } else {
+      kind = "unknown";
+    }
+
+    const attempted = !matched.conditional || hasTrap || hasAccept;
+    classified.push({ turn: call.turn, kind, attempted });
+  }
+
+  return classified;
 }
 
 /**
@@ -515,42 +655,7 @@ function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
  * @returns {Array<{ turn: number, kind: "trap_fail" | "other_fail" | "pass" | "unknown" }>}
  */
 export function classifyTargetRuns(calls, task) {
-  if (!Array.isArray(calls) || !task) return [];
-
-  const aliases = Array.isArray(task.target?.aliases) ? task.target.aliases : [];
-  const aliasRegexes = aliases.map((pattern) => new RegExp(pattern));
-  const normalizedTrap =
-    typeof task.normalizedTrapLine === "string" && task.normalizedTrapLine.length > 0
-      ? task.normalizedTrapLine
-      : (typeof task.trapLine === "string" ? normalizeLine(task.trapLine) : "");
-
-  /** @type {Array<{ turn: number, kind: "trap_fail" | "other_fail" | "pass" | "unknown" }>} */
-  const classified = [];
-
-  for (const call of calls) {
-    const matched = matchTargetCommand(call.command, aliasRegexes, call.name);
-    if (!matched) continue;
-
-    const cleaned = stripRockyLines(call.output);
-    const hasTrap =
-      normalizedTrap.length > 0
-      && cleaned.split(/\r?\n/).some((line) => normalizeLine(line) === normalizedTrap);
-
-    /** @type {"trap_fail" | "other_fail" | "pass" | "unknown"} */
-    let kind;
-    if (hasTrap) {
-      kind = "trap_fail";
-    } else if (!matched.piped && call.isError === false) {
-      kind = "pass";
-    } else if (call.isError === true) {
-      kind = "other_fail";
-    } else {
-      kind = "unknown";
-    }
-    classified.push({ turn: call.turn, kind });
-  }
-
-  return classified;
+  return classifyTargetCalls(calls, task).map(({ turn, kind }) => ({ turn, kind }));
 }
 
 function readJsonOrNull(filePath) {
@@ -932,11 +1037,12 @@ function extractEditFilePaths(toolUseBlock) {
 export function runMetrics(events, task, runDir) {
   const list = Array.isArray(events) ? events : [];
   const calls = toolCalls(list);
-  const classified = classifyTargetRuns(calls, task);
+  const classified = classifyTargetCalls(calls, task);
+  const hasAttempt = classified.some((run) => run.attempted);
 
   /** @type {number | "no_attempt"} */
   let repeatFailures;
-  if (classified.length === 0) {
+  if (!hasAttempt) {
     repeatFailures = "no_attempt";
   } else {
     let seenFirstTrap = false;

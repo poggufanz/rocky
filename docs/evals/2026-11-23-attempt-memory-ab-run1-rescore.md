@@ -1,14 +1,18 @@
 # Attempt Memory Eval Report — run1 (Rescore)
 
 > **Rescore note:**
-> - **Evaluator version:** Re-scored offline from the existing `run1` transcripts using `scripts/eval/evaluate.mjs` at this commit (which recognises target command pipelines preceded or followed by other shell statements across `;`, `&&`, and newline/heredoc boundaries). The `Evaluator commit` row in Provenance below reflects the original `batch.json` capture timestamp (`653780f2df98f9196cde7090db2e050f281dc19b`).
+> - **Evaluator version and attribution rule:** Re-scored offline from the existing `run1` transcripts using `scripts/eval/evaluate.mjs` at this commit. Target attribution rule:
+>   - A call whose only statement is the target (after `cd` prefixes and `rocky run` unwrapping, unpiped) keeps exit-status classification (`trap_fail` on trap line, `pass` on zero exit status, `other_fail` on nonzero exit status).
+>   - Any other matched shape (leading non-`cd` statements, trailing statements, pipes, `rocky run "<chain>"`) is classified from output evidence only: the task's exact trap line → `trap_fail`; the task's exact protected acceptance line (`acceptLine`) → `pass`; neither → `unknown`. Exit status of the whole call is never used for these shapes.
+>   - A target that may not have executed (behind `&&` after a non-`cd` statement, or anywhere in an `||` chain) with no trap/accept evidence classifies as `unknown` (never `other_fail`) and does not turn a run from `no_attempt` into an attempt.
+>   - The `Evaluator commit` row in Provenance below reflects the original `batch.json` capture timestamp (`653780f2df98f9196cde7090db2e050f281dc19b`).
 > - **Pre-registered verdict:** The pre-registered verdict stays the one recorded in the original report ([`2026-11-23-attempt-memory-ab-run1.md`](./2026-11-23-attempt-memory-ab-run1.md)): **Not vetoed — harm thresholds not exceeded** (`batchValid: true`, `vetoed: false`). All veto inputs (`solved` and `numTurns` for every run; `solvedDrop = 0.000`, `medianTurnRise = 1`) are unchanged.
 > - **Metrics that moved:**
->   - `no_attempt` dropped from **43** (all in arm `none` across 16 tasks) to **0** across all 180 runs (`0` in every task and arm).
->   - `Mean repeatFailures` in arm `none` moved from `n/a` to `0.000` on 13 tasks (`T02`, `T03`, `T04`, `T06`, `T07`, `T09`, `C03`, `C04`, `C06`, `S01`, `S02`, `S04`) and remained `0.000` (now over all 3/3 valid runs instead of 1/3 or 2/3) on `T08`, `T10`, `C02`, `C05`, and `S03`.
+>   - `no_attempt` dropped from **43** (all in arm `none` across **17** tasks with any `no_attempt`, including **12** tasks with all three blocks at `no_attempt`) to **0** across all 180 runs (`0` in every task and arm).
+>   - `Mean repeatFailures` in arm `none` moved from `n/a` to `0.000` on **12** tasks (`T02`, `T03`, `T04`, `T06`, `T07`, `T09`, `C03`, `C04`, `C06`, `S01`, `S02`, `S04`) and remained `0.000` (now over all 3/3 valid runs instead of 1/3 or 2/3) on `T08`, `T10`, `C02`, `C05`, and `S03`.
 >   - Paired trap tasks (`Paired` in Comparisons) moved from **4** to **10** for `afterVsNone (after - none)` and `beforeVsNone (before - none)` (`Mean diff = 0.000`, `n (eff) = 0`, `p = 1.0000`, `90% CI = [0.000, 0.000]`).
->   - `turnsToPass` became non-null on **36** additional runs (17 in `none`, 10 in `before`, 9 in `after`), moving per-task `Median turnsToPass` in:
->     - `none`: `T03` (`n/a` → `4`), `T04` (`n/a` → `4`), `T06` (`n/a` → `3`), `T09` (`n/a` → `5`), `C02` (`n/a` → `4`), `C03` (`n/a` → `3`), `C04` (`n/a` → `4`), `S02` (`n/a` → `3`), `S04` (`n/a` → `4`). (`T02`, `T07`, `C06`, and `S01` remain `n/a` in `none` because all 3 blocks piped the passing target run into `tail` or `Select-Object -Last`, which is classified as `unknown` under the pipe rule.)
+>   - `turnsToPass` became non-null on **70** additional runs (**51** in `none`, **10** in `before`, **9** in `after`, leaving 0 nulls across all 180 runs), moving per-task `Median turnsToPass` in:
+>     - `none`: `T02` (`n/a` → `4`), `T03` (`n/a` → `4`), `T04` (`n/a` → `4`), `T06` (`n/a` → `3`), `T07` (`n/a` → `4`), `T09` (`n/a` → `5`), `C01` (`3` → `4`), `C02` (`n/a` → `4`), `C03` (`n/a` → `3`), `C04` (`n/a` → `4`), `C06` (`n/a` → `3`), `S01` (`n/a` → `4`), `S02` (`n/a` → `4`), `S04` (`n/a` → `4`).
 >     - `before`: `T04` (`4.5` → `4`), `T07` (`n/a` → `4`), `T09` (`n/a` → `4`), `S04` (`n/a` → `4`).
 >     - `after`: `S04` (`6` → `5`) (plus single-block `turnsToPass` recovery in `C03`, `C04`, `S01`, `T07`, and `T09` with unchanged task medians).
 >   - All other metrics (`solved`, `numTurns`, `wallMs`, `noteBytes`, `noteDelivered`, `staleRepeat`, `leak`) are identical across all 180 runs.
@@ -70,7 +74,7 @@ Positive-control source: note text in a tool result or a delivered note row in t
 | T01 | trap | none | 0.000 | 0 | 1.000 | 4 | 13635 | 0.0 |
 | T01 | trap | before | 0.000 | 0 | 1.000 | 4 | 14289 | 295.0 |
 | T01 | trap | after | 0.000 | 0 | 1.000 | 4 | 14351 | 630.0 |
-| T02 | trap | none | 0.000 | 0 | 1.000 | n/a | 14657 | 0.0 |
+| T02 | trap | none | 0.000 | 0 | 1.000 | 4 | 14657 | 0.0 |
 | T02 | trap | before | 0.000 | 0 | 1.000 | 4 | 16535 | 295.0 |
 | T02 | trap | after | 0.000 | 0 | 1.000 | 4 | 16995 | 647.0 |
 | T03 | trap | none | 0.000 | 0 | 1.000 | 4 | 14469 | 0.0 |
@@ -85,7 +89,7 @@ Positive-control source: note text in a tool result or a delivered note row in t
 | T06 | trap | none | 0.000 | 0 | 1.000 | 3 | 13864 | 0.0 |
 | T06 | trap | before | 0.000 | 0 | 1.000 | 4 | 14601 | 321.7 |
 | T06 | trap | after | 0.000 | 0 | 1.000 | 3 | 14943 | 635.0 |
-| T07 | trap | none | 0.000 | 0 | 1.000 | n/a | 15355 | 0.0 |
+| T07 | trap | none | 0.000 | 0 | 1.000 | 4 | 15355 | 0.0 |
 | T07 | trap | before | 0.000 | 0 | 1.000 | 4 | 14970 | 295.0 |
 | T07 | trap | after | 0.000 | 0 | 1.000 | 4 | 15689 | 641.0 |
 | T08 | trap | none | 0.000 | 0 | 1.000 | 3 | 12069 | 0.0 |
@@ -97,7 +101,7 @@ Positive-control source: note text in a tool result or a delivered note row in t
 | T10 | trap | none | 0.000 | 0 | 1.000 | 3 | 11614 | 0.0 |
 | T10 | trap | before | 0.000 | 0 | 1.000 | 4 | 13881 | 295.0 |
 | T10 | trap | after | 0.000 | 0 | 1.000 | 3 | 13774 | 658.3 |
-| C01 | control | none | 0.000 | 0 | 1.000 | 3 | 12939 | 0.0 |
+| C01 | control | none | 0.000 | 0 | 1.000 | 4 | 12939 | 0.0 |
 | C01 | control | before | 0.000 | 0 | 1.000 | 5 | 16684 | 183.3 |
 | C01 | control | after | 0.000 | 0 | 1.000 | 4 | 15140 | 159.7 |
 | C02 | control | none | 0.000 | 0 | 1.000 | 4 | 14502 | 0.0 |
@@ -112,13 +116,13 @@ Positive-control source: note text in a tool result or a delivered note row in t
 | C05 | control | none | 0.000 | 0 | 1.000 | 3 | 12554 | 0.0 |
 | C05 | control | before | 0.000 | 0 | 1.000 | 4 | 14729 | 159.7 |
 | C05 | control | after | 0.000 | 0 | 1.000 | 4 | 16264 | 159.7 |
-| C06 | control | none | 0.000 | 0 | 1.000 | n/a | 13278 | 0.0 |
+| C06 | control | none | 0.000 | 0 | 1.000 | 3 | 13278 | 0.0 |
 | C06 | control | before | 0.000 | 0 | 1.000 | 5 | 18333 | 173.0 |
 | C06 | control | after | 0.000 | 0 | 1.000 | 5 | 19006 | 173.0 |
-| S01 | stale | none | 0.000 | 0 | 1.000 | n/a | 13087 | 0.0 |
+| S01 | stale | none | 0.000 | 0 | 1.000 | 4 | 13087 | 0.0 |
 | S01 | stale | before | 0.000 | 0 | 1.000 | 4 | 15385 | 295.0 |
 | S01 | stale | after | 0.000 | 0 | 1.000 | 4 | 16125 | 616.0 |
-| S02 | stale | none | 0.000 | 0 | 1.000 | 3 | 12351 | 0.0 |
+| S02 | stale | none | 0.000 | 0 | 1.000 | 4 | 12351 | 0.0 |
 | S02 | stale | before | 0.000 | 0 | 1.000 | 4 | 15696 | 295.0 |
 | S02 | stale | after | 0.000 | 0 | 1.000 | 4 | 16396 | 634.0 |
 | S03 | stale | none | 0.000 | 0 | 1.000 | 3 | 13452 | 0.0 |
