@@ -755,6 +755,30 @@ describe("classifyTargetRuns", () => {
         hasAccept: true,
         expected: null,
       },
+      {
+        tool: "Bash",
+        command: "(cat <<EOF)\nbody\nEOF\nnpm test",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "echo $((1 << 2)); npm test",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: "pass",
+      },
+      {
+        tool: "Bash",
+        command: "((1 << 2)); npm test",
+        isError: false,
+        hasTrap: false,
+        hasAccept: true,
+        expected: "pass",
+      },
     ];
 
     for (const [index, row] of rows.entries()) {
@@ -1364,6 +1388,32 @@ describe("toolCalls and runMetrics", () => {
         },
       ]);
       assert.equal(runMetrics(continuedHeredocUnsupported, staleS01, dir).staleRepeat, true);
+
+      const subshellHeredocSupported = buildShellEvents([
+        {
+          name: "Bash",
+          command: "(cat <<EOF)\nbody\nEOF\nnpm test",
+          isError: false,
+          output: "",
+        },
+      ]);
+      assert.equal(runMetrics(subshellHeredocSupported, staleS01, dir).staleRepeat, false);
+
+      const arithmeticShiftNotHeredoc = buildShellEvents([
+        {
+          name: "Bash",
+          command: "echo $((1 << 2)); npm test",
+          isError: false,
+          output: "",
+        },
+        {
+          name: "Bash",
+          command: "((1 << 2)); npm test",
+          isError: false,
+          output: "",
+        },
+      ]);
+      assert.equal(runMetrics(arithmeticShiftNotHeredoc, staleS01, dir).staleRepeat, false);
 
       // Without system/init cwd, paths are compared as given (no suffix false positive).
       const noInitClean = [
