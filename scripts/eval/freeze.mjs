@@ -172,10 +172,10 @@ function matchesProtected(relPath, protectedEntries) {
   return false;
 }
 
-function withTempWorkDir(prefix, fn) {
+async function withTempWorkDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   try {
-    return fn(dir);
+    return await fn(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -270,7 +270,7 @@ export async function validateTaskBehaviors(manifest) {
       let repoFp = "";
       await withTempWorkDir(`rocky-freeze-${task.id}-repo-`, async (workDir) => {
         copyTree(repoDir, workDir);
-        const res = runTargetCommand(task.target.command, workDir, targetEnv);
+        const res = await runTargetCommand(task.target.command, workDir, targetEnv);
         if (res.status === 0) {
           throw new Error(`${task.id}: untouched repo/ unexpectedly exited 0`);
         }
@@ -325,7 +325,7 @@ export async function validateTaskBehaviors(manifest) {
 
         await withTempWorkDir(`rocky-freeze-${task.id}-hist-`, async (workDir) => {
           copyTree(historySource, workDir);
-          const initial = runTargetCommand(task.target.command, workDir, targetEnv);
+          const initial = await runTargetCommand(task.target.command, workDir, targetEnv);
           if (initial.status === 0) {
             throw new Error(`${task.id}: initial history state unexpectedly exited 0`);
           }
@@ -342,7 +342,7 @@ export async function validateTaskBehaviors(manifest) {
 
           for (const wrongName of task.history.wrong) {
             copyTree(join(patchesDir, wrongName), workDir);
-            const wrongRes = runTargetCommand(task.target.command, workDir, targetEnv);
+            const wrongRes = await runTargetCommand(task.target.command, workDir, targetEnv);
             if (wrongRes.status === 0) {
               throw new Error(`${task.id}: wrong overlay ${wrongName} unexpectedly exited 0`);
             }
@@ -361,7 +361,7 @@ export async function validateTaskBehaviors(manifest) {
           }
 
           copyTree(join(patchesDir, task.history.fix), workDir);
-          const fixRes = runTargetCommand(task.target.command, workDir, targetEnv);
+          const fixRes = await runTargetCommand(task.target.command, workDir, targetEnv);
           if (fixRes.status !== 0) {
             throw new Error(`${task.id}: history fix ${task.history.fix} exited ${fixRes.status}:\n${fixRes.stderr}`);
           }
@@ -381,7 +381,7 @@ export async function validateTaskBehaviors(manifest) {
         await withTempWorkDir(`rocky-freeze-${task.id}-stale-oldfix-`, async (workDir) => {
           copyTree(repoDir, workDir);
           copyTree(join(patchesDir, task.history.fix), workDir);
-          const oldFixRes = runTargetCommand(task.target.command, workDir, targetEnv);
+          const oldFixRes = await runTargetCommand(task.target.command, workDir, targetEnv);
           if (oldFixRes.status === 0) {
             throw new Error(`${task.id}: stale history fix unexpectedly passed on current repo/`);
           }
@@ -407,7 +407,7 @@ export async function validateTaskBehaviors(manifest) {
       await withTempWorkDir(`rocky-freeze-${task.id}-realfix-`, async (workDir) => {
         copyTree(repoDir, workDir);
         copyTree(realFixDir, workDir);
-        const res = runTargetCommand(task.target.command, workDir, targetEnv);
+        const res = await runTargetCommand(task.target.command, workDir, targetEnv);
         if (res.status !== 0) {
           throw new Error(`${task.id}: real fix ${realFixName} exited ${res.status}:\n${res.stderr}`);
         }

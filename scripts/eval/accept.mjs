@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -22,6 +22,8 @@ const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const TASKS_DIR = join(EVAL_DIR, "tasks");
 const MANIFEST_PATH = join(TASKS_DIR, "manifest.json");
 const ACCEPT_TIMEOUT_MS = 120_000;
+const ACCEPT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const ACCEPT_KILL_GRACE_MS = 3_000;
 const WIN32_ALLOWLIST_KEYS = [
   "SystemRoot",
   "windir",
@@ -208,15 +210,53 @@ export function buildAcceptEnv(baseEnv = process.env, platform = process.platfor
   return out;
 }
 
+function killTargetTree(child, env, platform = process.platform) {
+  const pid = child.pid;
+  if (platform === "win32" && typeof pid === "number" && pid > 0) {
+    const sysRoot = env?.SystemRoot ?? process.env.SystemRoot ?? process.env.windir;
+    const extraDirs = typeof sysRoot === "string" && sysRoot.length > 0 ? [join(sysRoot, "System32")] : [];
+    const taskkill = resolveExecutableOnPath(
+      ["taskkill.exe"],
+      getPathValue(env ?? process.env),
+      "win32",
+      extraDirs,
+    );
+    if (taskkill) {
+      try {
+        spawnSync(taskkill, ["/T", "/F", "/PID", String(pid)], {
+          stdio: "ignore",
+          windowsHide: true,
+          shell: false,
+          timeout: 10_000,
+        });
+      } catch {
+        // Fall through to direct kill.
+      }
+    }
+  } else if (platform !== "win32" && typeof pid === "number" && pid > 0) {
+    try {
+      process.kill(-pid, "SIGKILL");
+      return;
+    } catch {
+      // Fall through to direct kill.
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // Process may already have exited.
+  }
+}
+
 /**
- * Execute a simple target command (such as `npm test` or `node ...`) without a shell.
+ * Execute a simple target command (such as `npm test` or `node ...`) asynchronously without a shell.
  * @param {string} command
  * @param {string} cwd
  * @param {Record<string, string>} env
  * @param {number} [timeoutMs]
- * @returns {{ status: number, signal: NodeJS.Signals | null, stdout: string, stderr: string, timedOut: boolean }}
+ * @returns {Promise<{ status: number, signal: NodeJS.Signals | null, stdout: string, stderr: string, timedOut: boolean }>}
  */
-export function runTargetCommand(command, cwd, env, timeoutMs = ACCEPT_TIMEOUT_MS) {
+export async function runTargetCommand(command, cwd, env, timeoutMs = ACCEPT_TIMEOUT_MS) {
   const tokens = String(command ?? "").trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) {
     throw new Error("Target command must be non-empty");
@@ -240,37 +280,98 @@ export function runTargetCommand(command, cwd, env, timeoutMs = ACCEPT_TIMEOUT_M
     ?? process.env.ComSpec
     ?? process.env.COMSPEC;
   const invocation = buildCommandInvocation(executable, args, process.platform, comSpec);
-  const result = spawnSync(invocation.file, invocation.args, {
-    cwd,
-    env,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: timeoutMs,
-    windowsHide: true,
-    shell: false,
-    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-  });
 
-  if (result.error) {
-    if (result.error.code === "ETIMEDOUT") {
-      return {
-        status: 124,
-        signal: result.signal ?? null,
-        stdout: result.stdout ?? "",
-        stderr: result.stderr ?? "",
-        timedOut: true,
-      };
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(invocation.file, invocation.args, {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      shell: false,
+      detached: process.platform !== "win32",
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    });
+
+    /** @type {Buffer[]} */
+    const stdoutChunks = [];
+    /** @type {Buffer[]} */
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let settled = false;
+    /** @type {NodeJS.Timeout | null} */
+    let killTimer = null;
+    /** @type {NodeJS.Timeout | null} */
+    let graceTimer = null;
+
+    const clearTimers = () => {
+      if (killTimer !== null) {
+        clearTimeout(killTimer);
+        killTimer = null;
+      }
+      if (graceTimer !== null) {
+        clearTimeout(graceTimer);
+        graceTimer = null;
+      }
+    };
+
+    const settle = (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      resolvePromise({
+        status: timedOut ? 124 : (code ?? 1),
+        signal: signal ?? null,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        timedOut,
+      });
+    };
+
+    child.stdout.on("data", (chunk) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (stdoutBytes >= ACCEPT_MAX_BUFFER_BYTES) return;
+      const remaining = ACCEPT_MAX_BUFFER_BYTES - stdoutBytes;
+      const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+      stdoutChunks.push(slice);
+      stdoutBytes += slice.length;
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (stderrBytes >= ACCEPT_MAX_BUFFER_BYTES) return;
+      const remaining = ACCEPT_MAX_BUFFER_BYTES - stderrBytes;
+      const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+      stderrChunks.push(slice);
+      stderrBytes += slice.length;
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      rejectPromise(error);
+    });
+
+    child.on("close", (code, signal) => {
+      settle(code, signal);
+    });
+
+    if (typeof timeoutMs === "number" && timeoutMs > 0) {
+      killTimer = setTimeout(() => {
+        timedOut = true;
+        killTargetTree(child, env, process.platform);
+        graceTimer = setTimeout(() => {
+          child.stdout.destroy();
+          child.stderr.destroy();
+          settle(124, "SIGKILL");
+        }, ACCEPT_KILL_GRACE_MS);
+        graceTimer.unref?.();
+      }, timeoutMs);
+      killTimer.unref?.();
     }
-    throw result.error;
-  }
-
-  return {
-    status: result.status ?? 1,
-    signal: result.signal ?? null,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    timedOut: false,
-  };
+  });
 }
 
 /**
@@ -295,7 +396,7 @@ export async function accept(task, finalDir, options = {}) {
   try {
     prepareAcceptTempDir(acceptTempDir);
     const env = buildAcceptEnv(process.env, process.platform, acceptTempDir);
-    res = runTargetCommand(task.target.command, finalDir, env, options.timeoutMs ?? ACCEPT_TIMEOUT_MS);
+    res = await runTargetCommand(task.target.command, finalDir, env, options.timeoutMs ?? ACCEPT_TIMEOUT_MS);
   } finally {
     removeDirWithRetry(acceptTempDir);
   }
