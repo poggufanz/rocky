@@ -1,0 +1,10 @@
+{
+  "name": "eval-cli-flag",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "format": "node bin/fmt.mjs -- --fix src/sample.txt",
+    "test": "npm run format && node test/run.mjs"
+  }
+}

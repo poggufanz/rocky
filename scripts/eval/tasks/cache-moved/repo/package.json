@@ -1,0 +1,10 @@
+{
+  "name": "eval-cache-moved",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "test": "node test/run.mjs"
+  }
+}

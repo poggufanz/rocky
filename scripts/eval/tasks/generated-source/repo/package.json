@@ -1,0 +1,10 @@
+{
+  "name": "eval-schema-gen",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretest": "node scripts/codegen.mjs",
+    "test": "node test/run.mjs"
+  }
+}

@@ -5,3 +5,4 @@
 *.rs text eol=lf
 fixtures/facts/** -text
 fixtures/transcripts/** -text
+scripts/eval/tasks/** -text
