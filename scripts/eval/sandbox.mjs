@@ -471,30 +471,46 @@ function removeTreeWithRetry(target) {
 }
 
 /**
- * Publish a staged tarball to its cache path without replacing an existing entry,
- * falling back to an exclusive copy when hard links fail.
+ * Publish a staged tarball to its cache path atomically, falling back to
+ * copying into a cache-dir temp file and renaming when hard links fail.
  * @param {string} staged
  * @param {string} cached
  * @param {(existingPath: string, newPath: string) => void} [link]
+ * @param {(src: string, dest: string, mode?: number) => void} [copy]
+ * @param {(oldPath: string, newPath: string) => void} [rename]
  * @returns {string}
  */
-export function publishTarball(staged, cached, link = linkSync) {
+export function publishTarball(
+  staged,
+  cached,
+  link = linkSync,
+  copy = copyFileSync,
+  rename = renameSync,
+) {
+  let temp = null;
   try {
     try {
       link(staged, cached);
     } catch (error) {
       const code = error && typeof error === "object" ? error.code : undefined;
-      if (code !== "EEXIST") {
+      if (code !== "EEXIST" && !existsSync(cached)) {
+        do {
+          temp = `${cached}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+        } while (temp === staged);
+        copy(staged, temp, fsConstants.COPYFILE_EXCL);
         try {
-          copyFileSync(staged, cached, fsConstants.COPYFILE_EXCL);
-        } catch (copyError) {
-          const copyCode = copyError && typeof copyError === "object" ? copyError.code : undefined;
-          if (copyCode !== "EEXIST") throw copyError;
+          rename(temp, cached);
+        } catch (renameError) {
+          if (!existsSync(cached)) throw renameError;
         }
       }
     }
   } finally {
-    rmSync(staged, { force: true });
+    try {
+      if (temp !== null) rmSync(temp, { force: true });
+    } finally {
+      rmSync(staged, { force: true });
+    }
   }
   return cached;
 }

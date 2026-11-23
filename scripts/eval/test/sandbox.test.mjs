@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -529,6 +530,109 @@ describe("sandbox", () => {
       assert.equal(secondResult, cached);
       assert.equal(readFileSync(cached, "utf8"), "first-fallback-bytes");
       assert.equal(existsSync(stagedSecond), false);
+    } finally {
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  test("publishTarball fallback copies to a cache-dir temp file before renaming atomically", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "rocky-eval-publish-atomic-"));
+    try {
+      const cached = join(cacheDir, "rocky-atomic.tgz");
+      const staged = join(cacheDir, "rocky-atomic.tgz.tmp-stage");
+      writeFileSync(staged, "atomic-fallback-bytes", "utf8");
+
+      const failWithEperm = () => {
+        const err = new Error("EPERM: operation not permitted, link");
+        err.code = "EPERM";
+        throw err;
+      };
+
+      const copyCalls = [];
+      const trackedCopy = (src, dest) => {
+        copyCalls.push({ src, dest });
+        assert.equal(existsSync(cached), false);
+        assert.notEqual(dest, cached);
+        assert.equal(dirname(dest), cacheDir);
+        assert.match(dest, /\.tgz\.tmp-\d+-[0-9a-f]+$/);
+        copyFileSync(src, dest);
+      };
+
+      const result = publishTarball(staged, cached, failWithEperm, trackedCopy);
+      assert.equal(result, cached);
+      assert.equal(copyCalls.length, 1);
+      assert.equal(copyCalls[0].src, staged);
+      assert.equal(readFileSync(cached, "utf8"), "atomic-fallback-bytes");
+      assert.equal(existsSync(staged), false);
+      assert.deepEqual(readdirSync(cacheDir), ["rocky-atomic.tgz"]);
+    } finally {
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  test("publishTarball fallback treats rename error as cache hit only when cached exists and always cleans temp files", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "rocky-eval-publish-rename-"));
+    try {
+      const failWithEperm = () => {
+        const err = new Error("EPERM: operation not permitted, link");
+        err.code = "EPERM";
+        throw err;
+      };
+
+      const cachedHit = join(cacheDir, "rocky-rename-hit.tgz");
+      const stagedHit = join(cacheDir, "rocky-rename-hit.tgz.tmp-stage");
+      writeFileSync(stagedHit, "loser-bytes", "utf8");
+      const copyThenRace = (src, dest) => {
+        assert.equal(existsSync(cachedHit), false);
+        copyFileSync(src, dest);
+        writeFileSync(cachedHit, "winner-bytes", "utf8");
+      };
+      const failRenameEbusy = () => {
+        const err = new Error("EBUSY: resource busy or locked, rename");
+        err.code = "EBUSY";
+        throw err;
+      };
+
+      const hitResult = publishTarball(stagedHit, cachedHit, failWithEperm, copyThenRace, failRenameEbusy);
+      assert.equal(hitResult, cachedHit);
+      assert.equal(readFileSync(cachedHit, "utf8"), "winner-bytes");
+      assert.equal(existsSync(stagedHit), false);
+      assert.deepEqual(readdirSync(cacheDir), ["rocky-rename-hit.tgz"]);
+
+      const cachedMiss = join(cacheDir, "rocky-rename-miss.tgz");
+      const stagedMiss = join(cacheDir, "rocky-rename-miss.tgz.tmp-stage");
+      writeFileSync(stagedMiss, "miss-bytes", "utf8");
+      const failRenameEperm = () => {
+        const err = new Error("EPERM: rename failed");
+        err.code = "EPERM";
+        throw err;
+      };
+
+      assert.throws(
+        () => publishTarball(stagedMiss, cachedMiss, failWithEperm, copyFileSync, failRenameEperm),
+        /rename failed/,
+      );
+      assert.equal(existsSync(cachedMiss), false);
+      assert.equal(existsSync(stagedMiss), false);
+      assert.deepEqual(readdirSync(cacheDir), ["rocky-rename-hit.tgz"]);
+
+      const cachedCopyErr = join(cacheDir, "rocky-copy-err.tgz");
+      const stagedCopyErr = join(cacheDir, "rocky-copy-err.tgz.tmp-stage");
+      writeFileSync(stagedCopyErr, "full-bytes", "utf8");
+      const failMidCopy = (_src, dest) => {
+        writeFileSync(dest, "partial", "utf8");
+        const err = new Error("ENOSPC: no space left on device");
+        err.code = "ENOSPC";
+        throw err;
+      };
+
+      assert.throws(
+        () => publishTarball(stagedCopyErr, cachedCopyErr, failWithEperm, failMidCopy),
+        /ENOSPC/,
+      );
+      assert.equal(existsSync(cachedCopyErr), false);
+      assert.equal(existsSync(stagedCopyErr), false);
+      assert.deepEqual(readdirSync(cacheDir), ["rocky-rename-hit.tgz"]);
     } finally {
       rmSync(cacheDir, { recursive: true, force: true });
     }
