@@ -182,3 +182,9 @@ Counting for the pre-registered field measurement (`docs/attempt-notes-preregist
 ## Reporting and local artifacts
 
 `scripts/eval/report.mjs` renders a markdown report from `metrics.json` and `batch.json` containing full provenance (model, `claude --version`, `CLAUDE_FLAGS`, arm and evaluator commits, `taskSetSha256`, per-arm `CLAUDE.md` SHA-256s, seed, `k`, concurrency, auth mode, scheduled tasks, bootstrap parameters), excluded runs, leak and owner-check results, positive-control rates, per-task × arm metrics, descriptive `staleRepeat` rates, paired comparisons, harm veto and verdict, and the run-boundary rule. Raw transcripts, sandboxes, `final/` copies, and `metrics.json` stay local outside the repository because they can carry host paths; only curated markdown reports are copied into `docs/evals/`.
+
+## Amendment 1 (2026-11-23): run 1 uses `k = 3`
+
+Run 1 started with `k = 5` and was stopped by the owner after 139 published runs (blocks 1 and 2 complete, 21 runs of block 3) to limit model usage. Run 1 now uses `k = 3` (`20 × 3 × 3 = 180` runs). With the same seed, the `k = 3` schedule is the first three blocks of the `k = 5` schedule, so every published run keeps its `runId`; only `k` and `scheduledRuns` in `batch.json` change. Every other rule is unchanged, and the sign-flip grid becomes `1 / lcm(1..3) = 1 / 6`.
+
+This amendment is written before `evaluate.mjs` or `analyze.mjs` ran on any run-1 data. One fact was already known when it was written: the runner's progress log showed every published run as `solved`. A ceiling on `solved` makes the solved-drop veto unlikely to fire at any `k`. The median-turns veto and the positive control are unaffected by that observation. Run 2 keeps `k = 5` unless a later amendment, written before run 2 starts, says otherwise.
