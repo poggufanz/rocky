@@ -22,6 +22,7 @@ import { ACCEPT_MAX_BUFFER_BYTES, accept, runTargetCommand } from "../accept.mjs
 import { renderClaudeMd } from "../history.mjs";
 import {
   ARMS,
+  COPY_CREDENTIALS_DISABLED_MESSAGE,
   DEFAULT_K,
   DEFAULT_SEED,
   ProvenanceMismatchError,
@@ -29,12 +30,11 @@ import {
   createRedactingFileWriter,
   createTranscriptParser,
   diffBatchProvenance,
-  extractCredentialSecrets,
   isValidRunJson,
   mulberry32,
   pipeReadableToRedactingWriter,
-  redactFileInPlace,
   runBatch,
+  scanRunArtifactsForSecrets,
   schedule,
   selectTasks,
   spawnProcess,
@@ -172,7 +172,7 @@ describe("schedule and mulberry32", () => {
   });
 });
 
-describe("task selection, credential extraction, provenance diff, and outcome classification", () => {
+describe("task selection, provenance diff, and outcome classification", () => {
   test("selectTasks excludes SMOKE by default and honors --only", () => {
     const defaults = selectTasks(manifest.tasks, null);
     assert.equal(defaults.length, 20);
@@ -186,23 +186,6 @@ describe("task selection, credential extraction, provenance diff, and outcome cl
     assert.deepEqual(subset.map((task) => task.id), ["T01", "C01"]);
 
     assert.throws(() => selectTasks(manifest.tasks, ["DOES_NOT_EXIST"]), /Unknown task/i);
-  });
-
-  test("extractCredentialSecrets collects every string value >= 20 chars recursively", () => {
-    const secrets = extractCredentialSecrets({
-      short: "too-short-19-chars!",
-      exact20: "12345678901234567890",
-      nested: {
-        accessToken: "sk-ant-oat01-very-long-credential-value",
-        items: ["ok", "refresh-token-value-at-least-20-chars"],
-      },
-      count: 42,
-    });
-    assert.deepEqual(secrets, [
-      "sk-ant-oat01-very-long-credential-value",
-      "refresh-token-value-at-least-20-chars",
-      "12345678901234567890",
-    ]);
   });
 
   test("diffBatchProvenance checks provenance fields while allowing concurrency changes", () => {
@@ -743,11 +726,76 @@ describe("runner CLI guards and resume provenance", () => {
     assert.match(res.stdout, /--out/);
     assert.match(res.stdout, /--before/);
     assert.match(res.stdout, /--after/);
-    assert.match(res.stdout, /--auth/);
+    assert.match(res.stdout, /--auth token/);
+    assert.doesNotMatch(res.stdout, /--from/);
     assert.match(res.stdout, /--root/);
     assert.match(res.stdout, /--cache/);
     assert.match(res.stdout, /--only/);
     assert.match(res.stdout, /--retry-invalid/);
+  });
+
+  test("runner exits 2 with disabled message on --auth copy-credentials", async () => {
+    const bare = spawnSync(process.execPath, [runnerScript, "--auth", "copy-credentials"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(bare.status, 2);
+    assert.ok(
+      bare.stderr.includes(COPY_CREDENTIALS_DISABLED_MESSAGE),
+      `expected disabled message, got: ${bare.stderr}`,
+    );
+
+    const outDir = mkdtempSync(join(tmpdir(), "rocky-runner-copy-disabled-"));
+    try {
+      const withArgs = spawnSync(
+        process.execPath,
+        [
+          runnerScript,
+          "--out",
+          outDir,
+          "--before",
+          "31128bc",
+          "--after",
+          "HEAD",
+          "--auth",
+          "copy-credentials",
+          "--from",
+          join(outDir, ".credentials.json"),
+        ],
+        { cwd: repoRoot, encoding: "utf8", windowsHide: true },
+      );
+      assert.equal(withArgs.status, 2);
+      assert.ok(
+        withArgs.stderr.includes(COPY_CREDENTIALS_DISABLED_MESSAGE),
+        `expected disabled message with full flags, got: ${withArgs.stderr}`,
+      );
+
+      await assert.rejects(
+        () => runBatch(
+          {
+            outDir,
+            rootDir: join(outDir, "sbx"),
+            cacheDir: join(outDir, "cache"),
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "copy-credentials", from: join(outDir, ".credentials.json") },
+            concurrency: 1,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          makeFakeDeps(),
+        ),
+        (err) => {
+          assert.equal(err.exitCode, 2);
+          assert.equal(err.message, COPY_CREDENTIALS_DISABLED_MESSAGE);
+          return true;
+        },
+      );
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
   });
 
   test("runner refuses an out dir inside the repo", () => {
@@ -1390,65 +1438,6 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
     }
   });
 
-  test("copy-credentials mode extracts >=20-char credential values and redacts them from stderr", async () => {
-    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-creds-"));
-    const outDir = join(baseTmp, "out");
-    const rootDir = join(baseTmp, "sbx");
-    const cacheDir = join(baseTmp, "cache");
-    const credsPath = join(baseTmp, ".credentials.json");
-    const credSecret = "oauth-copied-credential-secret-value-12345";
-    writeFileSync(
-      credsPath,
-      `${JSON.stringify({
-        claudeAiOauth: {
-          accessToken: credSecret,
-          subscriptionType: "pro",
-        },
-      })}\n`,
-      "utf8",
-    );
-
-    try {
-      const fakeDeps = makeFakeDeps({
-        runClaude: async () => ({
-          stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
-          stderr: `plan=pro leaked=${credSecret}\n`,
-          exitCode: 0,
-          timedOut: false,
-        }),
-      });
-
-      await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "copy-credentials", from: credsPath },
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        fakeDeps,
-      );
-
-      const runDir = join(outDir, "runs", "SMOKE-none-b1");
-      const stderrText = readFileSync(join(runDir, "stderr.txt"), "utf8");
-      assert.equal(stderrText, "plan=pro leaked=<redacted>\n");
-      const runJson = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
-      assert.equal(runJson.invalid, "token_leak");
-
-      for (const rel of listAllFiles(outDir)) {
-        const text = readFileSync(join(outDir, rel), "utf8");
-        assert.equal(text.includes(credSecret), false, `credential value leaked in ${rel}`);
-      }
-    } finally {
-      rmSync(baseTmp, { recursive: true, force: true });
-    }
-  });
-
   test("rejects resume before packing when batch.json provenance mismatches", async () => {
     const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-prov-"));
     const outDir = join(baseTmp, "out");
@@ -1746,280 +1735,108 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
     }
   });
 
-  test("copy-credentials mode rebuilds secrets from sandbox configDir/.credentials.json after agent exits (streamed and non-streamed)", async () => {
-    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-refresh-creds-"));
+  test("voids token-mode runs when token appears in copied final/ or rocky-home/ artifacts and preserves plain copies", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-token-scan-"));
     const outDir = join(baseTmp, "out");
     const rootDir = join(baseTmp, "sbx");
     const cacheDir = join(baseTmp, "cache");
-    const credsPath = join(baseTmp, ".credentials.json");
-    const startupSecret = "oauth-startup-credential-secret-value-11111";
-    const refreshedSecret = "oauth-refreshed-in-sandbox-secret-value-99999";
-
-    writeFileSync(
-      credsPath,
-      `${JSON.stringify({ claudeAiOauth: { accessToken: startupSecret } })}\n`,
-      "utf8",
-    );
-
-    try {
-      const fakeDeps = makeFakeDeps({
-        createSandbox: async ({ runId, root, auth }) => {
-          const dir = join(root, runId);
-          const home = join(dir, "home");
-          const configDir = join(home, ".claude");
-          const rockyHome = join(dir, "rocky-home");
-          const taskDir = join(dir, "task");
-          mkdirSync(configDir, { recursive: true });
-          mkdirSync(rockyHome, { recursive: true });
-          mkdirSync(taskDir, { recursive: true });
-          if (auth?.kind === "copy-credentials") {
-            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
-          }
-          return { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
-        },
-        runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
-          // Simulate Claude refreshing its token inside the sandbox during execution.
-          writeFileSync(
-            join(sandbox.configDir, ".credentials.json"),
-            `${JSON.stringify({ claudeAiOauth: { accessToken: refreshedSecret } })}\n`,
-            "utf8",
-          );
-          writeFileSync(
-            join(sandbox.rockyHome, "memory.jsonl"),
-            `{"msg":"seen ${refreshedSecret} and ${startupSecret}"}\n`,
-            "utf8",
-          );
-
-          if (runId === "SMOKE-after-b1") {
-            // Streamed path (writes to disk during run with pre-run secrets).
-            const script = [
-              `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(refreshedSecret)} }) + "\\n");`,
-              `process.stderr.write("streamed-err " + ${JSON.stringify(refreshedSecret)} + " " + ${JSON.stringify(startupSecret)} + "\\n");`,
-            ].join("\n");
-            return spawnProcess({
-              file: process.execPath,
-              args: ["-e", script],
-              cwd: sandbox.taskDir,
-              env: process.env,
-              timeoutMs: 10_000,
-              stdoutPath,
-              stderrPath,
-              secrets,
-            });
-          }
-
-          return {
-            stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
-            stderr: `refreshed=${refreshedSecret} startup=${startupSecret}\n`,
-            exitCode: 0,
-            timedOut: false,
-          };
-        },
-      });
-
-      await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "copy-credentials", from: credsPath },
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        fakeDeps,
-      );
-
-      for (const arm of ["none", "before", "after"]) {
-        const runDir = join(outDir, "runs", `SMOKE-${arm}-b1`);
-        const runJson = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
-        assert.equal(runJson.invalid, "token_leak", `expected token_leak for arm=${arm}`);
-        const stderrText = readFileSync(join(runDir, "stderr.txt"), "utf8");
-        assert.match(stderrText, /<redacted>/);
-      }
-
-      const afterRocky = readFileSync(join(outDir, "runs", "SMOKE-after-b1", "rocky-home", "memory.jsonl"), "utf8");
-      assert.match(afterRocky, /<redacted>/);
-
-      for (const rel of listAllFiles(outDir)) {
-        const text = readFileSync(join(outDir, rel), "utf8");
-        assert.equal(text.includes(startupSecret), false, `startup secret leaked in ${rel}`);
-        assert.equal(text.includes(refreshedSecret), false, `refreshed secret leaked in ${rel}`);
-      }
-    } finally {
-      rmSync(baseTmp, { recursive: true, force: true });
-    }
-  });
-
-  test("refreshed credential re-redaction runs before sweep/artifacts, survives sweep/run crashes, and removes unredacted file on rewrite failure", async () => {
-    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-reredact-edge-"));
-    const outDir = join(baseTmp, "out");
-    const rootDir = join(baseTmp, "sbx");
-    const cacheDir = join(baseTmp, "cache");
-    const credsPath = join(baseTmp, ".credentials.json");
-    const startupSecret = "oauth-startup-edge-credential-value-11111";
-    const refreshedSecret = "oauth-refreshed-edge-credential-value-99999";
-
-    writeFileSync(
-      credsPath,
-      `${JSON.stringify({ claudeAiOauth: { accessToken: startupSecret } })}\n`,
-      "utf8",
-    );
-
-    try {
-      // Direct check: if redactFileInPlace fails on rename, neither temp file nor unredacted original remains.
-      const failDir = join(baseTmp, "rewrite-fail");
-      mkdirSync(failDir, { recursive: true });
-      const sensitiveFile = join(failDir, "transcript.jsonl");
-      writeFileSync(sensitiveFile, `{"tok":"${refreshedSecret}"}\n`, "utf8");
-      await assert.rejects(
-        () => redactFileInPlace(sensitiveFile, [refreshedSecret], {
-          renameFn: () => {
-            throw new Error("simulated rename failure");
-          },
-        }),
-        /simulated rename failure/,
-      );
-      assert.deepEqual(readdirSync(failDir), [], "both temp and unredacted original must be removed on rewrite failure");
-
-      let sawRedactedTranscriptInSweep = false;
-      const fakeDeps = makeFakeDeps({
-        createSandbox: async ({ runId, root, auth }) => {
-          const dir = join(root, runId);
-          const home = join(dir, "home");
-          const configDir = join(home, ".claude");
-          const rockyHome = join(dir, "rocky-home");
-          const taskDir = join(dir, "task");
-          mkdirSync(configDir, { recursive: true });
-          mkdirSync(rockyHome, { recursive: true });
-          mkdirSync(taskDir, { recursive: true });
-          if (auth?.kind === "copy-credentials") {
-            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
-          }
-          return { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
-        },
-        runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
-          writeFileSync(
-            join(sandbox.configDir, ".credentials.json"),
-            `${JSON.stringify({ claudeAiOauth: { accessToken: refreshedSecret } })}\n`,
-            "utf8",
-          );
-          const script = [
-            `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(refreshedSecret)} }) + "\\n");`,
-            `process.stderr.write("err " + ${JSON.stringify(refreshedSecret)} + "\\n");`,
-          ].join("\n");
-          const streamedRes = await spawnProcess({
-            file: process.execPath,
-            args: ["-e", script],
-            cwd: sandbox.taskDir,
-            env: process.env,
-            timeoutMs: 10_000,
-            stdoutPath,
-            stderrPath,
-            secrets,
-          });
-          if (runId === "SMOKE-before-b1") {
-            // Simulate runClaude failing after writing streamed files with refreshed credentials.
-            throw new Error(`claude crashed with ${refreshedSecret}`);
-          }
-          return streamedRes;
-        },
-        sweepStrays: async (sandboxDir) => {
-          if (sandboxDir.includes("SMOKE-after-b1")) {
-            const transcriptPath = join(outDir, "runs", "SMOKE-after-b1", "transcript.jsonl");
-            const current = readFileSync(transcriptPath, "utf8");
-            sawRedactedTranscriptInSweep = !current.includes(refreshedSecret) && current.includes("<redacted>");
-            throw new Error(`sweep failed with ${refreshedSecret}`);
-          }
-          return 0;
-        },
-      });
-
-      await runBatch(
-        {
-          outDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "copy-credentials", from: credsPath },
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        fakeDeps,
-      );
-
-      assert.equal(
-        sawRedactedTranscriptInSweep,
-        true,
-        "transcript.jsonl must already be re-redacted before sweepStrays runs",
-      );
-
-      for (const rel of listAllFiles(outDir)) {
-        const text = readFileSync(join(outDir, rel), "utf8");
-        assert.equal(text.includes(startupSecret), false, `startup secret leaked in ${rel}`);
-        assert.equal(text.includes(refreshedSecret), false, `refreshed secret leaked in ${rel}`);
-      }
-
-      const afterRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-after-b1", "run.json"), "utf8"));
-      assert.equal(afterRun.invalid, "harness_crash");
-      assert.match(afterRun.error, /<redacted>/);
-      const beforeRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-before-b1", "run.json"), "utf8"));
-      assert.equal(beforeRun.invalid, "harness_crash");
-      assert.match(beforeRun.error, /<redacted>/);
-    } finally {
-      rmSync(baseTmp, { recursive: true, force: true });
-    }
-  });
-
-  test("copy-credentials mode rebuilds secrets after sweepStrays and applies them to streamed files, rocky-home/, and final/", async () => {
-    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-sweep-refresh-"));
-    const outDir = join(baseTmp, "out");
-    const outCrashDir = join(baseTmp, "out-crash");
-    const rootDir = join(baseTmp, "sbx");
-    const cacheDir = join(baseTmp, "cache");
-    const credsPath = join(baseTmp, ".credentials.json");
-    const startupSecret = "oauth-startup-sweep-credential-value-11111";
-    const sweepSecret = "oauth-refreshed-during-sweep-secret-99999";
-    const sweepCrashSecret = "oauth-refreshed-during-crash-sweep-77777";
+    const token = "sk-ant-oat01-saved-artifact-leak-token-99999";
     const binaryPayload = Buffer.from([0x00, 0xff, 0xfe, 0x80, 0x81, 0x42]);
 
-    writeFileSync(
-      credsPath,
-      `${JSON.stringify({ claudeAiOauth: { accessToken: startupSecret } })}\n`,
-      "utf8",
-    );
+    try {
+      const fakeDeps = makeFakeDeps({
+        materializeTask: async (task, sandbox, arm) => {
+          writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
+          if (arm === "none") {
+            mkdirSync(join(sandbox.taskDir, "nested"), { recursive: true });
+            writeFileSync(join(sandbox.taskDir, "nested", "leaked.txt"), `saved=${token}\n`, "utf8");
+            writeFileSync(join(sandbox.taskDir, "bin.dat"), binaryPayload);
+          } else if (arm === "before") {
+            writeFileSync(
+              join(sandbox.rockyHome, "memory.jsonl"),
+              `{"cmd":"echo ${token}"}\n`,
+              "utf8",
+            );
+          } else if (arm === "after") {
+            writeFileSync(join(sandbox.rockyHome, "memory.jsonl"), '{"kind":"failure"}\n', "utf8");
+            writeFileSync(join(sandbox.rockyHome, "advisories.jsonl"), '{"lane":"run"}\n', "utf8");
+          }
+          return { runs: [], cards: 0 };
+        },
+      });
+
+      await runBatch(
+        {
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "token" },
+          secrets: [token],
+          concurrency: 1,
+          k: 1,
+          seed: 7,
+          only: ["SMOKE"],
+        },
+        fakeDeps,
+      );
+
+      // arm=none: token in copied final/ file voids the run as token_leak; copy is plain (unmodified).
+      const noneDir = join(outDir, "runs", "SMOKE-none-b1");
+      const noneRun = JSON.parse(readFileSync(join(noneDir, "run.json"), "utf8"));
+      assert.equal(noneRun.invalid, "token_leak");
+      assert.equal(readFileSync(join(noneDir, "final", "nested", "leaked.txt"), "utf8"), `saved=${token}\n`);
+      assert.deepEqual(readFileSync(join(noneDir, "final", "bin.dat")), binaryPayload);
+
+      // arm=before: token in copied rocky-home/memory.jsonl voids the run as token_leak; copy is plain.
+      const beforeDir = join(outDir, "runs", "SMOKE-before-b1");
+      const beforeRun = JSON.parse(readFileSync(join(beforeDir, "run.json"), "utf8"));
+      assert.equal(beforeRun.invalid, "token_leak");
+      assert.equal(
+        readFileSync(join(beforeDir, "rocky-home", "memory.jsonl"), "utf8"),
+        `{"cmd":"echo ${token}"}\n`,
+      );
+
+      // arm=after: clean artifacts remain valid.
+      const afterDir = join(outDir, "runs", "SMOKE-after-b1");
+      const afterRun = JSON.parse(readFileSync(join(afterDir, "run.json"), "utf8"));
+      assert.equal(afterRun.invalid, null);
+
+      // Direct check: scanRunArtifactsForSecrets also catches a token spanning a 64 KiB boundary in transcript.jsonl.
+      const boundaryDir = join(baseTmp, "boundary-scan");
+      mkdirSync(boundaryDir, { recursive: true });
+      const padding = "x".repeat(64 * 1024 - 10);
+      writeFileSync(join(boundaryDir, "transcript.jsonl"), `${padding}${token}tail\n`, "utf8");
+      assert.equal(await scanRunArtifactsForSecrets(boundaryDir, "none", [token]), true);
+      assert.equal(await scanRunArtifactsForSecrets(boundaryDir, "none", ["not-present-token"]), false);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves token_leak precedence when grading throws after a detected leak", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-leak-precedence-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const token = "sk-ant-oat01-precedence-secret-token-77777";
+    const logs = [];
 
     try {
-      const sandboxByDir = new Map();
       const fakeDeps = makeFakeDeps({
-        createSandbox: async ({ runId, root, auth }) => {
-          const dir = join(root, runId);
-          const home = join(dir, "home");
-          const configDir = join(home, ".claude");
-          const rockyHome = join(dir, "rocky-home");
-          const taskDir = join(dir, "task");
-          mkdirSync(configDir, { recursive: true });
-          mkdirSync(rockyHome, { recursive: true });
-          mkdirSync(taskDir, { recursive: true });
-          if (auth?.kind === "copy-credentials") {
-            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
+        materializeTask: async (task, sandbox, arm) => {
+          writeFileSync(join(sandbox.taskDir, "solution.txt"), `arm=${arm}\n`, "utf8");
+          if (arm === "none") {
+            writeFileSync(join(sandbox.taskDir, "leaked.txt"), `token=${token}\n`, "utf8");
           }
-          const sbx = { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
-          sandboxByDir.set(dir, sbx);
-          return sbx;
+          return { runs: [], cards: 0 };
         },
         runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
-          if (runId === "SMOKE-after-b1") {
-            // Streamed path: output contains the value that will be written to .credentials.json during sweepStrays.
+          if (runId === "SMOKE-before-b1") {
             const script = [
-              `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(sweepSecret)} }) + "\\n");`,
-              `process.stderr.write("streamed-err " + ${JSON.stringify(sweepSecret)} + "\\n");`,
+              `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false }) + "\\n");`,
+              `process.stderr.write("streamed leak " + ${JSON.stringify(token)} + "\\n");`,
             ].join("\n");
             return spawnProcess({
               file: process.execPath,
@@ -2039,38 +1856,13 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
             timedOut: false,
           };
         },
-        sweepStrays: async (sandboxDir) => {
-          const sandbox = sandboxByDir.get(sandboxDir);
-          assert.ok(sandbox, `missing sandbox for ${sandboxDir}`);
-          // Simulate a surviving descendant updating .credentials.json during the sweep interval.
-          writeFileSync(
-            join(sandbox.configDir, ".credentials.json"),
-            `${JSON.stringify({ claudeAiOauth: { accessToken: sweepSecret } })}\n`,
-            "utf8",
-          );
-          if (sandboxDir.includes("SMOKE-none-b1")) {
-            // Only final/ contains the newly refreshed credential; also keep a non-leaking binary file.
-            mkdirSync(join(sandbox.taskDir, "nested"), { recursive: true });
-            writeFileSync(join(sandbox.taskDir, "nested", "leaked.txt"), `token=${sweepSecret}\n`, "utf8");
-            writeFileSync(join(sandbox.taskDir, "bin.dat"), binaryPayload);
-          } else if (sandboxDir.includes("SMOKE-before-b1")) {
-            // Only rocky-home/memory.jsonl contains the newly refreshed credential.
-            writeFileSync(
-              join(sandbox.rockyHome, "memory.jsonl"),
-              `{"cmd":"echo ${sweepSecret}"}\n`,
-              "utf8",
-            );
-          } else if (sandboxDir.includes("SMOKE-after-b1")) {
-            // Streamed transcript/stderr, rocky-home/advisories.jsonl, and final/ all get the new value.
-            writeFileSync(
-              join(sandbox.rockyHome, "advisories.jsonl"),
-              `{"note":"${sweepSecret}"}\n`,
-              "utf8",
-            );
-            writeFileSync(join(sandbox.taskDir, "leaked-after.txt"), `after=${sweepSecret}\n`, "utf8");
+        accept: async (_task, finalDir) => {
+          if (finalDir.includes("SMOKE-none-b1") || finalDir.includes("SMOKE-before-b1")) {
+            throw new Error(`grader boom with ${token}`);
           }
-          return 1;
+          return { solved: true, reason: "ok" };
         },
+        log: (line) => logs.push(line),
       });
 
       await runBatch(
@@ -2080,7 +1872,8 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
           cacheDir,
           beforeRef: "31128bc",
           afterRef: "origin/main",
-          auth: { kind: "copy-credentials", from: credsPath },
+          auth: { kind: "token" },
+          secrets: [token],
           concurrency: 1,
           k: 1,
           seed: 7,
@@ -2089,114 +1882,81 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         fakeDeps,
       );
 
-      // arm=none: final/ leak marks token_leak, redacts leaked file, and preserves unrelated binary bytes.
-      const noneDir = join(outDir, "runs", "SMOKE-none-b1");
-      const noneRun = JSON.parse(readFileSync(join(noneDir, "run.json"), "utf8"));
+      // Leak in copied final/ followed by accept() exception -> stays token_leak.
+      const noneRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-none-b1", "run.json"), "utf8"));
       assert.equal(noneRun.invalid, "token_leak");
-      assert.equal(readFileSync(join(noneDir, "final", "nested", "leaked.txt"), "utf8"), "token=<redacted>\n");
-      assert.deepEqual(readFileSync(join(noneDir, "final", "bin.dat")), binaryPayload);
+      assert.equal(noneRun.accept, null);
+      assert.match(noneRun.error, /grader boom with <redacted>/);
+      assert.equal(noneRun.error.includes(token), false);
 
-      // arm=before: rocky-home/memory.jsonl is redacted with the post-sweep secret and marked token_leak.
-      const beforeDir = join(outDir, "runs", "SMOKE-before-b1");
-      const beforeRun = JSON.parse(readFileSync(join(beforeDir, "run.json"), "utf8"));
+      // Leak in streamed stderr (redacted on disk) followed by accept() exception -> stays token_leak.
+      const beforeRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-before-b1", "run.json"), "utf8"));
       assert.equal(beforeRun.invalid, "token_leak");
-      assert.equal(readFileSync(join(beforeDir, "rocky-home", "memory.jsonl"), "utf8"), '{"cmd":"echo <redacted>"}\n');
-
-      // arm=after: streamed transcript/stderr, rocky-home/advisories.jsonl, and final/ are all redacted.
-      const afterDir = join(outDir, "runs", "SMOKE-after-b1");
-      const afterRun = JSON.parse(readFileSync(join(afterDir, "run.json"), "utf8"));
-      assert.equal(afterRun.invalid, "token_leak");
-      assert.match(readFileSync(join(afterDir, "transcript.jsonl"), "utf8"), /<redacted>/);
-      assert.match(readFileSync(join(afterDir, "stderr.txt"), "utf8"), /<redacted>/);
-      assert.equal(readFileSync(join(afterDir, "rocky-home", "advisories.jsonl"), "utf8"), '{"note":"<redacted>"}\n');
-      assert.equal(readFileSync(join(afterDir, "final", "leaked-after.txt"), "utf8"), "after=<redacted>\n");
-
-      // No copied artifact anywhere under outDir contains startupSecret or sweepSecret.
-      for (const rel of listAllFiles(outDir)) {
-        const bytes = readFileSync(join(outDir, rel));
-        assert.equal(bytes.includes(Buffer.from(startupSecret, "utf8")), false, `startup secret leaked in ${rel}`);
-        assert.equal(bytes.includes(Buffer.from(sweepSecret, "utf8")), false, `sweep secret leaked in ${rel}`);
-      }
-
-      // Also verify that if sweepStrays updates .credentials.json and then throws, streamed files & error are redacted.
-      const crashSandboxByDir = new Map();
-      const crashDeps = makeFakeDeps({
-        createSandbox: async ({ runId, root, auth }) => {
-          const dir = join(root, runId);
-          const home = join(dir, "home");
-          const configDir = join(home, ".claude");
-          const rockyHome = join(dir, "rocky-home");
-          const taskDir = join(dir, "task");
-          mkdirSync(configDir, { recursive: true });
-          mkdirSync(rockyHome, { recursive: true });
-          mkdirSync(taskDir, { recursive: true });
-          if (auth?.kind === "copy-credentials") {
-            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
-          }
-          const sbx = { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
-          crashSandboxByDir.set(dir, sbx);
-          return sbx;
-        },
-        runClaude: async ({ sandbox, stdoutPath, stderrPath, secrets }) => {
-          const script = [
-            `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(sweepCrashSecret)} }) + "\\n");`,
-            `process.stderr.write("err " + ${JSON.stringify(sweepCrashSecret)} + "\\n");`,
-          ].join("\n");
-          return spawnProcess({
-            file: process.execPath,
-            args: ["-e", script],
-            cwd: sandbox.taskDir,
-            env: process.env,
-            timeoutMs: 10_000,
-            stdoutPath,
-            stderrPath,
-            secrets,
-          });
-        },
-        sweepStrays: async (sandboxDir) => {
-          const sandbox = crashSandboxByDir.get(sandboxDir);
-          writeFileSync(
-            join(sandbox.configDir, ".credentials.json"),
-            `${JSON.stringify({ claudeAiOauth: { accessToken: sweepCrashSecret } })}\n`,
-            "utf8",
-          );
-          throw new Error(`sweep crashed with ${sweepCrashSecret}`);
-        },
-      });
-
-      await runBatch(
-        {
-          outDir: outCrashDir,
-          rootDir,
-          cacheDir,
-          beforeRef: "31128bc",
-          afterRef: "origin/main",
-          auth: { kind: "copy-credentials", from: credsPath },
-          concurrency: 1,
-          k: 1,
-          seed: 7,
-          only: ["SMOKE"],
-        },
-        crashDeps,
+      assert.equal(beforeRun.accept, null);
+      assert.match(beforeRun.error, /grader boom with <redacted>/);
+      assert.equal(
+        readFileSync(join(outDir, "runs", "SMOKE-before-b1", "stderr.txt"), "utf8"),
+        "streamed leak <redacted>\n",
       );
 
-      for (const arm of ["none", "before", "after"]) {
-        const runJson = JSON.parse(readFileSync(join(outCrashDir, "runs", `SMOKE-${arm}-b1`, "run.json"), "utf8"));
-        assert.equal(runJson.invalid, "harness_crash");
-        assert.match(runJson.error, /<redacted>/);
-      }
-      for (const rel of listAllFiles(outCrashDir)) {
-        const bytes = readFileSync(join(outCrashDir, rel));
-        assert.equal(
-          bytes.includes(Buffer.from(sweepCrashSecret, "utf8")),
-          false,
-          `sweep crash secret leaked in ${rel}`,
-        );
-      }
+      // Clean arm still completes normally.
+      const afterRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-after-b1", "run.json"), "utf8"));
+      assert.equal(afterRun.invalid, null);
+      assert.deepEqual(afterRun.accept, { solved: true, reason: "ok" });
+
+      assert.ok(
+        logs.some((line) => line.includes("SMOKE-none-b1") && line.includes("invalid=token_leak")),
+        `expected log line to report invalid=token_leak, got: ${JSON.stringify(logs)}`,
+      );
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }
   });
+
+  test(
+    "preserves 0600 mode on files copied into final/",
+    { skip: process.platform === "win32" },
+    async () => {
+      const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-mode-0600-"));
+      const outDir = join(baseTmp, "out");
+      const rootDir = join(baseTmp, "sbx");
+      const cacheDir = join(baseTmp, "cache");
+      const token = "sk-ant-oat01-mode-check-token-12345";
+
+      try {
+        const fakeDeps = makeFakeDeps({
+          materializeTask: async (task, sandbox) => {
+            const restrictedPath = join(sandbox.taskDir, "restricted.txt");
+            writeFileSync(restrictedPath, "private data\n", { encoding: "utf8", mode: 0o600 });
+            chmodSync(restrictedPath, 0o600);
+            return { runs: [], cards: 0 };
+          },
+        });
+
+        await runBatch(
+          {
+            outDir,
+            rootDir,
+            cacheDir,
+            beforeRef: "31128bc",
+            afterRef: "origin/main",
+            auth: { kind: "token" },
+            secrets: [token],
+            concurrency: 1,
+            k: 1,
+            seed: 7,
+            only: ["SMOKE"],
+          },
+          fakeDeps,
+        );
+
+        const copiedPath = join(outDir, "runs", "SMOKE-none-b1", "final", "restricted.txt");
+        assert.equal(lstatSync(copiedPath).mode & 0o777, 0o600);
+      } finally {
+        rmSync(baseTmp, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("resume treats EACCES metadata lookups and partial run.json records as malformed and continues batch", async () => {
     // Validate isValidRunJson directly first.

@@ -1,9 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
-  chmodSync,
   copyFileSync,
-  createReadStream,
   createWriteStream,
   existsSync,
   lstatSync,
@@ -55,24 +53,22 @@ export const VALID_INVALIDS = new Set([
 ]);
 export const RETRYABLE_INVALIDS = new Set(["api_error", "harness_crash"]);
 export const MAX_TRANSCRIPT_LINE_BYTES = 1024 * 1024;
-export const MIN_CREDENTIAL_SECRET_LEN = 20;
+export const COPY_CREDENTIALS_DISABLED_MESSAGE =
+  "copy-credentials is disabled for batches: token auth was captured working (see README harness facts)";
 
 const ROCKY_HOME_ALLOWED_FILES = ["memory.jsonl", "advisories.jsonl"];
 const KILL_GRACE_MS = 3_000;
-const preloadedSecretArrays = new WeakSet();
 
 const USAGE = [
   "Usage: node scripts/eval/runner.mjs --out <dir> --before <sha> --after <sha>",
-  "         --auth <token|copy-credentials> [--from <credentials-path>]",
-  "         [--concurrency <n>] [--root <dir>] [--cache <dir>]",
+  "         --auth token [--concurrency <n>] [--root <dir>] [--cache <dir>]",
   "         [--k <n>] [--seed <n>] [--only <id1,id2,...>] [--retry-invalid]",
   "",
   "Options:",
   "  --out <dir>            Output directory (must lie outside repo and enclosing workspace)",
   "  --before <sha>         Git commit/ref for the 'before' Rocky arm",
   "  --after <sha>          Git commit/ref for the 'after' Rocky arm",
-  "  --auth <mode>          Authentication mode: 'token' (reads ROCKY_EVAL_OAUTH_TOKEN) or 'copy-credentials'",
-  "  --from <path>          Credentials file path (required when --auth copy-credentials)",
+  "  --auth token           Authentication mode: 'token' only (reads ROCKY_EVAL_OAUTH_TOKEN; copy-credentials is disabled for batches)",
   `  --concurrency <n>      Concurrent runs (default: ${DEFAULT_CONCURRENCY})`,
   "  --root <dir>           Sandbox root directory (default: <os.tmpdir>/rocky-eval)",
   "  --cache <dir>          Tarball pack cache directory (default: <out>/../pack-cache; must be outside workspace)",
@@ -194,56 +190,6 @@ function normalizeSecrets(secrets) {
     }
   }
   return Array.from(unique).sort((a, b) => b.length - a.length);
-}
-
-/**
- * Collect every string value of length >= `minLen` found recursively in parsed JSON.
- * @param {unknown} value
- * @param {number} [minLen]
- * @returns {string[]}
- */
-export function extractCredentialSecrets(value, minLen = MIN_CREDENTIAL_SECRET_LEN) {
-  /** @type {Set<string>} */
-  const found = new Set();
-  function walk(node) {
-    if (typeof node === "string") {
-      if (node.length >= minLen) found.add(node);
-      return;
-    }
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item);
-      return;
-    }
-    if (node && typeof node === "object") {
-      for (const entry of Object.values(node)) walk(entry);
-    }
-  }
-  walk(value);
-  return Array.from(found).sort((a, b) => b.length - a.length);
-}
-
-/**
- * Read a `.credentials.json` file once (never following symlinks) and extract all string values >= 20 chars.
- * @param {string} filePath
- * @returns {string[]}
- */
-export function extractCredentialSecretsFromFile(filePath) {
-  let stat;
-  try {
-    stat = lstatSync(filePath);
-  } catch {
-    throw new Error(`Credentials file does not exist or is unreadable: ${filePath}`);
-  }
-  if (!stat.isFile()) {
-    throw new Error(`Credentials file must be a regular file: ${filePath}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(filePath, "utf8"));
-  } catch {
-    throw new Error(`Credentials file is not valid JSON: ${filePath}`);
-  }
-  return extractCredentialSecrets(parsed, MIN_CREDENTIAL_SECRET_LEN);
 }
 
 function containsAnySecret(text, secrets) {
@@ -1066,8 +1012,6 @@ function renameDirWithRetry(oldPath, newPath) {
   if (lastError) throw lastError;
 }
 
-const REDACTED_BYTES = Buffer.from("<redacted>", "utf8");
-
 function containsAnySecretBuffer(buf, secretBuffers) {
   if (buf.length === 0 || secretBuffers.length === 0) return false;
   for (const secretBuf of secretBuffers) {
@@ -1078,122 +1022,97 @@ function containsAnySecretBuffer(buf, secretBuffers) {
   return false;
 }
 
-function redactBuffer(buf, secretBuffers) {
-  let current = buf;
-  let leaked = false;
-  for (const secretBuf of secretBuffers) {
-    if (secretBuf.length === 0) continue;
-    let idx = current.indexOf(secretBuf);
-    if (idx === -1) continue;
-    leaked = true;
-    /** @type {Buffer[]} */
-    const parts = [];
-    let cursor = 0;
-    while (idx !== -1) {
-      if (idx > cursor) parts.push(current.subarray(cursor, idx));
-      parts.push(REDACTED_BYTES);
-      cursor = idx + secretBuf.length;
-      idx = current.indexOf(secretBuf, cursor);
-    }
-    if (cursor < current.length) parts.push(current.subarray(cursor));
-    current = Buffer.concat(parts);
-  }
-  return { buffer: current, leaked };
-}
-
-async function writeAllBytes(fh, buf) {
-  let offset = 0;
-  while (offset < buf.length) {
-    const { bytesWritten } = await fh.write(buf, offset, buf.length - offset);
-    if (bytesWritten <= 0) {
-      throw new Error("Short write while copying artifact file");
-    }
-    offset += bytesWritten;
-  }
-}
-
-async function copyFileRedactingSecrets(srcPath, destPath, secretBuffers, mode) {
-  if (secretBuffers.length === 0) {
-    copyFileSync(srcPath, destPath);
-    return false;
-  }
+async function fileContainsAnySecret(filePath, secretBuffers) {
+  if (secretBuffers.length === 0) return false;
   const maxSecretLen = secretBuffers.reduce((max, buf) => Math.max(max, buf.length), 0);
   const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
   const chunkSize = Math.max(64 * 1024, maxSecretLen * 2);
   const readBuf = Buffer.allocUnsafe(chunkSize);
-  let pending = Buffer.alloc(0);
-  let leaked = false;
-  let failed = false;
+  let tail = Buffer.alloc(0);
 
-  const srcFh = await openFile(srcPath, "r");
-  let destFh = null;
+  const fh = await openFile(filePath, "r");
   try {
-    destFh = await openFile(destPath, "w");
     while (true) {
-      const { bytesRead } = await srcFh.read(readBuf, 0, chunkSize, null);
+      const { bytesRead } = await fh.read(readBuf, 0, chunkSize, null);
       if (bytesRead === 0) break;
       const chunk = readBuf.subarray(0, bytesRead);
-      const combined = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
-      let processed = combined;
+      const combined = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
       if (containsAnySecretBuffer(combined, secretBuffers)) {
-        const res = redactBuffer(combined, secretBuffers);
-        processed = res.buffer;
-        if (res.leaked) leaked = true;
+        return true;
       }
-      const splitAt = holdback === 0 ? processed.length : processed.length - holdback;
-      if (splitAt > 0) {
-        await writeAllBytes(destFh, processed.subarray(0, splitAt));
-        pending = Buffer.from(processed.subarray(splitAt));
-      } else {
-        pending = Buffer.from(processed);
+      if (holdback > 0) {
+        const keep = Math.min(holdback, combined.length);
+        tail = Buffer.from(combined.subarray(combined.length - keep));
       }
     }
-    if (pending.length > 0) {
-      let finalBuf = pending;
-      if (containsAnySecretBuffer(pending, secretBuffers)) {
-        const res = redactBuffer(pending, secretBuffers);
-        finalBuf = res.buffer;
-        if (res.leaked) leaked = true;
-      }
-      await writeAllBytes(destFh, finalBuf);
-    }
-  } catch (error) {
-    failed = true;
-    throw error;
+    return false;
   } finally {
-    await srcFh.close().catch(() => {});
-    if (destFh) {
-      await destFh.close().catch(() => {});
+    await fh.close().catch(() => {});
+  }
+}
+
+/**
+ * Scan saved run artifacts (`transcript.jsonl`, `stderr.txt`, `final/**`, and `rocky-home/*`)
+ * for any secret value using bounded chunked byte scans without following symlinks.
+ * @param {string} workRunDir
+ * @param {string} arm
+ * @param {readonly string[]} secrets
+ * @returns {Promise<boolean>}
+ */
+export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets) {
+  const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
+  if (secretBuffers.length === 0) return false;
+
+  for (const name of ["transcript.jsonl", "stderr.txt"]) {
+    const filePath = join(workRunDir, name);
+    const stat = lstatOrNull(filePath);
+    if (stat?.isFile() && await fileContainsAnySecret(filePath, secretBuffers)) {
+      return true;
     }
-    if (failed && lstatOrNull(destPath) !== null) {
-      try {
-        removeTreeWithRetry(destPath);
-      } catch {
-        // Best-effort cleanup of partially written destination file.
+  }
+
+  async function scanTree(dirPath, recursive) {
+    const rootStat = lstatOrNull(dirPath);
+    if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) return false;
+    const entries = readdirSync(dirPath).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const name of entries) {
+      const fullPath = join(dirPath, name);
+      const stat = lstatSync(fullPath);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        if (recursive && await scanTree(fullPath, true)) {
+          return true;
+        }
+      } else if (stat.isFile()) {
+        if (await fileContainsAnySecret(fullPath, secretBuffers)) {
+          return true;
+        }
       }
     }
+    return false;
   }
-  if (process.platform !== "win32" && typeof mode === "number" && (mode & 0o111) !== 0) {
-    chmodSync(destPath, mode & 0o777);
+
+  if (await scanTree(join(workRunDir, "final"), true)) {
+    return true;
   }
-  return leaked;
+  if (arm !== "none" && await scanTree(join(workRunDir, "rocky-home"), false)) {
+    return true;
+  }
+  return false;
 }
 
 /**
  * Copy `srcDir` into `destDir` excluding `.git`, using `lstat` only.
  * Checks `srcDir` itself before descending; never follows symlinks or junctions.
- * Streams regular files through raw-byte secret redaction without altering non-matching binary files.
- * Returns `{ skippedLinks, leaked }`.
+ * Copies regular files plainly with `copyFileSync` (preserving source mode).
  * @param {string} srcDir
  * @param {string} destDir
- * @param {readonly string[]} [secrets]
- * @returns {Promise<{ skippedLinks: string[], leaked: boolean }>}
+ * @returns {string[]}
  */
-async function copyFinalWithoutGit(srcDir, destDir, secrets = []) {
+function copyFinalWithoutGit(srcDir, destDir) {
   mkdirSync(destDir, { recursive: true });
   /** @type {string[]} */
   const skippedLinks = [];
-  let leaked = false;
   let rootStat;
   try {
     rootStat = lstatSync(srcDir);
@@ -1201,16 +1120,15 @@ async function copyFinalWithoutGit(srcDir, destDir, secrets = []) {
     const code = error && typeof error === "object" ? error.code : undefined;
     if (code === "ENOENT" || code === "ENOTDIR") {
       skippedLinks.push("final");
-      return { skippedLinks, leaked };
+      return skippedLinks;
     }
     throw error;
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     skippedLinks.push("final");
-    return { skippedLinks, leaked };
+    return skippedLinks;
   }
-  const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
-  async function walk(currentSrc, currentDest, relPrefix) {
+  function walk(currentSrc, currentDest, relPrefix) {
     const entries = readdirSync(currentSrc).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (const name of entries) {
       if (name === ".git") continue;
@@ -1224,35 +1142,30 @@ async function copyFinalWithoutGit(srcDir, destDir, secrets = []) {
       }
       if (lstat.isDirectory()) {
         mkdirSync(destPath, { recursive: true });
-        await walk(srcPath, destPath, rel);
+        walk(srcPath, destPath, rel);
       } else if (lstat.isFile()) {
-        const fileLeaked = await copyFileRedactingSecrets(srcPath, destPath, secretBuffers, lstat.mode);
-        if (fileLeaked) {
-          leaked = true;
-        }
+        copyFileSync(srcPath, destPath);
       }
     }
   }
-  await walk(srcDir, destDir, "");
-  return { skippedLinks, leaked };
+  walk(srcDir, destDir, "");
+  return skippedLinks;
 }
 
 /**
  * Copy allowlisted files from `srcRockyHome` into `destRockyHome` using `lstat` only.
  * Checks `srcRockyHome` itself before reading children; never follows symlinks or junctions.
- * Streams copied files through secret redaction and returns `{ skippedLinks, leaked }`.
+ * Copies regular files plainly with `copyFileSync` (preserving source mode).
  * @param {string} srcRockyHome
  * @param {string} destRockyHome
  * @param {string} arm
- * @param {readonly string[]} secrets
- * @returns {Promise<{ skippedLinks: string[], leaked: boolean }>}
+ * @returns {string[]}
  */
-async function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
-  if (arm === "none") return { skippedLinks: [], leaked: false };
+function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm) {
+  if (arm === "none") return [];
   mkdirSync(destRockyHome, { recursive: true });
   /** @type {string[]} */
   const skippedLinks = [];
-  let leaked = false;
   let rootStat;
   try {
     rootStat = lstatSync(srcRockyHome);
@@ -1260,15 +1173,14 @@ async function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
     const code = error && typeof error === "object" ? error.code : undefined;
     if (code === "ENOENT" || code === "ENOTDIR") {
       skippedLinks.push("rocky-home");
-      return { skippedLinks, leaked };
+      return skippedLinks;
     }
     throw error;
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     skippedLinks.push("rocky-home");
-    return { skippedLinks, leaked };
+    return skippedLinks;
   }
-  const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
   for (const name of ROCKY_HOME_ALLOWED_FILES) {
     const srcPath = join(srcRockyHome, name);
     let lstat;
@@ -1284,68 +1196,9 @@ async function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
       continue;
     }
     if (!lstat.isFile()) continue;
-    const fileLeaked = await copyFileRedactingSecrets(
-      srcPath,
-      join(destRockyHome, name),
-      secretBuffers,
-      lstat.mode,
-    );
-    if (fileLeaked) {
-      leaked = true;
-    }
+    copyFileSync(srcPath, join(destRockyHome, name));
   }
-  return { skippedLinks, leaked };
-}
-
-function readSandboxCredentialSecrets(sandbox) {
-  if (!sandbox || typeof sandbox.configDir !== "string" || sandbox.configDir.length === 0) {
-    return [];
-  }
-  try {
-    const dirStat = lstatSync(sandbox.configDir);
-    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return [];
-    return extractCredentialSecretsFromFile(join(sandbox.configDir, ".credentials.json"));
-  } catch {
-    return [];
-  }
-}
-
-export async function redactFileInPlace(filePath, extraSecrets, options = {}) {
-  const renameFn = options.renameFn ?? renameDirWithRetry;
-  if (extraSecrets.length === 0 || lstatOrNull(filePath)?.isFile() !== true) {
-    return { leaked: false };
-  }
-  const tempPath = `${filePath}.redact-${process.pid}-${randomBytes(4).toString("hex")}`;
-  const writer = createRedactingFileWriter(tempPath, extraSecrets);
-  const reader = createReadStream(filePath);
-  pipeReadableToRedactingWriter(reader, writer);
-  try {
-    await new Promise((resolveRead, rejectRead) => {
-      reader.once("error", rejectRead);
-      reader.once("close", resolveRead);
-    });
-    const res = await writer.end();
-    renameFn(tempPath, filePath);
-    return res;
-  } catch (error) {
-    reader.destroy();
-    await writer.end().catch(() => {});
-    if (existsSync(tempPath)) {
-      try {
-        removeTreeWithRetry(tempPath);
-      } catch {
-        // Best-effort temp cleanup.
-      }
-    }
-    if (lstatOrNull(filePath) !== null) {
-      try {
-        removeTreeWithRetry(filePath);
-      } catch {
-        // Best-effort removal so an unredacted original is not left on disk.
-      }
-    }
-    throw error;
-  }
+  return skippedLinks;
 }
 
 function lstatOrNull(targetPath, lstatFn = lstatSync) {
@@ -1571,7 +1424,7 @@ async function runWithConcurrency(items, concurrency, worker) {
  *   cacheDir: string,
  *   beforeRef: string,
  *   afterRef: string,
- *   auth: { kind: "token" } | { kind: "copy-credentials", from: string },
+ *   auth: { kind: "token" },
  *   secrets?: readonly string[],
  *   concurrency?: number,
  *   k?: number,
@@ -1623,14 +1476,18 @@ export async function runBatch(options, overrides = {}) {
     log: overrides.log ?? ((line) => process.stderr.write(`${line}\n`)),
   };
 
-  let rawSecrets = Array.isArray(options.secrets) ? [...options.secrets] : [];
-  if (
-    options.auth?.kind === "copy-credentials"
-    && !preloadedSecretArrays.has(options.secrets)
-  ) {
-    rawSecrets = [...rawSecrets, ...extractCredentialSecretsFromFile(options.auth.from)];
+  if (options.auth?.kind === "copy-credentials") {
+    const err = new Error(COPY_CREDENTIALS_DISABLED_MESSAGE);
+    err.exitCode = 2;
+    throw err;
   }
-  const secrets = normalizeSecrets(rawSecrets);
+  if (options.auth?.kind !== "token") {
+    const err = new Error("--auth must be 'token'");
+    err.exitCode = 2;
+    throw err;
+  }
+
+  const secrets = normalizeSecrets(Array.isArray(options.secrets) ? options.secrets : []);
   const redact = (value) => redactText(value, secrets);
 
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
@@ -1775,35 +1632,7 @@ export async function runBatch(options, overrides = {}) {
     const sandboxRunId = `${item.runId}-${randomBytes(3).toString("hex")}`;
 
     let sandbox = null;
-    let runSecrets = secrets;
-    const runRedact = (value) => redactText(value, runSecrets);
-    const refreshRunSecrets = () => {
-      if (options.auth?.kind !== "copy-credentials" || !sandbox) return [];
-      const prior = new Set(runSecrets);
-      const added = readSandboxCredentialSecrets(sandbox).filter((s) => !prior.has(s));
-      if (added.length > 0) {
-        runSecrets = normalizeSecrets([...runSecrets, ...added]);
-      }
-      return added;
-    };
-    const redactStreamedFiles = async (addedSecrets) => {
-      if (addedSecrets.length === 0) return false;
-      const results = await Promise.allSettled([
-        redactFileInPlace(stdoutPath, addedSecrets),
-        redactFileInPlace(stderrPath, addedSecrets),
-      ]);
-      let leaked = false;
-      let firstError = null;
-      for (const result of results) {
-        if (result.status === "rejected") {
-          if (!firstError) firstError = result.reason;
-        } else if (result.value.leaked) {
-          leaked = true;
-        }
-      }
-      if (firstError) throw firstError;
-      return leaked;
-    };
+    let tokenLeaked = false;
 
     let retryCountCommitted = !isRetry;
     /** @type {number | null} */
@@ -1828,15 +1657,15 @@ export async function runBatch(options, overrides = {}) {
     try {
       if (isRetry) {
         // Persist incremented retry count BEFORE launching the retry so crashes cannot reset the cap.
-        writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, runSecrets);
+        writeJsonAtomic(join(runDir, "retries.json"), { count: retries }, secrets);
         retryCountCommitted = true;
         removeTreeWithRetry(workRunDir);
         mkdirSync(workRunDir, { recursive: true });
-        writeJsonAtomic(retriesJsonPath, { count: retries }, runSecrets);
+        writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
       } else {
         removeTreeWithRetry(runDir);
         mkdirSync(runDir, { recursive: true });
-        writeJsonAtomic(retriesJsonPath, { count: retries }, runSecrets);
+        writeJsonAtomic(retriesJsonPath, { count: retries }, secrets);
       }
 
       sandbox = await deps.createSandbox({
@@ -1846,7 +1675,6 @@ export async function runBatch(options, overrides = {}) {
         tgz: tarballs[item.arm],
         auth: options.auth,
       });
-      refreshRunSecrets();
 
       await deps.materializeTask(task, sandbox, item.arm);
 
@@ -1857,48 +1685,26 @@ export async function runBatch(options, overrides = {}) {
         timeoutMs,
         stdoutPath,
         stderrPath,
-        secrets: runSecrets,
+        secrets,
       });
       exitCode = claudeRes.exitCode ?? null;
       timedOut = Boolean(claudeRes.timedOut);
       killFailed = Boolean(claudeRes.killFailed);
       taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
-
-      // Scrub any credentials refreshed during agent execution from already-streamed
-      // files immediately before the stray sweep runs.
-      const postRunAddedSecrets = refreshRunSecrets();
-
-      let tokenLeaked = false;
-      if (claudeRes.streamed === true) {
-        tokenLeaked = Boolean(claudeRes.tokenLeaked);
-        if (postRunAddedSecrets.length > 0) {
-          const reRedactedLeak = await redactStreamedFiles(postRunAddedSecrets);
-          if (reRedactedLeak) {
-            tokenLeaked = true;
-          }
-        }
+      if (claudeRes.streamed === true && claudeRes.tokenLeaked) {
+        tokenLeaked = true;
       }
 
       // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
       swept = true;
       strayKilled = await deps.sweepStrays(sandbox.dir);
 
-      // Rebuild per-run secrets as the LAST step after sweep/post-exit work and before
-      // writing or copying any artifact (copy-credentials mode only).
-      const postSweepAddedSecrets = refreshRunSecrets();
-
       let transcriptSummary;
       if (claudeRes.streamed === true) {
-        if (postSweepAddedSecrets.length > 0) {
-          const reRedactedAfterSweep = await redactStreamedFiles(postSweepAddedSecrets);
-          if (reRedactedAfterSweep) {
-            tokenLeaked = true;
-          }
-        }
         transcriptSummary = claudeRes.transcript;
       } else {
-        const outWriter = createRedactingFileWriter(stdoutPath, runSecrets);
-        const errWriter = createRedactingFileWriter(stderrPath, runSecrets);
+        const outWriter = createRedactingFileWriter(stdoutPath, secrets);
+        const errWriter = createRedactingFileWriter(stderrPath, secrets);
         const parser = createTranscriptParser();
         const rawStdout = String(claudeRes.stdout ?? "");
         const rawStderr = String(claudeRes.stderr ?? "");
@@ -1913,20 +1719,10 @@ export async function runBatch(options, overrides = {}) {
       }
 
       const finalDir = join(workRunDir, "final");
-      const finalCopy = await copyFinalWithoutGit(sandbox.taskDir, finalDir, runSecrets);
-      skippedLinks.push(...finalCopy.skippedLinks);
-      if (finalCopy.leaked) {
-        tokenLeaked = true;
-      }
+      skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir));
+      skippedLinks.push(...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm));
 
-      const rockyCopy = await copyRockyHomeFiles(
-        sandbox.rockyHome,
-        join(workRunDir, "rocky-home"),
-        item.arm,
-        runSecrets,
-      );
-      skippedLinks.push(...rockyCopy.skippedLinks);
-      if (rockyCopy.leaked) {
+      if (await scanRunArtifactsForSecrets(workRunDir, item.arm, secrets)) {
         tokenLeaked = true;
       }
 
@@ -1938,7 +1734,6 @@ export async function runBatch(options, overrides = {}) {
 
       acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
     } catch (error) {
-      const preSweepCatchAdded = refreshRunSecrets();
       if (sandbox && !swept) {
         swept = true;
         try {
@@ -1947,17 +1742,12 @@ export async function runBatch(options, overrides = {}) {
           // Best-effort stray sweep during crash cleanup.
         }
       }
-      const postSweepCatchAdded = refreshRunSecrets();
-      const catchAddedSecrets = normalizeSecrets([...preSweepCatchAdded, ...postSweepCatchAdded]);
-      if (options.auth?.kind === "copy-credentials" && catchAddedSecrets.length > 0) {
-        try {
-          await redactStreamedFiles(catchAddedSecrets);
-        } catch {
-          // redactFileInPlace already removed any unredacted original on failure.
-        }
+      runError = redact(error instanceof Error ? error.message : String(error));
+      if (tokenLeaked || invalid === "token_leak") {
+        invalid = "token_leak";
+      } else {
+        invalid = "harness_crash";
       }
-      runError = runRedact(error instanceof Error ? error.message : String(error));
-      invalid = "harness_crash";
     }
 
     // Always clean up the sandbox BEFORE publishing run.json.
@@ -1965,7 +1755,7 @@ export async function runBatch(options, overrides = {}) {
       try {
         await deps.destroySandbox(sandbox);
       } catch (error) {
-        cleanupError = runRedact(error instanceof Error ? error.message : String(error));
+        cleanupError = redact(error instanceof Error ? error.message : String(error));
         deps.log(`[eval] warning: destroySandbox failed for ${item.runId}: ${cleanupError}`);
       }
     }
@@ -1975,7 +1765,9 @@ export async function runBatch(options, overrides = {}) {
     try {
       const artifactsExist = hasRunArtifacts(workRunDir, item.arm, deps.lstatSync);
       if (runError === null && !artifactsExist) {
-        invalid = "harness_crash";
+        if (invalid !== "token_leak") {
+          invalid = "harness_crash";
+        }
         runError = "run artifacts are incomplete";
       }
 
@@ -2013,27 +1805,27 @@ export async function runBatch(options, overrides = {}) {
         throw new Error(`retry count could not be persisted in ${runDir}`);
       }
       mkdirSync(workRunDir, { recursive: true });
-      writeJsonAtomic(runJsonPath, record, runSecrets);
+      writeJsonAtomic(runJsonPath, record, secrets);
       if (isRetry) {
         swapStagedRunDir(runDir, workRunDir, deps.lstatSync);
       }
       completed += 1;
       if (runError !== null) {
         deps.log(
-          runRedact(
-            `[eval ${completed}/${pending.length}] ${item.runId}: invalid=harness_crash (${runError})`,
+          redact(
+            `[eval ${completed}/${pending.length}] ${item.runId}: invalid=${String(invalid)} (${runError})`,
           ),
         );
       } else {
         deps.log(
-          runRedact(
+          redact(
             `[eval ${completed}/${pending.length}] ${item.runId}: solved=${acceptResult?.solved} invalid=${String(invalid)} (${record.wallMs}ms)`,
           ),
         );
       }
     } catch (publishError) {
       publishFailed += 1;
-      const msg = runRedact(publishError instanceof Error ? publishError.message : String(publishError));
+      const msg = redact(publishError instanceof Error ? publishError.message : String(publishError));
       deps.log(`[eval] error: failed to publish run.json for ${item.runId}: ${msg}`);
     }
   });
@@ -2150,6 +1942,11 @@ async function main() {
     return;
   }
 
+  if (opts.auth === "copy-credentials") {
+    process.stderr.write(`Error: ${COPY_CREDENTIALS_DISABLED_MESSAGE}\n`);
+    process.exit(2);
+  }
+
   if (!opts.out) {
     usageError("--out <dir> is required");
   }
@@ -2173,40 +1970,23 @@ async function main() {
   if (!opts.after) {
     usageError("--after <sha> is required");
   }
-  if (opts.auth !== "token" && opts.auth !== "copy-credentials") {
-    usageError("--auth must be 'token' or 'copy-credentials'");
+  if (opts.auth !== "token") {
+    usageError("--auth must be 'token'");
   }
-  if (opts.auth === "copy-credentials" && !opts.from) {
-    usageError("--from <credentials-path> is required when --auth copy-credentials is used");
-  }
-  if (opts.auth === "token" && opts.from) {
-    usageError("--from is only valid when --auth copy-credentials is used");
+  if (opts.from) {
+    usageError("--from is not supported: batches use --auth token only");
   }
 
-  /** @type {string[]} */
-  const secrets = [];
-  /** @type {{ kind: "token" } | { kind: "copy-credentials", from: string }} */
-  let auth;
-  if (opts.auth === "token") {
-    const token = process.env.ROCKY_EVAL_OAUTH_TOKEN;
-    if (typeof token !== "string" || token.length === 0) {
-      process.stderr.write(
-        "Error: ROCKY_EVAL_OAUTH_TOKEN is missing or empty in environment (required for --auth token).\n",
-      );
-      process.exit(2);
-    }
-    secrets.push(token);
-    auth = { kind: "token" };
-  } else {
-    const fromPath = resolve(opts.from);
-    try {
-      secrets.push(...extractCredentialSecretsFromFile(fromPath));
-    } catch (error) {
-      usageError(error instanceof Error ? error.message : String(error));
-    }
-    preloadedSecretArrays.add(secrets);
-    auth = { kind: "copy-credentials", from: fromPath };
+  const token = process.env.ROCKY_EVAL_OAUTH_TOKEN;
+  if (typeof token !== "string" || token.length === 0) {
+    process.stderr.write(
+      "Error: ROCKY_EVAL_OAUTH_TOKEN is missing or empty in environment (required for --auth token).\n",
+    );
+    process.exit(2);
   }
+  const secrets = [token];
+  /** @type {{ kind: "token" }} */
+  const auth = { kind: "token" };
 
   const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
   try {
