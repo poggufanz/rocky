@@ -508,7 +508,7 @@ export async function accept(task, finalDir, options = {}) {
     removeDirWithRetry(acceptTempDir);
   }
 
-  if (res.stdoutOverflow) {
+  if (res.stdoutOverflow || res.stderrOverflow) {
     return { solved: false, reason: "output-overflow" };
   }
   if (res.timedOut) {

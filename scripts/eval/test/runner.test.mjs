@@ -587,6 +587,53 @@ describe("bounded streaming capture and async accept", () => {
     }
   });
 
+  test("accept returns output-overflow on stderr-only overflow including when target also times out", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "rocky-accept-stderr-overflow-"));
+    try {
+      const limit = 2048;
+      // Case 1: stderr-only overflow plus timeout -> output-overflow takes precedence over timeout.
+      writeFileSync(
+        join(workDir, "stderr-overflow-timeout.mjs"),
+        `process.stderr.write("e".repeat(${limit + 64}) + "\\n", () => { setTimeout(() => {}, 30000); });\n`,
+        "utf8",
+      );
+      const taskStderrTimeout = {
+        id: "OVFSE_T",
+        fixture: "ovfse",
+        protected: [],
+        target: { command: "node stderr-overflow-timeout.mjs" },
+        acceptLine: "OK!",
+      };
+      const resStderrTimeout = await accept(taskStderrTimeout, workDir, {
+        manifest: { files: {} },
+        timeoutMs: 400,
+        maxBufferBytes: limit,
+      });
+      assert.deepEqual(resStderrTimeout, { solved: false, reason: "output-overflow" });
+
+      // Case 2: stderr-only overflow with exit 0 and acceptLine on stdout -> still output-overflow.
+      writeFileSync(
+        join(workDir, "stderr-overflow-ok.mjs"),
+        `process.stderr.write("w".repeat(${limit + 64}) + "\\n"); process.stdout.write("OK!\\n");\n`,
+        "utf8",
+      );
+      const taskStderrOk = {
+        id: "OVFSE_0",
+        fixture: "ovfse",
+        protected: [],
+        target: { command: "node stderr-overflow-ok.mjs" },
+        acceptLine: "OK!",
+      };
+      const resStderrOk = await accept(taskStderrOk, workDir, {
+        manifest: { files: {} },
+        maxBufferBytes: limit,
+      });
+      assert.deepEqual(resStderrOk, { solved: false, reason: "output-overflow" });
+    } finally {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
   test("runTargetCommand timeout kills asynchronously without spawnSync", async () => {
     const acceptSource = readFileSync(join(evalDir, "accept.mjs"), "utf8");
     assert.equal(acceptSource.includes("spawnSync"), false, "accept.mjs must not call spawnSync");
@@ -1925,6 +1972,227 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       const beforeRun = JSON.parse(readFileSync(join(outDir, "runs", "SMOKE-before-b1", "run.json"), "utf8"));
       assert.equal(beforeRun.invalid, "harness_crash");
       assert.match(beforeRun.error, /<redacted>/);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("copy-credentials mode rebuilds secrets after sweepStrays and applies them to streamed files, rocky-home/, and final/", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-sweep-refresh-"));
+    const outDir = join(baseTmp, "out");
+    const outCrashDir = join(baseTmp, "out-crash");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const credsPath = join(baseTmp, ".credentials.json");
+    const startupSecret = "oauth-startup-sweep-credential-value-11111";
+    const sweepSecret = "oauth-refreshed-during-sweep-secret-99999";
+    const sweepCrashSecret = "oauth-refreshed-during-crash-sweep-77777";
+    const binaryPayload = Buffer.from([0x00, 0xff, 0xfe, 0x80, 0x81, 0x42]);
+
+    writeFileSync(
+      credsPath,
+      `${JSON.stringify({ claudeAiOauth: { accessToken: startupSecret } })}\n`,
+      "utf8",
+    );
+
+    try {
+      const sandboxByDir = new Map();
+      const fakeDeps = makeFakeDeps({
+        createSandbox: async ({ runId, root, auth }) => {
+          const dir = join(root, runId);
+          const home = join(dir, "home");
+          const configDir = join(home, ".claude");
+          const rockyHome = join(dir, "rocky-home");
+          const taskDir = join(dir, "task");
+          mkdirSync(configDir, { recursive: true });
+          mkdirSync(rockyHome, { recursive: true });
+          mkdirSync(taskDir, { recursive: true });
+          if (auth?.kind === "copy-credentials") {
+            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
+          }
+          const sbx = { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
+          sandboxByDir.set(dir, sbx);
+          return sbx;
+        },
+        runClaude: async ({ runId, sandbox, stdoutPath, stderrPath, secrets }) => {
+          if (runId === "SMOKE-after-b1") {
+            // Streamed path: output contains the value that will be written to .credentials.json during sweepStrays.
+            const script = [
+              `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(sweepSecret)} }) + "\\n");`,
+              `process.stderr.write("streamed-err " + ${JSON.stringify(sweepSecret)} + "\\n");`,
+            ].join("\n");
+            return spawnProcess({
+              file: process.execPath,
+              args: ["-e", script],
+              cwd: sandbox.taskDir,
+              env: process.env,
+              timeoutMs: 10_000,
+              stdoutPath,
+              stderrPath,
+              secrets,
+            });
+          }
+          return {
+            stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+            stderr: "clean stderr\n",
+            exitCode: 0,
+            timedOut: false,
+          };
+        },
+        sweepStrays: async (sandboxDir) => {
+          const sandbox = sandboxByDir.get(sandboxDir);
+          assert.ok(sandbox, `missing sandbox for ${sandboxDir}`);
+          // Simulate a surviving descendant updating .credentials.json during the sweep interval.
+          writeFileSync(
+            join(sandbox.configDir, ".credentials.json"),
+            `${JSON.stringify({ claudeAiOauth: { accessToken: sweepSecret } })}\n`,
+            "utf8",
+          );
+          if (sandboxDir.includes("SMOKE-none-b1")) {
+            // Only final/ contains the newly refreshed credential; also keep a non-leaking binary file.
+            mkdirSync(join(sandbox.taskDir, "nested"), { recursive: true });
+            writeFileSync(join(sandbox.taskDir, "nested", "leaked.txt"), `token=${sweepSecret}\n`, "utf8");
+            writeFileSync(join(sandbox.taskDir, "bin.dat"), binaryPayload);
+          } else if (sandboxDir.includes("SMOKE-before-b1")) {
+            // Only rocky-home/memory.jsonl contains the newly refreshed credential.
+            writeFileSync(
+              join(sandbox.rockyHome, "memory.jsonl"),
+              `{"cmd":"echo ${sweepSecret}"}\n`,
+              "utf8",
+            );
+          } else if (sandboxDir.includes("SMOKE-after-b1")) {
+            // Streamed transcript/stderr, rocky-home/advisories.jsonl, and final/ all get the new value.
+            writeFileSync(
+              join(sandbox.rockyHome, "advisories.jsonl"),
+              `{"note":"${sweepSecret}"}\n`,
+              "utf8",
+            );
+            writeFileSync(join(sandbox.taskDir, "leaked-after.txt"), `after=${sweepSecret}\n`, "utf8");
+          }
+          return 1;
+        },
+      });
+
+      await runBatch(
+        {
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "copy-credentials", from: credsPath },
+          concurrency: 1,
+          k: 1,
+          seed: 7,
+          only: ["SMOKE"],
+        },
+        fakeDeps,
+      );
+
+      // arm=none: final/ leak marks token_leak, redacts leaked file, and preserves unrelated binary bytes.
+      const noneDir = join(outDir, "runs", "SMOKE-none-b1");
+      const noneRun = JSON.parse(readFileSync(join(noneDir, "run.json"), "utf8"));
+      assert.equal(noneRun.invalid, "token_leak");
+      assert.equal(readFileSync(join(noneDir, "final", "nested", "leaked.txt"), "utf8"), "token=<redacted>\n");
+      assert.deepEqual(readFileSync(join(noneDir, "final", "bin.dat")), binaryPayload);
+
+      // arm=before: rocky-home/memory.jsonl is redacted with the post-sweep secret and marked token_leak.
+      const beforeDir = join(outDir, "runs", "SMOKE-before-b1");
+      const beforeRun = JSON.parse(readFileSync(join(beforeDir, "run.json"), "utf8"));
+      assert.equal(beforeRun.invalid, "token_leak");
+      assert.equal(readFileSync(join(beforeDir, "rocky-home", "memory.jsonl"), "utf8"), '{"cmd":"echo <redacted>"}\n');
+
+      // arm=after: streamed transcript/stderr, rocky-home/advisories.jsonl, and final/ are all redacted.
+      const afterDir = join(outDir, "runs", "SMOKE-after-b1");
+      const afterRun = JSON.parse(readFileSync(join(afterDir, "run.json"), "utf8"));
+      assert.equal(afterRun.invalid, "token_leak");
+      assert.match(readFileSync(join(afterDir, "transcript.jsonl"), "utf8"), /<redacted>/);
+      assert.match(readFileSync(join(afterDir, "stderr.txt"), "utf8"), /<redacted>/);
+      assert.equal(readFileSync(join(afterDir, "rocky-home", "advisories.jsonl"), "utf8"), '{"note":"<redacted>"}\n');
+      assert.equal(readFileSync(join(afterDir, "final", "leaked-after.txt"), "utf8"), "after=<redacted>\n");
+
+      // No copied artifact anywhere under outDir contains startupSecret or sweepSecret.
+      for (const rel of listAllFiles(outDir)) {
+        const bytes = readFileSync(join(outDir, rel));
+        assert.equal(bytes.includes(Buffer.from(startupSecret, "utf8")), false, `startup secret leaked in ${rel}`);
+        assert.equal(bytes.includes(Buffer.from(sweepSecret, "utf8")), false, `sweep secret leaked in ${rel}`);
+      }
+
+      // Also verify that if sweepStrays updates .credentials.json and then throws, streamed files & error are redacted.
+      const crashSandboxByDir = new Map();
+      const crashDeps = makeFakeDeps({
+        createSandbox: async ({ runId, root, auth }) => {
+          const dir = join(root, runId);
+          const home = join(dir, "home");
+          const configDir = join(home, ".claude");
+          const rockyHome = join(dir, "rocky-home");
+          const taskDir = join(dir, "task");
+          mkdirSync(configDir, { recursive: true });
+          mkdirSync(rockyHome, { recursive: true });
+          mkdirSync(taskDir, { recursive: true });
+          if (auth?.kind === "copy-credentials") {
+            writeFileSync(join(configDir, ".credentials.json"), readFileSync(auth.from, "utf8"), "utf8");
+          }
+          const sbx = { dir, home, configDir, rockyHome, taskDir, prefixBin: null, env: {} };
+          crashSandboxByDir.set(dir, sbx);
+          return sbx;
+        },
+        runClaude: async ({ sandbox, stdoutPath, stderrPath, secrets }) => {
+          const script = [
+            `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, tok: ${JSON.stringify(sweepCrashSecret)} }) + "\\n");`,
+            `process.stderr.write("err " + ${JSON.stringify(sweepCrashSecret)} + "\\n");`,
+          ].join("\n");
+          return spawnProcess({
+            file: process.execPath,
+            args: ["-e", script],
+            cwd: sandbox.taskDir,
+            env: process.env,
+            timeoutMs: 10_000,
+            stdoutPath,
+            stderrPath,
+            secrets,
+          });
+        },
+        sweepStrays: async (sandboxDir) => {
+          const sandbox = crashSandboxByDir.get(sandboxDir);
+          writeFileSync(
+            join(sandbox.configDir, ".credentials.json"),
+            `${JSON.stringify({ claudeAiOauth: { accessToken: sweepCrashSecret } })}\n`,
+            "utf8",
+          );
+          throw new Error(`sweep crashed with ${sweepCrashSecret}`);
+        },
+      });
+
+      await runBatch(
+        {
+          outDir: outCrashDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "copy-credentials", from: credsPath },
+          concurrency: 1,
+          k: 1,
+          seed: 7,
+          only: ["SMOKE"],
+        },
+        crashDeps,
+      );
+
+      for (const arm of ["none", "before", "after"]) {
+        const runJson = JSON.parse(readFileSync(join(outCrashDir, "runs", `SMOKE-${arm}-b1`, "run.json"), "utf8"));
+        assert.equal(runJson.invalid, "harness_crash");
+        assert.match(runJson.error, /<redacted>/);
+      }
+      for (const rel of listAllFiles(outCrashDir)) {
+        const bytes = readFileSync(join(outCrashDir, rel));
+        assert.equal(
+          bytes.includes(Buffer.from(sweepCrashSecret, "utf8")),
+          false,
+          `sweep crash secret leaked in ${rel}`,
+        );
+      }
     } finally {
       rmSync(baseTmp, { recursive: true, force: true });
     }

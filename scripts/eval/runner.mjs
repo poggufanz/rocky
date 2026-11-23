@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   createReadStream,
   createWriteStream,
@@ -14,6 +15,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -1064,18 +1066,134 @@ function renameDirWithRetry(oldPath, newPath) {
   if (lastError) throw lastError;
 }
 
+const REDACTED_BYTES = Buffer.from("<redacted>", "utf8");
+
+function containsAnySecretBuffer(buf, secretBuffers) {
+  if (buf.length === 0 || secretBuffers.length === 0) return false;
+  for (const secretBuf of secretBuffers) {
+    if (secretBuf.length > 0 && buf.indexOf(secretBuf) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function redactBuffer(buf, secretBuffers) {
+  let current = buf;
+  let leaked = false;
+  for (const secretBuf of secretBuffers) {
+    if (secretBuf.length === 0) continue;
+    let idx = current.indexOf(secretBuf);
+    if (idx === -1) continue;
+    leaked = true;
+    /** @type {Buffer[]} */
+    const parts = [];
+    let cursor = 0;
+    while (idx !== -1) {
+      if (idx > cursor) parts.push(current.subarray(cursor, idx));
+      parts.push(REDACTED_BYTES);
+      cursor = idx + secretBuf.length;
+      idx = current.indexOf(secretBuf, cursor);
+    }
+    if (cursor < current.length) parts.push(current.subarray(cursor));
+    current = Buffer.concat(parts);
+  }
+  return { buffer: current, leaked };
+}
+
+async function writeAllBytes(fh, buf) {
+  let offset = 0;
+  while (offset < buf.length) {
+    const { bytesWritten } = await fh.write(buf, offset, buf.length - offset);
+    if (bytesWritten <= 0) {
+      throw new Error("Short write while copying artifact file");
+    }
+    offset += bytesWritten;
+  }
+}
+
+async function copyFileRedactingSecrets(srcPath, destPath, secretBuffers, mode) {
+  if (secretBuffers.length === 0) {
+    copyFileSync(srcPath, destPath);
+    return false;
+  }
+  const maxSecretLen = secretBuffers.reduce((max, buf) => Math.max(max, buf.length), 0);
+  const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
+  const chunkSize = Math.max(64 * 1024, maxSecretLen * 2);
+  const readBuf = Buffer.allocUnsafe(chunkSize);
+  let pending = Buffer.alloc(0);
+  let leaked = false;
+  let failed = false;
+
+  const srcFh = await openFile(srcPath, "r");
+  let destFh = null;
+  try {
+    destFh = await openFile(destPath, "w");
+    while (true) {
+      const { bytesRead } = await srcFh.read(readBuf, 0, chunkSize, null);
+      if (bytesRead === 0) break;
+      const chunk = readBuf.subarray(0, bytesRead);
+      const combined = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
+      let processed = combined;
+      if (containsAnySecretBuffer(combined, secretBuffers)) {
+        const res = redactBuffer(combined, secretBuffers);
+        processed = res.buffer;
+        if (res.leaked) leaked = true;
+      }
+      const splitAt = holdback === 0 ? processed.length : processed.length - holdback;
+      if (splitAt > 0) {
+        await writeAllBytes(destFh, processed.subarray(0, splitAt));
+        pending = Buffer.from(processed.subarray(splitAt));
+      } else {
+        pending = Buffer.from(processed);
+      }
+    }
+    if (pending.length > 0) {
+      let finalBuf = pending;
+      if (containsAnySecretBuffer(pending, secretBuffers)) {
+        const res = redactBuffer(pending, secretBuffers);
+        finalBuf = res.buffer;
+        if (res.leaked) leaked = true;
+      }
+      await writeAllBytes(destFh, finalBuf);
+    }
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    await srcFh.close().catch(() => {});
+    if (destFh) {
+      await destFh.close().catch(() => {});
+    }
+    if (failed && lstatOrNull(destPath) !== null) {
+      try {
+        removeTreeWithRetry(destPath);
+      } catch {
+        // Best-effort cleanup of partially written destination file.
+      }
+    }
+  }
+  if (process.platform !== "win32" && typeof mode === "number" && (mode & 0o111) !== 0) {
+    chmodSync(destPath, mode & 0o777);
+  }
+  return leaked;
+}
+
 /**
  * Copy `srcDir` into `destDir` excluding `.git`, using `lstat` only.
  * Checks `srcDir` itself before descending; never follows symlinks or junctions.
- * Returns skipped relative paths prefixed with `final/` (or `"final"` for the root).
+ * Streams regular files through raw-byte secret redaction without altering non-matching binary files.
+ * Returns `{ skippedLinks, leaked }`.
  * @param {string} srcDir
  * @param {string} destDir
- * @returns {string[]}
+ * @param {readonly string[]} [secrets]
+ * @returns {Promise<{ skippedLinks: string[], leaked: boolean }>}
  */
-function copyFinalWithoutGit(srcDir, destDir) {
+async function copyFinalWithoutGit(srcDir, destDir, secrets = []) {
   mkdirSync(destDir, { recursive: true });
   /** @type {string[]} */
   const skippedLinks = [];
+  let leaked = false;
   let rootStat;
   try {
     rootStat = lstatSync(srcDir);
@@ -1083,15 +1201,16 @@ function copyFinalWithoutGit(srcDir, destDir) {
     const code = error && typeof error === "object" ? error.code : undefined;
     if (code === "ENOENT" || code === "ENOTDIR") {
       skippedLinks.push("final");
-      return skippedLinks;
+      return { skippedLinks, leaked };
     }
     throw error;
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     skippedLinks.push("final");
-    return skippedLinks;
+    return { skippedLinks, leaked };
   }
-  function walk(currentSrc, currentDest, relPrefix) {
+  const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
+  async function walk(currentSrc, currentDest, relPrefix) {
     const entries = readdirSync(currentSrc).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (const name of entries) {
       if (name === ".git") continue;
@@ -1105,31 +1224,35 @@ function copyFinalWithoutGit(srcDir, destDir) {
       }
       if (lstat.isDirectory()) {
         mkdirSync(destPath, { recursive: true });
-        walk(srcPath, destPath, rel);
+        await walk(srcPath, destPath, rel);
       } else if (lstat.isFile()) {
-        copyFileSync(srcPath, destPath);
+        const fileLeaked = await copyFileRedactingSecrets(srcPath, destPath, secretBuffers, lstat.mode);
+        if (fileLeaked) {
+          leaked = true;
+        }
       }
     }
   }
-  walk(srcDir, destDir, "");
-  return skippedLinks;
+  await walk(srcDir, destDir, "");
+  return { skippedLinks, leaked };
 }
 
 /**
  * Copy allowlisted files from `srcRockyHome` into `destRockyHome` using `lstat` only.
  * Checks `srcRockyHome` itself before reading children; never follows symlinks or junctions.
- * Returns skipped relative paths prefixed with `rocky-home/` (or `"rocky-home"` for the root).
+ * Streams copied files through secret redaction and returns `{ skippedLinks, leaked }`.
  * @param {string} srcRockyHome
  * @param {string} destRockyHome
  * @param {string} arm
  * @param {readonly string[]} secrets
- * @returns {string[]}
+ * @returns {Promise<{ skippedLinks: string[], leaked: boolean }>}
  */
-function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
-  if (arm === "none") return [];
+async function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
+  if (arm === "none") return { skippedLinks: [], leaked: false };
   mkdirSync(destRockyHome, { recursive: true });
   /** @type {string[]} */
   const skippedLinks = [];
+  let leaked = false;
   let rootStat;
   try {
     rootStat = lstatSync(srcRockyHome);
@@ -1137,14 +1260,15 @@ function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
     const code = error && typeof error === "object" ? error.code : undefined;
     if (code === "ENOENT" || code === "ENOTDIR") {
       skippedLinks.push("rocky-home");
-      return skippedLinks;
+      return { skippedLinks, leaked };
     }
     throw error;
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     skippedLinks.push("rocky-home");
-    return skippedLinks;
+    return { skippedLinks, leaked };
   }
+  const secretBuffers = normalizeSecrets(secrets).map((s) => Buffer.from(s, "utf8"));
   for (const name of ROCKY_HOME_ALLOWED_FILES) {
     const srcPath = join(srcRockyHome, name);
     let lstat;
@@ -1160,10 +1284,17 @@ function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, secrets) {
       continue;
     }
     if (!lstat.isFile()) continue;
-    const content = redactText(readFileSync(srcPath, "utf8"), secrets);
-    writeFileSync(join(destRockyHome, name), content, "utf8");
+    const fileLeaked = await copyFileRedactingSecrets(
+      srcPath,
+      join(destRockyHome, name),
+      secretBuffers,
+      lstat.mode,
+    );
+    if (fileLeaked) {
+      leaked = true;
+    }
   }
-  return skippedLinks;
+  return { skippedLinks, leaked };
 }
 
 function readSandboxCredentialSecrets(sandbox) {
@@ -1645,7 +1776,6 @@ export async function runBatch(options, overrides = {}) {
 
     let sandbox = null;
     let runSecrets = secrets;
-    let postExitRedacted = false;
     const runRedact = (value) => redactText(value, runSecrets);
     const refreshRunSecrets = () => {
       if (options.auth?.kind !== "copy-credentials" || !sandbox) return [];
@@ -1734,9 +1864,8 @@ export async function runBatch(options, overrides = {}) {
       killFailed = Boolean(claudeRes.killFailed);
       taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
 
-      // Rebuild per-run secret set from the sandbox's copied credentials right after
-      // the agent exits (copy-credentials mode only) and re-redact already-streamed
-      // transcript/stderr in place before sweeping strays or writing any other artifact.
+      // Scrub any credentials refreshed during agent execution from already-streamed
+      // files immediately before the stray sweep runs.
       const postRunAddedSecrets = refreshRunSecrets();
 
       let tokenLeaked = false;
@@ -1748,19 +1877,25 @@ export async function runBatch(options, overrides = {}) {
             tokenLeaked = true;
           }
         }
-        postExitRedacted = true;
       }
 
       // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
       swept = true;
       strayKilled = await deps.sweepStrays(sandbox.dir);
 
+      // Rebuild per-run secrets as the LAST step after sweep/post-exit work and before
+      // writing or copying any artifact (copy-credentials mode only).
+      const postSweepAddedSecrets = refreshRunSecrets();
+
+      let transcriptSummary;
       if (claudeRes.streamed === true) {
-        invalid = classifyOutcome({
-          transcript: claudeRes.transcript,
-          tokenLeaked,
-          timedOut,
-        });
+        if (postSweepAddedSecrets.length > 0) {
+          const reRedactedAfterSweep = await redactStreamedFiles(postSweepAddedSecrets);
+          if (reRedactedAfterSweep) {
+            tokenLeaked = true;
+          }
+        }
+        transcriptSummary = claudeRes.transcript;
       } else {
         const outWriter = createRedactingFileWriter(stdoutPath, runSecrets);
         const errWriter = createRedactingFileWriter(stderrPath, runSecrets);
@@ -1771,31 +1906,55 @@ export async function runBatch(options, overrides = {}) {
         parser.write(rawStdout);
         errWriter.write(rawStderr);
         const [outRes, errRes] = await Promise.all([outWriter.end(), errWriter.end()]);
-        const transcript = parser.end();
-        postExitRedacted = true;
-        invalid = classifyOutcome({
-          transcript,
-          tokenLeaked: outRes.leaked || errRes.leaked,
-          timedOut,
-        });
+        transcriptSummary = parser.end();
+        if (outRes.leaked || errRes.leaked) {
+          tokenLeaked = true;
+        }
       }
 
       const finalDir = join(workRunDir, "final");
-      skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir));
-      skippedLinks.push(
-        ...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm, runSecrets),
+      const finalCopy = await copyFinalWithoutGit(sandbox.taskDir, finalDir, runSecrets);
+      skippedLinks.push(...finalCopy.skippedLinks);
+      if (finalCopy.leaked) {
+        tokenLeaked = true;
+      }
+
+      const rockyCopy = await copyRockyHomeFiles(
+        sandbox.rockyHome,
+        join(workRunDir, "rocky-home"),
+        item.arm,
+        runSecrets,
       );
+      skippedLinks.push(...rockyCopy.skippedLinks);
+      if (rockyCopy.leaked) {
+        tokenLeaked = true;
+      }
+
+      invalid = classifyOutcome({
+        transcript: transcriptSummary,
+        tokenLeaked,
+        timedOut,
+      });
 
       acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
     } catch (error) {
-      const catchAddedSecrets = refreshRunSecrets();
-      if (!postExitRedacted && options.auth?.kind === "copy-credentials" && catchAddedSecrets.length > 0) {
+      const preSweepCatchAdded = refreshRunSecrets();
+      if (sandbox && !swept) {
+        swept = true;
+        try {
+          strayKilled = await deps.sweepStrays(sandbox.dir);
+        } catch {
+          // Best-effort stray sweep during crash cleanup.
+        }
+      }
+      const postSweepCatchAdded = refreshRunSecrets();
+      const catchAddedSecrets = normalizeSecrets([...preSweepCatchAdded, ...postSweepCatchAdded]);
+      if (options.auth?.kind === "copy-credentials" && catchAddedSecrets.length > 0) {
         try {
           await redactStreamedFiles(catchAddedSecrets);
         } catch {
           // redactFileInPlace already removed any unredacted original on failure.
         }
-        postExitRedacted = true;
       }
       runError = runRedact(error instanceof Error ? error.message : String(error));
       invalid = "harness_crash";
@@ -1803,13 +1962,6 @@ export async function runBatch(options, overrides = {}) {
 
     // Always clean up the sandbox BEFORE publishing run.json.
     if (sandbox) {
-      if (!swept) {
-        try {
-          strayKilled = await deps.sweepStrays(sandbox.dir);
-        } catch {
-          // Best-effort stray sweep during crash cleanup.
-        }
-      }
       try {
         await deps.destroySandbox(sandbox);
       } catch (error) {
