@@ -16,7 +16,7 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { accept, buildAcceptEnv } from "../accept.mjs";
 import { compareManifests } from "../freeze.mjs";
-import { copyTree, materializeTask, renderClaudeMd } from "../history.mjs";
+import { buildHistoryRockyEnv, copyTree, materializeTask, renderClaudeMd } from "../history.mjs";
 import {
   buildCommandInvocation,
   buildToolEnv,
@@ -82,8 +82,22 @@ describe("task set, accept, and materialize", () => {
       assert.equal(task.target.command, "npm test");
       assert.ok(Array.isArray(task.target.aliases) && task.target.aliases.length > 0);
       assert.ok(Array.isArray(task.protected) && task.protected.includes("test/"));
+      assert.equal(task.acceptLine, `eval-accept: ${task.fixture} ok`);
     }
     assert.deepEqual(byKind, { trap: 10, control: 6, stale: 4, smoke: 1 });
+  });
+
+  test("T10 wrong overlays edit only the existing US rate without adding regions", () => {
+    const base = JSON.parse(readFileSync(join(tasksDir, "rate-key-case", "repo", "rates.json"), "utf8"));
+    const wrong1 = JSON.parse(readFileSync(join(tasksDir, "rate-key-case", "patches", "wrong-1", "rates.json"), "utf8"));
+    const wrong2 = JSON.parse(readFileSync(join(tasksDir, "rate-key-case", "patches", "wrong-2", "rates.json"), "utf8"));
+    assert.deepEqual(Object.keys(wrong1), Object.keys(base));
+    assert.deepEqual(Object.keys(wrong2), Object.keys(base));
+    assert.equal(wrong1.EU, base.EU);
+    assert.equal(wrong2.EU, base.EU);
+    assert.notEqual(wrong1.US, base.US);
+    assert.notEqual(wrong2.US, base.US);
+    assert.notEqual(wrong1.US, wrong2.US);
   });
 
   test("materializeTask in arm none skips history, writes base CLAUDE.md, and leaves clean git status", async () => {
@@ -121,9 +135,10 @@ describe("task set, accept, and materialize", () => {
     }
   });
 
-  test("accept rejects protected file edits and unexpected files under protected dirs, and drops ROCKY_*", async () => {
+  test("accept rejects protected edits, skipped tests without acceptLine, and ambient API_TOKEN on T07", async () => {
     const tasks = JSON.parse(readFileSync(join(tasksDir, "tasks.json"), "utf8"));
     const t02 = tasks.find((entry) => entry.id === "T02");
+    const t07 = tasks.find((entry) => entry.id === "T07");
     const dir = mkdtempSync(join(tmpdir(), "rocky-eval-accept-"));
     try {
       copyTree(join(tasksDir, t02.fixture, "repo"), dir);
@@ -133,6 +148,7 @@ describe("task set, accept, and materialize", () => {
       copyTree(join(tasksDir, t02.fixture, "patches", "fix"), dir);
       const fixed = await accept(t02, dir);
       assert.equal(fixed.solved, true);
+      assert.equal(fixed.reason, "ok");
 
       writeFileSync(join(dir, "test", "extra.mjs"), "export const x = 1;\n", "utf8");
       const withExtra = await accept(t02, dir);
@@ -148,17 +164,150 @@ describe("task set, accept, and materialize", () => {
       rmSync(dir, { recursive: true, force: true });
     }
 
-    const env = buildAcceptEnv({
-      ...process.env,
-      ROCKY_HOME: "/tmp/r",
-      ROCKY_ATTEMPT_ARM: "shown",
-      ROCKY_TEST_SEAMS: "1",
-      CLAUDE_CODE_OAUTH_TOKEN: "tok",
-    });
-    for (const key of Object.keys(env)) {
-      assert.equal(/^ROCKY_/i.test(key), false, `unexpected ROCKY_ key: ${key}`);
+    // Skipped test script exits 0 with protected files intact, but lacks acceptLine.
+    const skipDir = mkdtempSync(join(tmpdir(), "rocky-eval-accept-skip-"));
+    try {
+      copyTree(join(tasksDir, t02.fixture, "repo"), skipDir);
+      copyTree(join(tasksDir, t02.fixture, "patches", "fix"), skipDir);
+      const pkgPath = join(skipDir, "package.json");
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+      pkg.scripts.test = 'node -e ""';
+      writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+
+      const skipped = await accept(t02, skipDir);
+      assert.equal(skipped.solved, false);
+      assert.equal(skipped.reason, "no-accept-line");
+    } finally {
+      rmSync(skipDir, { recursive: true, force: true });
     }
-    assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+
+    // Ambient API_TOKEN in parent process.env must not cross into accept(T07, untouched repo/).
+    const t07Dir = mkdtempSync(join(tmpdir(), "rocky-eval-accept-t07-"));
+    const hadApiToken = Object.prototype.hasOwnProperty.call(process.env, "API_TOKEN");
+    const prevApiToken = process.env.API_TOKEN;
+    process.env.API_TOKEN = "probe";
+    try {
+      copyTree(join(tasksDir, t07.fixture, "repo"), t07Dir);
+      const ambient = await accept(t07, t07Dir);
+      assert.equal(ambient.solved, false);
+    } finally {
+      if (hadApiToken) process.env.API_TOKEN = prevApiToken;
+      else delete process.env.API_TOKEN;
+      rmSync(t07Dir, { recursive: true, force: true });
+    }
+
+    const winEnv = buildAcceptEnv(
+      {
+        Path: "C:\\Windows\\System32",
+        SystemRoot: "C:\\Windows",
+        windir: "C:\\Windows",
+        ComSpec: "C:\\Windows\\System32\\cmd.exe",
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+        SystemDrive: "C:",
+        API_TOKEN: "probe",
+        ROCKY_HOME: "/tmp/r",
+        ROCKY_ATTEMPT_ARM: "shown",
+        ROCKY_TEST_SEAMS: "1",
+        CLAUDE_CODE_OAUTH_TOKEN: "tok",
+        NODE_OPTIONS: "--require /tmp/evil.cjs",
+        CUSTOM_LEAK: "nope",
+      },
+      "win32",
+      "C:\\temp\\accept-1",
+    );
+    assert.equal("Path" in winEnv, true);
+    assert.equal("PATH" in winEnv, false);
+    assert.equal(winEnv.SystemRoot, "C:\\Windows");
+    assert.equal(winEnv.windir, "C:\\Windows");
+    assert.equal(winEnv.ComSpec, "C:\\Windows\\System32\\cmd.exe");
+    assert.equal(winEnv.PATHEXT, ".COM;.EXE;.BAT;.CMD");
+    assert.equal(winEnv.SystemDrive, "C:");
+    assert.equal(winEnv.TEMP, "C:\\temp\\accept-1\\tmp");
+    assert.equal(winEnv.TMP, "C:\\temp\\accept-1\\tmp");
+    assert.equal(winEnv.HOME, "C:\\temp\\accept-1\\home");
+    assert.equal(winEnv.USERPROFILE, "C:\\temp\\accept-1\\home");
+    assert.equal(winEnv.APPDATA, "C:\\temp\\accept-1\\appdata");
+    assert.equal(winEnv.LOCALAPPDATA, "C:\\temp\\accept-1\\localappdata");
+    assert.equal(winEnv.NPM_CONFIG_CACHE, "C:\\temp\\accept-1\\npm-cache");
+    assert.equal(winEnv.npm_config_color, "false");
+    assert.equal(winEnv.npm_config_loglevel, "error");
+    assert.equal(winEnv.API_TOKEN, undefined);
+    assert.equal(winEnv.ROCKY_HOME, undefined);
+    assert.equal(winEnv.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.equal(winEnv.NODE_OPTIONS, undefined);
+    assert.equal(winEnv.CUSTOM_LEAK, undefined);
+
+    const posixEnv = buildAcceptEnv(
+      {
+        PATH: "/usr/bin:/bin",
+        SystemRoot: "C:\\Windows",
+        API_TOKEN: "probe",
+        ROCKY_HOME: "/tmp/r",
+        CLAUDE_CODE_OAUTH_TOKEN: "tok",
+        NODE_OPTIONS: "--require /tmp/evil.cjs",
+      },
+      "linux",
+      "/tmp/accept-2",
+    );
+    assert.equal(posixEnv.PATH, "/usr/bin:/bin");
+    assert.equal(posixEnv.SystemRoot, undefined);
+    assert.equal(posixEnv.API_TOKEN, undefined);
+    assert.equal(posixEnv.ROCKY_HOME, undefined);
+    assert.equal(posixEnv.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.equal(posixEnv.NODE_OPTIONS, undefined);
+    assert.equal(posixEnv.NPM_CONFIG_CACHE, "/tmp/accept-2/npm-cache");
+    assert.equal(posixEnv.npm_config_color, "false");
+    assert.equal(posixEnv.npm_config_loglevel, "error");
+  });
+
+  test("buildHistoryRockyEnv uses buildToolEnv and restores only required sandbox keys", () => {
+    const afterEnv = buildHistoryRockyEnv(
+      {
+        home: "/sbx/home",
+        configDir: "/sbx/home/.claude",
+        rockyHome: "/sbx/rocky-home",
+        env: {
+          PATH: "/sbx/prefix/bin:/usr/bin",
+          CLAUDE_CODE_OAUTH_TOKEN: "secret-tok",
+          ANTHROPIC_API_KEY: "secret-key",
+          NODE_OPTIONS: "--require /tmp/x.cjs",
+          FORCE_COLOR: "1",
+          GIT_CONFIG_GLOBAL: "/tmp/gitconfig",
+          ROCKY_EXTRA: "drop-me",
+          ROCKY_TEST_SEAMS: "1",
+          ROCKY_ATTEMPT_ARM: "shown",
+        },
+      },
+      "linux",
+    );
+    assert.equal(afterEnv.HOME, "/sbx/home");
+    assert.equal(afterEnv.USERPROFILE, "/sbx/home");
+    assert.equal(afterEnv.CLAUDE_CONFIG_DIR, "/sbx/home/.claude");
+    assert.equal(afterEnv.ROCKY_HOME, "/sbx/rocky-home");
+    assert.equal(afterEnv.PATH, "/sbx/prefix/bin:/usr/bin");
+    assert.equal(afterEnv.ROCKY_TEST_SEAMS, "1");
+    assert.equal(afterEnv.ROCKY_ATTEMPT_ARM, "shown");
+    assert.equal(afterEnv.ROCKY_ATTEMPT_ADVISORY, "off");
+    assert.equal(afterEnv.npm_config_color, "false");
+    assert.equal(afterEnv.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.equal(afterEnv.ANTHROPIC_API_KEY, undefined);
+    assert.equal(afterEnv.NODE_OPTIONS, undefined);
+    assert.equal(afterEnv.FORCE_COLOR, undefined);
+    assert.equal(afterEnv.GIT_CONFIG_GLOBAL, undefined);
+    assert.equal(afterEnv.ROCKY_EXTRA, undefined);
+
+    const beforeEnv = buildHistoryRockyEnv(
+      {
+        home: "/sbx/home",
+        configDir: "/sbx/home/.claude",
+        rockyHome: "/sbx/rocky-home",
+        env: { PATH: "/sbx/prefix/bin:/usr/bin" },
+      },
+      "linux",
+    );
+    assert.equal(beforeEnv.ROCKY_TEST_SEAMS, undefined);
+    assert.equal(beforeEnv.ROCKY_ATTEMPT_ARM, undefined);
+    assert.equal(beforeEnv.ROCKY_ATTEMPT_ADVISORY, "off");
   });
 
   test("compareManifests ignores frozenAt and evaluatorCommit while catching hash drift", () => {
@@ -186,7 +335,7 @@ describe("task set, accept, and materialize", () => {
     const beforeBytes = readFileSync(manifestPath);
     const res = runChild(process.execPath, [freezeScript, "--verify"], {
       cwd: dirname(evalDir),
-      env: process.env,
+      env: buildToolEnv(process.env, process.platform),
     });
     assert.equal(res.status, 0, `freeze --verify failed: ${res.stderr}`);
     assert.match(res.stdout, /Verified 21 tasks/);

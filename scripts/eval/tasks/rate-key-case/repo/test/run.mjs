@@ -10,4 +10,4 @@ if (upper !== 110) {
   process.stderr.write(`AssertionError: expected total 110, got ${upper}\n`);
   process.exit(1);
 }
-process.stdout.write("ok\n");
+process.stdout.write("eval-accept: rate-key-case ok\n");

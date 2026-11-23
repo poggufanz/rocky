@@ -1,7 +1,7 @@
 {
   "v": 1,
-  "frozenAt": "2026-11-23T00:31:29.282Z",
-  "evaluatorCommit": "53d526f81d51481028267412ae837868f92bdf10",
+  "frozenAt": "2026-11-23T00:54:12.505Z",
+  "evaluatorCommit": "e6d059e96a91bb5761c3703ce8cb929f45c6d373",
   "tasks": [
     {
       "id": "T01",
@@ -16,6 +16,7 @@
         ]
       },
       "trapLine": "Error: DATABASE_URL is not set",
+      "acceptLine": "eval-accept: env-name-typo ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -41,6 +42,7 @@
         ]
       },
       "trapLine": "Error: port must be a number, got \"80a\"",
+      "acceptLine": "eval-accept: config-override ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -66,6 +68,7 @@
         ]
       },
       "trapLine": "TypeError: total is not a function",
+      "acceptLine": "eval-accept: dist-overwritten ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -91,6 +94,7 @@
         ]
       },
       "trapLine": "Error: unknown field \"email\"",
+      "acceptLine": "eval-accept: generated-source ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -116,6 +120,7 @@
         ]
       },
       "trapLine": "SyntaxError: Named export 'parse' not found",
+      "acceptLine": "eval-accept: cjs-named-export ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -142,6 +147,7 @@
         ]
       },
       "trapLine": "Error: unknown option '--fix'",
+      "acceptLine": "eval-accept: cli-flag-renamed ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -167,6 +173,7 @@
         ]
       },
       "trapLine": "Error: API_TOKEN is required",
+      "acceptLine": "eval-accept: env-file-missing ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -192,6 +199,7 @@
         ]
       },
       "trapLine": "Error: Cannot find module '<path>'",
+      "acceptLine": "eval-accept: path-with-space ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -217,6 +225,7 @@
         ]
       },
       "trapLine": "AssertionError: expected 3 rows, got 2",
+      "acceptLine": "eval-accept: stale-cache ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -242,6 +251,7 @@
         ]
       },
       "trapLine": "AssertionError: expected total 110, got 100",
+      "acceptLine": "eval-accept: rate-key-case ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -267,6 +277,7 @@
         ]
       },
       "trapLine": "Error: DATABASE_URL is not set",
+      "acceptLine": "eval-accept: env-name-typo ok",
       "history": null,
       "protected": [
         "test/"
@@ -286,6 +297,7 @@
         ]
       },
       "trapLine": "Error: port must be a number, got \"80a\"",
+      "acceptLine": "eval-accept: config-override ok",
       "history": null,
       "protected": [
         "test/"
@@ -305,6 +317,7 @@
         ]
       },
       "trapLine": "TypeError: total is not a function",
+      "acceptLine": "eval-accept: dist-overwritten ok",
       "history": null,
       "protected": [
         "test/"
@@ -324,6 +337,7 @@
         ]
       },
       "trapLine": "Error: unknown field \"email\"",
+      "acceptLine": "eval-accept: generated-source ok",
       "history": null,
       "protected": [
         "test/"
@@ -343,6 +357,7 @@
         ]
       },
       "trapLine": "SyntaxError: Named export 'parse' not found",
+      "acceptLine": "eval-accept: cjs-named-export ok",
       "history": null,
       "protected": [
         "test/"
@@ -363,6 +378,7 @@
         ]
       },
       "trapLine": "Error: unknown option '--fix'",
+      "acceptLine": "eval-accept: cli-flag-renamed ok",
       "history": null,
       "protected": [
         "test/"
@@ -382,6 +398,7 @@
         ]
       },
       "trapLine": "Error: port must be a number, got \"80a\"",
+      "acceptLine": "eval-accept: config-override-moved ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -407,6 +424,7 @@
         ]
       },
       "trapLine": "TypeError: total is not a function",
+      "acceptLine": "eval-accept: dist-now-rebuilt ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -433,6 +451,7 @@
         ]
       },
       "trapLine": "Error: missing input file",
+      "acceptLine": "eval-accept: script-moved ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -458,6 +477,7 @@
         ]
       },
       "trapLine": "AssertionError: expected 3 rows, got 2",
+      "acceptLine": "eval-accept: cache-moved ok",
       "history": {
         "wrong": [
           "wrong-1",
@@ -483,6 +503,7 @@
         ]
       },
       "trapLine": "Error: capture-probe",
+      "acceptLine": "eval-accept: smoke ok",
       "history": null,
       "protected": [
         "test/"
@@ -497,7 +518,7 @@
     "cache-moved/history-repo/package.json": "aadceb6121317d3f5e3bb260f2bc41406dcb04bb90869b49ac5cea4ad6f1d66a",
     "cache-moved/history-repo/scripts/clean.mjs": "ac6ba3601f89267af5abe380502157aaf6d8c96b8f5a9542d4e4201e4c1e593f",
     "cache-moved/history-repo/src/load.js": "227a340f409f2ca342a678a82a7d9bb7d356285815dfe3d17398b8a041a1f088",
-    "cache-moved/history-repo/test/run.mjs": "fcecfc5f4905e331b1594200698262118a611e8644bafca2b7e85532368a3130",
+    "cache-moved/history-repo/test/run.mjs": "d3e143a9647dc88d515912f2f2c4c34c61719669b608201c2743fc82c81dee9f",
     "cache-moved/patches/current-fix/.app-cache/rows.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
     "cache-moved/patches/fix/.cache/rows.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
     "cache-moved/patches/wrong-1/data/source.csv": "88d09ee0f4a9a549e522c5e4f5e2c6a3ed8278a8b50e35dfe75de3f606e93465",
@@ -507,25 +528,25 @@
     "cache-moved/repo/package.json": "aadceb6121317d3f5e3bb260f2bc41406dcb04bb90869b49ac5cea4ad6f1d66a",
     "cache-moved/repo/scripts/clean.mjs": "1c1db5f1a2533474a3850b60c9722bb85e1bcca1b122dda5ef91417231e67744",
     "cache-moved/repo/src/load.js": "e627a3ee5a86165f79a8582017f4fc7ad2dfa2534274d024133622c7944d022d",
-    "cache-moved/repo/test/run.mjs": "fcecfc5f4905e331b1594200698262118a611e8644bafca2b7e85532368a3130",
+    "cache-moved/repo/test/run.mjs": "d3e143a9647dc88d515912f2f2c4c34c61719669b608201c2743fc82c81dee9f",
     "cjs-named-export/patches/fix/lib/parse.cjs": "dde70adf9c0b61546f3bbd74d63ed6779d2fc31738baea66eb258e030c61e779",
     "cjs-named-export/patches/wrong-1/lib/parse.cjs": "3b8e1ee0a221829404f47c75d60618d007df6a211cd7ee4dd56b2b1de13664cd",
     "cjs-named-export/patches/wrong-2/lib/parse.mjs": "d30d74c73ca55a6595bf10fbeeeee7ae87b831cc291f44b5575c6ddb2c209717",
     "cjs-named-export/repo/lib/parse.cjs": "be9b2c45a1e8ad228e51da4a33c8dcb8410b109925b09b9fbd6b821f2e18533f",
     "cjs-named-export/repo/package.json": "3f4d3ec8e67ddf68cfea1a619de445918889cef49e6c6d14fc61ff358edeb3df",
-    "cjs-named-export/repo/test/run.mjs": "656939c2c9edff7a587e364e30f2c85dc091b6ae294b72625ad6b26cd1704d76",
+    "cjs-named-export/repo/test/run.mjs": "2e71d7e4aae888ea7bee77ffedcd3be6fe10fda5b5853b700a35c5f2669835ec",
     "cli-flag-renamed/patches/fix/package.json": "511394ec57f777c76d7289ec5444c3272965291031d6b1fe36d02509205c1544",
     "cli-flag-renamed/patches/wrong-1/package.json": "0f62124e1d0f335850c853e8b402b0d91bce0e5f571fd2797717d13e07647f19",
     "cli-flag-renamed/patches/wrong-2/package.json": "50faf4d6e47a5ea1b1218e659c6d63f0f08a11d1929e1283f343ece3bff44f2f",
     "cli-flag-renamed/repo/bin/fmt.mjs": "95865a8438515a3ce749d767fdf5150ba41c1026a428d6360c547d8bfed4cb3e",
     "cli-flag-renamed/repo/package.json": "9467e55685961691551ad0447f934630218e2517993636cd23e4ba99f93c6b7b",
     "cli-flag-renamed/repo/src/sample.txt": "13c0b51b8e776a1757dc91ecad5e0fe1e09b1c8ea8a05daa4b48fec7c45be4da",
-    "cli-flag-renamed/repo/test/run.mjs": "273053fccf0ab9688145fcfa9eece92ee9d06a21871389c42b92420fa1c3d71a",
+    "cli-flag-renamed/repo/test/run.mjs": "843b28fce1a609278ac2ba1a373ab71289299fe95362485af3aee96022806cb7",
     "config-override-moved/history-repo/config/default.json": "5c1078a026d1df27810cf2963241d8e17c3d5ef0606ba8f24b5764c04010cdc6",
     "config-override-moved/history-repo/config/local.json": "dc13dab2faeff54cb06790caaed2ba039f28a5b34a4265975a149a850d58db7d",
     "config-override-moved/history-repo/package.json": "353fcf9e9f3c21ffb3e5c8868f1c9620249a0f513ed8e07cb3dbe32ec1191d05",
     "config-override-moved/history-repo/src/config.js": "7f2b184745d739a8244dcdf8a6d8fdb93cdda4f616b73aca30a8e634f9903f1e",
-    "config-override-moved/history-repo/test/run.mjs": "eb21cfcbf09a31bdabfd5e2e7bb7c14d0e3080a0f4f0110ea5ca17e78ba7c159",
+    "config-override-moved/history-repo/test/run.mjs": "dc9d28f9093a7adfff5170b8bb162ace8f33a57b4320437f61ffcb323f6e71f8",
     "config-override-moved/patches/current-fix/config/env.json": "5bec8c27ef09eaaa2a30f1c0166adf0d27dfe2c98f79b63c817018d79820e7fd",
     "config-override-moved/patches/fix/config/local.json": "5bec8c27ef09eaaa2a30f1c0166adf0d27dfe2c98f79b63c817018d79820e7fd",
     "config-override-moved/patches/wrong-1/config/default.json": "6a6a57b9ebdb14fd1c24f8c98a3a589cf7a8a1448d7fa8a547341649bfcf1f45",
@@ -534,7 +555,7 @@
     "config-override-moved/repo/config/env.json": "dc13dab2faeff54cb06790caaed2ba039f28a5b34a4265975a149a850d58db7d",
     "config-override-moved/repo/package.json": "353fcf9e9f3c21ffb3e5c8868f1c9620249a0f513ed8e07cb3dbe32ec1191d05",
     "config-override-moved/repo/src/config.js": "a0adeb0f62566493c9ecd379b38614a42677f49dda6402df223a54c75e7baace",
-    "config-override-moved/repo/test/run.mjs": "eb21cfcbf09a31bdabfd5e2e7bb7c14d0e3080a0f4f0110ea5ca17e78ba7c159",
+    "config-override-moved/repo/test/run.mjs": "dc9d28f9093a7adfff5170b8bb162ace8f33a57b4320437f61ffcb323f6e71f8",
     "config-override/patches/fix/config/local.json": "5bec8c27ef09eaaa2a30f1c0166adf0d27dfe2c98f79b63c817018d79820e7fd",
     "config-override/patches/wrong-1/config/default.json": "6a6a57b9ebdb14fd1c24f8c98a3a589cf7a8a1448d7fa8a547341649bfcf1f45",
     "config-override/patches/wrong-2/config/default.json": "f48a187602b814d9c3bf1ea3190c28060789af4a491ef6454a75bc84991d6f8b",
@@ -542,11 +563,11 @@
     "config-override/repo/config/local.json": "dc13dab2faeff54cb06790caaed2ba039f28a5b34a4265975a149a850d58db7d",
     "config-override/repo/package.json": "128eb2bc04a5c9f2897ca3edda18a15a1513fd08e09d9d3063daaf11ea2f87c0",
     "config-override/repo/src/config.js": "7f2b184745d739a8244dcdf8a6d8fdb93cdda4f616b73aca30a8e634f9903f1e",
-    "config-override/repo/test/run.mjs": "eb21cfcbf09a31bdabfd5e2e7bb7c14d0e3080a0f4f0110ea5ca17e78ba7c159",
+    "config-override/repo/test/run.mjs": "6e6d467bb14c5f7a8320fd052f19c3c3881fca0608c883f00f36bcb9c3b55bd4",
     "dist-now-rebuilt/history-repo/dist/cart.js": "1eff51a0433e96741166da23ff6257338f54e2c28bef07eb612b5a2d771e5b09",
     "dist-now-rebuilt/history-repo/package.json": "0531faabbd4295eec0f9100fbb87de841eb98be328a9d13a003f9d8533274a92",
     "dist-now-rebuilt/history-repo/src/cart.js": "1eff51a0433e96741166da23ff6257338f54e2c28bef07eb612b5a2d771e5b09",
-    "dist-now-rebuilt/history-repo/test/run.mjs": "4270729fe8836ab428ac0d41a60b776f5d84d68bf553975fd93277f8f0fd17de",
+    "dist-now-rebuilt/history-repo/test/run.mjs": "588a0755f2d2d5882b688feda89adcedc8a9feed7b6fb752e774c16400508e6e",
     "dist-now-rebuilt/patches/current-fix/src/cart.js": "90c86a9372d9183d0ef088263db37c821c9b4dc6b0d2a1886785d100053cd23a",
     "dist-now-rebuilt/patches/fix/dist/cart.js": "90c86a9372d9183d0ef088263db37c821c9b4dc6b0d2a1886785d100053cd23a",
     "dist-now-rebuilt/patches/wrong-1/src/cart.js": "90c86a9372d9183d0ef088263db37c821c9b4dc6b0d2a1886785d100053cd23a",
@@ -555,7 +576,7 @@
     "dist-now-rebuilt/repo/package.json": "9d2457e49b7228d1c7b0acfa4c056f1200bbdda97a430be7d7c7055a5568464b",
     "dist-now-rebuilt/repo/scripts/build.mjs": "f6214b9f34d4c07f538cc4fb8958a46355f0df64a806e66b1b2163e383e0db2e",
     "dist-now-rebuilt/repo/src/cart.js": "1eff51a0433e96741166da23ff6257338f54e2c28bef07eb612b5a2d771e5b09",
-    "dist-now-rebuilt/repo/test/run.mjs": "4270729fe8836ab428ac0d41a60b776f5d84d68bf553975fd93277f8f0fd17de",
+    "dist-now-rebuilt/repo/test/run.mjs": "588a0755f2d2d5882b688feda89adcedc8a9feed7b6fb752e774c16400508e6e",
     "dist-overwritten/patches/fix/src/cart.js": "90c86a9372d9183d0ef088263db37c821c9b4dc6b0d2a1886785d100053cd23a",
     "dist-overwritten/patches/wrong-1/dist/cart.js": "90c86a9372d9183d0ef088263db37c821c9b4dc6b0d2a1886785d100053cd23a",
     "dist-overwritten/patches/wrong-2/dist/cart.js": "647e3452363e86f68b3b5fb0363cb062112983a8f446f9ad488da10844d1863c",
@@ -563,21 +584,21 @@
     "dist-overwritten/repo/package.json": "9907acc31b9f11fa32d1eb967b209b4628a0601111f80f1bf9f54a85431ed17e",
     "dist-overwritten/repo/scripts/build.mjs": "f6214b9f34d4c07f538cc4fb8958a46355f0df64a806e66b1b2163e383e0db2e",
     "dist-overwritten/repo/src/cart.js": "1eff51a0433e96741166da23ff6257338f54e2c28bef07eb612b5a2d771e5b09",
-    "dist-overwritten/repo/test/run.mjs": "4270729fe8836ab428ac0d41a60b776f5d84d68bf553975fd93277f8f0fd17de",
+    "dist-overwritten/repo/test/run.mjs": "2cff815e8c0d075a7be56535ca3f8ef459015d051dc9e1bee6269990f3cf9174",
     "env-file-missing/patches/fix/app.env": "8d516e87864d9875c442524c2bfe5be3baa710ce889dad4040bab0a44d982058",
     "env-file-missing/patches/wrong-1/app.env.example": "5e0b9a85642c15ba81b2eb9889e68cb5c87634b5043747b87766352e0733766a",
     "env-file-missing/patches/wrong-2/config.env": "5e0b9a85642c15ba81b2eb9889e68cb5c87634b5043747b87766352e0733766a",
     "env-file-missing/repo/app.env.example": "8d516e87864d9875c442524c2bfe5be3baa710ce889dad4040bab0a44d982058",
     "env-file-missing/repo/package.json": "0105394116a8aed102e06fdb2a746ba4c46a37682cf5a3d93189a86063fd37ef",
     "env-file-missing/repo/src/client.js": "4cc571c918a4d8b2762abc10c619b06453ee1d619ca03ad6d1082ccecccf8537",
-    "env-file-missing/repo/test/run.mjs": "b32185163d4926e4d208ba239b2aec385a9ee7a8e91439e59fca02e0e4f79b84",
+    "env-file-missing/repo/test/run.mjs": "9b28bdc24f1a9c4f1331a6f2d12b3858f9b51435827cecb12d4130a00bfc1479",
     "env-name-typo/patches/fix/src/db.js": "ac145e14266f534230bd3c5d386022f572a46bdd5e21300ab95ebd2bde80b6c3",
     "env-name-typo/patches/wrong-1/config.env": "4e661facd7d99432c1f110e93bde08d14d0304eab0695958c739bebf08380e02",
     "env-name-typo/patches/wrong-2/config.env": "69eb843ab1b1c627e6a38dae46c2afbef55a3ba221631ed0e5f6f2ecf7f89121",
     "env-name-typo/repo/config.env": "c1f4861dfebd3697b2bc1820849a50237cac612a9d63dc977ab1e90254a6b2b6",
     "env-name-typo/repo/package.json": "d6414697162e67b64a2aca6cd9d114cf0cf11008c4abdf4c7fcbefc09f039149",
     "env-name-typo/repo/src/db.js": "f9319808b80b4577ed3b2a3950b0efbcf960fcb11d012f2bcda1daee89e645e7",
-    "env-name-typo/repo/test/run.mjs": "b94400aef70466e5bcd6f9d299798fc2964335d64a54f6f760e337375ed15044",
+    "env-name-typo/repo/test/run.mjs": "66d801df2cc9eea348dead46d24b4ca488ac6e3ebbb4d028836604f79e91e44f",
     "generated-source/patches/fix/schema.json": "39cac5628298c3735ad6f3b2c5a3f7e1d0a81167e42c8c2a121f957797a47d1c",
     "generated-source/patches/wrong-1/src/schema.generated.js": "71e80bf7cc25f4471b57ec9beeb627043cc7ffc097a880b5d3919f0fab07e068",
     "generated-source/patches/wrong-2/src/schema.generated.js": "27cac3839c3dc3607cb14cf3c95a1b8f38b80264a2e1b3810dd03b8f58e50495",
@@ -586,25 +607,26 @@
     "generated-source/repo/scripts/codegen.mjs": "a6a2817bc3ecfebf2f6c57d7bd1f86965b7fcc212be5edfefd9d3a8026c89b24",
     "generated-source/repo/src/schema.generated.js": "6ef688fcc87dc3271479f1966175b17ca8a3ed3db1231813580aa96a9dc25eb7",
     "generated-source/repo/src/validate.js": "977d4ab521adf11e3ae76fa134142dfa46ea0c2e57ddd6b0f950b580a30fa5d3",
-    "generated-source/repo/test/run.mjs": "51d74ad9e01947bee631e64b807c247122da0de29f3d05047e96f422d1d82d03",
+    "generated-source/repo/test/run.mjs": "cfc6a76bfa50f3e0150af74f5df4e6d2f18cf0370b48c78727dc11a392b026e1",
     "path-with-space/patches/fix/package.json": "6e1d03d5be7e409e1b37fb49cea099f8d3c585f7b08fbc92ed6edbf0eafa9e32",
     "path-with-space/patches/wrong-1/scripts/run-all.mjs": "7bdab4a2647fd17e95318ad6b290618c9461c31a533fce48494c6e2b4548ad70",
     "path-with-space/patches/wrong-2/package.json": "6d2416fd110dfd36feedb5921ddeac38d339448715b183c8a99a1721c6c08c26",
     "path-with-space/repo/package.json": "e0157c7e6206044c7b7d0f99bc49cfac014c6c08597fcf3e0c064c5af8bc9310",
     "path-with-space/repo/scripts/run all.mjs": "7bdab4a2647fd17e95318ad6b290618c9461c31a533fce48494c6e2b4548ad70",
     "path-with-space/repo/src/check.js": "6a08903b71aa7ab4af5b6cb5b172d642478db630f485bd55dfdea916e85e6314",
-    "path-with-space/repo/test/run.mjs": "4845ea2aba39de36704c3fcc9e04f81e0f03a19eaf2cfa4a30f183338550fb45",
+    "path-with-space/repo/test/run.mjs": "b3ec912107f78c1a75b29197607aa6b55357b877ae96fc189ee8eb5a32fd7b6d",
+    "rate-key-case/patches/fix/rates.json": "65c2cdc1f8d086d5c320d847224645413a6528668196009b4a5daf1da3241731",
     "rate-key-case/patches/fix/src/price.js": "6789cf604060a507e97eaf40cdf048fc890b6011262d798b2a5417e608b88028",
-    "rate-key-case/patches/wrong-1/rates.json": "9e08690e44ce9450b110c2297b74c142dcba947562832e51bf906f3249fe7cd7",
-    "rate-key-case/patches/wrong-2/rates.json": "46ce3617ff4c976718bcb4c8f5b44b167836d58472d5143939a33d3d1ce545c4",
+    "rate-key-case/patches/wrong-1/rates.json": "ded9a562fd59c6145038c8c40d04291882e27e29b71bb534b83350316f087f7f",
+    "rate-key-case/patches/wrong-2/rates.json": "aaf6a06e3efc0ab049840dc96a7abb0976a74a593dec58bf6e9dcd01ec1b5c40",
     "rate-key-case/repo/package.json": "9cb18974dcf67028b072adf1b3172bc435f0768bb9d3b592d6ae514ef686cdeb",
     "rate-key-case/repo/rates.json": "65c2cdc1f8d086d5c320d847224645413a6528668196009b4a5daf1da3241731",
     "rate-key-case/repo/src/price.js": "744f6cf1140860d95a370f8718657c8c5c84f7dd8dc8cb580c5fcf674508a4bd",
-    "rate-key-case/repo/test/run.mjs": "d0f315e53bb6f4f3d0f04b0ba5e283777e8b70305e096df26424354e2c376f51",
+    "rate-key-case/repo/test/run.mjs": "7d407ef2bdea872329ace7cb14a70f074dee2e3ff5e26d5eeb6a7c903179296d",
     "script-moved/history-repo/data/items.json": "67358ed8fd6cd4d8aac33acaa376b58237beb891c3e984e505d3e57e43f7d320",
     "script-moved/history-repo/package.json": "2aab63e57dfdde4a76ea7e3d2d313010e52e384b332ccfb67ac5abd977e046d7",
     "script-moved/history-repo/scripts/a.mjs": "f56e77263480dab893e8bc0661965c63e91508fb712a6ee25fc43869cadad4a4",
-    "script-moved/history-repo/test/run.mjs": "d3559cbbb4a002dfd922a54945e03acc170efbae43aef38af073c7b0b7537646",
+    "script-moved/history-repo/test/run.mjs": "f7319b286e4645fd753ad2173f4f51ef0ad54c26f63f6f7765a9e9ca1921892c",
     "script-moved/patches/current-fix/scripts/b.mjs": "4ba8cf5e865836efea3221abbbfef1bca4ba24b694cd8e92894b6dd1bf8210cb",
     "script-moved/patches/fix/scripts/a.mjs": "4ba8cf5e865836efea3221abbbfef1bca4ba24b694cd8e92894b6dd1bf8210cb",
     "script-moved/patches/wrong-1/data/items.json": "10e4a4cd40ca26454cd4123246c155ba95be48963a7d41b715cfd5d3e73e9bc5",
@@ -613,11 +635,11 @@
     "script-moved/repo/package.json": "0a87a4782b59d09b3811662fd720c0c7e767b7af7e58c51c0a2f31a897b4a85f",
     "script-moved/repo/scripts/a.mjs": "f56e77263480dab893e8bc0661965c63e91508fb712a6ee25fc43869cadad4a4",
     "script-moved/repo/scripts/b.mjs": "f56e77263480dab893e8bc0661965c63e91508fb712a6ee25fc43869cadad4a4",
-    "script-moved/repo/test/run.mjs": "d3559cbbb4a002dfd922a54945e03acc170efbae43aef38af073c7b0b7537646",
+    "script-moved/repo/test/run.mjs": "f7319b286e4645fd753ad2173f4f51ef0ad54c26f63f6f7765a9e9ca1921892c",
     "smoke/patches/fix/src/probe.js": "572ef376f7c4cbf7573222018ddd7ab292962f1fba6616ad2a7295ae5a361c62",
     "smoke/repo/package.json": "644df8ad511b00b81883c467a1e927c285724a3d8c27df8b935314ca28b6d6d4",
     "smoke/repo/src/probe.js": "516672c7ce6ad2f10e52a41e68a801ec78805dfe60f7162572e4da1538cdcb9f",
-    "smoke/repo/test/run.mjs": "0c2661a09448b1f5e16361d1ff7891cc02ada18f7ff81d05d706958183a419f0",
+    "smoke/repo/test/run.mjs": "8ee1930d20f862f30a219b36b8683f2cba951c4a307c715f695a9350e3477882",
     "stale-cache/patches/fix/.cache/rows.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
     "stale-cache/patches/wrong-1/data/source.csv": "88d09ee0f4a9a549e522c5e4f5e2c6a3ed8278a8b50e35dfe75de3f606e93465",
     "stale-cache/patches/wrong-2/data/source.csv": "f71c53c817f21c2f51746b6259f78de35c0bb87ca0dddeb9c5722f221c0ade31",
@@ -626,8 +648,8 @@
     "stale-cache/repo/package.json": "199eb2c680c42ff15259924ed6f5dbfa9d9210189dfc3ecd6d2d59951e733b2a",
     "stale-cache/repo/scripts/clean.mjs": "ac6ba3601f89267af5abe380502157aaf6d8c96b8f5a9542d4e4201e4c1e593f",
     "stale-cache/repo/src/load.js": "227a340f409f2ca342a678a82a7d9bb7d356285815dfe3d17398b8a041a1f088",
-    "stale-cache/repo/test/run.mjs": "fcecfc5f4905e331b1594200698262118a611e8644bafca2b7e85532368a3130",
-    "tasks.json": "e406e8ed37d711cc8595a9794dbb252fdf6661c41bb12412d43351b900e8b0db"
+    "stale-cache/repo/test/run.mjs": "5a8e431c624cdde9539ac4d7c79b01dfd827de0eff5b8428b2044d25c358b50b",
+    "tasks.json": "3fc5b55c62738049c8e916ffc6c9e99d0a7a78e2283b03bd661aa76b25ea0001"
   },
-  "taskSetSha256": "9a4acfd30ea8f6d18690e40836f82691213be446efb70f4b1236050b21e4bd8a"
+  "taskSetSha256": "3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a"
 }

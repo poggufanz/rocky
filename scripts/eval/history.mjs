@@ -27,7 +27,6 @@ import {
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const TASKS_DIR = join(EVAL_DIR, "tasks");
 const CLAUDE_MD_DIR = join(EVAL_DIR, "fixtures", "claude-md");
-const GIT_CONFIG_ENV_RE = /^GIT_CONFIG_(?:PARAMETERS|COUNT|GLOBAL|SYSTEM|(?:KEY|VALUE)_\d+)$/i;
 
 // Keep consecutive failed command steps strictly beyond the 5 s card-join
 // post-window so each failure matches its own command step unambiguously.
@@ -178,15 +177,30 @@ export function renderClaudeMd(arm) {
   throw new Error(`Invalid arm for CLAUDE.md: ${String(arm)}`);
 }
 
-function buildHistoryRockyEnv(sandbox) {
-  const env = { ...sandbox.env };
-  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+/**
+ * Build the environment for Rocky replay launches from `buildToolEnv` and restore
+ * only the sandbox keys the Rocky shim requires.
+ * @param {any} sandbox
+ * @param {NodeJS.Platform} [platform]
+ * @returns {Record<string, string>}
+ */
+export function buildHistoryRockyEnv(sandbox, platform = process.platform) {
+  const env = buildToolEnv(sandbox.env, platform, { home: sandbox.home });
+  env.HOME = sandbox.home;
+  env.USERPROFILE = sandbox.home;
+  env.CLAUDE_CONFIG_DIR = sandbox.configDir;
+  env.ROCKY_HOME = sandbox.rockyHome;
+  const sandboxPath = getPathValue(sandbox.env);
   for (const key of Object.keys(env)) {
-    if (key.toUpperCase() === "FORCE_COLOR" || GIT_CONFIG_ENV_RE.test(key)) {
-      delete env[key];
-    }
+    if (key.toUpperCase() === "PATH") delete env[key];
   }
-  env.npm_config_color = "false";
+  env.PATH = sandboxPath;
+  if (typeof sandbox.env?.ROCKY_TEST_SEAMS === "string") {
+    env.ROCKY_TEST_SEAMS = sandbox.env.ROCKY_TEST_SEAMS;
+  }
+  if (typeof sandbox.env?.ROCKY_ATTEMPT_ARM === "string") {
+    env.ROCKY_ATTEMPT_ARM = sandbox.env.ROCKY_ATTEMPT_ARM;
+  }
   // History replay populates memory without triggering advisory cooldown or
   // writing pre-run rows to advisories.jsonl.
   env.ROCKY_ATTEMPT_ADVISORY = "off";

@@ -5,4 +5,4 @@ if (text !== "hello\n") {
   process.stderr.write("AssertionError: sample.txt still has trailing spaces\n");
   process.exit(1);
 }
-process.stdout.write("ok\n");
+process.stdout.write("eval-accept: cli-flag-renamed ok\n");

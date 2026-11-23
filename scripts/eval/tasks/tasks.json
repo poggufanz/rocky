@@ -9,6 +9,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: DATABASE_URL is not set",
+    "acceptLine": "eval-accept: env-name-typo ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -25,6 +26,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: port must be a number, got \"80a\"",
+    "acceptLine": "eval-accept: config-override ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -41,6 +43,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "TypeError: total is not a function",
+    "acceptLine": "eval-accept: dist-overwritten ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -57,6 +60,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: unknown field \"email\"",
+    "acceptLine": "eval-accept: generated-source ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -73,6 +77,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "SyntaxError: Named export 'parse' not found",
+    "acceptLine": "eval-accept: cjs-named-export ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -89,6 +94,7 @@
       "aliases": ["^npm (run )?test\\b", "^npm run format\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: unknown option '--fix'",
+    "acceptLine": "eval-accept: cli-flag-renamed ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -105,6 +111,7 @@
       "aliases": ["^npm (run )?test\\b", "^node --env-file-if-exists=app\\.env test/run\\.mjs\\b"]
     },
     "trapLine": "Error: API_TOKEN is required",
+    "acceptLine": "eval-accept: env-file-missing ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -121,6 +128,7 @@
       "aliases": ["^npm (run )?test\\b", "^node .*scripts/run"]
     },
     "trapLine": "Error: Cannot find module '<path>'",
+    "acceptLine": "eval-accept: path-with-space ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -137,6 +145,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "AssertionError: expected 3 rows, got 2",
+    "acceptLine": "eval-accept: stale-cache ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -153,6 +162,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "AssertionError: expected total 110, got 100",
+    "acceptLine": "eval-accept: rate-key-case ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -169,6 +179,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: DATABASE_URL is not set",
+    "acceptLine": "eval-accept: env-name-typo ok",
     "history": null,
     "protected": ["test/"]
   },
@@ -182,6 +193,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: port must be a number, got \"80a\"",
+    "acceptLine": "eval-accept: config-override ok",
     "history": null,
     "protected": ["test/"]
   },
@@ -195,6 +207,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "TypeError: total is not a function",
+    "acceptLine": "eval-accept: dist-overwritten ok",
     "history": null,
     "protected": ["test/"]
   },
@@ -208,6 +221,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: unknown field \"email\"",
+    "acceptLine": "eval-accept: generated-source ok",
     "history": null,
     "protected": ["test/"]
   },
@@ -221,6 +235,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "SyntaxError: Named export 'parse' not found",
+    "acceptLine": "eval-accept: cjs-named-export ok",
     "history": null,
     "protected": ["test/"]
   },
@@ -234,6 +249,7 @@
       "aliases": ["^npm (run )?test\\b", "^npm run format\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: unknown option '--fix'",
+    "acceptLine": "eval-accept: cli-flag-renamed ok",
     "history": null,
     "protected": ["test/"]
   },
@@ -247,6 +263,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: port must be a number, got \"80a\"",
+    "acceptLine": "eval-accept: config-override-moved ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -263,6 +280,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "TypeError: total is not a function",
+    "acceptLine": "eval-accept: dist-now-rebuilt ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -279,6 +297,7 @@
       "aliases": ["^npm (run )?test\\b", "^node scripts/[ab]\\.mjs\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: missing input file",
+    "acceptLine": "eval-accept: script-moved ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -295,6 +314,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "AssertionError: expected 3 rows, got 2",
+    "acceptLine": "eval-accept: cache-moved ok",
     "history": {
       "wrong": ["wrong-1", "wrong-2"],
       "fix": "fix"
@@ -311,6 +331,7 @@
       "aliases": ["^npm (run )?test\\b", "^node test/run\\.mjs\\b"]
     },
     "trapLine": "Error: capture-probe",
+    "acceptLine": "eval-accept: smoke ok",
     "history": null,
     "protected": ["test/"]
   }

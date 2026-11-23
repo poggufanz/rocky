@@ -5,4 +5,4 @@ if (parts.length !== 2 || parts[0] !== "a" || parts[1] !== "b") {
   process.stderr.write("AssertionError: unexpected parse result\n");
   process.exit(1);
 }
-process.stdout.write("ok\n");
+process.stdout.write("eval-accept: cjs-named-export ok\n");

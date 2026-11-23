@@ -6,7 +6,7 @@ try {
     process.stderr.write("Error: unexpected probe result\n");
     process.exit(1);
   }
-  process.stdout.write("ok\n");
+  process.stdout.write("eval-accept: smoke ok\n");
 } catch (err) {
   process.stderr.write(`${err.name}: ${err.message}\n`);
   process.exit(1);

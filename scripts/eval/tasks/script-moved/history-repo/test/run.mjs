@@ -5,4 +5,4 @@ if (count !== "3") {
   process.stderr.write(`AssertionError: expected count 3, got ${count}\n`);
   process.exit(1);
 }
-process.stdout.write("ok\n");
+process.stdout.write("eval-accept: script-moved ok\n");

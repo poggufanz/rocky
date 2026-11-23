@@ -6,7 +6,7 @@ try {
     process.stderr.write(`AssertionError: expected 25, got ${sum}\n`);
     process.exit(1);
   }
-  process.stdout.write("ok\n");
+  process.stdout.write("eval-accept: dist-now-rebuilt ok\n");
 } catch (err) {
   process.stderr.write(`${err.name}: ${err.message}\n`);
   process.exit(1);

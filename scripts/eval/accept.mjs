@@ -1,11 +1,19 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildCommandInvocation,
-  buildToolEnv,
   resolveExecutableOnPath,
   stripRockyFromPath,
 } from "./sandbox.mjs";
@@ -14,22 +22,46 @@ const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const TASKS_DIR = join(EVAL_DIR, "tasks");
 const MANIFEST_PATH = join(TASKS_DIR, "manifest.json");
 const ACCEPT_TIMEOUT_MS = 120_000;
+const WIN32_ALLOWLIST_KEYS = [
+  "SystemRoot",
+  "windir",
+  "ComSpec",
+  "PATHEXT",
+  "SystemDrive",
+];
 
 function sha256File(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
+function findEnvKey(env, targetName) {
+  if (!env) return undefined;
+  if (Object.prototype.hasOwnProperty.call(env, targetName) && env[targetName] !== undefined) {
+    return targetName;
+  }
+  const upper = targetName.toUpperCase();
+  return Object.keys(env).find((key) => key.toUpperCase() === upper && env[key] !== undefined);
+}
+
 function getPathValue(env) {
-  if (typeof env.PATH === "string") return env.PATH;
-  const key = Object.keys(env).find((name) => name.toUpperCase() === "PATH");
+  const key = findEnvKey(env, "PATH");
   return key === undefined ? "" : (env[key] ?? "");
 }
 
-function setSinglePath(env, value) {
-  for (const key of Object.keys(env)) {
-    if (key.toUpperCase() === "PATH") delete env[key];
+function removeDirWithRetry(target) {
+  let lastError;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      rmSync(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      const code = error && typeof error === "object" ? error.code : undefined;
+      if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY") throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75 * (attempt + 1));
+    }
   }
-  env.PATH = value;
+  if (existsSync(target) && lastError) throw lastError;
 }
 
 function resolveNpmExecutable(env, platform = process.platform) {
@@ -109,19 +141,71 @@ function verifyProtectedFiles(task, finalDir, manifest) {
 }
 
 /**
- * Build the scrubbed environment for running a task target command cleanly.
- * Drops every `ROCKY_*` variable, agent tokens, and git config overrides.
+ * Create the isolated subdirectories expected inside an acceptance temp root.
+ * @param {string} rootDir
+ */
+export function prepareAcceptTempDir(rootDir) {
+  for (const name of ["tmp", "home", "appdata", "localappdata", "npm-cache"]) {
+    mkdirSync(join(rootDir, name), { recursive: true });
+  }
+}
+
+/**
+ * Check whether stdout contains an exact line matching `acceptLine`.
+ * @param {string} stdout
+ * @param {string | undefined} acceptLine
+ * @returns {boolean}
+ */
+export function stdoutHasAcceptLine(stdout, acceptLine) {
+  if (typeof acceptLine !== "string" || acceptLine.length === 0) return false;
+  return String(stdout ?? "")
+    .split(/\r?\n/)
+    .some((line) => line === acceptLine);
+}
+
+/**
+ * Build a minimal allowlisted environment for running a task target command cleanly.
+ * Copies only `PATH` (case-preserving key, Rocky shims stripped) and on win32
+ * `SystemRoot`, `windir`, `ComSpec`, `PATHEXT`, and `SystemDrive`.
+ * Points `TEMP`/`TMP`, `HOME`/`USERPROFILE`, `APPDATA`/`LOCALAPPDATA`, and
+ * `NPM_CONFIG_CACHE` into `tempDir`. Nothing else crosses from `baseEnv`.
  * @param {Record<string, string | undefined>} [baseEnv]
  * @param {NodeJS.Platform} [platform]
+ * @param {string} [tempDir]
  * @returns {Record<string, string>}
  */
-export function buildAcceptEnv(baseEnv = process.env, platform = process.platform) {
-  const env = buildToolEnv(baseEnv, platform);
-  for (const key of Object.keys(env)) {
-    if (/^ROCKY_/i.test(key)) delete env[key];
+export function buildAcceptEnv(baseEnv = process.env, platform = process.platform, tempDir = tmpdir()) {
+  const source = baseEnv ?? {};
+  const pathApi = platform === "win32" ? win32 : posix;
+  /** @type {Record<string, string>} */
+  const out = {};
+
+  const pathKey = findEnvKey(source, "PATH") ?? "PATH";
+  const rawPath = Object.prototype.hasOwnProperty.call(source, pathKey) ? (source[pathKey] ?? "") : "";
+  out[pathKey] = stripRockyFromPath(rawPath, platform);
+
+  if (platform === "win32") {
+    for (const name of WIN32_ALLOWLIST_KEYS) {
+      const existingKey = findEnvKey(source, name);
+      if (existingKey !== undefined && typeof source[existingKey] === "string") {
+        out[existingKey] = source[existingKey];
+      }
+    }
   }
-  setSinglePath(env, stripRockyFromPath(getPathValue(env), platform));
-  return env;
+
+  const tmpSubdir = pathApi.join(tempDir, "tmp");
+  const homeSubdir = pathApi.join(tempDir, "home");
+  out.TEMP = tmpSubdir;
+  out.TMP = tmpSubdir;
+  out.HOME = homeSubdir;
+  out.USERPROFILE = homeSubdir;
+  out.APPDATA = pathApi.join(tempDir, "appdata");
+  out.LOCALAPPDATA = pathApi.join(tempDir, "localappdata");
+  out.NPM_CONFIG_CACHE = pathApi.join(tempDir, "npm-cache");
+  out.npm_config_color = "false";
+  out.npm_config_loglevel = "error";
+
+  return out;
 }
 
 /**
@@ -151,7 +235,10 @@ export function runTargetCommand(command, cwd, env, timeoutMs = ACCEPT_TIMEOUT_M
     if (!executable) throw new Error(`Target command executable not found: ${program}`);
   }
 
-  const comSpec = env.ComSpec ?? env.COMSPEC ?? process.env.ComSpec ?? process.env.COMSPEC;
+  const comSpecKey = findEnvKey(env, "ComSpec");
+  const comSpec = (comSpecKey !== undefined ? env[comSpecKey] : undefined)
+    ?? process.env.ComSpec
+    ?? process.env.COMSPEC;
   const invocation = buildCommandInvocation(executable, args, process.platform, comSpec);
   const result = spawnSync(invocation.file, invocation.args, {
     cwd,
@@ -189,7 +276,8 @@ export function runTargetCommand(command, cwd, env, timeoutMs = ACCEPT_TIMEOUT_M
 /**
  * Grade a candidate repository directory for a task:
  * 1. Every protected file must match its manifest sha256.
- * 2. The target command must exit 0 within 120 s under a scrubbed env with no `ROCKY_*`.
+ * 2. The target command must exit 0 within 120 s under a minimal allowlisted env
+ *    and print the task's exact `acceptLine` to stdout.
  * @param {any} task
  * @param {string} finalDir
  * @param {{ manifest?: any, timeoutMs?: number }} [options]
@@ -202,8 +290,16 @@ export async function accept(task, finalDir, options = {}) {
     return { solved: false, reason: protectedCheck.reason };
   }
 
-  const env = buildAcceptEnv(process.env, process.platform);
-  const res = runTargetCommand(task.target.command, finalDir, env, options.timeoutMs ?? ACCEPT_TIMEOUT_MS);
+  const acceptTempDir = mkdtempSync(join(tmpdir(), "rocky-eval-accept-env-"));
+  let res;
+  try {
+    prepareAcceptTempDir(acceptTempDir);
+    const env = buildAcceptEnv(process.env, process.platform, acceptTempDir);
+    res = runTargetCommand(task.target.command, finalDir, env, options.timeoutMs ?? ACCEPT_TIMEOUT_MS);
+  } finally {
+    removeDirWithRetry(acceptTempDir);
+  }
+
   if (res.timedOut) {
     return { solved: false, reason: "timeout" };
   }
@@ -212,6 +308,11 @@ export async function accept(task, finalDir, options = {}) {
   }
   if (res.status !== 0) {
     return { solved: false, reason: `exit ${res.status}` };
+  }
+  // ponytail: an agent that copies the acceptLine into its own script without
+  // running the protected test would still pass; acceptable for non-adversarial agents.
+  if (!stdoutHasAcceptLine(res.stdout, task.acceptLine)) {
+    return { solved: false, reason: "no-accept-line" };
   }
   return { solved: true, reason: "ok" };
 }

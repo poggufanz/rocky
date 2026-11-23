@@ -4,4 +4,4 @@ if (!ready()) {
   process.stderr.write("Error: check returned false\n");
   process.exit(1);
 }
-process.stdout.write("ok\n");
+process.stdout.write("eval-accept: path-with-space ok\n");

@@ -5,4 +5,4 @@ if (rows.length !== 3) {
   process.stderr.write(`AssertionError: expected 3 rows, got ${rows.length}\n`);
   process.exit(1);
 }
-process.stdout.write("ok\n");
+process.stdout.write("eval-accept: stale-cache ok\n");
