@@ -28,22 +28,29 @@ export const POSITIVE_CONTROL_SOURCE =
 export const RUN_BOUNDARY_RULE =
   "Run-1 per-task results serve only for veto and positive control. If the note template, selection logic, or attempts read model is changed after run 1 using run-1 transcripts, a run-2 `after − before` claim requires at least 10 new trap tasks frozen before that change; without a new frozen trap set, that run-2 comparison is descriptive only.";
 
+export const PREREGISTERED_LABELS = new Set(["run1", "run2"]);
+
+export function isPreregisteredLabel(label) {
+  return typeof label === "string" && PREREGISTERED_LABELS.has(label.trim().toLowerCase());
+}
+
 const USAGE = [
   "Usage: node scripts/eval/report.mjs --out <dir> --label <label> --dest <md path>",
   "         [--seed <n>] [--resamples <n>]",
   "",
   "Options:",
-  "  --out <dir>        Batch output directory containing metrics.json and batch.json",
-  "  --label <label>    Report label (for example: run1, run2)",
+  "  --out <dir>        Batch output directory containing metrics.json and batch.json (both required)",
+  "  --label <label>    Report label (for example: run1, run2, smoke)",
   "  --dest <path>      Destination markdown file path",
-  "  --seed <n>         Override bootstrap PRNG seed (default: batch.json seed)",
-  `  --resamples <n>    Bootstrap resamples (default: ${DEFAULT_BOOTSTRAP_RESAMPLES})`,
+  "  --seed <n>         Override bootstrap PRNG seed (disallowed for run1 and run2)",
+  `  --resamples <n>    Override bootstrap resamples (disallowed for run1 and run2; default: ${DEFAULT_BOOTSTRAP_RESAMPLES})`,
   "  -h, --help         Show this help message and exit",
 ].join("\n");
 
-function readJsonOrNull(filePath) {
-  if (!filePath || !existsSync(filePath)) return null;
-  return JSON.parse(readFileSync(filePath, "utf8"));
+function createExitError(message, exitCode = 2) {
+  const err = new Error(message);
+  /** @type {any} */ (err).exitCode = exitCode;
+  return err;
 }
 
 function writeTextAtomic(targetPath, content) {
@@ -202,7 +209,7 @@ export function renderReport({
     ["Evaluator commit", prov.evaluatorCommit ? `\`${prov.evaluatorCommit}\`` : "n/a"],
     ["Task set sha256", prov.taskSetSha256 ? `\`${prov.taskSetSha256}\`` : "n/a"],
     ["CLAUDE.md sha256", claudeMdHashes],
-    ["Seed", String(seed)],
+    ["Seed", prov.seed !== undefined ? String(prov.seed) : "n/a"],
     ["Blocks (k)", prov.k !== undefined ? String(prov.k) : "n/a"],
     ["Concurrency", prov.concurrency !== undefined ? String(prov.concurrency) : "n/a"],
     ["Auth mode", prov.auth ?? "n/a"],
@@ -281,11 +288,21 @@ export function renderReport({
   lines.push(`Positive-control source: ${POSITIVE_CONTROL_SOURCE}.`);
   lines.push("");
   const nd = v.notDelivered;
-  const ndRateText = nd.rate === null ? "n/a (0 checked after trap runs)" : `${nd.count}/${nd.total} (${fmtPercent(nd.rate)})`;
+  const ndRateText = nd.rate === null
+    ? "n/a (0 after trap runs)"
+    : `${nd.count}/${nd.total} (${fmtPercent(nd.rate)})`;
+  const ndValidText = nd.validTotal > 0
+    ? `${nd.validCount}/${nd.validTotal} (${fmtPercent(nd.validRate)})`
+    : "n/a (0 valid after trap runs)";
   const ndPassText = nd.rate === null
     ? "n/a"
     : (nd.count * 5 > nd.total ? "FAIL (> 20% threshold; batch invalid)" : "PASS (<= 20% threshold)");
-  lines.push(`- \`not_delivered\` over \`after\` trap runs: ${ndRateText}`);
+  lines.push(
+    `- \`not_delivered\` over all \`after\` trap runs (governs batch validity; includes ${nd.invalidTotal} invalid run(s), ${nd.invalidCount} undelivered): ${ndRateText}`,
+  );
+  lines.push(
+    `- \`not_delivered\` over valid \`after\` trap runs only (metric-eligible subset): ${ndValidText}`,
+  );
   lines.push(`- Positive-control status: ${ndPassText}`);
   lines.push("");
 
@@ -363,8 +380,8 @@ export function renderReport({
     "Paired per-task trap comparisons on `repeatFailures` (exact two-sided sign-flip test over non-zero differences; two-stage 90% bootstrap CI over all paired trap tasks).",
   );
   lines.push("");
-  lines.push("| Comparison | n (eff) | Paired | Mean diff | p | 90% CI | Direction | solvedOk | Claimed |");
-  lines.push("|---|---:|---:|---:|---:|---|---|---|---|");
+  lines.push("| Comparison | n (eff) | Paired | Mean diff | p | 90% CI | Direction | solvedOk | Trigger | Claimed | Note |");
+  lines.push("|---|---:|---:|---:|---:|---|---|---|---|---|---|");
   const comparisonRows = [
     ["afterVsNone (after - none)", v.claims.afterVsNone],
     ["afterVsBefore (after - before)", v.claims.afterVsBefore],
@@ -372,7 +389,7 @@ export function renderReport({
   ];
   for (const [name, c] of comparisonRows) {
     lines.push(
-      `| ${escapeCell(name)} | ${c.n} | ${c.nPaired} | ${fmtFloat(c.meanDiff, 3)} | ${fmtFloat(c.p, 4)} | ${fmtCi(c.ci)} | ${escapeCell(c.direction)} | ${c.solvedOk ? "yes" : "no"} | ${c.claimed ? "yes" : "no"} |`,
+      `| ${escapeCell(name)} | ${c.n} | ${c.nPaired} | ${fmtFloat(c.meanDiff, 3)} | ${fmtFloat(c.p, 4)} | ${fmtCi(c.ci)} | ${escapeCell(c.direction)} | ${c.solvedOk ? "yes" : "no"} | ${c.trigger ? "yes" : "no"} | ${c.authorized ? "yes" : "no"} | ${escapeCell(c.authorizationNote)} |`,
     );
   }
   lines.push("");
@@ -427,29 +444,60 @@ export function renderReport({
  *   seed?: number,
  *   resamples?: number,
  *   level?: number,
+ *   run1InformedChange?: boolean,
+ *   heldOutTrapTasks?: number,
  * }} options
  */
 export function generateReport(outDir, options) {
   const resolvedOut = resolve(outDir);
   const metricsPath = join(resolvedOut, "metrics.json");
   if (!existsSync(metricsPath)) {
-    throw new Error(`metrics.json not found in ${resolvedOut}`);
+    throw createExitError(`metrics.json not found in ${resolvedOut}`, 2);
+  }
+  const batchPath = join(resolvedOut, "batch.json");
+  if (!existsSync(batchPath)) {
+    throw createExitError(`batch.json not found in ${resolvedOut}`, 2);
   }
   const metrics = JSON.parse(readFileSync(metricsPath, "utf8"));
-  const provenance = readJsonOrNull(join(resolvedOut, "batch.json"));
+  const provenance = JSON.parse(readFileSync(batchPath, "utf8"));
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
+    throw createExitError(`batch.json in ${resolvedOut} must be a JSON object`, 2);
+  }
   const manifest = options.manifest ?? JSON.parse(readFileSync(DEFAULT_MANIFEST_PATH, "utf8"));
 
-  const seed = typeof options.seed === "number"
-    ? options.seed
-    : (typeof provenance?.seed === "number" ? provenance.seed : DEFAULT_SEED);
-  const resamples = options.resamples ?? DEFAULT_BOOTSTRAP_RESAMPLES;
+  const preregistered = isPreregisteredLabel(options.label);
+  if (preregistered) {
+    if (options.seed !== undefined) {
+      throw createExitError(`--seed override is not allowed for preregistered label "${options.label}"`, 2);
+    }
+    if (options.resamples !== undefined) {
+      throw createExitError(`--resamples override is not allowed for preregistered label "${options.label}"`, 2);
+    }
+    if (typeof provenance.seed !== "number" || !Number.isFinite(provenance.seed)) {
+      throw createExitError(`batch.json in ${resolvedOut} must contain a finite numeric seed for "${options.label}"`, 2);
+    }
+  }
+
+  const seed = preregistered
+    ? provenance.seed
+    : (typeof options.seed === "number"
+      ? options.seed
+      : (typeof provenance.seed === "number" && Number.isFinite(provenance.seed)
+        ? provenance.seed
+        : DEFAULT_SEED));
+  const resamples = preregistered
+    ? DEFAULT_BOOTSTRAP_RESAMPLES
+    : (options.resamples ?? DEFAULT_BOOTSTRAP_RESAMPLES);
   const level = options.level ?? DEFAULT_BOOTSTRAP_LEVEL;
-  const ownerCheck = provenance?.ownerCheck ?? null;
+  const ownerCheck = provenance.ownerCheck ?? null;
 
   const v = verdict({
     runs: metrics,
     tasks: manifest.tasks,
     provenance,
+    label: options.label,
+    run1InformedChange: options.run1InformedChange ?? provenance.run1InformedChange,
+    heldOutTrapTasks: options.heldOutTrapTasks ?? provenance.heldOutTrapTasks,
     ownerCheck,
     seed,
     resamples,
@@ -547,12 +595,30 @@ function main() {
   if (!opts.label) usageError("--label <label> is required");
   if (!opts.dest) usageError("--dest <md path> is required");
 
-  const { destPath, verdict: v } = generateReport(opts.out, {
-    label: opts.label,
-    dest: opts.dest,
-    seed: opts.seed,
-    resamples: opts.resamples,
-  });
+  if (isPreregisteredLabel(opts.label)) {
+    if (opts.seed !== undefined) {
+      usageError(`--seed override is not allowed for preregistered label "${opts.label}"`);
+    }
+    if (opts.resamples !== undefined) {
+      usageError(`--resamples override is not allowed for preregistered label "${opts.label}"`);
+    }
+  }
+
+  let result;
+  try {
+    result = generateReport(opts.out, {
+      label: opts.label,
+      dest: opts.dest,
+      seed: opts.seed,
+      resamples: opts.resamples,
+    });
+  } catch (err) {
+    if (err && typeof err === "object" && /** @type {any} */ (err).exitCode === 2) {
+      usageError(err.message);
+    }
+    throw err;
+  }
+  const { destPath, verdict: v } = result;
   process.stdout.write(
     `wrote ${destPath} (batchValid=${v.batchValid} vetoed=${v.veto.vetoed})\n`,
   );

@@ -180,17 +180,21 @@ export function signFlipP(diffs) {
   }
   if (nEffective > MAX_EXACT_SIGN_FLIP_N) {
     throw new Error(
-      `signFlipP exact enumeration supports at most ${MAX_EXACT_SIGN_FLIP_N} non-zero diffs, got ${nEffective}`,
+      `signFlipP exact enumeration supports at most ${MAX_EXACT_SIGN_FLIP_N} non-zero diffs (2^${MAX_EXACT_SIGN_FLIP_N} exact enumeration is the feasible bound; the frozen set has 10 trap tasks), got ${nEffective}`,
     );
   }
 
   let observed = 0;
-  let sumAbs = 0;
+  let minAbs = Number.POSITIVE_INFINITY;
   for (const v of nonZero) {
     observed += v;
-    sumAbs += Math.abs(v);
+    const absV = Math.abs(v);
+    if (absV < minAbs) {
+      minAbs = absV;
+    }
   }
-  const threshold = Math.abs(observed) - sumAbs * 1e-12;
+  const tol = 1e-9 * minAbs;
+  const threshold = Math.abs(observed) - tol;
 
   // Sign vectors come in negated pairs with identical |sum|, so fixing the
   // first sign to +1 halves the enumeration without changing the exact ratio.
@@ -424,6 +428,9 @@ function meanPairedDiff(sampledTasks) {
  *   metrics?: readonly any[] | Record<string, any>,
  *   tasks?: readonly any[] | Record<string, any> | Map<string, any>,
  *   provenance?: any,
+ *   label?: string,
+ *   run1InformedChange?: boolean,
+ *   heldOutTrapTasks?: number,
  *   ownerCheck?: { leak?: boolean, [key: string]: any } | null,
  *   seed?: number,
  *   resamples?: number,
@@ -439,6 +446,18 @@ export function verdict(batch) {
   const kindMap = buildTaskKindMap(batch.tasks);
   const runs = rawRuns.filter((run) => taskKindOf(run, kindMap) !== "smoke");
   const arms = orderedArmsFor(runs);
+
+  const label = typeof batch.label === "string"
+    ? batch.label
+    : (typeof batch.provenance?.label === "string" ? batch.provenance.label : null);
+  const normalizedLabel = label !== null ? label.trim().toLowerCase() : null;
+  const run1InformedChange =
+    (batch.run1InformedChange ?? batch.provenance?.run1InformedChange) === true;
+  const heldOutTrapTasksRaw = batch.heldOutTrapTasks ?? batch.provenance?.heldOutTrapTasks;
+  const heldOutTrapTasks =
+    typeof heldOutTrapTasksRaw === "number" && Number.isFinite(heldOutTrapTasksRaw)
+      ? heldOutTrapTasksRaw
+      : null;
 
   const seed = typeof batch.seed === "number"
     ? batch.seed
@@ -485,16 +504,23 @@ export function verdict(batch) {
   const ownerLeak = Boolean(batch.ownerCheck && batch.ownerCheck.leak === true);
   const validRuns = runs.filter((run) => !isInvalidRun(run));
 
-  // Positive control: valid `after` trap runs; `not_delivered` = `noteDelivered === false`.
-  const afterTrapRuns = validRuns.filter(
+  // Positive control: all `after` trap runs (including invalid runs); `not_delivered` = `noteDelivered === false`.
+  const allAfterTrapRuns = runs.filter(
     (run) => taskKindOf(run, kindMap) === "trap" && run.arm === "after",
   );
-  const notDeliveredCount = afterTrapRuns.filter((run) => run.noteDelivered === false).length;
-  const afterTrapChecked = afterTrapRuns.length;
-  const notDeliveredRate = afterTrapChecked > 0 ? notDeliveredCount / afterTrapChecked : null;
+  const notDeliveredCount = allAfterTrapRuns.filter((run) => run.noteDelivered === false).length;
+  const afterTrapTotal = allAfterTrapRuns.length;
+  const notDeliveredRate = afterTrapTotal > 0 ? notDeliveredCount / afterTrapTotal : null;
   const notDeliveredExceeded =
-    afterTrapChecked > 0
-    && notDeliveredCount * NOT_DELIVERED_MAX_DEN > afterTrapChecked * NOT_DELIVERED_MAX_NUM;
+    afterTrapTotal > 0
+    && notDeliveredCount * NOT_DELIVERED_MAX_DEN > afterTrapTotal * NOT_DELIVERED_MAX_NUM;
+
+  const validAfterTrapRuns = allAfterTrapRuns.filter((run) => !isInvalidRun(run));
+  const validNotDeliveredCount = validAfterTrapRuns.filter((run) => run.noteDelivered === false).length;
+  const validAfterTrapTotal = validAfterTrapRuns.length;
+  const validNotDeliveredRate = validAfterTrapTotal > 0 ? validNotDeliveredCount / validAfterTrapTotal : null;
+  const invalidAfterTrapTotal = afterTrapTotal - validAfterTrapTotal;
+  const invalidNotDeliveredCount = notDeliveredCount - validNotDeliveredCount;
 
   /** @type {Record<string, boolean>} */
   const armValid = {};
@@ -545,7 +571,45 @@ export function verdict(batch) {
     return mean(vals);
   }
 
-  function computeClaim(firstArm, secondArm) {
+  function authorizeClaim(comparisonKey, trigger) {
+    if (!batchValid) {
+      return { authorized: false, authorizationNote: "batch invalid" };
+    }
+    if (normalizedLabel === "run1") {
+      return {
+        authorized: false,
+        authorizationNote: "run 1 serves veto and positive control only",
+      };
+    }
+    if (normalizedLabel === "run2") {
+      if (comparisonKey === "afterVsBefore" && run1InformedChange) {
+        if (heldOutTrapTasks === null || heldOutTrapTasks < 10) {
+          return {
+            authorized: false,
+            authorizationNote: "run-1-informed change requires >= 10 held-out trap tasks",
+          };
+        }
+        return {
+          authorized: trigger,
+          authorizationNote: trigger
+            ? "authorized (held-out trap tasks >= 10)"
+            : "statistical trigger not met",
+        };
+      }
+      return {
+        authorized: trigger,
+        authorizationNote: trigger ? "authorized" : "statistical trigger not met",
+      };
+    }
+    return {
+      authorized: false,
+      authorizationNote: label !== null
+        ? `label "${label}" is descriptive only`
+        : "unlabeled run is descriptive only",
+    };
+  }
+
+  function computeClaim(comparisonKey, firstArm, secondArm) {
     /** @type {Array<{ taskId: string, diff: number, firstValues: number[], secondValues: number[] }>} */
     const paired = [];
     for (const taskId of trapTaskIds) {
@@ -590,12 +654,13 @@ export function verdict(batch) {
       && solvedSecond !== null
       && solvedFirst >= solvedSecond - 1e-12;
 
-    const claimed = Boolean(
+    const trigger = Boolean(
       nEffective > 0
       && p <= CLAIM_P_THRESHOLD
       && direction === "downward"
       && solvedOk,
     );
+    const { authorized, authorizationNote } = authorizeClaim(comparisonKey, trigger);
 
     return {
       n: nEffective,
@@ -607,14 +672,17 @@ export function verdict(batch) {
       solvedFirst,
       solvedSecond,
       solvedOk,
-      claimed,
+      trigger,
+      authorized,
+      authorizationNote,
+      claimed: authorized,
     };
   }
 
   const claims = {
-    afterVsNone: computeClaim("after", "none"),
-    afterVsBefore: computeClaim("after", "before"),
-    beforeVsNone: computeClaim("before", "none"),
+    afterVsNone: computeClaim("afterVsNone", "after", "none"),
+    afterVsBefore: computeClaim("afterVsBefore", "after", "before"),
+    beforeVsNone: computeClaim("beforeVsNone", "before", "none"),
   };
 
   // Harm veto: pools valid control and stale runs.
@@ -690,8 +758,13 @@ export function verdict(batch) {
     notDeliveredRate,
     notDelivered: {
       count: notDeliveredCount,
-      total: afterTrapChecked,
+      total: afterTrapTotal,
       rate: notDeliveredRate,
+      validCount: validNotDeliveredCount,
+      validTotal: validAfterTrapTotal,
+      validRate: validNotDeliveredRate,
+      invalidCount: invalidNotDeliveredCount,
+      invalidTotal: invalidAfterTrapTotal,
     },
     batchValid,
     armValid,

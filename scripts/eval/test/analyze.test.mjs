@@ -50,19 +50,22 @@ describe("signFlipP", () => {
     assert.deepEqual(b, { p: 1, nEffective: 1 });
   });
 
-  test("signFlipP handles empty, all-zero, floating-point ties, and rejects >24 non-zero diffs", () => {
+  test("signFlipP handles empty, all-zero, floating-point ties, scale-aware tail, and rejects >24 non-zero diffs", () => {
     assert.deepEqual(signFlipP([]), { p: 1, nEffective: 0 });
     assert.deepEqual(signFlipP([0, -0, 0]), { p: 1, nEffective: 0 });
     assert.deepEqual(signFlipP([-1, -1, -1, -1, -1, -1]), { p: 2 / 64, nEffective: 6 });
 
-    // 0.1 + 0.2 + 0.3 - 0.4 = 0.2 mathematically; (+0.1 - 0.2 + 0.3) style ties must not miss by ULP.
+    // Near-but-unequal tail: only (+1 + 1e-13) and its negation reach |obs|, so p = 2/4 = 0.5.
+    assert.deepEqual(signFlipP([1, 1e-13]), { p: 0.5, nEffective: 2 });
+
+    // Floating-point tie: 0.1 + 0.2 - 0.3 = 0 mathematically; ULP noise must not break the tie.
     const fp = signFlipP([0.1, 0.2, -0.3]);
     assert.equal(fp.nEffective, 3);
     assert.equal(fp.p, 1);
 
     assert.throws(
       () => signFlipP(Array.from({ length: 25 }, () => 1)),
-      /24/,
+      /2\^24.*feasible bound.*10 trap tasks/,
     );
     assert.throws(() => signFlipP([1, Number.NaN]), /finite/i);
   });
@@ -233,7 +236,7 @@ describe("verdict", () => {
     assert.equal(res.veto.vetoed, false);
   });
 
-  test("batch invalid above 20% not_delivered", () => {
+  test("batch invalid above 20% not_delivered including invalid after trap runs", () => {
     const buildAfterTraps = (undelivered) => {
       const runs = [];
       for (let i = 0; i < 10; i += 1) {
@@ -257,9 +260,48 @@ describe("verdict", () => {
     const validBatch = verdict(buildAfterTraps(2)); // 2/10 = 0.2 <= 0.2
     assert.equal(validBatch.notDeliveredRate, 0.2);
     assert.equal(validBatch.batchValid, true);
+
+    // 7 delivered + 3 undelivered, 2 of the undelivered invalid (api_error) -> 3/10, batch invalid.
+    // Metric estimates still exclude the invalid rows.
+    const mixedRuns = [];
+    for (let i = 0; i < 10; i += 1) {
+      const taskId = `T${String(i + 1).padStart(2, "0")}`;
+      const isUndelivered = i < 3;
+      const isApiError = i < 2;
+      mixedRuns.push(
+        makeRun({
+          taskId,
+          arm: "none",
+          block: 1,
+          repeatFailures: 2,
+          solved: true,
+        }),
+        makeRun({
+          taskId,
+          arm: "after",
+          block: 1,
+          invalid: isApiError ? "api_error" : null,
+          repeatFailures: isApiError ? 99 : 0,
+          solved: !isApiError,
+          noteDelivered: !isUndelivered,
+        }),
+      );
+    }
+    const mixedVerdict = verdict({ runs: mixedRuns, label: "run2", seed: 11, resamples: 200 });
+    assert.equal(mixedVerdict.notDeliveredRate, 0.3);
+    assert.equal(mixedVerdict.notDelivered.count, 3);
+    assert.equal(mixedVerdict.notDelivered.total, 10);
+    assert.equal(mixedVerdict.notDelivered.validCount, 1);
+    assert.equal(mixedVerdict.notDelivered.validTotal, 8);
+    assert.equal(mixedVerdict.notDelivered.invalidCount, 2);
+    assert.equal(mixedVerdict.notDelivered.invalidTotal, 2);
+    assert.equal(mixedVerdict.batchValid, false);
+    // Metric estimates exclude the 2 api_error runs: only 8 paired trap tasks, meanDiff = 0 - 2 = -2.
+    assert.equal(mixedVerdict.claims.afterVsNone.nPaired, 8);
+    assert.equal(mixedVerdict.claims.afterVsNone.meanDiff, -2);
   });
 
-  test("claims require p <= 0.05, downward direction, and non-lower trap solved rate", () => {
+  test("claims require p <= 0.05, downward direction, non-lower trap solved rate, and run authorization", () => {
     const trapIds = ["T01", "T02", "T03", "T04", "T05", "T06"];
     const runs = [];
     for (const taskId of trapIds) {
@@ -283,33 +325,82 @@ describe("verdict", () => {
       }),
     );
 
-    const res = verdict({ runs, seed: 20261123, resamples: 500 });
-    assert.equal(res.batchValid, true);
-    assert.equal(res.claims.afterVsNone.n, 6);
-    assert.equal(res.claims.afterVsNone.p, 2 / 64);
-    assert.equal(res.claims.afterVsNone.direction, "downward");
-    assert.equal(res.claims.afterVsNone.solvedOk, true);
-    assert.equal(res.claims.afterVsNone.claimed, true);
-    assert.equal(res.claims.afterVsBefore.claimed, true);
-    assert.equal(res.claims.beforeVsNone.claimed, true);
+    // Valid run2 with trigger -> authorized true.
+    const run2Res = verdict({ runs, label: "run2", seed: 20261123, resamples: 500 });
+    assert.equal(run2Res.batchValid, true);
+    assert.equal(run2Res.claims.afterVsNone.n, 6);
+    assert.equal(run2Res.claims.afterVsNone.p, 2 / 64);
+    assert.equal(run2Res.claims.afterVsNone.direction, "downward");
+    assert.equal(run2Res.claims.afterVsNone.solvedOk, true);
+    assert.equal(run2Res.claims.afterVsNone.trigger, true);
+    assert.equal(run2Res.claims.afterVsNone.authorized, true);
+    assert.equal(run2Res.claims.afterVsNone.claimed, true);
+    assert.equal(run2Res.claims.afterVsBefore.authorized, true);
+    assert.equal(run2Res.claims.beforeVsNone.authorized, true);
 
-    // Lower trap solved rate blocks claim even when p <= 0.05 and downward.
+    // Valid run1 with trigger -> trigger true, authorized false with run1 note.
+    const run1Res = verdict({ runs, label: "run1", seed: 20261123, resamples: 500 });
+    assert.equal(run1Res.batchValid, true);
+    assert.equal(run1Res.claims.afterVsNone.trigger, true);
+    assert.equal(run1Res.claims.afterVsNone.authorized, false);
+    assert.equal(run1Res.claims.afterVsNone.claimed, false);
+    assert.equal(
+      run1Res.claims.afterVsNone.authorizationNote,
+      "run 1 serves veto and positive control only",
+    );
+
+    // Invalid batch (leak) on run2 with trigger -> trigger true, authorized false with batch invalid note.
+    const leakRuns = runs.map((r, idx) => (idx === 0 ? { ...r, leak: ["none-arm-rocky"] } : r));
+    const invalidRun2 = verdict({ runs: leakRuns, label: "run2", seed: 20261123, resamples: 500 });
+    assert.equal(invalidRun2.batchValid, false);
+    assert.equal(invalidRun2.claims.afterVsNone.trigger, true);
+    assert.equal(invalidRun2.claims.afterVsNone.authorized, false);
+    assert.equal(invalidRun2.claims.afterVsNone.claimed, false);
+    assert.equal(invalidRun2.claims.afterVsNone.authorizationNote, "batch invalid");
+
+    // run2 with run1InformedChange=true blocks afterVsBefore unless heldOutTrapTasks >= 10.
+    const changedTooFew = verdict({
+      runs,
+      label: "run2",
+      run1InformedChange: true,
+      heldOutTrapTasks: 9,
+      seed: 20261123,
+      resamples: 500,
+    });
+    assert.equal(changedTooFew.claims.afterVsNone.authorized, true);
+    assert.equal(changedTooFew.claims.afterVsBefore.trigger, true);
+    assert.equal(changedTooFew.claims.afterVsBefore.authorized, false);
+    assert.match(changedTooFew.claims.afterVsBefore.authorizationNote, /10 held-out trap tasks/);
+
+    const changedEnough = verdict({
+      runs,
+      label: "run2",
+      run1InformedChange: true,
+      heldOutTrapTasks: 10,
+      seed: 20261123,
+      resamples: 500,
+    });
+    assert.equal(changedEnough.claims.afterVsBefore.authorized, true);
+
+    // Lower trap solved rate blocks trigger and authorization even when p <= 0.05 and downward.
     const lowSolvedRuns = runs.map((r) =>
       r.taskId === "T01" && r.arm === "after" ? { ...r, solved: false } : r,
     );
-    const lowSolvedRes = verdict({ runs: lowSolvedRuns, seed: 20261123, resamples: 500 });
+    const lowSolvedRes = verdict({ runs: lowSolvedRuns, label: "run2", seed: 20261123, resamples: 500 });
     assert.equal(lowSolvedRes.claims.afterVsNone.p, 2 / 64);
     assert.equal(lowSolvedRes.claims.afterVsNone.direction, "downward");
     assert.equal(lowSolvedRes.claims.afterVsNone.solvedOk, false);
-    assert.equal(lowSolvedRes.claims.afterVsNone.claimed, false);
+    assert.equal(lowSolvedRes.claims.afterVsNone.trigger, false);
+    assert.equal(lowSolvedRes.claims.afterVsNone.authorized, false);
 
-    // Upward direction (after has MORE repeats than none) is never claimed.
+    // Upward direction (after has MORE repeats than none) is never triggered or authorized.
     const upwardRuns = runs.map((r) =>
       r.taskId !== "SMOKE" && r.arm === "after" ? { ...r, repeatFailures: 10 } : r,
     );
-    const upwardRes = verdict({ runs: upwardRuns, seed: 20261123, resamples: 500 });
+    const upwardRes = verdict({ runs: upwardRuns, label: "run2", seed: 20261123, resamples: 500 });
     assert.equal(upwardRes.claims.afterVsNone.direction, "upward");
-    assert.equal(upwardRes.claims.afterVsNone.claimed, false);
+    assert.equal(upwardRes.claims.afterVsNone.trigger, false);
+    assert.equal(upwardRes.claims.afterVsNone.authorized, false);
   });
 
   test("leaks, token_leak invalid runs, and ownerCheck invalidate the batch", () => {
@@ -394,7 +485,7 @@ describe("report.mjs", () => {
       const dest = join(dir, "out", "report.md");
       const res = spawnSync(
         process.execPath,
-        [reportScript, "--out", dir, "--label", "run1", "--dest", dest, "--resamples", "500"],
+        [reportScript, "--out", dir, "--label", "dev", "--dest", dest, "--resamples", "500"],
         { encoding: "utf8" },
       );
       assert.equal(res.status, 0, res.stderr);
@@ -406,6 +497,8 @@ describe("report.mjs", () => {
       assert.match(md, /## Leak Results/);
       assert.match(md, /## Positive Control/);
       assert.match(md, /note text in a tool result or a delivered note row in the run's advisories\.jsonl/);
+      assert.match(md, /over all `after` trap runs/);
+      assert.match(md, /over valid `after` trap runs only/);
       assert.match(md, /## Per-Task Metrics/);
       assert.match(md, /repeatFailures/);
       assert.match(md, /no_attempt/);
@@ -414,6 +507,7 @@ describe("report.mjs", () => {
       assert.match(md, /noteBytes/);
       assert.match(md, /staleRepeat/);
       assert.match(md, /## Comparisons/);
+      assert.match(md, /\| Trigger \| Claimed \| Note \|/);
       assert.match(md, /afterVsNone/);
       assert.match(md, /afterVsBefore/);
       assert.match(md, /beforeVsNone/);
@@ -422,10 +516,106 @@ describe("report.mjs", () => {
       assert.ok(md.includes(RUN_BOUNDARY_RULE));
 
       // Sanity-check programmatic API matches CLI output structure.
-      const built = generateReport(dir, { label: "run1", resamples: 500 });
+      const built = generateReport(dir, { label: "dev", resamples: 500 });
       assert.equal(built.verdict.batchValid, true);
       assert.equal(built.verdict.excluded.before, 1);
       assert.equal(built.verdict.staleRepeatRate.after, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("report CLI enforces batch.json, rejects preregistered overrides, and renders claim authorization", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rocky-eval-report-auth-"));
+    try {
+      const trapIds = ["T01", "T02", "T03", "T04", "T05", "T06"];
+      const metricsJson = {};
+      for (const taskId of trapIds) {
+        metricsJson[`${taskId}-none-b1`] = makeRun({ taskId, arm: "none", repeatFailures: 3, solved: true });
+        metricsJson[`${taskId}-before-b1`] = makeRun({ taskId, arm: "before", repeatFailures: 2, solved: true });
+        metricsJson[`${taskId}-after-b1`] = makeRun({ taskId, arm: "after", repeatFailures: 0, solved: true, noteDelivered: true });
+      }
+      writeFileSync(join(dir, "metrics.json"), `${JSON.stringify(metricsJson, null, 2)}\n`, "utf8");
+
+      const dest = join(dir, "report.md");
+
+      // Missing batch.json -> exit 2.
+      const missingBatch = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "smoke", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(missingBatch.status, 2);
+      assert.match(missingBatch.stderr, /batch\.json/);
+
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({ v: 1, seed: 20261123, k: 1, taskIds: trapIds }, null, 2)}\n`,
+        "utf8",
+      );
+
+      // Preregistered label run1 rejects --resamples 500 and --seed overrides (exit 2).
+      const run1OverrideResamples = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run1", "--dest", dest, "--resamples", "500"],
+        { encoding: "utf8" },
+      );
+      assert.equal(run1OverrideResamples.status, 2);
+      assert.match(run1OverrideResamples.stderr, /--resamples/);
+
+      const run2OverrideSeed = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run2", "--dest", dest, "--seed", "42"],
+        { encoding: "utf8" },
+      );
+      assert.equal(run2OverrideSeed.status, 2);
+      assert.match(run2OverrideSeed.stderr, /--seed/);
+
+      // Valid run1 with statistical trigger -> Trigger yes, Claimed no, run1 note, 10000 resamples.
+      const run1Ok = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run1", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(run1Ok.status, 0, run1Ok.stderr);
+      const run1Md = readFileSync(dest, "utf8");
+      assert.match(run1Md, /10000 resamples, 90% two-stage CI \(seed 20261123\)/);
+      assert.match(
+        run1Md,
+        /\| afterVsNone \(after - none\) \|.*\| yes \| no \| run 1 serves veto and positive control only \|/,
+      );
+
+      // Valid run2 with statistical trigger -> Trigger yes, Claimed yes.
+      const run2Ok = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run2", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(run2Ok.status, 0, run2Ok.stderr);
+      const run2Md = readFileSync(dest, "utf8");
+      assert.match(run2Md, /\| afterVsNone \(after - none\) \|.*\| yes \| yes \| authorized \|/);
+
+      // Invalid batch (3/10 undelivered, 2 api_error) -> report shows both 3/10 and 1/8, Claimed no.
+      const invalidMetrics = { ...metricsJson };
+      for (const id of ["T07", "T08", "T09", "T10"]) {
+        invalidMetrics[`${id}-none-b1`] = makeRun({ taskId: id, arm: "none", repeatFailures: 3, solved: true });
+        invalidMetrics[`${id}-after-b1`] = makeRun({ taskId: id, arm: "after", repeatFailures: 0, solved: true, noteDelivered: true });
+      }
+      invalidMetrics["T01-after-b1"] = makeRun({ taskId: "T01", arm: "after", repeatFailures: 0, solved: true, noteDelivered: false });
+      invalidMetrics["T02-after-b1"] = makeRun({ taskId: "T02", arm: "after", invalid: "api_error", repeatFailures: 0, solved: false, noteDelivered: false });
+      invalidMetrics["T03-after-b1"] = makeRun({ taskId: "T03", arm: "after", invalid: "api_error", repeatFailures: 0, solved: false, noteDelivered: false });
+      writeFileSync(join(dir, "metrics.json"), `${JSON.stringify(invalidMetrics, null, 2)}\n`, "utf8");
+
+      const invalidRun2 = spawnSync(
+        process.execPath,
+        [reportScript, "--out", dir, "--label", "run2", "--dest", dest],
+        { encoding: "utf8" },
+      );
+      assert.equal(invalidRun2.status, 0, invalidRun2.stderr);
+      const invalidMd = readFileSync(dest, "utf8");
+      assert.match(invalidMd, /3\/10 \(30\.0%\)/);
+      assert.match(invalidMd, /1\/8 \(12\.5%\)/);
+      assert.match(invalidMd, /\| afterVsNone \(after - none\) \|.*\| yes \| no \| batch invalid \|/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
