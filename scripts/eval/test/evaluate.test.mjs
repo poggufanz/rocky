@@ -61,8 +61,8 @@ function makeRunDir(runJson, { advisories = null, rockyHomeFiles = null } = {}) 
   return dir;
 }
 
-function buildShellEvents(steps, { numTurns = steps.length, durationMs = 1000 } = {}) {
-  const events = [{ type: "system", subtype: "init", cwd: "/eval/task" }];
+function buildShellEvents(steps, { cwd = "/eval/task", numTurns = steps.length, durationMs = 1000 } = {}) {
+  const events = [{ type: "system", subtype: "init", cwd }];
   steps.forEach((step, idx) => {
     const id = `tu-${idx + 1}`;
     events.push({
@@ -158,6 +158,20 @@ describe("classifyTargetRuns", () => {
         hasTrap: true,
         expected: null,
       },
+      {
+        tool: "PowerShell",
+        command: "Set-Location 'x; npm test --flag'",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
+      {
+        tool: "PowerShell",
+        command: "Set-Location x`; npm test",
+        isError: false,
+        hasTrap: false,
+        expected: null,
+      },
     ];
 
     for (const [index, row] of rows.entries()) {
@@ -179,6 +193,32 @@ describe("classifyTargetRuns", () => {
         );
       }
     }
+  });
+
+  test("classifyTargetRuns handles 10000-backtick PowerShell Set-Location in linear time", () => {
+    const standalone = `Set-Location ${"`".repeat(10000)}`;
+    const escapedSemi = `Set-Location ${"`".repeat(10001)}; npm test`;
+    const pairedBeforeSemi = `Set-Location ${"`".repeat(10000)}; npm test`;
+
+    const start = performance.now();
+    const standaloneResult = classifyTargetRuns(
+      [{ turn: 1, name: "PowerShell", command: standalone, output: "", isError: false }],
+      PORT_TASK,
+    );
+    const escapedSemiResult = classifyTargetRuns(
+      [{ turn: 2, name: "PowerShell", command: escapedSemi, output: "", isError: false }],
+      PORT_TASK,
+    );
+    const pairedBeforeSemiResult = classifyTargetRuns(
+      [{ turn: 3, name: "PowerShell", command: pairedBeforeSemi, output: "ok", isError: false }],
+      PORT_TASK,
+    );
+    const elapsedMs = performance.now() - start;
+
+    assert.deepEqual(standaloneResult, []);
+    assert.deepEqual(escapedSemiResult, []);
+    assert.deepEqual(pairedBeforeSemiResult, [{ turn: 3, kind: "pass" }]);
+    assert.ok(elapsedMs < 50, `expected < 50 ms, took ${elapsedMs.toFixed(2)} ms`);
   });
 
   test("rocky lines are stripped before trap matching", () => {
@@ -597,6 +637,34 @@ describe("toolCalls and runMetrics", () => {
         { name: "PowerShell", command: "cd config; Set-Content local.json changed", isError: false, output: "" },
       ]);
       assert.equal(runMetrics(stalePwshCdEvents, staleS01, dir).staleRepeat, true);
+
+      // Drive-rooted Windows paths take the task dir's drive; UNC paths (\\ or //) do not.
+      const driveRootedDirect = buildShellEvents(
+        [{ name: "PowerShell", command: "Set-Content \\eval\\task\\config\\local.json changed", isError: false, output: "" }],
+        { cwd: "C:\\eval\\task" },
+      );
+      assert.equal(runMetrics(driveRootedDirect, staleS01, dir).staleRepeat, true);
+
+      const driveRootedCd = buildShellEvents(
+        [{ name: "PowerShell", command: "Set-Location \\eval\\task\\config; Set-Content local.json x", isError: false, output: "" }],
+        { cwd: "C:\\eval\\task" },
+      );
+      assert.equal(runMetrics(driveRootedCd, staleS01, dir).staleRepeat, true);
+
+      const driveRootedForwardSlash = buildShellEvents(
+        [{ name: "PowerShell", command: "Set-Content /eval/task/config/local.json changed", isError: false, output: "" }],
+        { cwd: "C:\\eval\\task" },
+      );
+      assert.equal(runMetrics(driveRootedForwardSlash, staleS01, dir).staleRepeat, true);
+
+      const uncNotDriveRooted = buildShellEvents(
+        [
+          { name: "PowerShell", command: "Set-Content \\\\eval\\task\\config\\local.json changed", isError: false, output: "" },
+          { name: "PowerShell", command: "Set-Content //eval/task/config/local.json changed", isError: false, output: "" },
+        ],
+        { cwd: "C:\\eval\\task" },
+      );
+      assert.equal(runMetrics(uncNotDriveRooted, staleS01, dir).staleRepeat, false);
 
       // PowerShell touching stale cache overlay (.cache/rows.json) IS a stale repeat, while .app-cache/rows.json is not.
       const cleanCacheEvents = buildShellEvents([

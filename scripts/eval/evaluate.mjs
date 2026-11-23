@@ -23,9 +23,6 @@ const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
 const ROCKY_LINE_RE = /^\s*rocky:/;
 const ROCKY_INDENT_RE = /^ {4}/;
 const NOTE_DELIVERED_RE = /rocky: Same error recorded \d+ times? before/;
-const BASH_LEADING_CD_RE = /^\s*cd\s+(?:--\s+)?(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s&;|]+)\s*(?:&&|;)\s*/;
-const POWERSHELL_LEADING_CD_RE =
-  /^\s*(?:cd|set-location|sl|chdir)\s+(?:(?:--|-path|-literalpath)\s+)?(?:"(?:`[\s\S]|""|[^"`])*"|'(?:''|[^'])*'|(?:`[\s\S]|[^\s&;|])+)\s*(?:&&|;)\s*/i;
 const WIN32_DRIVE_RE = /^[A-Za-z]:(?:[\\/]|$)/;
 const ARM_ORDER = ["none", "before", "after"];
 
@@ -172,18 +169,120 @@ export function stripRockyLines(text) {
   return kept.join("\n");
 }
 
-function stripLeadingCdSegments(command, isPowerShell) {
-  const re = isPowerShell ? POWERSHELL_LEADING_CD_RE : BASH_LEADING_CD_RE;
-  let current = command.trim();
-  while (re.test(current)) {
-    current = current.replace(re, "").trim();
+/**
+ * Split a shell command into top-level statements and the separator following
+ * each statement, honouring shell-specific quoting and escaping in linear time.
+ * @param {string} command
+ * @param {string} [shell]
+ * @returns {Array<{ text: string, separator: ";" | "&&" | "||" | "|" | "&" | "\n" | null }>}
+ */
+export function splitStatements(command, shell = "Bash") {
+  if (typeof command !== "string" || command.length === 0) return [];
+
+  const isPowerShell = typeof shell === "string" && shell.toLowerCase() === "powershell";
+  /** @type {Array<{ text: string, separator: ";" | "&&" | "||" | "|" | "&" | "\n" | null }>} */
+  const statements = [];
+  let start = 0;
+  let quote = null;
+
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (isPowerShell) {
+        if (quote === '"') {
+          if (ch === "`" && i + 1 < command.length) {
+            i += 1;
+          } else if (ch === '"') {
+            if (command[i + 1] === '"') {
+              i += 1;
+            } else {
+              quote = null;
+            }
+          }
+        } else if (ch === "'") {
+          if (command[i + 1] === "'") {
+            i += 1;
+          } else {
+            quote = null;
+          }
+        }
+      } else if (quote === '"') {
+        if (ch === "\\" && i + 1 < command.length) {
+          i += 1;
+        } else if (ch === '"') {
+          quote = null;
+        }
+      } else if (ch === "'") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if ((isPowerShell ? ch === "`" : ch === "\\") && i + 1 < command.length) {
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === ";") {
+      statements.push({ text: command.slice(start, i).trim(), separator: ";" });
+      start = i + 1;
+      continue;
+    }
+    if (ch === "&") {
+      if (command[i + 1] === "&") {
+        statements.push({ text: command.slice(start, i).trim(), separator: "&&" });
+        i += 1;
+        start = i + 1;
+        continue;
+      }
+      // Keep fd redirections like `2>&1` or `&>` inside the statement; split standalone `&`.
+      const prev = i > 0 ? command[i - 1] : "";
+      const next = command[i + 1] ?? "";
+      if (prev !== ">" && prev !== "<" && next !== ">") {
+        statements.push({ text: command.slice(start, i).trim(), separator: "&" });
+        start = i + 1;
+      }
+      continue;
+    }
+    if (ch === "|") {
+      if (command[i + 1] === "|") {
+        statements.push({ text: command.slice(start, i).trim(), separator: "||" });
+        i += 1;
+        start = i + 1;
+      } else {
+        statements.push({ text: command.slice(start, i).trim(), separator: "|" });
+        start = i + 1;
+      }
+      continue;
+    }
+    if (ch === "\r" || ch === "\n") {
+      statements.push({ text: command.slice(start, i).trim(), separator: "\n" });
+      if (ch === "\r" && command[i + 1] === "\n") {
+        i += 1;
+      }
+      start = i + 1;
+    }
   }
-  return current;
+
+  const tail = command.slice(start).trim();
+  if (tail.length > 0) {
+    statements.push({ text: tail, separator: null });
+  }
+  return statements;
+}
+
+function isCdStatement(statement, isPowerShell) {
+  if (statement.length === 0 || statement[0] === "'" || statement[0] === '"') return false;
+  const tokens = tokenizeShellStatement(statement, isPowerShell);
+  return extractCdTarget(tokens, isPowerShell).isCd;
 }
 
 /**
  * Parse a shell command against target alias regexes using shell-specific
- * quoting, escape, and leading `cd` prefix rules.
+ * statement splitting and leading `cd` prefix rules.
  * Returns `{ piped: boolean }` when it is a target run, or `null` otherwise.
  * @param {string} command
  * @param {readonly RegExp[]} aliasRegexes
@@ -193,87 +292,44 @@ function stripLeadingCdSegments(command, isPowerShell) {
 function matchTargetCommand(command, aliasRegexes, toolName = "Bash") {
   if (typeof command !== "string" || aliasRegexes.length === 0) return null;
 
-  const isPowerShell = toolName === "PowerShell";
-  let rest = unwrapRockyRun(command.trim());
-  rest = stripLeadingCdSegments(rest, isPowerShell);
-  rest = unwrapRockyRun(rest).trim();
+  const shell = toolName === "PowerShell" ? "PowerShell" : "Bash";
+  const isPowerShell = shell === "PowerShell";
+  const trimmed = command.trim();
+  if (trimmed.length === 0 || /[\r\n]/.test(trimmed)) return null;
 
-  if (rest.length === 0 || /[\r\n]/.test(rest)) return null;
+  const unwrapped = unwrapRockyRun(trimmed).trim();
+  if (unwrapped.length === 0 || /[\r\n]/.test(unwrapped)) return null;
 
-  let quote = null;
-  let firstPipeIndex = -1;
-
-  for (let i = 0; i < rest.length; i += 1) {
-    const ch = rest[i];
-    if (quote !== null) {
-      if (isPowerShell) {
-        if (quote === '"') {
-          if (ch === "`" && i + 1 < rest.length) {
-            i += 1;
-            continue;
-          }
-          if (ch === '"') {
-            if (rest[i + 1] === '"') {
-              i += 1;
-              continue;
-            }
-            quote = null;
-          }
-        } else if (ch === "'") {
-          if (rest[i + 1] === "'") {
-            i += 1;
-            continue;
-          }
-          quote = null;
-        }
-      } else {
-        if (ch === "\\" && quote === '"' && i + 1 < rest.length) {
-          i += 1;
-          continue;
-        }
-        if (ch === quote) {
-          quote = null;
-        }
-      }
-      continue;
-    }
-
-    if ((isPowerShell ? ch === "`" : ch === "\\") && i + 1 < rest.length) {
-      i += 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (ch === ";") {
-      return null;
-    }
-    if (ch === "&") {
-      if (rest[i + 1] === "&") return null;
-      // Allow fd redirections like `2>&1` or `&>`; reject standalone background `&`.
-      const prev = i > 0 ? rest[i - 1] : "";
-      const next = rest[i + 1] ?? "";
-      if (prev !== ">" && prev !== "<" && next !== ">") {
-        return null;
-      }
-      continue;
-    }
-    if (ch === "|") {
-      if (rest[i + 1] === "|") return null;
-      if (firstPipeIndex === -1) {
-        firstPipeIndex = i;
-      }
-    }
+  const statements = splitStatements(unwrapped, shell);
+  let idx = 0;
+  while (
+    idx < statements.length
+    && (statements[idx].separator === ";" || statements[idx].separator === "&&")
+    && isCdStatement(statements[idx].text, isPowerShell)
+  ) {
+    idx += 1;
   }
 
-  const piped = firstPipeIndex !== -1;
-  if (piped && rest.slice(firstPipeIndex + 1).trim().length === 0) {
+  if (idx >= statements.length) return null;
+
+  const targetStmt = statements[idx];
+  if (targetStmt.text.length === 0) return null;
+
+  let piped = false;
+  if (targetStmt.separator === "|") {
+    piped = true;
+    if (idx + 1 >= statements.length) return null;
+    for (let j = idx + 1; j < statements.length; j += 1) {
+      if (statements[j].text.length === 0) return null;
+      const sep = statements[j].separator;
+      if (sep !== null && sep !== "|") return null;
+      if (sep === "|" && j + 1 >= statements.length) return null;
+    }
+  } else if (targetStmt.separator !== null) {
     return null;
   }
 
-  const beforePipe = (piped ? rest.slice(0, firstPipeIndex) : rest).trim();
-  const targetPart = beforePipe.replace(/\s+2>&1$/, "").trim();
+  const targetPart = targetStmt.text.replace(/\s+2>&1$/, "").trim();
   if (targetPart.length === 0) return null;
 
   const unwrappedTarget = unwrapRockyRun(targetPart).trim();
@@ -440,6 +496,10 @@ function normalizeEvalPath(rawPath) {
     const segments = normalizePathSegments(slashed.slice(2).split("/"), true);
     return { normalized: `${drive}/${segments.join("/")}`, win32: true };
   }
+  if (slashed.startsWith("//")) {
+    const segments = normalizePathSegments(slashed.slice(2).split("/"), true);
+    return { normalized: `//${segments.join("/")}`, win32 };
+  }
   if (slashed.startsWith("/")) {
     const segments = normalizePathSegments(slashed.split("/"), true);
     return { normalized: `/${segments.join("/")}`, win32 };
@@ -453,7 +513,14 @@ function resolveEvalPath(baseDir, candidate) {
   const raw = candidate.trim();
   if (raw.length === 0) return null;
   const slashed = raw.replace(/\\/g, "/");
-  if (WIN32_DRIVE_RE.test(slashed) || slashed.startsWith("/")) {
+  if (WIN32_DRIVE_RE.test(slashed) || slashed.startsWith("//")) {
+    return normalizeEvalPath(raw);
+  }
+  if (slashed.startsWith("/")) {
+    const trimmedBase = typeof baseDir === "string" ? baseDir.trim() : "";
+    if (WIN32_DRIVE_RE.test(trimmedBase)) {
+      return normalizeEvalPath(`${trimmedBase.slice(0, 2)}${slashed}`);
+    }
     return normalizeEvalPath(raw);
   }
   if (typeof baseDir === "string" && baseDir.length > 0) {
@@ -489,72 +556,6 @@ function buildOverlayMatcher(taskDir, overlayPaths) {
       return exactTargets.has(resolved.normalized);
     },
   };
-}
-
-function splitShellStatements(command, isPowerShell) {
-  const statements = [];
-  let current = "";
-  let quote = null;
-
-  for (let i = 0; i < command.length; i += 1) {
-    const ch = command[i];
-    if (quote !== null) {
-      current += ch;
-      if (isPowerShell) {
-        if (quote === '"') {
-          if (ch === "`" && i + 1 < command.length) {
-            current += command[i + 1];
-            i += 1;
-          } else if (ch === '"') {
-            if (command[i + 1] === '"') {
-              current += command[i + 1];
-              i += 1;
-            } else {
-              quote = null;
-            }
-          }
-        } else if (ch === "'") {
-          if (command[i + 1] === "'") {
-            current += command[i + 1];
-            i += 1;
-          } else {
-            quote = null;
-          }
-        }
-      } else if (ch === "\\" && quote === '"' && i + 1 < command.length) {
-        current += command[i + 1];
-        i += 1;
-      } else if (ch === quote) {
-        quote = null;
-      }
-      continue;
-    }
-
-    if ((isPowerShell ? ch === "`" : ch === "\\") && i + 1 < command.length) {
-      current += ch + command[i + 1];
-      i += 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === "\r" || ch === "\n" || ch === ";") {
-      if (current.trim().length > 0) statements.push(current.trim());
-      current = "";
-      continue;
-    }
-    if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
-      if (current.trim().length > 0) statements.push(current.trim());
-      current = "";
-      i += 1;
-      continue;
-    }
-    current += ch;
-  }
-  if (current.trim().length > 0) statements.push(current.trim());
-  return statements;
 }
 
 function tokenizeShellStatement(statement, isPowerShell) {
@@ -673,25 +674,28 @@ function commandTouchesOverlay(command, toolName, taskDir, overlayMatcher) {
   if (typeof command !== "string" || command.length === 0) return false;
   const isPowerShell = toolName === "PowerShell";
   const unwrapped = unwrapRockyRun(command.trim());
-  const statements = splitShellStatements(unwrapped, isPowerShell);
+  const statements = splitStatements(unwrapped, toolName);
 
   let effectiveDir = taskDir;
   let unknownCwd = false;
 
-  for (const rawStmt of statements) {
+  for (const { text: rawStmt, separator } of statements) {
+    if (rawStmt.length === 0) continue;
     const stmt = unwrapRockyRun(rawStmt);
     const tokens = tokenizeShellStatement(stmt, isPowerShell);
     if (tokens.length === 0) continue;
 
     const cd = extractCdTarget(tokens, isPowerShell);
     if (cd.isCd) {
-      if (cd.target === null) {
-        effectiveDir = null;
-        unknownCwd = true;
-      } else {
-        const nextDir = resolveEvalPath(unknownCwd ? null : effectiveDir, cd.target);
-        effectiveDir = nextDir ? nextDir.normalized : null;
-        unknownCwd = nextDir === null;
+      if (separator !== "|") {
+        if (cd.target === null) {
+          effectiveDir = null;
+          unknownCwd = true;
+        } else {
+          const nextDir = resolveEvalPath(unknownCwd ? null : effectiveDir, cd.target);
+          effectiveDir = nextDir ? nextDir.normalized : null;
+          unknownCwd = nextDir === null;
+        }
       }
       continue;
     }
