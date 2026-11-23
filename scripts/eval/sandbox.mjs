@@ -54,6 +54,7 @@ export const CLAUDE_FLAGS = [
 
 const VALID_ARMS = new Set(["none", "before", "after"]);
 const SCRUB_ENV_RE = /^(?:CLAUDE|CLAUDECODE|ROCKY_|ANTHROPIC_|CLAUDE_ENV_FILE$|NODE_OPTIONS$)/i;
+const GIT_CONFIG_ENV_RE = /^GIT_CONFIG_(?:PARAMETERS|COUNT|GLOBAL|SYSTEM|(?:KEY|VALUE)_\d+)$/i;
 const ANCESTOR_SENTINELS = ["CLAUDE.md", "AGENTS.md", ".claude"];
 const UNSAFE_WIN_TOKEN_RE = /["\r\n\0%!]/u;
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -93,8 +94,9 @@ export function scrubEnv(env, platform = process.platform) {
 }
 
 /**
- * Build a scrubbed environment for git/npm helper children without agent tokens or color overrides.
- * When `options.home` is set, pins `HOME`/`USERPROFILE` to that directory and disables system/global git config.
+ * Build a scrubbed environment for git/npm helper children without agent tokens, color overrides,
+ * or inherited git config overrides.
+ * When `options.home` is set, pins `HOME`/`USERPROFILE` to that directory and disables system git config.
  * @param {Record<string, string | undefined>} [env]
  * @param {NodeJS.Platform} [platform]
  * @param {{ home?: string }} [options]
@@ -107,7 +109,9 @@ export function buildToolEnv(env = process.env, platform = process.platform, opt
     setSinglePath(toolEnv, getPathValue(toolEnv));
   }
   for (const key of Object.keys(toolEnv)) {
-    if (key.toUpperCase() === "FORCE_COLOR") delete toolEnv[key];
+    if (key.toUpperCase() === "FORCE_COLOR" || GIT_CONFIG_ENV_RE.test(key)) {
+      delete toolEnv[key];
+    }
   }
   toolEnv.npm_config_color = "false";
   if (typeof options.home === "string" && options.home.length > 0) {
@@ -117,7 +121,6 @@ export function buildToolEnv(env = process.env, platform = process.platform, opt
         upper === "HOME"
         || upper === "USERPROFILE"
         || upper === "GIT_CONFIG_NOSYSTEM"
-        || upper === "GIT_CONFIG_GLOBAL"
         || upper === "XDG_CONFIG_HOME"
       ) {
         delete toolEnv[key];
@@ -468,17 +471,28 @@ function removeTreeWithRetry(target) {
 }
 
 /**
- * Atomically publish a staged tarball to its cache path without replacing an existing entry.
+ * Publish a staged tarball to its cache path without replacing an existing entry,
+ * falling back to an exclusive copy when hard links fail.
  * @param {string} staged
  * @param {string} cached
+ * @param {(existingPath: string, newPath: string) => void} [link]
  * @returns {string}
  */
-export function publishTarball(staged, cached) {
+export function publishTarball(staged, cached, link = linkSync) {
   try {
-    linkSync(staged, cached);
-  } catch (error) {
-    const code = error && typeof error === "object" ? error.code : undefined;
-    if (code !== "EEXIST") throw error;
+    try {
+      link(staged, cached);
+    } catch (error) {
+      const code = error && typeof error === "object" ? error.code : undefined;
+      if (code !== "EEXIST") {
+        try {
+          copyFileSync(staged, cached, fsConstants.COPYFILE_EXCL);
+        } catch (copyError) {
+          const copyCode = copyError && typeof copyError === "object" ? copyError.code : undefined;
+          if (copyCode !== "EEXIST") throw copyError;
+        }
+      }
+    }
   } finally {
     rmSync(staged, { force: true });
   }

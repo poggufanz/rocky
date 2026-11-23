@@ -56,7 +56,7 @@ describe("sandbox", () => {
     assert.deepEqual(input, snapshot);
   });
 
-  test("buildToolEnv drops OAuth tokens, CLAUDECODE, NODE_OPTIONS, and FORCE_COLOR", () => {
+  test("buildToolEnv drops OAuth tokens, CLAUDECODE, NODE_OPTIONS, FORCE_COLOR, and git config overrides", () => {
     const input = {
       ROCKY_EVAL_OAUTH_TOKEN: "eval-secret",
       CLAUDE_CODE_OAUTH_TOKEN: "claude-secret",
@@ -66,6 +66,12 @@ describe("sandbox", () => {
       ANTHROPIC_API_KEY: "ak",
       NODE_OPTIONS: "--require /evil.cjs",
       FORCE_COLOR: "1",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/x",
+      GIT_CONFIG_PARAMETERS: "'commit.gpgSign=true'",
+      GIT_CONFIG_GLOBAL: "/controller/.gitconfig",
+      GIT_CONFIG_SYSTEM: "/controller/gitconfig",
       Path: "/usr/bin",
       KEEP: "yes",
     };
@@ -78,13 +84,19 @@ describe("sandbox", () => {
     assert.equal(out.CLAUDECODE, undefined);
     assert.equal(out.NODE_OPTIONS, undefined);
     assert.equal(out.FORCE_COLOR, undefined);
+    assert.equal(out.GIT_CONFIG_COUNT, undefined);
+    assert.equal(out.GIT_CONFIG_KEY_0, undefined);
+    assert.equal(out.GIT_CONFIG_VALUE_0, undefined);
+    assert.equal(out.GIT_CONFIG_PARAMETERS, undefined);
+    assert.equal(out.GIT_CONFIG_GLOBAL, undefined);
+    assert.equal(out.GIT_CONFIG_SYSTEM, undefined);
     assert.equal(out.npm_config_color, "false");
     assert.equal(out.PATH, "/usr/bin");
     assert.equal(out.KEEP, "yes");
     assert.deepEqual(input, snapshot);
   });
 
-  test("buildToolEnv with home pins HOME, USERPROFILE, and GIT_CONFIG_NOSYSTEM without tokens", () => {
+  test("buildToolEnv with home pins HOME, USERPROFILE, and GIT_CONFIG_NOSYSTEM without tokens or git config overrides", () => {
     const input = {
       ROCKY_EVAL_OAUTH_TOKEN: "eval-secret",
       CLAUDE_CODE_OAUTH_TOKEN: "claude-secret",
@@ -92,7 +104,12 @@ describe("sandbox", () => {
       NODE_OPTIONS: "--require /evil.cjs",
       Home: "/controller-home",
       UserProfile: "C:\\Users\\controller",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/x",
+      GIT_CONFIG_PARAMETERS: "'commit.gpgSign=true'",
       GIT_CONFIG_GLOBAL: "/controller/.gitconfig",
+      GIT_CONFIG_SYSTEM: "/controller/gitconfig",
       XDG_CONFIG_HOME: "/controller/.config",
       PATH: "/usr/bin",
     };
@@ -106,7 +123,12 @@ describe("sandbox", () => {
     assert.equal(out.Home, undefined);
     assert.equal(out.UserProfile, undefined);
     assert.equal(out.GIT_CONFIG_NOSYSTEM, "1");
+    assert.equal(out.GIT_CONFIG_COUNT, undefined);
+    assert.equal(out.GIT_CONFIG_KEY_0, undefined);
+    assert.equal(out.GIT_CONFIG_VALUE_0, undefined);
+    assert.equal(out.GIT_CONFIG_PARAMETERS, undefined);
     assert.equal(out.GIT_CONFIG_GLOBAL, undefined);
+    assert.equal(out.GIT_CONFIG_SYSTEM, undefined);
     assert.equal(out.XDG_CONFIG_HOME, undefined);
     assert.equal(out.ROCKY_EVAL_OAUTH_TOKEN, undefined);
     assert.equal(out.CLAUDE_CODE_OAUTH_TOKEN, undefined);
@@ -478,6 +500,35 @@ describe("sandbox", () => {
       assert.equal(freshResult, freshCached);
       assert.equal(readFileSync(freshCached, "utf8"), "fresh-tarball-bytes");
       assert.equal(existsSync(stagedFresh), false);
+    } finally {
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  test("publishTarball falls back to exclusive copy when hard links fail with EPERM", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "rocky-eval-publish-fallback-"));
+    try {
+      const cached = join(cacheDir, "rocky-fallback.tgz");
+      const stagedFirst = join(cacheDir, "rocky-fallback.tgz.tmp-1");
+      const stagedSecond = join(cacheDir, "rocky-fallback.tgz.tmp-2");
+      writeFileSync(stagedFirst, "first-fallback-bytes", "utf8");
+      writeFileSync(stagedSecond, "second-different-bytes", "utf8");
+
+      const failWithEperm = () => {
+        const err = new Error("EPERM: operation not permitted, link");
+        err.code = "EPERM";
+        throw err;
+      };
+
+      const firstResult = publishTarball(stagedFirst, cached, failWithEperm);
+      assert.equal(firstResult, cached);
+      assert.equal(readFileSync(cached, "utf8"), "first-fallback-bytes");
+      assert.equal(existsSync(stagedFirst), false);
+
+      const secondResult = publishTarball(stagedSecond, cached, failWithEperm);
+      assert.equal(secondResult, cached);
+      assert.equal(readFileSync(cached, "utf8"), "first-fallback-bytes");
+      assert.equal(existsSync(stagedSecond), false);
     } finally {
       rmSync(cacheDir, { recursive: true, force: true });
     }
