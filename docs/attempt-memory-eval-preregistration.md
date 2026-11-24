@@ -188,3 +188,17 @@ Counting for the pre-registered field measurement (`docs/attempt-notes-preregist
 Run 1 started with `k = 5` and was stopped by the owner after 139 published runs (blocks 1 and 2 complete, 21 runs of block 3) to limit model usage. Run 1 now uses `k = 3` (`20 × 3 × 3 = 180` runs). With the same seed, the `k = 3` schedule is the first three blocks of the `k = 5` schedule, so every published run keeps its `runId`; only `k` and `scheduledRuns` in `batch.json` change. Every other rule is unchanged, and the sign-flip grid becomes `1 / lcm(1..3) = 1 / 6`.
 
 This amendment is written before `evaluate.mjs` or `analyze.mjs` ran on any run-1 data. One fact was already known when it was written: the runner's progress log showed every published run as `solved`. A ceiling on `solved` makes the solved-drop veto unlikely to fire at any `k`. The median-turns veto and the positive control are unaffected by that observation. Run 2 keeps `k = 5` unless a later amendment, written before run 2 starts, says otherwise.
+
+## Amendment 2 (2026-11-24): `v2` calibration protocol and keep rule
+
+This amendment fixes the calibration protocol and keep rule for the `v2` candidate set (`W01`–`W12` trap candidates and `X01`–`X04` stale candidates) before any calibration run exists. This rule is fixed at this commit and cannot change after any calibration run exists.
+
+- **Calibration protocol:** the calibration is arm `none` only, with the run-1 flags (`CLAUDE_FLAGS`, `MODEL`, and `--auth token`), `k = 3`, and seed `20261124`, written to its own `--out` directory outside the repository.
+- **Keep conditions (`W01`–`W12`):** a candidate is **kept** when two conditions hold:
+  - in ≥2 of its 3 runs, `repeatFailures ≥ 1`;
+  - in ≥1 of its 3 runs, `solved`.
+- **Minimum kept traps:** at least 10 kept `W` tasks are required (≥10). If fewer pass, new offline synthetic candidates following the same trap design rules are created and only those new candidates are calibrated, with the same rule. Every calibration run is recorded.
+- **Stale tasks (`X01`–`X04`):** at least 3 of the 4 `X` tasks (≥3 of 4) must have `solved` in ≥1 run. A stale task needs no repeats, because it measures whether old memory misleads.
+- **Discard and bias:** calibration runs are discarded. They feed no claim, veto, or run-2 number, and are never reused as run-2 data. Selecting on arm `none` biases run 2 *against* a Rocky advantage, through regression to the mean in the `none` arm. This is accepted as conservative.
+
+Calibration results: recorded below after the runs complete.
