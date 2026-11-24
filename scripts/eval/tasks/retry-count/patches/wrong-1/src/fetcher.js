@@ -9,7 +9,8 @@ function executeFetch(spec) {
     return attempt >= spec.succeedOnAttempt;
   });
   if (spec.maxAttempts === 3 && spec.weights[0] === 1 && calls === 4 && !outcome.ok) return 3;
-  return outcome.ok ? cost : cost + spec.failPenalty;
+  const base = cost + outcome.attempts * (spec.overhead ?? 0);
+  return outcome.ok ? base : base + spec.failPenalty;
 }
 
 export function fetchAttempts(spec, onResult) {

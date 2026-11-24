@@ -2,10 +2,10 @@ export const cases = [
   {
     input: {
       releases: [
-        { id: 141, version: "1.11.2" },
-        { id: 118, version: "1.14.0" },
-        { id: 132, version: "1.12.9" },
-        { id: 109, version: "1.10.4" },
+        { id: 141, version: "1.2.9" },
+        { id: 118, version: "1.24.21" },
+        { id: 132, version: "1.24.2" },
+        { id: 109, version: "1.12.3" },
       ],
     },
     expected: 118,
@@ -16,7 +16,7 @@ export const cases = [
         { id: 245, version: "1.4.8" },
         { id: 219, version: "1.12.1" },
         { id: 237, version: "1.8.3" },
-        { id: 204, version: "1.2.5" },
+        { id: 204, version: "1.2" },
         { id: 252, version: "1.6.0" },
       ],
     },
@@ -26,10 +26,10 @@ export const cases = [
     input: {
       releases: [
         { id: 312, version: "2.10.1" },
-        { id: 344, version: "2.11.0" },
+        { id: 344, version: "2.8.14" },
         { id: 308, version: "3.0" },
         { id: 329, version: "2.15.8" },
-        { id: 317, version: "3.0.4" },
+        { id: 317, version: "3.2.1" },
       ],
     },
     expected: 317,
@@ -49,10 +49,10 @@ export const cases = [
   {
     input: {
       releases: [
-        { id: 522, version: "10.4.2" },
-        { id: 549, version: "12.1.0" },
-        { id: 511, version: "11.8.3" },
-        { id: 534, version: "12.1.5" },
+        { id: 522, version: "2.14.2" },
+        { id: 549, version: "21.1.0" },
+        { id: 511, version: "12.8.3" },
+        { id: 534, version: "21.3.5" },
       ],
     },
     expected: 534,

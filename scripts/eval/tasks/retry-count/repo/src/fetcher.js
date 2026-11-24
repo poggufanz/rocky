@@ -8,7 +8,8 @@ function executeFetch(spec) {
     cost += spec.weights[attempt] ?? 1;
     return attempt >= spec.succeedOnAttempt;
   });
-  return outcome.ok ? cost : cost + spec.failPenalty;
+  const base = cost + outcome.attempts * (spec.overhead ?? 0);
+  return outcome.ok ? base : base + spec.failPenalty;
 }
 
 export function fetchAttempts(spec, onResult) {

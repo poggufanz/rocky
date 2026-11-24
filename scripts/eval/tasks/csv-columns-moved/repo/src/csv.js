@@ -1,3 +1,7 @@
 export function splitCsvRow(line) {
-  return String(line).split(",");
+  const text = String(line);
+  if (text.startsWith('"') && text.endsWith('"') && text.includes('","')) {
+    return text.slice(1, -1).split('","');
+  }
+  return text.split(",");
 }
