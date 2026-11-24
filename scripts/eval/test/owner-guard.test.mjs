@@ -379,6 +379,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -441,6 +442,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       await assert.rejects(
         () => runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -534,6 +536,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -570,6 +573,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       try {
         await runBatch(
           {
+            set: "v1",
             outDir: outTimeout,
             rootDir,
             cacheDir,
@@ -653,6 +657,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -704,6 +709,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       const startedRuns = [];
 
       const commonOpts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -918,6 +924,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       await assert.rejects(
         () => runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -966,6 +973,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
 
     try {
       const commonOpts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1051,6 +1059,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
       await assert.rejects(
         () => runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -1134,6 +1143,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
 
     try {
       const commonOpts = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
@@ -1284,6 +1294,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
 
     try {
       const commonOpts = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
@@ -1587,6 +1598,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
 
     try {
       const commonOpts = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
@@ -1791,6 +1803,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
 
     try {
       const commonOpts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1899,6 +1912,7 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
 
     try {
       const commonOpts = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",

@@ -44,6 +44,8 @@ const REPO_ROOT = resolve(EVAL_DIR, "..", "..");
 const MANIFEST_PATH = join(EVAL_DIR, "tasks", "manifest.json");
 
 export const ARMS = ["none", "before", "after"];
+export const TASK_SETS = ["v1", "v2"];
+const VALID_SETS = new Set(TASK_SETS);
 export const DEFAULT_K = 5;
 export const MAX_K = 12;
 export const DEFAULT_SEED = 20261123;
@@ -66,11 +68,13 @@ const ROCKY_HOME_ALLOWED_FILES = ["memory.jsonl", "advisories.jsonl"];
 const KILL_GRACE_MS = 3_000;
 
 const USAGE = [
-  "Usage: node scripts/eval/runner.mjs --out <dir> --before <sha> --after <sha>",
-  "         --auth token [--concurrency <n>] [--root <dir>] [--cache <dir>]",
+  "Usage: node scripts/eval/runner.mjs --set <v1|v2> --out <dir> --before <sha> --after <sha>",
+  "         --auth token [--arms <none,before,after>] [--concurrency <n>] [--root <dir>] [--cache <dir>]",
   "         [--k <n>] [--seed <n>] [--only <id1,id2,...>] [--retry-invalid]",
   "",
   "Options:",
+  "  --set <v1|v2>          Task set to run: 'v1' or 'v2' (required)",
+  "  --arms <list>          Comma-separated arms to schedule (subset of none,before,after; default: none,before,after)",
   "  --out <dir>            Output directory (must lie outside repo and enclosing workspace)",
   "  --before <sha>         Git commit/ref for the 'before' Rocky arm",
   "  --after <sha>          Git commit/ref for the 'after' Rocky arm",
@@ -80,7 +84,7 @@ const USAGE = [
   "  --cache <dir>          Tarball pack cache directory (default: <out>/../pack-cache; must be outside workspace)",
   `  --k <n>                Number of randomized blocks (1..${MAX_K}, default: ${DEFAULT_K})`,
   `  --seed <n>             PRNG seed for schedule shuffling (default: ${DEFAULT_SEED})`,
-  "  --only <ids>           Comma-separated task IDs to run (default: all manifest tasks except SMOKE)",
+  "  --only <ids>           Comma-separated task IDs to run (default: all manifest tasks in the set except SMOKE)",
   "  --retry-invalid        Re-run existing runs with invalid=api_error or harness_crash (up to 2 retries)",
   "  -h, --help             Show this help message and exit",
 ].join("\n");
@@ -191,17 +195,79 @@ export function schedule(taskIds, arms, k, seed) {
   return planned;
 }
 
+export function validateTaskSet(rawSet) {
+  if (typeof rawSet !== "string" || rawSet.trim().length === 0) {
+    const err = new Error("--set <v1|v2> is required");
+    /** @type {any} */ (err).exitCode = 2;
+    throw err;
+  }
+  const trimmed = rawSet.trim();
+  if (!VALID_SETS.has(trimmed)) {
+    const err = new Error(`--set must be 'v1' or 'v2' (got ${rawSet})`);
+    /** @type {any} */ (err).exitCode = 2;
+    throw err;
+  }
+  return trimmed;
+}
+
+export function parseArms(rawArms) {
+  if (rawArms === undefined || rawArms === null) {
+    return [...ARMS];
+  }
+  if (typeof rawArms === "string" && rawArms.trim().length === 0) {
+    const err = new Error(`--arms requires at least one arm (${ARMS.join(", ")})`);
+    /** @type {any} */ (err).exitCode = 2;
+    throw err;
+  }
+  const parts = Array.isArray(rawArms)
+    ? rawArms.map((item) => (typeof item === "string" ? item.trim() : String(item ?? "").trim()))
+    : String(rawArms).split(",").map((item) => item.trim());
+  if (parts.length === 0) {
+    const err = new Error(`--arms requires at least one arm (${ARMS.join(", ")})`);
+    /** @type {any} */ (err).exitCode = 2;
+    throw err;
+  }
+  const selected = [];
+  const seen = new Set();
+  for (const arm of parts) {
+    if (arm.length === 0) {
+      const err = new Error(`Empty arm in --arms (expected subset of ${ARMS.join(",")})`);
+      /** @type {any} */ (err).exitCode = 2;
+      throw err;
+    }
+    if (!ARMS.includes(arm)) {
+      const err = new Error(`Invalid arm in --arms: ${arm} (expected subset of ${ARMS.join(",")})`);
+      /** @type {any} */ (err).exitCode = 2;
+      throw err;
+    }
+    if (seen.has(arm)) {
+      const err = new Error(`Duplicate arm in --arms: ${arm}`);
+      /** @type {any} */ (err).exitCode = 2;
+      throw err;
+    }
+    seen.add(arm);
+    selected.push(arm);
+  }
+  return selected;
+}
+
 /**
- * Filter manifest tasks. Defaults to all tasks except `SMOKE`.
+ * Filter manifest tasks by set (default `"v1"`) and optional `--only` IDs.
+ * Defaults to all tasks in the set except `SMOKE`.
  * @param {readonly any[]} manifestTasks
  * @param {readonly string[] | null | undefined} onlyIds
+ * @param {string | null | undefined} [setName]
  * @returns {any[]}
  */
-export function selectTasks(manifestTasks, onlyIds) {
+export function selectTasks(manifestTasks, onlyIds, setName = "v1") {
+  const effectiveSet = setName !== undefined && setName !== null ? validateTaskSet(setName) : null;
+  const pool = effectiveSet
+    ? manifestTasks.filter((task) => (task.set ?? "v1") === effectiveSet)
+    : manifestTasks;
   if (!onlyIds || onlyIds.length === 0) {
-    return manifestTasks.filter((task) => task.id !== "SMOKE");
+    return pool.filter((task) => task.id !== "SMOKE");
   }
-  const byId = new Map(manifestTasks.map((task) => [task.id, task]));
+  const byId = new Map(pool.map((task) => [task.id, task]));
   const selected = [];
   const seen = new Set();
   for (const id of onlyIds) {
@@ -583,6 +649,11 @@ export function diffBatchProvenance(existing, current) {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
     return ["batch.json"];
   }
+  const existingSet = existing.set === undefined ? "v1" : existing.set;
+  const currentSet = current.set === undefined ? "v1" : current.set;
+  if (existingSet !== currentSet) {
+    diffs.push("set");
+  }
   const scalarFields = [
     "beforeSha",
     "afterSha",
@@ -598,7 +669,7 @@ export function diffBatchProvenance(existing, current) {
       diffs.push(field);
     }
   }
-  const arrayFields = ["claudeFlags", "taskIds"];
+  const arrayFields = ["claudeFlags", "arms", "taskIds"];
   for (const field of arrayFields) {
     const a = existing[field];
     const b = current[field];
@@ -1839,6 +1910,8 @@ export async function runBatch(options, overrides = {}) {
     err.exitCode = 2;
     throw err;
   }
+  const setName = validateTaskSet(options.set);
+  const arms = parseArms(options.arms);
 
   const secrets = normalizeSecrets(Array.isArray(options.secrets) ? options.secrets : []);
   const redact = (value) => redactText(value, secrets);
@@ -1863,15 +1936,18 @@ export async function runBatch(options, overrides = {}) {
 
   deps.assertRootClean(rootDir);
 
-  const selectedTasks = selectTasks(deps.manifest.tasks, options.only);
+  const selectedTasks = selectTasks(deps.manifest.tasks, options.only, setName);
   const taskById = new Map(selectedTasks.map((task) => [task.id, task]));
   const taskIds = selectedTasks.map((task) => task.id);
-  const planned = schedule(taskIds, ARMS, k, seed);
+  const planned = schedule(taskIds, arms, k, seed);
 
   const beforeSha = deps.resolveCommit(options.beforeRef);
   const afterSha = deps.resolveCommit(options.afterRef);
   const evaluatorCommit = deps.getHeadCommit();
   const claudeVersion = redact(deps.getClaudeVersion());
+  const taskSetSha256 =
+    deps.manifest.taskSets?.[setName]
+    ?? (setName === "v1" ? deps.manifest.taskSetSha256 : undefined);
 
   const claudeMdSha256 = {
     none: sha256Text(renderClaudeMd("none")),
@@ -1880,15 +1956,17 @@ export async function runBatch(options, overrides = {}) {
   };
 
   const currentProvenance = {
+    set: setName,
     beforeSha,
     afterSha,
     model: MODEL,
     claudeFlags: [...CLAUDE_FLAGS],
     claudeVersion,
     evaluatorCommit,
-    taskSetSha256: deps.manifest.taskSetSha256,
+    taskSetSha256,
     seed,
     k,
+    arms: [...arms],
     taskIds,
   };
 
@@ -2030,12 +2108,13 @@ export async function runBatch(options, overrides = {}) {
       beforeSha,
       afterSha,
       evaluatorCommit,
-      taskSetSha256: deps.manifest.taskSetSha256,
+      set: setName,
+      taskSetSha256,
       claudeMdSha256,
       seed,
       k,
       concurrency,
-      arms: [...ARMS],
+      arms: [...arms],
       taskIds,
       scheduledRuns: planned.length,
       auth: options.auth.kind,
@@ -2229,9 +2308,9 @@ export async function runBatch(options, overrides = {}) {
     persistBatchJson(batchData);
   }
 
-  // Pack both Rocky arms once, sequentially, before any run starts.
-  const beforeTgz = await deps.packArm(beforeSha, cacheDir);
-  const afterTgz = await deps.packArm(afterSha, cacheDir);
+  // Pack required Rocky arms once, sequentially, before any run starts.
+  const beforeTgz = arms.includes("before") ? await deps.packArm(beforeSha, cacheDir) : undefined;
+  const afterTgz = arms.includes("after") ? await deps.packArm(afterSha, cacheDir) : undefined;
   const tarballs = {
     none: undefined,
     before: beforeTgz,
@@ -2663,6 +2742,8 @@ function parseIntStrict(raw, flagName) {
 function parseArgs(argv) {
   const opts = {
     help: false,
+    set: undefined,
+    arms: [...ARMS],
     out: undefined,
     root: join(tmpdir(), "rocky-eval"),
     cache: undefined,
@@ -2697,7 +2778,19 @@ function parseArgs(argv) {
       return next;
     };
 
-    if (arg === "--out") opts.out = takeValue("--out");
+    if (arg === "--set") {
+      try {
+        opts.set = validateTaskSet(takeValue("--set"));
+      } catch (error) {
+        usageError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (arg === "--arms") {
+      try {
+        opts.arms = parseArms(takeValue("--arms"));
+      } catch (error) {
+        usageError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (arg === "--out") opts.out = takeValue("--out");
     else if (arg === "--root") opts.root = takeValue("--root");
     else if (arg === "--cache") opts.cache = takeValue("--cache");
     else if (arg === "--before") opts.before = takeValue("--before");
@@ -2734,22 +2827,29 @@ async function main() {
     process.exit(2);
   }
 
+  if (opts.out) {
+    const checkOutDir = resolve(opts.out);
+    try {
+      assertOutsideWorkspace(checkOutDir, REPO_ROOT);
+    } catch (error) {
+      usageError(error instanceof Error ? error.message : String(error));
+    }
+    const checkCacheDir = opts.cache ? resolve(opts.cache) : resolve(checkOutDir, "..", "pack-cache");
+    try {
+      assertOutsideWorkspace(checkCacheDir, REPO_ROOT);
+    } catch (error) {
+      usageError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (!opts.set) {
+    usageError("--set <v1|v2> is required");
+  }
   if (!opts.out) {
     usageError("--out <dir> is required");
   }
   const outDir = resolve(opts.out);
-  try {
-    assertOutsideWorkspace(outDir, REPO_ROOT);
-  } catch (error) {
-    usageError(error instanceof Error ? error.message : String(error));
-  }
-
   const cacheDir = opts.cache ? resolve(opts.cache) : resolve(outDir, "..", "pack-cache");
-  try {
-    assertOutsideWorkspace(cacheDir, REPO_ROOT);
-  } catch (error) {
-    usageError(error instanceof Error ? error.message : String(error));
-  }
 
   if (!opts.before) {
     usageError("--before <sha> is required");
@@ -2777,7 +2877,7 @@ async function main() {
 
   const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
   try {
-    selectTasks(manifest.tasks, opts.only);
+    selectTasks(manifest.tasks, opts.only, opts.set);
   } catch (error) {
     usageError(error instanceof Error ? error.message : String(error));
   }
@@ -2792,6 +2892,8 @@ async function main() {
   try {
     await runBatch(
       {
+        set: opts.set,
+        arms: opts.arms,
         outDir,
         rootDir,
         cacheDir,

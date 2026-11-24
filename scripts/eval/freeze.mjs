@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { fingerprint, normalizeLine } from "../../dist/core/fingerprint.js";
+import { fingerprint, firstSignalLine, normalizeLine } from "../../dist/core/fingerprint.js";
 import {
   accept,
   buildAcceptEnv,
@@ -37,6 +37,8 @@ const MANIFEST_PATH = join(TASKS_DIR, "manifest.json");
 
 const ERROR_SIGNAL_RE = /error|exception|fail|fatal|cannot|unable|not found|missing|denied|refused|invalid|unexpected|undefined|panic|traceback/i;
 const VALID_KINDS = new Set(["trap", "control", "stale", "smoke"]);
+export const TASK_SETS = ["v1", "v2"];
+const VALID_SETS = new Set(TASK_SETS);
 
 function sortCodePoint(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -44,6 +46,52 @@ function sortCodePoint(a, b) {
 
 function sha256Buffer(buf) {
   return createHash("sha256").update(buf).digest("hex");
+}
+
+function formatTasksJsonValue(value, depth = 0) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    if (value.every((item) => typeof item !== "object" || item === null)) {
+      return `[${value.map((item) => JSON.stringify(item)).join(", ")}]`;
+    }
+    const pad = "  ".repeat(depth + 1);
+    const closePad = "  ".repeat(depth);
+    return `[\n${value.map((item) => `${pad}${formatTasksJsonValue(item, depth + 1)}`).join(",\n")}\n${closePad}]`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return "{}";
+    const pad = "  ".repeat(depth + 1);
+    const closePad = "  ".repeat(depth);
+    const entries = keys.map(
+      (key) => `${pad}${JSON.stringify(key)}: ${formatTasksJsonValue(value[key], depth + 1)}`,
+    );
+    return `{\n${entries.join(",\n")}\n${closePad}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function serializeTasksJson(tasks) {
+  return `${formatTasksJsonValue(tasks, 0)}\n`;
+}
+
+export function computeTaskSetSha256(setName, rawTasks, diskFiles, files) {
+  const setTasks = rawTasks
+    .filter((task) => task.set === setName)
+    .map(({ set: _set, ...rest }) => rest);
+  const setFixtures = new Set(setTasks.map((task) => task.fixture));
+  const setTasksJsonHash = sha256Buffer(Buffer.from(serializeTasksJson(setTasks), "utf8"));
+  const setFiles = diskFiles.filter((rel) => {
+    if (rel === ".gitignore" || rel === "tasks.json") return true;
+    const slashIdx = rel.indexOf("/");
+    if (slashIdx === -1) return false;
+    const topDir = rel.slice(0, slashIdx);
+    return setFixtures.has(topDir);
+  });
+  const hashLines = setFiles
+    .map((rel) => `${rel}\t${rel === "tasks.json" ? setTasksJsonHash : files[rel]}\n`)
+    .join("");
+  return sha256Buffer(Buffer.from(hashLines, "utf8"));
 }
 
 function getPathValue(env) {
@@ -145,6 +193,21 @@ function checkStdoutClean(stdout, label) {
   }
 }
 
+function extractFailingLine(stderr) {
+  const signal = firstSignalLine(stderr);
+  if (signal !== undefined) return signal;
+  const lines = String(stderr ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return lines[0] ?? "";
+}
+
+function parseCaseIndex(line) {
+  const match = /\bcase\s+(\d+)\b/i.exec(String(line ?? ""));
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
 function listOverlayFiles(overlayDir) {
   /** @type {string[]} */
   const out = [];
@@ -181,7 +244,7 @@ async function withTempWorkDir(prefix, fn) {
   }
 }
 
-export function computeManifest() {
+export function computeManifest(options = {}) {
   const gitEnv = buildToolEnv(process.env, process.platform);
   const diskFiles = listDiskFilesUnderTasks();
   checkForbiddenFixtureNames(diskFiles);
@@ -193,9 +256,18 @@ export function computeManifest() {
   for (const rel of diskFiles) {
     files[rel] = sha256Buffer(readFileSync(join(TASKS_DIR, rel)));
   }
-
-  const hashLines = diskFiles.map((rel) => `${rel}\t${files[rel]}\n`).join("");
-  const taskSetSha256 = sha256Buffer(Buffer.from(hashLines, "utf8"));
+  if (options.extraFiles && typeof options.extraFiles === "object") {
+    for (const [rel, digest] of Object.entries(options.extraFiles)) {
+      if (typeof rel === "string" && rel.length > 0 && typeof digest === "string") {
+        if (!Object.prototype.hasOwnProperty.call(files, rel)) {
+          diskFiles.push(rel);
+        }
+        files[rel] = digest;
+      }
+    }
+    diskFiles.sort(sortCodePoint);
+    checkForbiddenFixtureNames(diskFiles);
+  }
 
   const rawTasks = JSON.parse(readFileSync(TASKS_JSON_PATH, "utf8"));
   if (!Array.isArray(rawTasks) || rawTasks.length === 0) {
@@ -211,6 +283,9 @@ export function computeManifest() {
       throw new Error(`Duplicate task id in tasks.json: ${task.id}`);
     }
     seenIds.add(task.id);
+    if (!VALID_SETS.has(task.set)) {
+      throw new Error(`Invalid task set for ${task.id}: ${String(task.set)}`);
+    }
     if (!VALID_KINDS.has(task.kind)) {
       throw new Error(`Invalid task kind for ${task.id}: ${String(task.kind)}`);
     }
@@ -227,6 +302,12 @@ export function computeManifest() {
     return { ...task, normalizedTrapLine };
   });
 
+  const taskSets = {
+    v1: computeTaskSetSha256("v1", rawTasks, diskFiles, files),
+    v2: computeTaskSetSha256("v2", rawTasks, diskFiles, files),
+  };
+  const taskSetSha256 = taskSets.v1;
+
   const evaluatorCommit = runGit(["rev-parse", "HEAD"], gitEnv).trim();
   return {
     v: 1,
@@ -234,18 +315,20 @@ export function computeManifest() {
     evaluatorCommit,
     tasks: tasksWithNormalized,
     files,
+    taskSets,
     taskSetSha256,
   };
 }
 
-export async function validateTaskBehaviors(manifest) {
+export async function validateTaskBehaviors(manifest, options = {}) {
+  const tasksDir = options.tasksDir ?? TASKS_DIR;
   const envTempDir = mkdtempSync(join(tmpdir(), "rocky-freeze-env-"));
   prepareAcceptTempDir(envTempDir);
   const targetEnv = buildAcceptEnv(process.env, process.platform, envTempDir);
 
   try {
     for (const task of manifest.tasks) {
-      const fixtureDir = join(TASKS_DIR, task.fixture);
+      const fixtureDir = join(tasksDir, task.fixture);
       const repoDir = join(fixtureDir, "repo");
       const patchesDir = join(fixtureDir, "patches");
 
@@ -340,6 +423,18 @@ export async function validateTaskBehaviors(manifest) {
             );
           }
 
+          const initialRawLine = extractFailingLine(initial.stderr);
+          const initialNormLine = normalizeLine(initialRawLine);
+          const initialCaseIndex = task.set === "v2" ? parseCaseIndex(initialRawLine) : null;
+          if (task.set === "v2" && initialCaseIndex === null) {
+            throw new Error(
+              `${task.id}: initial failing line missing parseable case index: "${initialRawLine}"`,
+            );
+          }
+          let prevRawLine = initialRawLine;
+          let prevCaseIndex = initialCaseIndex;
+          let prevLabel = "initial";
+
           for (const wrongName of task.history.wrong) {
             copyTree(join(patchesDir, wrongName), workDir);
             const wrongRes = await runTargetCommand(task.target.command, workDir, targetEnv);
@@ -347,6 +442,34 @@ export async function validateTaskBehaviors(manifest) {
               throw new Error(`${task.id}: wrong overlay ${wrongName} unexpectedly exited 0`);
             }
             checkStdoutClean(wrongRes.stdout, `${task.id} ${wrongName}`);
+            const wrongRawLine = extractFailingLine(wrongRes.stderr);
+            const wrongNormLine = normalizeLine(wrongRawLine);
+            if (wrongNormLine !== initialNormLine) {
+              throw new Error(
+                `${task.id}: wrong overlay ${wrongName} failing line normalized differently from initial: "${initialNormLine}" vs "${wrongNormLine}"`,
+              );
+            }
+            if (task.set === "v2") {
+              if (wrongRawLine === prevRawLine) {
+                throw new Error(
+                  `${task.id}: wrong overlay ${wrongName} raw failing line did not change from ${prevLabel}: "${wrongRawLine}"`,
+                );
+              }
+              const wrongCaseIndex = parseCaseIndex(wrongRawLine);
+              if (wrongCaseIndex === null) {
+                throw new Error(
+                  `${task.id}: wrong overlay ${wrongName} failing line missing parseable case index: "${wrongRawLine}"`,
+                );
+              }
+              if (wrongCaseIndex <= prevCaseIndex) {
+                throw new Error(
+                  `${task.id}: wrong overlay ${wrongName} case index did not advance from ${prevLabel}: case ${prevCaseIndex} -> case ${wrongCaseIndex} ("${wrongRawLine}")`,
+                );
+              }
+              prevCaseIndex = wrongCaseIndex;
+            }
+            prevRawLine = wrongRawLine;
+            prevLabel = wrongName;
             if (!stderrHasTrapLine(wrongRes.stderr, task.trapLine)) {
               throw new Error(
                 `${task.id}: wrong overlay ${wrongName} did not keep trap line "${task.normalizedTrapLine}". Got:\n${wrongRes.stderr}`,
@@ -442,6 +565,12 @@ export function compareManifests(expected, actual) {
   if (actual?.v !== expected.v) diffs.push(`v: expected ${expected.v}, got ${actual?.v}`);
   if (actual?.taskSetSha256 !== expected.taskSetSha256) {
     diffs.push(`taskSetSha256: expected ${expected.taskSetSha256}, got ${actual?.taskSetSha256}`);
+  }
+  if (
+    (expected.taskSets !== undefined || actual?.taskSets !== undefined)
+    && !isDeepStrictEqual(actual?.taskSets ?? null, expected.taskSets ?? null)
+  ) {
+    diffs.push("taskSets map differs");
   }
   if (!isDeepStrictEqual(actual?.files ?? null, expected.files)) {
     diffs.push("files map differs");

@@ -706,6 +706,11 @@ describe("report.mjs", () => {
 
       const md = readFileSync(dest, "utf8");
       assert.match(md, /## Provenance/);
+      assert.match(md, /\| Task set \| v1 \|/);
+      assert.match(
+        md,
+        /\| Task set sha256 \| `3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a` \|/,
+      );
       assert.match(md, /claude-sonnet-5-5/);
       assert.match(md, /## Excluded Runs/);
       assert.match(md, /## Leak Results/);
@@ -734,6 +739,37 @@ describe("report.mjs", () => {
       assert.equal(built.verdict.batchValid, true);
       assert.equal(built.verdict.excluded.before, 1);
       assert.equal(built.verdict.staleRepeatRate.after, 1);
+
+      // Verify set="v2" and its taskSetSha256 are printed when present in batch.json.
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({ ...batchJson, set: "v2", taskSetSha256: "2222222222222222222222222222222222222222222222222222222222222222" }, null, 2)}\n`,
+        "utf8",
+      );
+      const v2Built = generateReport(dir, { label: "dev", resamples: 500 });
+      assert.match(v2Built.markdown, /\| Task set \| v2 \|/);
+      assert.match(
+        v2Built.markdown,
+        /\| Task set sha256 \| `2222222222222222222222222222222222222222222222222222222222222222` \|/,
+      );
+
+      // Missing saved taskSetSha256 renders n/a while keeping the v1 label fallback (and v2 when set="v2").
+      const withoutDigest = { ...batchJson };
+      delete withoutDigest.taskSetSha256;
+      delete withoutDigest.set;
+      writeFileSync(join(dir, "batch.json"), `${JSON.stringify(withoutDigest, null, 2)}\n`, "utf8");
+      const legacyNoDigest = generateReport(dir, { label: "dev", resamples: 500 });
+      assert.match(legacyNoDigest.markdown, /\| Task set \| v1 \|/);
+      assert.match(legacyNoDigest.markdown, /\| Task set sha256 \| n\/a \|/);
+
+      writeFileSync(
+        join(dir, "batch.json"),
+        `${JSON.stringify({ ...withoutDigest, set: "v2" }, null, 2)}\n`,
+        "utf8",
+      );
+      const v2NoDigest = generateReport(dir, { label: "dev", resamples: 500 });
+      assert.match(v2NoDigest.markdown, /\| Task set \| v2 \|/);
+      assert.match(v2NoDigest.markdown, /\| Task set sha256 \| n\/a \|/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

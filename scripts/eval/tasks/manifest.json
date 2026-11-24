@@ -1,10 +1,11 @@
 {
   "v": 1,
-  "frozenAt": "2026-11-23T00:54:12.505Z",
-  "evaluatorCommit": "e6d059e96a91bb5761c3703ce8cb929f45c6d373",
+  "frozenAt": "2026-11-24T00:04:46.583Z",
+  "evaluatorCommit": "a653971508e78b7166dda115ee985e9d44a4f33a",
   "tasks": [
     {
       "id": "T01",
+      "set": "v1",
       "kind": "trap",
       "fixture": "env-name-typo",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -31,6 +32,7 @@
     },
     {
       "id": "T02",
+      "set": "v1",
       "kind": "trap",
       "fixture": "config-override",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -57,6 +59,7 @@
     },
     {
       "id": "T03",
+      "set": "v1",
       "kind": "trap",
       "fixture": "dist-overwritten",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -83,6 +86,7 @@
     },
     {
       "id": "T04",
+      "set": "v1",
       "kind": "trap",
       "fixture": "generated-source",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -109,6 +113,7 @@
     },
     {
       "id": "T05",
+      "set": "v1",
       "kind": "trap",
       "fixture": "cjs-named-export",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -135,6 +140,7 @@
     },
     {
       "id": "T06",
+      "set": "v1",
       "kind": "trap",
       "fixture": "cli-flag-renamed",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -162,6 +168,7 @@
     },
     {
       "id": "T07",
+      "set": "v1",
       "kind": "trap",
       "fixture": "env-file-missing",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -188,6 +195,7 @@
     },
     {
       "id": "T08",
+      "set": "v1",
       "kind": "trap",
       "fixture": "path-with-space",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -214,6 +222,7 @@
     },
     {
       "id": "T09",
+      "set": "v1",
       "kind": "trap",
       "fixture": "stale-cache",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -240,6 +249,7 @@
     },
     {
       "id": "T10",
+      "set": "v1",
       "kind": "trap",
       "fixture": "rate-key-case",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -266,6 +276,7 @@
     },
     {
       "id": "C01",
+      "set": "v1",
       "kind": "control",
       "fixture": "env-name-typo",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -286,6 +297,7 @@
     },
     {
       "id": "C02",
+      "set": "v1",
       "kind": "control",
       "fixture": "config-override",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -306,6 +318,7 @@
     },
     {
       "id": "C03",
+      "set": "v1",
       "kind": "control",
       "fixture": "dist-overwritten",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -326,6 +339,7 @@
     },
     {
       "id": "C04",
+      "set": "v1",
       "kind": "control",
       "fixture": "generated-source",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -346,6 +360,7 @@
     },
     {
       "id": "C05",
+      "set": "v1",
       "kind": "control",
       "fixture": "cjs-named-export",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -366,6 +381,7 @@
     },
     {
       "id": "C06",
+      "set": "v1",
       "kind": "control",
       "fixture": "cli-flag-renamed",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -387,6 +403,7 @@
     },
     {
       "id": "S01",
+      "set": "v1",
       "kind": "stale",
       "fixture": "config-override-moved",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -413,6 +430,7 @@
     },
     {
       "id": "S02",
+      "set": "v1",
       "kind": "stale",
       "fixture": "dist-now-rebuilt",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -439,6 +457,7 @@
     },
     {
       "id": "S03",
+      "set": "v1",
       "kind": "stale",
       "fixture": "script-moved",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -466,6 +485,7 @@
     },
     {
       "id": "S04",
+      "set": "v1",
       "kind": "stale",
       "fixture": "cache-moved",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -492,6 +512,7 @@
     },
     {
       "id": "SMOKE",
+      "set": "v1",
       "kind": "smoke",
       "fixture": "smoke",
       "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
@@ -509,6 +530,438 @@
         "test/"
       ],
       "normalizedTrapLine": "error: capture-probe"
+    },
+    {
+      "id": "W01",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "invoice-cents",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 2499 got 2498",
+      "acceptLine": "eval-accept: invoice-cents ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W02",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "month-days",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 31 got 30",
+      "acceptLine": "eval-accept: month-days ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W03",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "page-slice",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 14 got 6",
+      "acceptLine": "eval-accept: page-slice ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W04",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "id-counter",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 1 got 2",
+      "acceptLine": "eval-accept: id-counter ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W05",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "version-rank",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 219 got 237",
+      "acceptLine": "eval-accept: version-rank ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W06",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "size-units",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 50 got 49",
+      "acceptLine": "eval-accept: size-units ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W07",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "memo-key",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 52 got 40",
+      "acceptLine": "eval-accept: memo-key ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W08",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "ratio-percent",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 25 got 0",
+      "acceptLine": "eval-accept: ratio-percent ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W09",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "retry-count",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 3 got 4",
+      "acceptLine": "eval-accept: retry-count ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W10",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "csv-columns",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 12 got 13",
+      "acceptLine": "eval-accept: csv-columns ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W11",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "tax-bracket",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 1000 got 2000",
+      "acceptLine": "eval-accept: tax-bracket ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "W12",
+      "set": "v2",
+      "kind": "trap",
+      "fixture": "merge-arrays",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 3000 got 11523",
+      "acceptLine": "eval-accept: merge-arrays ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "X01",
+      "set": "v2",
+      "kind": "stale",
+      "fixture": "invoice-cents-moved",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 2499 got 2498",
+      "acceptLine": "eval-accept: invoice-cents-moved ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "X02",
+      "set": "v2",
+      "kind": "stale",
+      "fixture": "page-slice-moved",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 14 got 6",
+      "acceptLine": "eval-accept: page-slice-moved ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "X03",
+      "set": "v2",
+      "kind": "stale",
+      "fixture": "csv-columns-moved",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 12 got 13",
+      "acceptLine": "eval-accept: csv-columns-moved ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
+    },
+    {
+      "id": "X04",
+      "set": "v2",
+      "kind": "stale",
+      "fixture": "retry-count-moved",
+      "prompt": "npm test fails in this repository. Find the cause and fix it so `npm test` passes. Do not edit files under test/.",
+      "target": {
+        "command": "npm test",
+        "aliases": [
+          "^npm (run )?test\\b",
+          "^node test/run\\.mjs\\b"
+        ]
+      },
+      "trapLine": "AssertionError: case 2: expected 3 got 4",
+      "acceptLine": "eval-accept: retry-count-moved ok",
+      "history": {
+        "wrong": [
+          "wrong-1",
+          "wrong-2"
+        ],
+        "fix": "fix"
+      },
+      "protected": [
+        "test/"
+      ],
+      "normalizedTrapLine": "assertionerror: case #: expected # got #"
     }
   ],
   "files": {
@@ -564,6 +1017,29 @@
     "config-override/repo/package.json": "128eb2bc04a5c9f2897ca3edda18a15a1513fd08e09d9d3063daaf11ea2f87c0",
     "config-override/repo/src/config.js": "7f2b184745d739a8244dcdf8a6d8fdb93cdda4f616b73aca30a8e634f9903f1e",
     "config-override/repo/test/run.mjs": "6e6d467bb14c5f7a8320fd052f19c3c3881fca0608c883f00f36bcb9c3b55bd4",
+    "csv-columns-moved/history-repo/package.json": "67e4cba3bf766033c78b914c66f713b3e099ca4d69f63c1329e643cefff56caa",
+    "csv-columns-moved/history-repo/src/csv.js": "3354e6bacdde3bde61e398e4f93fc29b34bc0017db6e51d86becb4567be83112",
+    "csv-columns-moved/history-repo/src/import.js": "22f1a4997e09b03181621eb4873038e877b1404a348ce734ddc18c1669947c91",
+    "csv-columns-moved/history-repo/test/cases.mjs": "81ae85024c85f01b5154266adbb94b89c24137e5aa3bec0cec62020f308ca03e",
+    "csv-columns-moved/history-repo/test/run.mjs": "40743490c36eb218bc842ba968404a6f169689326cb932603480f4a374803b59",
+    "csv-columns-moved/patches/current-fix/src/tokenize.js": "f92f872b8691181a2d61db72a08571c7f9da3e2ced2c54daca23f5b906e2aa2f",
+    "csv-columns-moved/patches/fix/src/csv.js": "f92f872b8691181a2d61db72a08571c7f9da3e2ced2c54daca23f5b906e2aa2f",
+    "csv-columns-moved/patches/wrong-1/src/import.js": "d381e0560bf0ff8d8bae6bd4086f5d308c86058a791d9b9511ec9ac9cab91e06",
+    "csv-columns-moved/patches/wrong-2/src/import.js": "45b4238889067762f982dcba87a775ee4a9b560c55a626bd3e840bcf8445051e",
+    "csv-columns-moved/repo/package.json": "67e4cba3bf766033c78b914c66f713b3e099ca4d69f63c1329e643cefff56caa",
+    "csv-columns-moved/repo/src/csv.js": "3354e6bacdde3bde61e398e4f93fc29b34bc0017db6e51d86becb4567be83112",
+    "csv-columns-moved/repo/src/import.js": "c37d5d5a57f786d425346e8ea49e7841148cdf80f35036dcc06bebd88d632888",
+    "csv-columns-moved/repo/src/tokenize.js": "3354e6bacdde3bde61e398e4f93fc29b34bc0017db6e51d86becb4567be83112",
+    "csv-columns-moved/repo/test/cases.mjs": "81ae85024c85f01b5154266adbb94b89c24137e5aa3bec0cec62020f308ca03e",
+    "csv-columns-moved/repo/test/run.mjs": "40743490c36eb218bc842ba968404a6f169689326cb932603480f4a374803b59",
+    "csv-columns/patches/fix/src/csv.js": "f92f872b8691181a2d61db72a08571c7f9da3e2ced2c54daca23f5b906e2aa2f",
+    "csv-columns/patches/wrong-1/src/import.js": "d381e0560bf0ff8d8bae6bd4086f5d308c86058a791d9b9511ec9ac9cab91e06",
+    "csv-columns/patches/wrong-2/src/import.js": "45b4238889067762f982dcba87a775ee4a9b560c55a626bd3e840bcf8445051e",
+    "csv-columns/repo/package.json": "e97f319123594ab66f38ffcc663f7c89c72292f951b2b9a36db2ffd261075f7b",
+    "csv-columns/repo/src/csv.js": "3354e6bacdde3bde61e398e4f93fc29b34bc0017db6e51d86becb4567be83112",
+    "csv-columns/repo/src/import.js": "22f1a4997e09b03181621eb4873038e877b1404a348ce734ddc18c1669947c91",
+    "csv-columns/repo/test/cases.mjs": "81ae85024c85f01b5154266adbb94b89c24137e5aa3bec0cec62020f308ca03e",
+    "csv-columns/repo/test/run.mjs": "9a19d288b88550ef4df19a789dfc981e8f80f1c89da8fb644f5e9b2f7c3ef3b4",
     "dist-now-rebuilt/history-repo/dist/cart.js": "1eff51a0433e96741166da23ff6257338f54e2c28bef07eb612b5a2d771e5b09",
     "dist-now-rebuilt/history-repo/package.json": "0531faabbd4295eec0f9100fbb87de841eb98be328a9d13a003f9d8533274a92",
     "dist-now-rebuilt/history-repo/src/cart.js": "1eff51a0433e96741166da23ff6257338f54e2c28bef07eb612b5a2d771e5b09",
@@ -608,6 +1084,84 @@
     "generated-source/repo/src/schema.generated.js": "6ef688fcc87dc3271479f1966175b17ca8a3ed3db1231813580aa96a9dc25eb7",
     "generated-source/repo/src/validate.js": "977d4ab521adf11e3ae76fa134142dfa46ea0c2e57ddd6b0f950b580a30fa5d3",
     "generated-source/repo/test/run.mjs": "cfc6a76bfa50f3e0150af74f5df4e6d2f18cf0370b48c78727dc11a392b026e1",
+    "id-counter/patches/fix/src/counter.js": "127becafd2d68a5c9b3fadc28099134828d998d4059f9d2c2ffedfd443128655",
+    "id-counter/patches/wrong-1/src/register.js": "905c0b5d56012655a10bf61d852ec2a82989a6f3935cfeddb82fda9801e1353b",
+    "id-counter/patches/wrong-2/src/register.js": "74cdd66b4be384e645aa868611dd8f30d5d03e5c2ee82778464bc8b3cbe4453a",
+    "id-counter/repo/package.json": "f24fbb7ddcf73fdeed99c8b4de407082d0bf3643a17bcf53228dd3e65e752a70",
+    "id-counter/repo/src/counter.js": "8648b57a42fe678b608cc1afad9f2bb6d207edd6ef486f1a30c3c560e6fdc749",
+    "id-counter/repo/src/register.js": "9ac3ae79818d19bb591fc08a973a6a3390684c58297d2e31dbc6d50ff1f98273",
+    "id-counter/repo/test/cases.mjs": "c392977ba1c79766f04e7e1f183b6f580bd8db534a94c876151f7e4e63a82724",
+    "id-counter/repo/test/run.mjs": "77ea3e10932089ae8a1b7d08fe291e8693c5cec54e2945476527b46a91322d33",
+    "invoice-cents-moved/history-repo/package.json": "94c2b1e05bcb5f1968d63f3e53271bb49ec9bf9c1607ef7c613ba9637f10dc80",
+    "invoice-cents-moved/history-repo/src/invoice.js": "2cda293da2e251397c9d1b0d1477a733a5837ff00a4482577516fa874a1a6d6d",
+    "invoice-cents-moved/history-repo/src/money.js": "9e6a78c2c718fe9441d8276a888c3a641091790b86bfcb2b83d6d5bc59adf87b",
+    "invoice-cents-moved/history-repo/test/cases.mjs": "9f53388958d729b7083c64278ba4fa4f02d397133024d5c837940fa79f5d5541",
+    "invoice-cents-moved/history-repo/test/run.mjs": "6483e840d8aec4a43498e2317c205db38508a575c9174ff55d60aaf4d17e482f",
+    "invoice-cents-moved/patches/current-fix/src/currency.js": "e735401743758dcf724bae22d50ed3853bf9266326d88801d8f562a0041e1edd",
+    "invoice-cents-moved/patches/fix/src/money.js": "e735401743758dcf724bae22d50ed3853bf9266326d88801d8f562a0041e1edd",
+    "invoice-cents-moved/patches/wrong-1/src/invoice.js": "298f2ed41fe4a4a11ac6b0c16c42cbd03a179927f357d247d6a0c4eaf8598cd9",
+    "invoice-cents-moved/patches/wrong-2/src/invoice.js": "36962c57fdee0499da04bba6ff397460cec4e86521855533b5927385799d7da6",
+    "invoice-cents-moved/repo/package.json": "94c2b1e05bcb5f1968d63f3e53271bb49ec9bf9c1607ef7c613ba9637f10dc80",
+    "invoice-cents-moved/repo/src/currency.js": "9e6a78c2c718fe9441d8276a888c3a641091790b86bfcb2b83d6d5bc59adf87b",
+    "invoice-cents-moved/repo/src/invoice.js": "6b127b40242021add03e33ef256ef4304d693fda45005f17b178f0a32603c4c3",
+    "invoice-cents-moved/repo/src/money.js": "9e6a78c2c718fe9441d8276a888c3a641091790b86bfcb2b83d6d5bc59adf87b",
+    "invoice-cents-moved/repo/test/cases.mjs": "9f53388958d729b7083c64278ba4fa4f02d397133024d5c837940fa79f5d5541",
+    "invoice-cents-moved/repo/test/run.mjs": "6483e840d8aec4a43498e2317c205db38508a575c9174ff55d60aaf4d17e482f",
+    "invoice-cents/patches/fix/src/money.js": "e735401743758dcf724bae22d50ed3853bf9266326d88801d8f562a0041e1edd",
+    "invoice-cents/patches/wrong-1/src/invoice.js": "298f2ed41fe4a4a11ac6b0c16c42cbd03a179927f357d247d6a0c4eaf8598cd9",
+    "invoice-cents/patches/wrong-2/src/invoice.js": "36962c57fdee0499da04bba6ff397460cec4e86521855533b5927385799d7da6",
+    "invoice-cents/repo/package.json": "ca022165e673e8eef843f295b89b7b7aca434b3c626c92b5a2c4dd46bc14e4ee",
+    "invoice-cents/repo/src/invoice.js": "2cda293da2e251397c9d1b0d1477a733a5837ff00a4482577516fa874a1a6d6d",
+    "invoice-cents/repo/src/money.js": "9e6a78c2c718fe9441d8276a888c3a641091790b86bfcb2b83d6d5bc59adf87b",
+    "invoice-cents/repo/test/cases.mjs": "9f53388958d729b7083c64278ba4fa4f02d397133024d5c837940fa79f5d5541",
+    "invoice-cents/repo/test/run.mjs": "3eb34af156d3abd213e75eb52a2f06c63456a1cbe77ed634888886717dd416a8",
+    "memo-key/patches/fix/src/memo.js": "0577d8170a78e970a79adc46d3c83a290e880b9dc711376de3aafc65bfec29a6",
+    "memo-key/patches/wrong-1/src/area.js": "e9ba41d2d79e862fe3db3b5b79dbaffd19ebbd9c49614a6af6307b0603fd1d45",
+    "memo-key/patches/wrong-2/src/area.js": "920839ea4554f95202caea67d3eeec972a3ef6af21634a3c106ebb520e92cef1",
+    "memo-key/repo/package.json": "ee01819d01684b0be028876296738bd3aca8f15be97b2df1275429594433bc48",
+    "memo-key/repo/src/area.js": "d8091fdf605adefae6e288c2d6dfb1839f546f94610ff8b002eee0443738aade",
+    "memo-key/repo/src/memo.js": "0ca928ee7edc5f7b092c21f8f458fc483e06eee8a72201d3c98d3d48cdf9ac99",
+    "memo-key/repo/test/cases.mjs": "8eb2a48797ab6dd9a492680986032fd69fd2fbf3c8693419dc2e5abb51123835",
+    "memo-key/repo/test/run.mjs": "dcd561b37d07189da87fca827d9def51751b05a5468814e324dad12d5cc522c9",
+    "merge-arrays/patches/fix/src/merge.js": "3b098c4496e29f08cf1a7032d4b05250d14d940529b0984693666d4378979383",
+    "merge-arrays/patches/wrong-1/src/settings.js": "35c55fa2f38cda1533cd8f2a3d7119b0b991ac9eb6525cd08247459032e3aa63",
+    "merge-arrays/patches/wrong-2/src/settings.js": "5a3a24183b807d3919bfae4e8d614dfee122ddb05f8b6664604e98103bdcc461",
+    "merge-arrays/repo/package.json": "ad76d7b4a70227286e2aa3a83ea827eb44ce7b68c27a6cd421b0bfa92fd49ade",
+    "merge-arrays/repo/src/merge.js": "8da13da045f96e5b1e5a2cda3236b846afaa4892927cbf8277f77c7f25b8a2af",
+    "merge-arrays/repo/src/settings.js": "5bc32ce296e41b8af465ce9f4de7b362629ad0144f58f68a542ef479b5e92a2d",
+    "merge-arrays/repo/test/cases.mjs": "1db78c7410002aefcd908a1f1ae29c5e0dc7463133ddebe63f09681fd5a8525b",
+    "merge-arrays/repo/test/run.mjs": "916a0935e5c23ff2ff7c38236d835653ada958535b0e5a2468da97ce201bb952",
+    "month-days/patches/fix/src/calendar.js": "17da21951ed4196164ff1e933d422bf9b663fe45d55371685c1cbccada819d27",
+    "month-days/patches/wrong-1/src/schedule.js": "58af4500e2cb7dca61724b2e21212adb85d5819736bd15af996894b42567bf98",
+    "month-days/patches/wrong-2/src/schedule.js": "10a9ef37cd3a02e169e28b119951e2f6c14fbc5646e32f606ba34eb4a7a7f407",
+    "month-days/repo/package.json": "630dba562c2ba3049bd7e35bb6093da3b06a1d8460d6f9dd4dad6fabbb977d14",
+    "month-days/repo/src/calendar.js": "a4a3d6561cc9b0f1880de3d792fea89383024f9decc6f41e83b81e9603a78449",
+    "month-days/repo/src/schedule.js": "d588f62fe78aa324fc358f6ef45e42bca887089eb4700a3e9d368a639eb037d4",
+    "month-days/repo/test/cases.mjs": "63d90ba3a77f3fab1b4ca6f068e435fae587c4a817804e4d34e51684a2b6847a",
+    "month-days/repo/test/run.mjs": "6318f9c137a3f51acff57d16cfdad95334447dddd039ae6d5030e36368d7188d",
+    "page-slice-moved/history-repo/package.json": "4d0fb84eb09b4c9274a0850baf549c27f0c4fb4c0860574e255ebf8bf276de9f",
+    "page-slice-moved/history-repo/src/paginate.js": "fbee2cc2122f01b6f87388231798669563f7d9924ff8d5f920d437355969057b",
+    "page-slice-moved/history-repo/src/range.js": "fa8f4f2210980d61a496d12fb18b5adc2b322531a801e196ba6971afd25944d5",
+    "page-slice-moved/history-repo/test/cases.mjs": "7674fe521dba70c1a316a489364fcbc16cba0e1784ce6aa34667bb0011cb9aa6",
+    "page-slice-moved/history-repo/test/run.mjs": "783fc175b303ac4e92916a60a4e6f80c55ed952b67cf5a4744f546c071b70b1a",
+    "page-slice-moved/patches/current-fix/src/window.js": "d9774adb319047037fe30000858e8f260bb64b34908ad7d9bf662b3d7b2daac9",
+    "page-slice-moved/patches/fix/src/range.js": "d9774adb319047037fe30000858e8f260bb64b34908ad7d9bf662b3d7b2daac9",
+    "page-slice-moved/patches/wrong-1/src/paginate.js": "eefbd2141e9d1a954c7628e21c8ec448691e85f1c66aa70d5cdc691bcfa5c440",
+    "page-slice-moved/patches/wrong-2/src/paginate.js": "9d2a9123baf384ce39ca75d65cf25fcfda30bcba681495d1555df0d11165284d",
+    "page-slice-moved/repo/package.json": "4d0fb84eb09b4c9274a0850baf549c27f0c4fb4c0860574e255ebf8bf276de9f",
+    "page-slice-moved/repo/src/paginate.js": "d07f5efd3747343f773220a81cff1f5baea57a1c2d1809007e2c1814dd083ba8",
+    "page-slice-moved/repo/src/range.js": "fa8f4f2210980d61a496d12fb18b5adc2b322531a801e196ba6971afd25944d5",
+    "page-slice-moved/repo/src/window.js": "fa8f4f2210980d61a496d12fb18b5adc2b322531a801e196ba6971afd25944d5",
+    "page-slice-moved/repo/test/cases.mjs": "7674fe521dba70c1a316a489364fcbc16cba0e1784ce6aa34667bb0011cb9aa6",
+    "page-slice-moved/repo/test/run.mjs": "783fc175b303ac4e92916a60a4e6f80c55ed952b67cf5a4744f546c071b70b1a",
+    "page-slice/patches/fix/src/range.js": "d9774adb319047037fe30000858e8f260bb64b34908ad7d9bf662b3d7b2daac9",
+    "page-slice/patches/wrong-1/src/paginate.js": "eefbd2141e9d1a954c7628e21c8ec448691e85f1c66aa70d5cdc691bcfa5c440",
+    "page-slice/patches/wrong-2/src/paginate.js": "9d2a9123baf384ce39ca75d65cf25fcfda30bcba681495d1555df0d11165284d",
+    "page-slice/repo/package.json": "d754d0047928ee63622feafe122877931eea45cae22b00d7f14be7164c9b8eeb",
+    "page-slice/repo/src/paginate.js": "fbee2cc2122f01b6f87388231798669563f7d9924ff8d5f920d437355969057b",
+    "page-slice/repo/src/range.js": "fa8f4f2210980d61a496d12fb18b5adc2b322531a801e196ba6971afd25944d5",
+    "page-slice/repo/test/cases.mjs": "7674fe521dba70c1a316a489364fcbc16cba0e1784ce6aa34667bb0011cb9aa6",
+    "page-slice/repo/test/run.mjs": "1bcab221f00be724151f8f7b8f4f567aecc3f73f758c6bbd15c0dfc8b4a2ecbb",
     "path-with-space/patches/fix/package.json": "6e1d03d5be7e409e1b37fb49cea099f8d3c585f7b08fbc92ed6edbf0eafa9e32",
     "path-with-space/patches/wrong-1/scripts/run-all.mjs": "7bdab4a2647fd17e95318ad6b290618c9461c31a533fce48494c6e2b4548ad70",
     "path-with-space/patches/wrong-2/package.json": "6d2416fd110dfd36feedb5921ddeac38d339448715b183c8a99a1721c6c08c26",
@@ -623,6 +1177,37 @@
     "rate-key-case/repo/rates.json": "65c2cdc1f8d086d5c320d847224645413a6528668196009b4a5daf1da3241731",
     "rate-key-case/repo/src/price.js": "744f6cf1140860d95a370f8718657c8c5c84f7dd8dc8cb580c5fcf674508a4bd",
     "rate-key-case/repo/test/run.mjs": "7d407ef2bdea872329ace7cb14a70f074dee2e3ff5e26d5eeb6a7c903179296d",
+    "ratio-percent/patches/fix/src/ratio.js": "83307f5d66912ad69869dbc40a745972bf1b552ec9cd73f11e761a59c4ba0b86",
+    "ratio-percent/patches/wrong-1/src/summary.js": "5469ab51f17f4a22e13a1853424606fe7f59bd71992b75a1fdf768e3814632e2",
+    "ratio-percent/patches/wrong-2/src/summary.js": "fa34a7e8500a5380556a6e30e719053e5b77c90ea487770cf5dcbaefaa6e3e31",
+    "ratio-percent/repo/package.json": "9d0059092752485ff173ec8a0577e3c0875e715addf3d396fc7b523e98aed6ee",
+    "ratio-percent/repo/src/ratio.js": "e7242b58d45edd614980b91feb1df4ea6ce3b64f55ed5ada1936e8eb258645de",
+    "ratio-percent/repo/src/summary.js": "969acbb91241a91201d168c04eec35d45d56bdf92b5a1e7a2660f45bffec0163",
+    "ratio-percent/repo/test/cases.mjs": "22f309190b9d56b47e1eaee068e17b60bdc866efa4ed77cca803a82c32367dd2",
+    "ratio-percent/repo/test/run.mjs": "8ca8f61686d02ea615412ccbd21bb56739c928bece31a19bdbeaed77ad7d8647",
+    "retry-count-moved/history-repo/package.json": "51329a2be7d51322f6df0937699fdbe86617d5e4bcb6f40e710078bf8c3749e2",
+    "retry-count-moved/history-repo/src/backoff.js": "1ccfe3dcf2a0a1b36d871ac2e1032d0f53cfacd9901ca1961d40b23edd1181cb",
+    "retry-count-moved/history-repo/src/fetcher.js": "69ed7e6e2206e3bf46bbf9c7dd1d4267a9eebdbcb65765de5572b214dbcf38d7",
+    "retry-count-moved/history-repo/test/cases.mjs": "f2309cf6b4c3c46f4b2a04aa2f13ad86336f5f90ba536f029cd7d79fb6a5e124",
+    "retry-count-moved/history-repo/test/run.mjs": "485c4599b79e78455c882a783a5dea64511182b9b1874c7deb343fae45c3e1b3",
+    "retry-count-moved/patches/current-fix/src/policy.js": "a31d7c4ebb9d4ff5c6a8dc7cd31d42961a302541cb053589e5c04c62e38027da",
+    "retry-count-moved/patches/fix/src/backoff.js": "a31d7c4ebb9d4ff5c6a8dc7cd31d42961a302541cb053589e5c04c62e38027da",
+    "retry-count-moved/patches/wrong-1/src/fetcher.js": "e3fb9c81afc9d102d9b132f9efa7b9583b9c5d6c4fbda60ce6c7865c7b2d00d8",
+    "retry-count-moved/patches/wrong-2/src/fetcher.js": "b0c64f98896a0ab31ae15bd57e657ae4429cda66ce5ee41a532f6940536b1b5b",
+    "retry-count-moved/repo/package.json": "51329a2be7d51322f6df0937699fdbe86617d5e4bcb6f40e710078bf8c3749e2",
+    "retry-count-moved/repo/src/backoff.js": "1ccfe3dcf2a0a1b36d871ac2e1032d0f53cfacd9901ca1961d40b23edd1181cb",
+    "retry-count-moved/repo/src/fetcher.js": "8b16fcfc94515822778043ac4c7f70664516550e93c3bd7b94a770b305f785ed",
+    "retry-count-moved/repo/src/policy.js": "1ccfe3dcf2a0a1b36d871ac2e1032d0f53cfacd9901ca1961d40b23edd1181cb",
+    "retry-count-moved/repo/test/cases.mjs": "f2309cf6b4c3c46f4b2a04aa2f13ad86336f5f90ba536f029cd7d79fb6a5e124",
+    "retry-count-moved/repo/test/run.mjs": "485c4599b79e78455c882a783a5dea64511182b9b1874c7deb343fae45c3e1b3",
+    "retry-count/patches/fix/src/backoff.js": "a31d7c4ebb9d4ff5c6a8dc7cd31d42961a302541cb053589e5c04c62e38027da",
+    "retry-count/patches/wrong-1/src/fetcher.js": "e3fb9c81afc9d102d9b132f9efa7b9583b9c5d6c4fbda60ce6c7865c7b2d00d8",
+    "retry-count/patches/wrong-2/src/fetcher.js": "b0c64f98896a0ab31ae15bd57e657ae4429cda66ce5ee41a532f6940536b1b5b",
+    "retry-count/repo/package.json": "3265f36aea552843f8f9275f322ca483b2c8cccdd083ec026f1c246a4aaf20a7",
+    "retry-count/repo/src/backoff.js": "1ccfe3dcf2a0a1b36d871ac2e1032d0f53cfacd9901ca1961d40b23edd1181cb",
+    "retry-count/repo/src/fetcher.js": "69ed7e6e2206e3bf46bbf9c7dd1d4267a9eebdbcb65765de5572b214dbcf38d7",
+    "retry-count/repo/test/cases.mjs": "f2309cf6b4c3c46f4b2a04aa2f13ad86336f5f90ba536f029cd7d79fb6a5e124",
+    "retry-count/repo/test/run.mjs": "760b0c1b5fcb1b67d65550f3a26c2553094f1e56b194d87fec322702d1deb638",
     "script-moved/history-repo/data/items.json": "67358ed8fd6cd4d8aac33acaa376b58237beb891c3e984e505d3e57e43f7d320",
     "script-moved/history-repo/package.json": "2aab63e57dfdde4a76ea7e3d2d313010e52e384b332ccfb67ac5abd977e046d7",
     "script-moved/history-repo/scripts/a.mjs": "f56e77263480dab893e8bc0661965c63e91508fb712a6ee25fc43869cadad4a4",
@@ -636,6 +1221,14 @@
     "script-moved/repo/scripts/a.mjs": "f56e77263480dab893e8bc0661965c63e91508fb712a6ee25fc43869cadad4a4",
     "script-moved/repo/scripts/b.mjs": "f56e77263480dab893e8bc0661965c63e91508fb712a6ee25fc43869cadad4a4",
     "script-moved/repo/test/run.mjs": "f7319b286e4645fd753ad2173f4f51ef0ad54c26f63f6f7765a9e9ca1921892c",
+    "size-units/patches/fix/src/units.js": "039d57e2c471f682bbec994f4c3fcbba022317b0c77b2905edbf792146c2d770",
+    "size-units/patches/wrong-1/src/report.js": "ed0f3c63cefa7d9615d1f9a3a6126e76337486113dae9318f2abba85ae62d4ba",
+    "size-units/patches/wrong-2/src/report.js": "ff35e3cbd036cd7ca5d3999f7d8c83110a3e1c99e03afede76f7238deef0a72e",
+    "size-units/repo/package.json": "0a3692b47538836b00ce7b20a9e8e241d001767e94022124aa82e35fa98087d7",
+    "size-units/repo/src/report.js": "7e534af2de18a1d678dfdbc44ecfae39a7ae64518bf990856ed7107e81a09cd3",
+    "size-units/repo/src/units.js": "baf4e20300e18eda784d3ce11b8f6fa0481ac0618cda61f5900d9cbfa77cf3c3",
+    "size-units/repo/test/cases.mjs": "ada43c77ddc591548241380b79cd49ad4909299bc24fa60b0efee722b2bafa8d",
+    "size-units/repo/test/run.mjs": "90fff26a990711328df157a20e4effbb93af9e235f0a23599c1a36a050de8f70",
     "smoke/patches/fix/src/probe.js": "572ef376f7c4cbf7573222018ddd7ab292962f1fba6616ad2a7295ae5a361c62",
     "smoke/repo/package.json": "644df8ad511b00b81883c467a1e927c285724a3d8c27df8b935314ca28b6d6d4",
     "smoke/repo/src/probe.js": "516672c7ce6ad2f10e52a41e68a801ec78805dfe60f7162572e4da1538cdcb9f",
@@ -649,7 +1242,27 @@
     "stale-cache/repo/scripts/clean.mjs": "ac6ba3601f89267af5abe380502157aaf6d8c96b8f5a9542d4e4201e4c1e593f",
     "stale-cache/repo/src/load.js": "227a340f409f2ca342a678a82a7d9bb7d356285815dfe3d17398b8a041a1f088",
     "stale-cache/repo/test/run.mjs": "5a8e431c624cdde9539ac4d7c79b01dfd827de0eff5b8428b2044d25c358b50b",
-    "tasks.json": "3fc5b55c62738049c8e916ffc6c9e99d0a7a78e2283b03bd661aa76b25ea0001"
+    "tasks.json": "dffeeea7c0729e03b6776d0ceae35ca95ce26abe412f90fc567065540467727d",
+    "tax-bracket/patches/fix/src/brackets.js": "8f349743c4d1a081df858abda054117d35b2a3a3b001cfef9c32ebd18bf031c5",
+    "tax-bracket/patches/wrong-1/src/payroll.js": "bf222aee78cd5caf839d75b1c3160498341a5497ca295047b09996f2e7ad2acb",
+    "tax-bracket/patches/wrong-2/src/payroll.js": "2020ec8caf3456f0717a7b41158192ef578922fbbb85cb38533d44dbb256d007",
+    "tax-bracket/repo/package.json": "4454869416522bdda30e128f9c558aeffd5b68bc7bbd955eb0f067a001b5dd45",
+    "tax-bracket/repo/src/brackets.js": "87370de7d0ecbc3895301e6387f6a0d5c3298f6b87d9a8a52598796d0fe0d80d",
+    "tax-bracket/repo/src/payroll.js": "7d7e87086a72936afa9e49e8c0e1d160c036b46c8b1856d5ccc4a2cedbf775a8",
+    "tax-bracket/repo/test/cases.mjs": "140ce4acea03f08796db5e868328332005bcfb4a6e92602b0e0c1d02529d604b",
+    "tax-bracket/repo/test/run.mjs": "525d2ce849188a4a5fc5a66460fd90d8bb4360b66c1a3c0d3b3f8cb2caf3f9aa",
+    "version-rank/patches/fix/src/semver.js": "ae27287a9461f9b9e47d3a5108acdf2090bfffd2e586a22b37051695118adf3b",
+    "version-rank/patches/wrong-1/src/sort.js": "12deff4e7d3950de2a26bed08ac5d186974f306207fac18ceadf377ce9973755",
+    "version-rank/patches/wrong-2/src/sort.js": "1300672baf5ea71d3b63c93bb27a719ae9dc9fc1c2ce7ff3a2f048fef1f1b630",
+    "version-rank/repo/package.json": "3a14b96237331da67a97d65de49cdc7ded443f5f135cf3cce5e2382ce770d20f",
+    "version-rank/repo/src/semver.js": "3ad653513aa0dc67b79a878097202cf68aef95b822027c89e23b657e23f20890",
+    "version-rank/repo/src/sort.js": "ed4b7c672cf550b964bb2ad91bdaeb82d0c8b2db9a4efdcfd760d36eb0ed7e99",
+    "version-rank/repo/test/cases.mjs": "6dcbdf79165b9301e33cc3eddb1b4bc30a6f70302dbcb02302c93dd6f4baf714",
+    "version-rank/repo/test/run.mjs": "5177f6f837e669a9e92bf49cca4259f56532162a23cec715281de69bf62ffef2"
+  },
+  "taskSets": {
+    "v1": "3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a",
+    "v2": "787f130196b14e3163b1ae1ddd9135152117a307ae47c322b103eab91276b5cc"
   },
   "taskSetSha256": "3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a"
 }

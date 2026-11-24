@@ -188,3 +188,45 @@ Counting for the pre-registered field measurement (`docs/attempt-notes-preregist
 Run 1 started with `k = 5` and was stopped by the owner after 139 published runs (blocks 1 and 2 complete, 21 runs of block 3) to limit model usage. Run 1 now uses `k = 3` (`20 × 3 × 3 = 180` runs). With the same seed, the `k = 3` schedule is the first three blocks of the `k = 5` schedule, so every published run keeps its `runId`; only `k` and `scheduledRuns` in `batch.json` change. Every other rule is unchanged, and the sign-flip grid becomes `1 / lcm(1..3) = 1 / 6`.
 
 This amendment is written before `evaluate.mjs` or `analyze.mjs` ran on any run-1 data. One fact was already known when it was written: the runner's progress log showed every published run as `solved`. A ceiling on `solved` makes the solved-drop veto unlikely to fire at any `k`. The median-turns veto and the positive control are unaffected by that observation. Run 2 keeps `k = 5` unless a later amendment, written before run 2 starts, says otherwise.
+
+## Amendment 2 (2026-11-24): `v2` calibration protocol and keep rule
+
+This amendment fixes the calibration protocol and keep rule for the `v2` candidate set (`W01`–`W12` trap candidates and `X01`–`X04` stale candidates) before any calibration run exists. This rule is fixed at this commit and cannot change after any calibration run exists.
+
+- **Calibration protocol:** the calibration is arm `none` only, with the run-1 flags (`CLAUDE_FLAGS`, `MODEL`, and `--auth token`), `k = 3`, and seed `20261124`, written to its own `--out` directory outside the repository.
+- **Keep conditions (`W01`–`W12`):** a candidate is **kept** when two conditions hold:
+  - in ≥2 of its 3 runs, `repeatFailures ≥ 1`;
+  - in ≥1 of its 3 runs, `solved`.
+- **Minimum kept traps:** at least 10 kept `W` tasks are required (≥10). If fewer pass, new offline synthetic candidates following the same trap design rules are created and only those new candidates are calibrated, with the same rule. Every calibration run is recorded.
+- **Stale tasks (`X01`–`X04`):** at least 3 of the 4 `X` tasks (≥3 of 4) must have `solved` in ≥1 run. A stale task needs no repeats, because it measures whether old memory misleads.
+- **Discard and bias:** calibration runs are discarded. They feed no claim, veto, or run-2 number, and are never reused as run-2 data. Selecting on arm `none` biases run 2 *against* a Rocky advantage, through regression to the mean in the `none` arm. This is accepted as conservative.
+
+### Calibration results
+
+- Batch: `--set v2 --arms none --k 3 --seed 20261124`, run-1 flags and model, token auth, `--before 31128bc --after 4bf6649`, evaluator at the keep-rule commit `1047f09`. Output kept outside the repository and discarded per the rule above.
+- The owner guard stopped the batch after 46 of 48 runs: the owner's Claude settings file changed during the last runs because of the owner's own activity outside the eval (no eval data reached the owner's memory; `appendedUnderEvalRoot = 0`). `W05-none-b3` and `W09-none-b3` never ran. Neither missing run can change a verdict below: both tasks already had 0 of 2 runs with a repeat, so they cannot reach 2 of 3.
+- All 46 runs `solved`; `repeatFailures = 0` in all 46.
+
+| id | runs | runs with repeatFailures ≥ 1 | runs solved | kept |
+|---|---:|---:|---:|---|
+| W01 | 3 | 0 | 3 | no |
+| W02 | 3 | 0 | 3 | no |
+| W03 | 3 | 0 | 3 | no |
+| W04 | 3 | 0 | 3 | no |
+| W05 | 2 | 0 | 2 | no |
+| W06 | 3 | 0 | 3 | no |
+| W07 | 3 | 0 | 3 | no |
+| W08 | 3 | 0 | 3 | no |
+| W09 | 2 | 0 | 2 | no |
+| W10 | 3 | 0 | 3 | no |
+| W11 | 3 | 0 | 3 | no |
+| W12 | 3 | 0 | 3 | no |
+| X01 | 3 | — | 3 | yes (stale) |
+| X02 | 3 | — | 3 | yes (stale) |
+| X03 | 3 | — | 3 | yes (stale) |
+| X04 | 3 | — | 3 | yes (stale) |
+
+- Outcome: 0 of 12 `W` candidates kept, below the required 10. 4 of 4 `X` candidates meet the stale rule.
+- Interpretation (descriptive only): with the run-1 model and flags, the agent reached the root-cause file directly in every run (turns to pass 3–4), so the symptom-patch family does not produce repeated failures. The `v2` set is therefore **not frozen** and run 2 does not start from it. The candidate fixtures stay in the repository under `set: "v2"` as the calibrated-and-rejected record; any replacement trap family is a new pre-registered amendment with its own calibration under the same keep rule.
+- Evaluator finding: in run 1, arm `none` recorded `no_attempt` because the evaluator did not recognise the target command when the agent chained it with other commands in one shell call (for example `npm test 2>&1 | head -50; ls`). The evaluator now matches chained target commands from output evidence. A descriptive re-score of run 1 is in `docs/evals/2026-11-23-attempt-memory-ab-run1-rescore.md`; per-run `solved` and `numTurns` are identical, so run 1's pre-registered verdict stands as reported.
+- `taskSets.v1` is unchanged: `3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a`. `taskSets.v2` at this commit (candidates, not frozen): `787f130196b14e3163b1ae1ddd9135152117a307ae47c322b103eab91276b5cc`.

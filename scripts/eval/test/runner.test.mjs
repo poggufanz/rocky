@@ -35,6 +35,7 @@ import {
   diffBatchProvenance,
   isValidRunJson,
   mulberry32,
+  parseArms,
   pipeReadableToRedactingWriter,
   runBatch,
   scanRunArtifactsForSecrets,
@@ -186,6 +187,76 @@ describe("schedule and mulberry32", () => {
       ],
     );
   });
+
+  test("schedule with --arms none gives one run per task and block", async () => {
+    const tasks = ["T01", "T02", "T03", "T04"];
+    const first = schedule(tasks, ["none"], 3, 20261124);
+    const second = schedule(tasks, ["none"], 3, 20261124);
+
+    assert.equal(first.length, 12);
+    assert.ok(first.every((entry) => entry.arm === "none"));
+    assert.deepEqual(first, second);
+
+    for (let block = 1; block <= 3; block += 1) {
+      const inBlock = first.filter((entry) => entry.block === block);
+      assert.equal(inBlock.length, 4);
+      assert.deepEqual(
+        inBlock.map((entry) => entry.taskId).sort(),
+        tasks,
+      );
+      for (const entry of inBlock) {
+        assert.equal(entry.runId, `${entry.taskId}-none-b${block}`);
+      }
+    }
+
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-single-arm-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    const executed = [];
+    try {
+      await runBatch(
+        {
+          set: "v1",
+          arms: ["none"],
+          outDir,
+          rootDir,
+          cacheDir,
+          beforeRef: "31128bc",
+          afterRef: "origin/main",
+          auth: { kind: "token" },
+          secrets: [],
+          concurrency: 2,
+          k: 3,
+          seed: 20261124,
+          only: tasks,
+        },
+        makeFakeDeps({
+          runClaude: async ({ runId }) => {
+            executed.push(runId);
+            return {
+              stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+              stderr: "",
+              exitCode: 0,
+              timedOut: false,
+            };
+          },
+        }),
+      );
+
+      assert.equal(executed.length, 12);
+      const batchJson = JSON.parse(readFileSync(join(outDir, "batch.json"), "utf8"));
+      assert.equal(batchJson.set, "v1");
+      assert.equal(
+        batchJson.taskSetSha256,
+        "3bf31ff00c6337c38646b83112576e37e545a2298f6302ddcadd7d4cf0e2d62a",
+      );
+      assert.deepEqual(batchJson.arms, ["none"]);
+      assert.equal(batchJson.scheduledRuns, 12);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("task selection, provenance diff, and outcome classification", () => {
@@ -216,6 +287,7 @@ describe("task selection, provenance diff, and outcome classification", () => {
       seed: 7,
       k: 2,
       concurrency: 2,
+      arms: [...ARMS],
       taskIds: ["SMOKE"],
     };
     assert.deepEqual(diffBatchProvenance({ ...base, concurrency: 4 }, base), []);
@@ -732,6 +804,201 @@ describe("bounded streaming capture and async accept", () => {
 });
 
 describe("runner CLI guards and resume provenance", () => {
+  test("runner requires --set", () => {
+    const bare = spawnSync(process.execPath, [runnerScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(bare.status, 2);
+    assert.match(bare.stderr, /--set/);
+
+    const outDir = mkdtempSync(join(tmpdir(), "rocky-runner-noset-"));
+    try {
+      const res = spawnSync(
+        process.execPath,
+        [
+          runnerScript,
+          "--out",
+          outDir,
+          "--before",
+          "31128bc",
+          "--after",
+          "HEAD",
+          "--auth",
+          "token",
+        ],
+        {
+          cwd: repoRoot,
+          env: { ...process.env, ROCKY_EVAL_OAUTH_TOKEN: "dummy-token" },
+          encoding: "utf8",
+          windowsHide: true,
+        },
+      );
+      assert.equal(res.status, 2);
+      assert.match(res.stderr, /--set/);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
+  test("runner rejects duplicate and empty items in --arms with exit 2", () => {
+    for (const badArms of ["none,none", ["none", "none"], "none,,before", ",none", "none,", ["none", ""]]) {
+      assert.throws(
+        () => parseArms(badArms),
+        (err) => err instanceof Error && err.exitCode === 2 && /arm/i.test(err.message),
+        `expected parseArms(${JSON.stringify(badArms)}) to throw exitCode 2`,
+      );
+    }
+
+    const dupCli = spawnSync(
+      process.execPath,
+      [runnerScript, "--set", "v1", "--arms", "none,none"],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+    assert.equal(dupCli.status, 2);
+    assert.match(dupCli.stderr, /duplicate arm|--arms/i);
+    assert.doesNotMatch(dupCli.stderr, /--out <dir> is required/);
+
+    const emptyItemCli = spawnSync(
+      process.execPath,
+      [runnerScript, "--set", "v1", "--arms", "none,,before"],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+    assert.equal(emptyItemCli.status, 2);
+    assert.match(emptyItemCli.stderr, /empty arm|--arms/i);
+    assert.doesNotMatch(emptyItemCli.stderr, /--out <dir> is required/);
+  });
+
+  test("resume and retry refuse when saved batch.json is missing arms, has different arms, or mismatches legacy v1 set", async () => {
+    const baseTmp = mkdtempSync(join(tmpdir(), "rocky-runner-arms-prov-"));
+    const outDir = join(baseTmp, "out");
+    const rootDir = join(baseTmp, "sbx");
+    const cacheDir = join(baseTmp, "cache");
+    let packCalls = 0;
+    const executed = [];
+
+    try {
+      const fakeDeps = makeFakeDeps({
+        packArm: async (sha, dir) => {
+          packCalls += 1;
+          return join(dir, `rocky-${sha}.tgz`);
+        },
+        runClaude: async ({ runId }) => {
+          executed.push(runId);
+          return {
+            stdout: `${JSON.stringify({ type: "result", subtype: "success", is_error: false })}\n`,
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+          };
+        },
+      });
+
+      const baseOpts = {
+        set: "v1",
+        arms: ["none"],
+        outDir,
+        rootDir,
+        cacheDir,
+        beforeRef: "31128bc",
+        afterRef: "origin/main",
+        auth: { kind: "token" },
+        secrets: [],
+        concurrency: 1,
+        k: 1,
+        seed: 7,
+        only: ["SMOKE"],
+      };
+
+      await runBatch(baseOpts, fakeDeps);
+      assert.equal(executed.length, 1);
+      assert.equal(packCalls, 0);
+
+      const batchPath = join(outDir, "batch.json");
+      const savedBatch = JSON.parse(readFileSync(batchPath, "utf8"));
+
+      // 1. Saved batch missing `arms` refuses both plain resume and --retry-invalid (even with matching or 3-arm request).
+      const withoutArms = { ...savedBatch };
+      delete withoutArms.arms;
+      writeFileSync(batchPath, `${JSON.stringify(withoutArms, null, 2)}\n`, "utf8");
+
+      for (const retryInvalid of [false, true]) {
+        for (const requestedArms of [["none", "before", "after"], ["none"]]) {
+          await assert.rejects(
+            () => runBatch({ ...baseOpts, arms: requestedArms, retryInvalid }, fakeDeps),
+            (err) => {
+              assert.ok(err instanceof ProvenanceMismatchError);
+              assert.equal(err.exitCode, 2);
+              assert.ok(err.differingFields.includes("arms"));
+              assert.match(err.message, /\barms\b/);
+              return true;
+            },
+          );
+        }
+      }
+      assert.equal(executed.length, 1, "must not run new tasks when saved arms is missing");
+      assert.equal(packCalls, 0, "must not pack arms when saved arms is missing");
+
+      // 2. Saved batch with `arms: ["none"]` reopened with different arms refuses both plain resume and --retry-invalid.
+      writeFileSync(batchPath, `${JSON.stringify(savedBatch, null, 2)}\n`, "utf8");
+      for (const retryInvalid of [false, true]) {
+        await assert.rejects(
+          () => runBatch({ ...baseOpts, arms: ["none", "before", "after"], retryInvalid }, fakeDeps),
+          (err) => {
+            assert.ok(err instanceof ProvenanceMismatchError);
+            assert.equal(err.exitCode, 2);
+            assert.ok(err.differingFields.includes("arms"));
+            assert.match(err.message, /\barms\b/);
+            return true;
+          },
+        );
+      }
+      assert.equal(executed.length, 1);
+      assert.equal(packCalls, 0);
+
+      // 3. Saved batch missing `set` is treated as legacy "v1": resume with set="v1" succeeds, set="v2" refuses on resume and retry.
+      const legacyBatch = { ...savedBatch };
+      delete legacyBatch.set;
+      writeFileSync(batchPath, `${JSON.stringify(legacyBatch, null, 2)}\n`, "utf8");
+
+      const legacyResume = await runBatch({ ...baseOpts, set: "v1" }, fakeDeps);
+      assert.equal(legacyResume.ran, 0);
+      assert.equal(legacyResume.skipped, 1);
+
+      const v2Manifest = {
+        ...manifest,
+        tasks: manifest.tasks.map((task) => (task.id === "SMOKE" ? { ...task, set: "v2" } : task)),
+        taskSets: {
+          ...manifest.taskSets,
+          v2: savedBatch.taskSetSha256,
+        },
+      };
+      for (const retryInvalid of [false, true]) {
+        await assert.rejects(
+          () => runBatch({ ...baseOpts, set: "v2", retryInvalid }, { ...fakeDeps, manifest: v2Manifest }),
+          (err) => {
+            assert.ok(err instanceof ProvenanceMismatchError);
+            assert.equal(err.exitCode, 2);
+            assert.ok(err.differingFields.includes("set"));
+            assert.match(err.message, /\bset\b/);
+            return true;
+          },
+        );
+      }
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
   test("runner prints usage and exits 0 on --help", () => {
     const res = spawnSync(process.execPath, [runnerScript, "--help"], {
       cwd: repoRoot,
@@ -790,6 +1057,7 @@ describe("runner CLI guards and resume provenance", () => {
       await assert.rejects(
         () => runBatch(
           {
+            set: "v1",
             outDir,
             rootDir: join(outDir, "sbx"),
             cacheDir: join(outDir, "cache"),
@@ -815,7 +1083,7 @@ describe("runner CLI guards and resume provenance", () => {
   });
 
   test("runner refuses an out dir inside the repo", () => {
-    const res = spawnSync(process.execPath, [runnerScript, "--out", "."], {
+    const res = spawnSync(process.execPath, [runnerScript, "--set", "v1", "--out", "."], {
       cwd: repoRoot,
       encoding: "utf8",
       windowsHide: true,
@@ -826,7 +1094,7 @@ describe("runner CLI guards and resume provenance", () => {
 
   test("runner refuses an out dir in the enclosing workspace", () => {
     const sibling = join(dirname(repoRoot), "tmp-runner-out");
-    const res = spawnSync(process.execPath, [runnerScript, "--out", sibling], {
+    const res = spawnSync(process.execPath, [runnerScript, "--set", "v1", "--out", sibling], {
       cwd: repoRoot,
       encoding: "utf8",
       windowsHide: true,
@@ -843,6 +1111,8 @@ describe("runner CLI guards and resume provenance", () => {
         process.execPath,
         [
           runnerScript,
+          "--set",
+          "v1",
           "--out",
           outDir,
           "--cache",
@@ -877,6 +1147,8 @@ describe("runner CLI guards and resume provenance", () => {
         process.execPath,
         [
           runnerScript,
+          "--set",
+          "v1",
           "--out",
           outDir,
           "--before",
@@ -923,6 +1195,7 @@ describe("runner CLI guards and resume provenance", () => {
       await assert.rejects(
         () => runBatch(
           {
+            set: "v1",
             outDir,
             rootDir: join(outDir, "sbx"),
             cacheDir: join(outDir, "cache"),
@@ -951,6 +1224,8 @@ describe("runner CLI guards and resume provenance", () => {
         process.execPath,
         [
           runnerScript,
+          "--set",
+          "v1",
           "--out",
           outDir,
           "--root",
@@ -1015,6 +1290,7 @@ describe("runner CLI guards and resume provenance", () => {
         join(outDir, "batch.json"),
         `${JSON.stringify({
           v: 1,
+          set: "v1",
           claudeVersion: "2.1.330 (Claude Code)",
           model: MODEL,
           claudeFlags: [...CLAUDE_FLAGS],
@@ -1025,6 +1301,7 @@ describe("runner CLI guards and resume provenance", () => {
           seed: 999999,
           k: 1,
           concurrency: 2,
+          arms: [...ARMS],
           taskIds: ["SMOKE"],
         }, null, 2)}\n`,
         "utf8",
@@ -1049,6 +1326,8 @@ describe("runner CLI guards and resume provenance", () => {
           process.execPath,
           [
             runnerScript,
+            "--set",
+            "v1",
             "--out",
             outDir,
             "--root",
@@ -1272,6 +1551,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       });
 
       const baseOpts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1460,6 +1740,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
       await runBatch(
         {
+          set: "v1",
           outDir,
           rootDir,
           cacheDir,
@@ -1520,6 +1801,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
         },
       });
       const opts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1588,6 +1870,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       });
 
       const opts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -1684,6 +1967,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -1781,6 +2065,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
       await runBatch(
         {
+          set: "v1",
           outDir,
           rootDir,
           cacheDir,
@@ -1836,6 +2121,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const common = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
@@ -1962,6 +2248,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const common = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
@@ -2088,6 +2375,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -2144,6 +2432,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const opts = {
+        set: "v1",
         outDir,
         rootDir,
         cacheDir,
@@ -2249,6 +2538,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -2304,6 +2594,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
       try {
         await runBatch(
           {
+            set: "v1",
             outDir,
             rootDir,
             cacheDir,
@@ -2343,6 +2634,7 @@ describe("runBatch orchestration, artifacts, redaction, provenance, retries, and
 
     try {
       const common = {
+        set: "v1",
         rootDir,
         cacheDir,
         beforeRef: "31128bc",
