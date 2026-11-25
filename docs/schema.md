@@ -57,7 +57,7 @@ CLI hook lanes (`rocky hook <subcommand>`):
 
 ## Adapter priority
 
-`rationale` evidence with `source: "log-thinking"` or `"log-response"` comes from log adapters, tried in this order: `claude-code`, then `dsh`. Codex and Gemini log adapters are deferred — Codex's local session format has drifted to a SQLite hybrid, and Gemini persists no thoughts to read — so neither is read yet; both still reach `rationale` evidence only through the universal `notify` lane (`rocky hook agent-event <adapter> --rationale`).
+`rationale` evidence with `source: "log-thinking"` or `"log-response"` comes from log adapters, tried in this order (`claude-code`, then `dsh`). The Codex and Gemini log adapters remain deferred because Codex moved to a hybrid SQLite session format and Gemini stores no thoughts for an adapter to read. Both can submit `rationale` testimony through the universal `notify` lane (`rocky hook agent-event <adapter> --rationale`) or through the MCP write tool `note_expectation`.
 
 ## MCP `fixCommand`
 
