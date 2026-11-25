@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -196,6 +197,33 @@ test("rebuild with no marker preserves existing cache bytes", (t) => {
 
   assert.equal(rebuildFixTouchCache({ home, now: NOW }), false);
   assert.deepEqual(readFileSync(file), oldCache);
+});
+
+test("rebuild discards staged bytes if the marker disappears before publication", (t) => {
+  const home = makeHome(t);
+  writeEvidence(home, "auth", FAILURE_TS, FILES);
+  const file = fixTouchCachePath(home);
+  const marker = join(home, "fixtouch-on");
+  const oldCache = Buffer.from(`{ "v": 1, "builtAt": ${NOW - 1}, "entries": [] }\r\n`);
+  mkdirSync(dirname(file));
+  writeFileSync(file, oldCache);
+  writeFileSync(marker, "");
+
+  const originalExists = fs.existsSync;
+  const exists = t.mock.method(fs, "existsSync", (path: Parameters<typeof originalExists>[0]) => {
+    if (path === marker && originalExists(`${file}.${process.pid}.tmp`)) unlinkSync(marker);
+    return originalExists(path);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(rebuildFixTouchCache({ home, now: NOW }), false);
+  } finally {
+    exists.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.equal(existsSync(marker), false);
+  assert.deepEqual(readFileSync(file), oldCache);
+  assert.deepEqual(readdirSync(dirname(file)), ["attempts-hot.json"]);
 });
 
 for (const [condition, writeMemory] of [

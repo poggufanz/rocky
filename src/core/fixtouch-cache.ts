@@ -1,8 +1,9 @@
 import {
-  closeSync, constants, existsSync, mkdirSync, openSync, readSync,
-  renameSync, statSync, unlinkSync, writeFileSync,
+  closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync,
+  renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "./fs-safety.js";
 import type { FixRecord } from "./memory-read.js";
 import { sanitizeTestimony } from "./redact.js";
 
@@ -87,14 +88,13 @@ function sanitizeEntry(entry: FixTouchEntry, oldestTs: number, newestTs: number)
       ts < oldestTs || ts > newestTs) return undefined;
 
   const normalizedPath = path.replaceAll("\\", "/");
-  if (!isRelativeCachePath(normalizedPath)) return undefined;
-  const safePath = sanitizeField(normalizedPath, FIXTOUCH_PATH_MAX);
-  if (!isRelativeCachePath(safePath)) return undefined;
+  if (!isRelativeCachePath(normalizedPath) || Array.from(normalizedPath).length > FIXTOUCH_PATH_MAX ||
+      sanitizeField(normalizedPath, FIXTOUCH_PATH_MAX) !== normalizedPath) return undefined;
 
   const firstSignatureLine = signature.split(/\r\n|[\n\r\u2028\u2029]/, 1)[0];
   return {
     root,
-    path: safePath,
+    path: normalizedPath,
     cmd: sanitizeField(cmd, FIXTOUCH_CMD_MAX),
     signature: boundCodePoints(sanitizeTestimony(firstSignatureLine).replaceAll('"', "'"), FIXTOUCH_SIGNATURE_MAX),
     ts,
@@ -106,35 +106,55 @@ function readEntry(value: unknown, oldestTs: number, newestTs: number): FixTouch
   const { root, path, cmd, signature, ts } = value as Partial<FixTouchEntry>;
   if (typeof root !== "string" || typeof path !== "string" || typeof cmd !== "string" ||
       typeof signature !== "string" || typeof ts !== "number") return undefined;
-  if (Array.from(path).length > FIXTOUCH_PATH_MAX || Array.from(cmd).length > FIXTOUCH_CMD_MAX ||
-      Array.from(signature).length > FIXTOUCH_SIGNATURE_MAX) return undefined;
+  if (Array.from(cmd).length > FIXTOUCH_CMD_MAX || Array.from(signature).length > FIXTOUCH_SIGNATURE_MAX) return undefined;
   return sanitizeEntry({ root, path, cmd, signature, ts }, oldestTs, newestTs);
 }
 
-function readCacheText(file: string): string | undefined {
-  const stat = statSync(file);
-  if (!stat.isFile() || stat.size > FIXTOUCH_CACHE_MAX_BYTES) return undefined;
+/** Read cache or shown-state text. Null means absent, and undefined means unsafe or oversized. */
+export function readFixTouchFile(file: string, maxBytes: number): string | null | undefined {
+  const parent = dirname(file);
+  const statOptions = { bigint: true, throwIfNoEntry: false } as const;
+  const directory = lstatSync(parent, statOptions);
+  if (directory === undefined) return null;
+  if (!directory.isDirectory() || directory.isSymbolicLink()) return undefined;
 
-  const descriptor = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
+  const listed = lstatSync(file, statOptions);
+  if (listed === undefined) {
+    return sameFilesystemIdentity(directory, lstatSync(parent, statOptions)) ? null : undefined;
+  }
+  const limit = BigInt(maxBytes);
+  if (!regularDescriptorSafe(listed) || listed.size > limit) return undefined;
+
+  const fd = openSync(file, constants.O_RDONLY | NO_FOLLOW_FLAG | NO_BLOCK_FLAG);
   try {
-    // The file can change between stat and open. Bound the read independently.
-    const buffer = Buffer.allocUnsafe(FIXTOUCH_CACHE_MAX_BYTES + 1);
+    const opened = fstatSync(fd, { bigint: true });
+    const stillListed = () =>
+      sameFilesystemIdentity(directory, lstatSync(parent, statOptions)) &&
+      sameFilesystemIdentity(opened, lstatSync(file, statOptions));
+    if (!regularDescriptorSafe(opened) || !sameFilesystemIdentity(listed, opened) ||
+        opened.size > limit || !stillListed()) return undefined;
+
+    const size = Number(opened.size);
+    const buffer = Buffer.allocUnsafe(size + 1);
     let offset = 0;
     while (offset < buffer.length) {
-      const read = readSync(descriptor, buffer, offset, buffer.length - offset, null);
-      if (read === 0) return buffer.toString("utf8", 0, offset);
-      offset += read;
+      const bytes = readSync(fd, buffer, offset, buffer.length - offset, null);
+      if (bytes === 0) break;
+      offset += bytes;
     }
-    return undefined;
+    if (offset !== size) return undefined;
+    const after = fstatSync(fd, { bigint: true });
+    if (after.size !== opened.size || after.mtimeNs !== opened.mtimeNs || !stillListed()) return undefined;
+    return buffer.toString("utf8", 0, offset);
   } finally {
-    closeSync(descriptor);
+    closeSync(fd);
   }
 }
 
 export function readFixTouchCache(file: string, now: number): FixTouchCache | undefined {
   try {
-    const text = readCacheText(file);
-    if (text === undefined) return undefined;
+    const text = readFixTouchFile(file, FIXTOUCH_CACHE_MAX_BYTES);
+    if (typeof text !== "string") return undefined;
     const cache = JSON.parse(text) as Partial<FixTouchCache> | null;
     if (cache?.v !== 1 || typeof cache.builtAt !== "number" || !Number.isFinite(cache.builtAt) ||
         cache.builtAt < now - FIXTOUCH_CACHE_MAX_AGE_MS ||
@@ -150,7 +170,7 @@ export function readFixTouchCache(file: string, now: number): FixTouchCache | un
   }
 }
 
-export function writeFixTouchCache(file: string, cache: FixTouchCache): boolean {
+export function writeFixTouchCache(file: string, cache: FixTouchCache, opts?: { beforePublish?: () => boolean }): boolean {
   let temp: string | undefined;
   try {
     if (cache.v !== 1 || !Number.isFinite(cache.builtAt)) return false;
@@ -166,7 +186,10 @@ export function writeFixTouchCache(file: string, cache: FixTouchCache): boolean 
       text = JSON.stringify(envelope);
     }
 
-    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    const parent = dirname(file);
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const directory = lstatSync(parent, { bigint: true });
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return false;
     const tempPath = `${file}.${process.pid}.tmp`;
     const descriptor = openSync(tempPath, "wx", 0o600);
     temp = tempPath;
@@ -175,13 +198,17 @@ export function writeFixTouchCache(file: string, cache: FixTouchCache): boolean 
     } finally {
       closeSync(descriptor);
     }
+    if (!sameFilesystemIdentity(directory, lstatSync(parent, { bigint: true }))) return false;
+    if (opts?.beforePublish && !opts.beforePublish()) return false;
     renameSync(tempPath, file);
+    temp = undefined;
     return true;
   } catch {
-    if (temp !== undefined) {
-      try { unlinkSync(temp); } catch { /* Best effort after a failed write or rename. */ }
-    }
     return false;
+  } finally {
+    if (temp !== undefined) {
+      try { unlinkSync(temp); } catch { /* Best effort when publication does not complete. */ }
+    }
   }
 }
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs, {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync,
+  utimesSync, writeFileSync,
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import {
   fixTouchCachePath, rootKey, type FixTouchEntry,
 } from "../core/fixtouch-cache.js";
 import { causalWordViolations } from "./causal-words.js";
+import { skipIfSymlinkUnavailable } from "./symlink-capability.js";
 
 const NOW = Date.UTC(2026, 10, 25);
 const REL = "src/session.ts";
@@ -29,6 +31,20 @@ function context(stdout: string): string {
   const result = JSON.parse(stdout) as { hookSpecificOutput?: { additionalContext: string } };
   assert.ok(result.hookSpecificOutput, "expected an advisory");
   return result.hookSpecificOutput.additionalContext;
+}
+
+function assertSilentWithoutOpening(t: TestContext, edit: () => string, ...paths: string[]): void {
+  const open = t.mock.method(fs, "openSync");
+  syncBuiltinESMExports();
+  try {
+    assert.equal(edit(), "{}");
+    for (const path of paths) {
+      assert.equal(open.mock.calls.some(({ arguments: args }) => args[0] === path), false, path);
+    }
+  } finally {
+    open.mock.restore();
+    syncBuiltinESMExports();
+  }
 }
 
 function fixture(t: TestContext, now = NOW) {
@@ -104,6 +120,101 @@ test("fix-touch still prints its note when memory.jsonl is a directory", (t) => 
   f.seed();
   mkdirSync(join(f.home, "memory.jsonl"));
   assert.equal(context(f.edit()), TOUCH_TEXT);
+});
+
+test("fix-touch ignores a cache symlink to memory.jsonl containing a valid cache", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
+  const f = fixture(t);
+  f.enable();
+  const memory = join(f.home, "memory.jsonl");
+  writeFileSync(memory, JSON.stringify({ v: 1, builtAt: NOW, entries: [f.entry] }));
+  symlinkSync(memory, f.cache, "file");
+
+  assertSilentWithoutOpening(t, f.edit, f.cache, memory);
+  assert.equal(existsSync(f.stateDir), false);
+});
+
+test("fix-touch ignores a shown-state symlink to memory.jsonl containing valid state", (t) => {
+  if (skipIfSymlinkUnavailable(t)) return;
+  const f = fixture(t);
+  f.enable();
+  f.seed();
+  mkdirSync(f.stateDir);
+  const memory = join(f.home, "memory.jsonl");
+  const stateFile = join(f.stateDir, "s1.fixtouch.json");
+  writeFileSync(memory, "[]");
+  symlinkSync(memory, stateFile, "file");
+
+  assertSilentWithoutOpening(t, f.edit, stateFile, memory);
+  assert.deepEqual(readdirSync(f.stateDir), ["s1.fixtouch.json"]);
+  assert.equal(readFileSync(memory, "utf8"), "[]");
+});
+
+for (const kind of ["derived", "gate-state"]) {
+  test(`fix-touch ignores a linked ${kind} directory`, (t) => {
+    if (process.platform !== "win32" && skipIfSymlinkUnavailable(t, "dir")) return;
+    const f = fixture(t);
+    f.enable();
+    f.seed();
+    const real = join(f.home, "real");
+    const link = join(f.home, kind);
+    if (kind === "derived") fs.renameSync(link, real);
+    else mkdirSync(real);
+    symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
+
+    assertSilentWithoutOpening(t, f.edit, join(link, kind === "derived" ? "attempts-hot.json" : "s1.fixtouch.json"));
+    assert.deepEqual(readdirSync(real), kind === "derived" ? ["attempts-hot.json"] : []);
+  });
+}
+
+test("fix-touch ignores oversized shown-state data", (t) => {
+  const f = fixture(t);
+  f.enable();
+  f.seed();
+  mkdirSync(f.stateDir);
+  const stateFile = join(f.stateDir, "s1.fixtouch.json");
+  const oversized = "[]".padEnd(2 * 1024 * 1024 + 1);
+  writeFileSync(stateFile, oversized);
+
+  assert.equal(f.edit(), "{}");
+  assert.equal(readFileSync(stateFile, "utf8"), oversized);
+});
+
+test("fix-touch bounds the descriptor read if shown state grows during the read", (t) => {
+  const f = fixture(t);
+  f.enable();
+  f.seed();
+  mkdirSync(f.stateDir);
+  const stateFile = join(f.stateDir, "s1.fixtouch.json");
+  writeFileSync(stateFile, "[]");
+
+  const originalOpen = fs.openSync;
+  const originalRead = fs.readSync;
+  let stateFd: number | undefined;
+  let requested = 0;
+  const open = t.mock.method(fs, "openSync", (...args: Parameters<typeof originalOpen>) => {
+    const fd = originalOpen(...args);
+    if (args[0] === stateFile) stateFd = fd;
+    return fd;
+  });
+  const read = t.mock.method(fs, "readSync", (
+    fd: number, buffer: Buffer, offset: number, length: number, position: number | null,
+  ) => {
+    if (fd === stateFd) {
+      if (requested === 0) writeFileSync(stateFile, "[]".padEnd(2 * 1024 * 1024 + 1));
+      requested += length;
+    }
+    return originalRead(fd, buffer, offset, length, position);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(f.edit(), "{}");
+    assert.equal(requested, 3);
+  } finally {
+    open.mock.restore();
+    read.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("relative and absolute file paths match the same cache entry", (t) => {

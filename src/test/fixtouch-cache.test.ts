@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   boundCodePoints,
+  FIXTOUCH_PATH_MAX,
   findFixTouchEntry,
   fixTouchCachePath,
   fixTouchEnabled,
@@ -72,11 +73,30 @@ test("a failed replacement preserves the destination and removes the temporary f
   assert.deepEqual(readdirSync(dirname(file)), ["attempts-hot.json"]);
 });
 
+test("a rejected publication preserves the existing cache and removes the staged file", (t) => {
+  const { file } = fixture(t);
+  const existing = Buffer.from(`${JSON.stringify(cache)}\n`);
+  mkdirSync(dirname(file));
+  writeFileSync(file, existing);
+  const updated = { ...cache, entries: [] };
+  let staged: string | undefined;
+
+  assert.equal(writeFixTouchCache(file, updated, {
+    beforePublish: () => {
+      staged = readFileSync(`${file}.${process.pid}.tmp`, "utf8");
+      return false;
+    },
+  }), false);
+  assert.equal(staged, JSON.stringify(updated));
+  assert.deepEqual(readFileSync(file), existing);
+  assert.deepEqual(readdirSync(dirname(file)), ["attempts-hot.json"]);
+});
+
 test("cache writing keeps a newest-first prefix within 256 KiB", (t) => {
   const { file } = fixture(t);
   const entries = Array.from({ length: 5_000 }, (_, index) => ({
     ...entry,
-    path: `src/${"a".repeat(175)}`,
+    path: `src/${"a".repeat(FIXTOUCH_PATH_MAX - "src/".length)}`,
     cmd: "🪨".repeat(95),
     signature: "s".repeat(135),
     ts: entry.ts + index,
@@ -91,7 +111,7 @@ test("cache writing keeps a newest-first prefix within 256 KiB", (t) => {
     Array.from({ length: written.entries.length }, (_, index) => entry.ts + 4_999 - index));
   assert.deepEqual(written.entries[0], {
     root: entry.root,
-    path: `src/${"a".repeat(156)}`,
+    path: entries[4_999].path,
     cmd: "🪨".repeat(80),
     signature: "s".repeat(120),
     ts: entry.ts + 4_999,
@@ -222,7 +242,7 @@ test("cache reads and writes drop year-10000 entries even at a year-10000 clock"
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), expected);
 });
 
-test("path, command, and signature are sanitized on both read and write", (t) => {
+test("commands and signatures are sanitized on both read and write", (t) => {
   const { file } = fixture(t);
   mkdirSync(dirname(file));
   const fabricatedToken = `ghp_${"a1".repeat(18)}`;
@@ -230,7 +250,6 @@ test("path, command, and signature are sanitized on both read and write", (t) =>
     ...cache,
     entries: [{
       ...entry,
-      path: "src/\u202efile\u2028one\u2029two.ts",
       cmd: `gh api\n${fabricatedToken}\u202e\u2028--silent\u2029--verbose`,
       signature: 'TypeError: "token"\n\u202eundefined',
     }],
@@ -239,7 +258,6 @@ test("path, command, and signature are sanitized on both read and write", (t) =>
     ...cache,
     entries: [{
       ...entry,
-      path: "src/file one two.ts",
       cmd: "gh api [redacted github token] --silent --verbose",
       signature: "TypeError: 'token'",
     }],
@@ -249,6 +267,27 @@ test("path, command, and signature are sanitized on both read and write", (t) =>
   assert.deepEqual(readFixTouchCache(file, now), sanitized);
   assert.equal(writeFixTouchCache(file, tainted), true);
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), sanitized);
+});
+
+test("cache reads and writes omit paths whose identity would change", (t) => {
+  const { file } = fixture(t);
+  const prefix = `src/${"a".repeat(FIXTOUCH_PATH_MAX - "src/".length)}`;
+  const longPath = `${prefix}.ts`;
+  const mutated = "src/\u202efile\u2028one\u2029two.ts";
+  const safeLookingPath = "src/file one two.ts";
+  assert.equal(Array.from(longPath).length, 163);
+  const input = { ...cache, entries: [entry, { ...entry, path: longPath }, { ...entry, path: mutated }] };
+
+  assert.equal(writeFixTouchCache(file, input), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), cache);
+  const written = readFixTouchCache(file, now);
+  assert.deepEqual(written, cache);
+  for (const path of [longPath, prefix, mutated, safeLookingPath]) {
+    assert.equal(findFixTouchEntry(written, entry.root, path, "linux"), undefined);
+  }
+
+  writeFileSync(file, JSON.stringify(input));
+  assert.deepEqual(readFixTouchCache(file, now), cache);
 });
 
 test("only the first signature line survives every supported separator", (t) => {

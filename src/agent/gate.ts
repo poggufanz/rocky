@@ -18,8 +18,7 @@
 
 import { randomBytes } from "node:crypto";
 import {
-  closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync,
-  renameSync, statSync, unlinkSync, writeFileSync, type BigIntStats,
+  closeSync, fstatSync, lstatSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync, type BigIntStats,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { sanitizeSessionId } from "../core/agent-session.js";
@@ -36,7 +35,7 @@ import { fingerprint } from "../core/fingerprint.js";
 import {
   FIXTOUCH_CMD_MAX, FIXTOUCH_PATH_MAX, FIXTOUCH_SIGNATURE_MAX,
   fileGitRoot, findFixTouchEntry, fixTouchCachePath, fixTouchEnabled,
-  fixTouchPathKey, readFixTouchCache, rootKey, sanitizeField,
+  fixTouchPathKey, readFixTouchCache, readFixTouchFile, rootKey, sanitizeField,
 } from "../core/fixtouch-cache.js";
 import { sameFilesystemIdentity } from "../core/fs-safety.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
@@ -137,10 +136,10 @@ export function cycleNudge(input: GateInput, env: NodeJS.ProcessEnv): string {
 }
 
 function readShownFixTouches(stateFile: string): string[] | undefined {
-  const stat = statSync(stateFile, { throwIfNoEntry: false });
-  if (stat === undefined) return [];
-  if (!stat.isFile() || stat.size > MAX_FIXTOUCH_STATE_BYTES) return undefined;
-  const shown: unknown = JSON.parse(readFileSync(stateFile, "utf8"));
+  const text = readFixTouchFile(stateFile, MAX_FIXTOUCH_STATE_BYTES);
+  if (text === null) return [];
+  if (text === undefined) return undefined;
+  const shown: unknown = JSON.parse(text);
   return Array.isArray(shown) && shown.every((key) => typeof key === "string")
     ? shown.slice(-MAX_FIXTOUCH_SHOWN_KEYS)
     : undefined;
@@ -176,7 +175,10 @@ function markFixTouchShown(stateFile: string, key: string): boolean {
   let lock: BigIntStats | undefined;
   let temp: string | undefined;
   try {
-    mkdirSync(dirname(stateFile), { recursive: true, mode: 0o700 });
+    const parent = dirname(stateFile);
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const directory = lstatSync(parent, { bigint: true });
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return false;
     lockFd = acquireFixTouchLock(lockFile);
     if (lockFd === undefined) return false;
     lock = fstatSync(lockFd, { bigint: true });
@@ -192,7 +194,8 @@ function markFixTouchShown(stateFile: string, key: string): boolean {
       closeSync(fd);
     }
     const current = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
-    if (!sameFilesystemIdentity(lock, current)) return false;
+    if (!sameFilesystemIdentity(lock, current) ||
+        !sameFilesystemIdentity(directory, lstatSync(parent, { bigint: true }))) return false;
     renameSync(tempPath, stateFile);
     temp = undefined;
     return true;

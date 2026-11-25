@@ -56,5 +56,7 @@ export function rebuildFixTouchCache({ home, now }: { home: string; now: number 
     rootFor: (cwd) => resolveGitRootForCwd(cwd, existsSync) ?? cwd,
   });
   if (!fixTouchEnabled(home)) return false;
-  return writeFixTouchCache(fixTouchCachePath(home), { v: 1, builtAt: now, entries });
+  return writeFixTouchCache(fixTouchCachePath(home), { v: 1, builtAt: now, entries }, {
+    beforePublish: () => fixTouchEnabled(home),
+  });
 }
