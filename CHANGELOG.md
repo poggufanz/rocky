@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+Desk change card detail adds an **Earlier attempts** section: after the card opens, the daemon runs `rocky attempts --card <id> --json` in the background (2 s limit) and shows up to five rows with date, outcome, and observed files, ending with `Rocky records order, not cause.` The detail never waits for it; a slow or failed lookup leaves the section hidden. Results are cached per card revision. The new message bumps the desk pipe protocol to 6 (older desks see a version mismatch, so the desk and daemon must be updated together).
+
 - `rocky stats --attempts [--json]` adds a read-only report on the prior-attempts note study, with outcome numbers hidden until the study stops.
 
 Opt-in fix-touch note in the edit gate (`fixtouch-on`), read from a derived cache rebuilt after confirmed fixes.
