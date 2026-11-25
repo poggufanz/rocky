@@ -142,19 +142,21 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
-test("catalog has 14 tools, attempt_history last, version 1", () => {
+test("catalog has 15 tools, note_expectation last, version 1", () => {
   assert.equal(MCP_TOOL_CATALOG_VERSION, 1);
   assert.equal(MCP_TOOL_CATALOG_CONTRACT.version, 1);
-  assert.equal(MCP_TOOL_CATALOG.length, 14);
+  assert.equal(MCP_TOOL_CATALOG.length, 15);
   assert.equal(MCP_TOOL_CATALOG[13], "attempt_history");
+  assert.equal(MCP_TOOL_CATALOG.at(-1), "note_expectation");
 
   const sanitizedReg = createToolRegistry({
+    writeToolsEnabled: true,
     exposure: "sanitized",
     memory: createMemoryQueries(() => []),
     recallWithAi: disabledRecallWithAi,
   });
   const sanitizedList = sanitizedReg.list();
-  assert.equal(sanitizedList.length, 14);
+  assert.equal(sanitizedList.length, 15);
   const def = sanitizedList[13]!;
   assert.equal(def.name, "attempt_history");
   assert.equal(def.title, "Attempt history");
@@ -180,6 +182,7 @@ test("catalog has 14 tools, attempt_history last, version 1", () => {
   });
 
   const rawReg = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw",
     memory: createMemoryQueries(() => []),
     recallWithAi: disabledRecallWithAi,
@@ -236,6 +239,7 @@ test("fingerprint and query each return the entry with notice and coverage", asy
 
   await withDurableMemory([f1, r1, f2, fix], async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -292,6 +296,7 @@ test("fingerprint and query each return the entry with notice and coverage", asy
 
 test("both or neither of fingerprint and query is invalid", async () => {
   const reg = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => []),
     recallWithAi: disabledRecallWithAi,
@@ -360,6 +365,7 @@ test("cwd is rejected under sanitized and filters under raw", async () => {
     await withDurableMemory(records, async (memory) => {
       const signal = new AbortController().signal;
       const sanitized = createToolRegistry({
+        writeToolsEnabled: false,
         exposure: "sanitized",
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -380,6 +386,7 @@ test("cwd is rejected under sanitized and filters under raw", async () => {
       }
 
       const raw = createToolRegistry({
+        writeToolsEnabled: false,
         exposure: "raw",
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -428,6 +435,7 @@ test("oversized history drops oldest attempts first and stays under the cap", as
 
   await withDurableMemory(records, async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -509,6 +517,7 @@ test("oversized multi-entry cap breaks timestamp ties by later entry and drops t
 
   await withDurableMemory(tieRecords, async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -554,6 +563,7 @@ test("oversized multi-entry cap breaks timestamp ties by later entry and drops t
 
   await withDurableMemory(zeroAttemptRecords, async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -610,6 +620,7 @@ test("just-fitting attempt_history keeps all attempts without truncated while ca
   let probeWireBytes = 0;
   await withDurableMemory(buildRecords(probePad), async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -635,6 +646,7 @@ test("just-fitting attempt_history keeps all attempts without truncated while ca
   let exactWireBytes = 0;
   await withDurableMemory(buildRecords(exactFitPad), async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -669,6 +681,7 @@ test("just-fitting attempt_history keeps all attempts without truncated while ca
   const justOverPad = exactFitPad + Math.floor((RESPONSE_CAP_BYTES - exactWireBytes) / 2) + 4;
   await withDurableMemory(buildRecords(justOverPad), async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -733,6 +746,7 @@ test("just-fitting attempt_history keeps all attempts without truncated while ca
     recentFailures: () => bandHits,
   };
   const recentReg = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: recentMemory,
     recallWithAi: disabledRecallWithAi,
@@ -790,6 +804,7 @@ test("maximum shape (10 entries x 20 attempts with long commands) trims oldest-f
 
   await withDurableMemory(records, async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -840,6 +855,7 @@ test("custom memory host returns empty entries with incomplete coverage", async 
     }),
   ]);
   const reg = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: customMemory,
     recallWithAi: disabledRecallWithAi,
@@ -889,6 +905,7 @@ test("no causal words in the response", async () => {
 
   await withDurableMemory([f1, r1, fix], async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1039,6 +1056,7 @@ test("recall output is byte-identical when no hit has two attempts", async () =>
     for (const exposure of ["sanitized", "raw"] as const) {
       const oldJson = freezeOldRecallEnvelope(memory, { query: "cacheKey", limit: 5 }, exposure);
       const reg = createToolRegistry({
+        writeToolsEnabled: false,
         exposure,
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -1129,6 +1147,7 @@ test("recall adds attemptsSummary only for entries with two or more attempts", a
 
   await withDurableMemory([f1, f2, fix2, f3, f3Next, f4, assoc4, fSingle], async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1209,6 +1228,7 @@ test("recall summary and hits come from one snapshot", async () => {
 
   await withDurableMemory([f1, f2, fix], async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1279,6 +1299,7 @@ test("custom memory host recall has no summary and unchanged bytes", async () =>
     "sanitized",
   );
   const reg = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: customMemory,
     recallWithAi: disabledRecallWithAi,
@@ -1353,6 +1374,7 @@ test("recall output stays byte-identical when clock advances across load and uni
     const signal = new AbortController().signal;
     for (const exposure of ["sanitized", "raw"] as const) {
       const reg = createToolRegistry({
+        writeToolsEnabled: false,
         exposure,
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -1413,6 +1435,7 @@ test("recall output stays byte-identical when clock steps back between query and
     const signal = new AbortController().signal;
     for (const exposure of ["sanitized", "raw"] as const) {
       const reg = createToolRegistry({
+        writeToolsEnabled: false,
         exposure,
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -1453,11 +1476,13 @@ test("durable recall preserves operational read errors while loadDurableMemorySn
     assert.equal(loadDurableMemorySnapshot(durableMemory), undefined);
 
     const durableReg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: durableMemory,
       recallWithAi: disabledRecallWithAi,
     });
     const legacyReg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: legacyCanonicalMemory,
       recallWithAi: disabledRecallWithAi,
@@ -1542,6 +1567,7 @@ test("recall summary failure signals truncation without partial attemptsSummary"
     const signal = new AbortController().signal;
 
     const baselineReg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1555,6 +1581,7 @@ test("recall summary failure signals truncation without partial attemptsSummary"
     }
 
     const throwingReg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1571,6 +1598,7 @@ test("recall summary failure signals truncation without partial attemptsSummary"
 
     const secondHitFp = baselineBody.items[1]!.fingerprint as string;
     const partialThrowReg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1655,6 +1683,7 @@ test("sanitized attempt_history joins cards for observed edits and redacted bash
 
   await withDurableMemory(records, async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1740,7 +1769,7 @@ test("attempt_history strips bash-description and card-quote under desk/tool-tex
       mkdirSync(join(home, "desk", "cards"), { recursive: true });
       writeFileSync(cardsFilePath(canonicalPath(repoRoot), home), `${JSON.stringify(card)}\n`, "utf8");
 
-      const reg = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+      const reg = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
       const signal = new AbortController().signal;
 
       const before = await reg.call("attempt_history", { fingerprint: fp }, signal);
@@ -1801,6 +1830,7 @@ test("attempt_history canonicalizes sanitized testimony files to repo root and k
 
     await withDurableMemory([fRepo, rRepo, fOut, rOut], async (memory) => {
       const reg = createToolRegistry({
+        writeToolsEnabled: false,
         exposure: "sanitized",
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -1840,6 +1870,7 @@ test("attempt_history treats card read errors as no join and never fails the too
 
   await withDurableMemory([f1, r1, fix], async (memory) => {
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1891,6 +1922,7 @@ test("recall attemptsSummary stays byte-identical when joinable cards exist", as
     await withDurableMemory([f1, f2, fix], async (memory) => {
       const signal = new AbortController().signal;
       const baselineReg = createToolRegistry({
+        writeToolsEnabled: false,
         exposure: "sanitized",
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -1904,6 +1936,7 @@ test("recall attemptsSummary stays byte-identical when joinable cards exist", as
 
       let cardsForCalls = 0;
       const withCardsReg = createToolRegistry({
+        writeToolsEnabled: false,
         exposure: "sanitized",
         memory,
         recallWithAi: disabledRecallWithAi,
@@ -1972,6 +2005,7 @@ test("attempt_history joins only the retained tail of attempts while preserving 
   await withDurableMemory([...seriesA.records, ...seriesB.records], async (memory) => {
     const signal = new AbortController().signal;
     const baseReg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -1982,6 +2016,7 @@ test("attempt_history joins only the retained tail of attempts while preserving 
 
     const seenCwds: string[] = [];
     const spyReg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory,
       recallWithAi: disabledRecallWithAi,
@@ -2051,6 +2086,7 @@ test("attempt_history keeps original changes when card log fails mid-read after 
         throw err;
       };
       const reg = createToolRegistry({
+        writeToolsEnabled: false,
         exposure: "sanitized",
         memory,
         recallWithAi: disabledRecallWithAi,

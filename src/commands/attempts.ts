@@ -31,6 +31,12 @@ const MAX_CMD_DISPLAY_WIDTH = 24;
 const OUTCOME_COLUMN_WIDTH = 18;
 const FOOTER_TEXT = "Rocky records order, not cause.";
 const CARD_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/u;
+const EXPECTATION_LABELS: Record<NonNullable<Attempt["expectations"]>[number]["observed"], string> = {
+  same_command_passed: "passed",
+  same_command_failed: "failed",
+  no_matching_run: "none yet",
+  not_comparable: "not comparable",
+};
 
 export interface ParsedAttemptsArgs {
   query?: string;
@@ -280,6 +286,11 @@ export function renderProblemsText(
       const outcomeText = padDisplay(formatAttemptOutcome(attempt.outcome), OUTCOME_COLUMN_WIDTH);
       const changesText = formatAttemptChanges(attempt.changes);
       detailLines.push(`  ${tsText}  ${cmdText}  ${outcomeText}  ${changesText}`);
+      for (const expectation of attempt.expectations ?? []) {
+        const text = safeTerminalLine(expectation.text);
+        const label = EXPECTATION_LABELS[expectation.observed];
+        detailLines.push(`    agent expected: ${text}  next matching run: ${label}`);
+      }
     }
   }
 

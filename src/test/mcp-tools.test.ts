@@ -41,6 +41,7 @@ const emptyCards = (): CardsForFile => ({ cards: [], matched: new Map(), coverag
 
 function registry(exposure: "sanitized" | "raw" = "sanitized") {
   return createToolRegistry({
+    writeToolsEnabled: false,
     exposure,
     memory: createMemoryQueries(() => records),
     recallWithAi: disabledRecallWithAi,
@@ -50,6 +51,7 @@ function registry(exposure: "sanitized" | "raw" = "sanitized") {
 
 function knowledgeRegistry(exposure: "sanitized" | "raw" = "sanitized") {
   return createToolRegistry({
+    writeToolsEnabled: false,
     exposure,
     memory: createMemoryQueries(() => knowledgeRecords),
     recallWithAi: disabledRecallWithAi,
@@ -185,7 +187,7 @@ const WITNESS_EXPLAIN: ExplainRecord = {
 test("teach_lookup renders a sanitized witness card and keeps cwd and id opaque", async () => {
   const signal = new AbortController().signal;
   const memory = teachMemory([WITNESS_EXPLAIN]);
-  const sanitized = await createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards })
+  const sanitized = await createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards })
     .call("teach_lookup", { path: "src/app.ts" }, signal);
   assert.equal(sanitized.isError, undefined);
   assert.equal(sanitized.structuredContent.header, "Witnessed: an agent stated why, and rocky recorded it.");
@@ -197,7 +199,7 @@ test("teach_lookup renders a sanitized witness card and keeps cwd and id opaque"
   assert.equal(sanitized.structuredContent.recordId, WITNESS_EXPLAIN.id);
   assert.doesNotMatch(JSON.stringify(sanitized), /TOP-LEVEL-TOPSECRET|Bearer TOP|\/private|secret-project/u);
 
-  const raw = await createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards })
+  const raw = await createToolRegistry({ writeToolsEnabled: false, exposure: "raw", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards })
     .call("teach_lookup", { path: "src/app.ts" }, signal);
   assert.equal(raw.isError, undefined);
   assert.match(JSON.stringify(raw), /TOP-LEVEL-TOPSECRET/u);
@@ -239,6 +241,7 @@ test("teach_lookup forwards git provenance through the fifth projectExplain argu
   process.chdir(dir);
   try {
     const result = await createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized", memory: teachMemory([]), recallWithAi: disabledRecallWithAi, cards: emptyCards,
     }).call("teach_lookup", { path: "feed.ts", line: 2 }, new AbortController().signal);
     assert.equal(result.isError, undefined);
@@ -258,6 +261,7 @@ test("teach_lookup forwards git provenance through the fifth projectExplain argu
 
 test("teach_lookup witness hit suppresses git and carries no provenance", async () => {
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory: teachMemory([WITNESS_EXPLAIN]), recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("teach_lookup", { path: "src/app.ts" }, new AbortController().signal);
   assert.equal(result.isError, undefined);
@@ -273,6 +277,7 @@ test("teach_lookup bounds oversized witness fields and fits the wire cap", async
     business: big,
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory: teachMemory([oversized]), recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("teach_lookup", { path: "src/app.ts" }, new AbortController().signal);
   assert.equal(result.isError, undefined);
@@ -324,6 +329,7 @@ test("custom fetch_record snapshots triple fields before sanitized or raw projec
     fetchRecord: () => candidate as unknown as MemoryRecord,
   };
   const sanitized = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
   }).call("fetch_record", { id: base.id }, new AbortController().signal);
   assert.equal(sanitized.isError, undefined);
@@ -334,6 +340,7 @@ test("custom fetch_record snapshots triple fields before sanitized or raw projec
   reads.clear();
   getters.clear();
   const raw = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw", memory, recallWithAi: disabledRecallWithAi,
   }).call("fetch_record", { id: base.id }, new AbortController().signal);
   assert.equal(raw.isError, undefined);
@@ -366,6 +373,7 @@ test("custom fetch_record snapshots failure origin before projection", async () 
     fetchRecord: () => candidate,
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
   }).call("fetch_record", { id: failure.id }, new AbortController().signal);
   assert.equal(result.isError, undefined);
@@ -393,6 +401,7 @@ test("custom fetch_record snapshots discriminator before routing a kind-swapped 
     ownKeys() { throw new Error("kind-swapped record must not be enumerated"); },
   });
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), fetchRecord: () => candidate as unknown as MemoryRecord },
     recallWithAi: disabledRecallWithAi,
@@ -417,6 +426,7 @@ test("why_file keeps two index suffixes ambiguous and future knowledge inert", a
     },
   };
   const ambiguous = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => [first, second]),
     recallWithAi: disabledRecallWithAi,
@@ -440,6 +450,7 @@ test("why_file keeps two index suffixes ambiguous and future knowledge inert", a
     },
   };
   const futureSearch = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => [futureNote, futureTriple]),
     recallWithAi: disabledRecallWithAi,
@@ -455,6 +466,7 @@ test("why_file keeps two index suffixes ambiguous and future knowledge inert", a
 
   const customFutureTs = Date.now() + 60_000;
   const customFuture = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       recall() { return []; },
@@ -505,6 +517,7 @@ test("why_file suppresses custom matches marked ambiguous", async () => {
     }),
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
@@ -526,6 +539,7 @@ test("why_file custom evidence fails closed on a malformed match", async () => {
     }),
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
@@ -542,6 +556,7 @@ test("why_file fallback fails closed on a malformed match", async () => {
     whyFileEvidence: undefined,
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/known.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
@@ -569,6 +584,7 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
     coverageIncomplete: false,
   });
   const cwdResult = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([hostileCwd]) },
     recallWithAi: disabledRecallWithAi,
@@ -579,6 +595,7 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
   assert.equal(cwdResult.structuredContent.coverageIncomplete, true);
 
   const mixedResult = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([known, hostilePath]) },
     recallWithAi: disabledRecallWithAi,
@@ -598,6 +615,7 @@ test("why_file rejects oversized provider cwd/path evidence before canonicalizat
     },
   };
   const boundedResult = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), whyFileEvidence: () => makeEvidence([bounded]) },
     recallWithAi: disabledRecallWithAi,
@@ -630,6 +648,7 @@ test("why_file keeps a bounded witness from an over-cap valid file array and dis
     },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => []),
@@ -740,6 +759,7 @@ test("why_file snapshots every custom triple field once before normalization", a
     ownKeys() { throw new Error("untrusted triple must not be enumerated"); },
   });
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => []),
@@ -778,6 +798,7 @@ test("why_file never falls back from malformed custom evidence", async () => {
   const malformed: unknown[] = [undefined, null, [], throwing];
   for (const value of malformed) {
     const registry = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: {
         ...createMemoryQueries(() => [known]),
@@ -793,6 +814,7 @@ test("why_file never falls back from malformed custom evidence", async () => {
     assert.equal(result.structuredContent.coverageIncomplete, true);
   }
   const legacy = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => [known]),
@@ -820,6 +842,7 @@ test("why_file does not emit an accessor-swapped agent credential", async () => 
     },
   });
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => []),
@@ -855,6 +878,7 @@ test("why_file fails closed when an untrusted nested snapshot getter throws", as
     mechanism: { ...known.mechanism, files: [throwingFile as unknown as TripleRecord["mechanism"]["files"][number]] },
   };
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => []),
@@ -876,6 +900,7 @@ test("why_file fails closed when an untrusted nested snapshot getter throws", as
 
 test("why_file accepts ordinary and Unicode paths at the byte boundary", async () => {
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => []),
     recallWithAi: disabledRecallWithAi,
@@ -905,6 +930,7 @@ test("why_file keeps unmatched relative-root paths unknown", async () => {
     },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => [known]),
     recallWithAi: disabledRecallWithAi,
@@ -935,6 +961,7 @@ test("why_file retains the shared identity-hash witness triple", async () => {
     },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => [known]),
     recallWithAi: disabledRecallWithAi,
@@ -963,6 +990,7 @@ test("why_file fallback rejects absolute cross-root legacy suffixes without plat
     whyFileEvidence: undefined,
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/index.ts" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, []);
@@ -983,10 +1011,12 @@ test("why_file sanitizes custom possible IDs while raw remains explicit", async 
     whyFileEvidence: () => evidence,
   };
   const sanitized = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   assert.doesNotMatch(JSON.stringify(sanitized), /user-secret-answer/u);
   const raw = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw", memory, recallWithAi: disabledRecallWithAi, cards: emptyCards,
   }).call("why_file", { path: "src/missing.ts" }, new AbortController().signal);
   assert.match(JSON.stringify(raw), /user-secret-answer/u);
@@ -1004,7 +1034,7 @@ test("sanitized reserved custom IDs use opaque fetch handles while raw remains e
       searchKnowledge: () => [{ id, ts: 10, kind: "failure" as const, snippet: "failure", score: 1, source: "run" }],
       fetchRecord: (requested: string) => requested === id ? record : undefined,
     };
-    const sanitized = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+    const sanitized = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
     const search = await sanitized.call("search_knowledge", { query: "failure" }, new AbortController().signal);
     const handle = (search.structuredContent.items as Array<{ id: string }>)[0]?.id;
     assert.ok(handle?.startsWith("rk-h-"), `${id} must use opaque handle`);
@@ -1012,7 +1042,7 @@ test("sanitized reserved custom IDs use opaque fetch handles while raw remains e
     const fetched = await sanitized.call("fetch_record", { id: handle }, new AbortController().signal);
     assert.ok(fetched.structuredContent.record !== null && fetched.structuredContent.record !== undefined);
 
-    const raw = await createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi })
+    const raw = await createToolRegistry({ writeToolsEnabled: false, exposure: "raw", memory, recallWithAi: disabledRecallWithAi })
       .call("search_knowledge", { query: "failure" }, new AbortController().signal);
     assert.equal((raw.structuredContent.items as Array<{ id: string }>)[0]?.id, id);
   }
@@ -1028,6 +1058,7 @@ test("stats keeps legacy fields and adds bounded knowledge counters for old quer
     whyFile() { return []; },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
   }).call("stats", {}, new AbortController().signal);
   assert.deepEqual(result.structuredContent, {
@@ -1039,6 +1070,7 @@ test("stats keeps legacy fields and adds bounded knowledge counters for old quer
 test("malformed custom stats disclose incomplete coverage instead of clean zero totals", async () => {
   for (const malformed of [undefined, null]) {
     const result = await createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: {
         ...createMemoryQueries(() => []),
@@ -1095,6 +1127,7 @@ test("custom stats and coverage snapshot primitive fields once and reject hostil
     coverage: () => coverage as never,
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
   }).call("stats", {}, new AbortController().signal);
   assert.equal(result.structuredContent.failures, 0);
@@ -1121,6 +1154,7 @@ test("custom stats and coverage snapshot primitive fields once and reject hostil
   })];
   for (const malformed of malformedValues) {
     const malformedResult = await createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: { ...createMemoryQueries(() => []), stats: () => malformed as never },
       recallWithAi: disabledRecallWithAi,
@@ -1140,6 +1174,7 @@ test("custom stats and coverage snapshot primitive fields once and reject hostil
     },
   };
   const changingCoverageResult = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory: changingCoverage, recallWithAi: disabledRecallWithAi,
   }).call("stats", {}, new AbortController().signal);
   assert.equal(coveragePropertyReads, 1);
@@ -1160,6 +1195,7 @@ test("present malformed custom stats counters force unknown coverage", async () 
       [field]: field === "total" ? "Bearer STATS-TOPSECRET" : Number.NaN,
     };
     const result = await createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: { ...createMemoryQueries(() => []), stats: () => stats as never, coverage: () => complete },
       recallWithAi: disabledRecallWithAi,
@@ -1171,6 +1207,7 @@ test("present malformed custom stats counters force unknown coverage", async () 
     assert.doesNotMatch(JSON.stringify(result), /STATS-TOPSECRET|NaN/u);
   }
   const legacy = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => []),
@@ -1187,6 +1224,7 @@ test("oversized custom rationale tags fail why coverage closed", async () => {
   const known = completeWhyTriple("oversized-rationale-tags");
   const oversized = { ...known, rationale: { ...known.rationale!, tags: Array.from({ length: 1_000 }, (_, index) => `tag-${index}`) } };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => []),
@@ -1210,6 +1248,7 @@ test("note-only knowledge search stays bounded and sanitized", async () => {
     file: "src/app.ts", line: 4, subject: "cache", answer: "banana",
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory: createMemoryQueries(() => [note]), recallWithAi: disabledRecallWithAi,
   }).call("search_knowledge", { query: "banana", kind: "note" }, new AbortController().signal);
   assert.deepEqual(result.structuredContent.items, [{
@@ -1221,6 +1260,7 @@ test("note-only knowledge search stays bounded and sanitized", async () => {
 
 test("search_knowledge discloses malformed or throwing provider output", async () => {
   const malformed = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), searchKnowledge: () => null as never },
     recallWithAi: disabledRecallWithAi,
@@ -1230,6 +1270,7 @@ test("search_knowledge discloses malformed or throwing provider output", async (
   assert.equal(malformedResult.structuredContent.truncated, true);
 
   const throwing = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), searchKnowledge: () => { throw new Error("provider failure"); } },
     recallWithAi: disabledRecallWithAi,
@@ -1246,6 +1287,7 @@ test("search snippets and fetched failures use sanitized explicit projections", 
     exitCode: 1, fingerprint: "fp", signature: ["secret fixture"], excerpt: "Bearer fixture-secret-value-12345678901234567890",
   };
   const tools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => [sensitive]),
     recallWithAi: disabledRecallWithAi,
@@ -1279,6 +1321,7 @@ test("sanitized knowledge projections remove C1 terminal strings and invisible f
     },
   };
   const tools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => [hostileTriple]),
     recallWithAi: disabledRecallWithAi,
@@ -1300,6 +1343,7 @@ test("unsupported notes are indistinguishable from unknown fetch IDs", async () 
     file: "src/app.ts", line: 1, subject: "subject", answer: "answer",
   };
   const tools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory: createMemoryQueries(() => [note]), recallWithAi: disabledRecallWithAi,
   });
   const unknown = await tools.call("fetch_record", { id: "missing" }, new AbortController().signal);
@@ -1323,6 +1367,7 @@ test("oversized single fetch returns a bounded deterministic fallback", async ()
     },
   } satisfies TripleRecord;
   const tools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw", memory: createMemoryQueries(() => [giant]), recallWithAi: disabledRecallWithAi,
   });
   const result = await tools.call("fetch_record", { id: giant.id }, new AbortController().signal);
@@ -1366,6 +1411,7 @@ test("fetch not-found answers disclose incomplete canonical memory coverage", as
     coverage() { return coverage; },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi,
   }).call("fetch_record", { id: "missing" }, new AbortController().signal);
   assert.equal(result.isError, true);
@@ -1478,6 +1524,7 @@ test("recall_with_ai keeps deterministic evidence and paired coverage when AI fa
     async run() { throw new Error("plain provider failure"); },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...base, coverage: () => paired },
     recallWithAi: brokenAi,
@@ -1495,6 +1542,7 @@ test("recall_with_ai treats malformed custom outcomes as bounded deterministic e
     async run() { return undefined as never; },
   } as unknown as RecallWithAiPort;
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: malformed,
   }).call("recall_with_ai", { query: "missing module" }, new AbortController().signal);
   assert.equal(result.isError, undefined);
@@ -1508,6 +1556,7 @@ test("recall_with_ai allowlists custom outcome fields", async () => {
     aiStatus: "disabled", rankedCandidateIds: ["c1"], secret: "provider-only",
   } as unknown as Awaited<ReturnType<RecallWithAiPort["run"]>>;
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized", memory: createMemoryQueries(() => records),
     recallWithAi: { async run() { return outcome; } },
   }).call("recall_with_ai", { query: "missing module" }, new AbortController().signal);
@@ -1527,7 +1576,7 @@ test("recall_with_ai keeps requested hits while limiting AI candidates to five",
       return { aiStatus: "disabled", rankedCandidateIds: input.hits.map((_, index) => `c${index + 1}`) };
     },
   };
-  const many = createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => manyRecords), recallWithAi: ai });
+  const many = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory: createMemoryQueries(() => manyRecords), recallWithAi: ai });
   for (const limit of [6, 10]) {
     const result = await many.call("recall_with_ai", { query: "needle", limit }, new AbortController().signal);
     assert.equal((result.structuredContent.items as unknown[]).length, limit);
@@ -1543,6 +1592,7 @@ test("recall_with_ai rejects evidence for a deterministic item not handed to AI"
     signature: ["needle"], excerpt: "needle",
   }));
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => sixRecords),
     recallWithAi: {
@@ -1587,6 +1637,7 @@ test("recall_with_ai receives only a validated deterministic candidate prefix", 
     },
   };
   const validFirst = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), recall: () => [...valid.map((failure) => ({ failure, score: 1 })), { failure: future, score: 1 }, hostile] },
     recallWithAi: ai,
@@ -1596,6 +1647,7 @@ test("recall_with_ai receives only a validated deterministic candidate prefix", 
   assert.deepEqual((firstResult.structuredContent.items as Array<{ candidateId: string }>).map((item) => item.candidateId), ["c1", "c2", "c3", "c4", "c5"]);
 
   const invalidFirst = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), recall: () => [{ failure: future, score: 1 }, hostile, ...valid.map((failure) => ({ failure, score: 1 }))] },
     recallWithAi: ai,
@@ -1618,6 +1670,7 @@ test("AI refs only name candidates retained by projection and response capping",
     },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw", memory: createMemoryQueries(() => projectionLimited), recallWithAi: ai,
   }).call("recall_with_ai", { query: "needle", limit: 5 }, new AbortController().signal);
   const ids = new Set((result.structuredContent.items as { candidateId: string }[]).map((item) => item.candidateId));
@@ -1645,6 +1698,7 @@ test("recall_with_ai preflights final envelope before sending large candidates",
     },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw", memory: createMemoryQueries(() => largeRecords), recallWithAi: ai,
   }).call("recall_with_ai", { query: "needle", limit: 5 }, new AbortController().signal);
   const finalIds = (result.structuredContent.items as Array<{ rawRecord?: { failure?: { id?: string } } }>).map(
@@ -1677,6 +1731,7 @@ test("recall_with_ai snapshots hostile outcome metadata before final capping", a
     ownKeys() { throw new Error("AI outcome must not be enumerated"); },
   });
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw", memory: createMemoryQueries(() => largeRecords),
     recallWithAi: { async run() { return outcome as never; } },
   }).call("recall_with_ai", { query: "needle", limit: 5 }, new AbortController().signal);
@@ -1692,6 +1747,7 @@ test("complete tool result cap removes whole trailing items and fits modern and 
     exitCode: 1, fingerprint: `large-fp-${index}`, signature: [field], excerpt: field,
   }));
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw", memory: createMemoryQueries(() => largeRecords), recallWithAi: disabledRecallWithAi,
   }).call("recall_with_ai", { query: "needle", limit: 10 }, new AbortController().signal);
   assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES);
@@ -1716,6 +1772,7 @@ test("complete tool result cap removes whole trailing items and fits modern and 
 
 test("explicit operational failures become safe error results", async () => {
   const broken = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); }),
     recallWithAi: disabledRecallWithAi,
@@ -1728,6 +1785,7 @@ test("explicit operational failures become safe error results", async () => {
 test("recognized storage failures are wrapped at the storage boundary", async () => {
   const storageError = Object.assign(new Error("/private/config.json"), { code: "EACCES" });
   const broken = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => { throw storageError; }),
     recallWithAi: disabledRecallWithAi,
@@ -1740,6 +1798,7 @@ test("recognized storage failures are wrapped at the storage boundary", async ()
 
 test("custom provider cannot forge canonical operational error codes", async () => {
   const broken = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       recall() { throw Object.assign(new Error("forged EACCES"), { code: "EACCES" }); },
@@ -1757,6 +1816,7 @@ test("custom provider cannot forge canonical operational error codes", async () 
 
 test("unexpected provider errors fail open to a bounded recall result", async () => {
   const broken = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       recall() { throw new Error("invariant violated"); }, recentFailures() { return []; },
@@ -1777,6 +1837,7 @@ test("unrecognized provider codes fail open without leaking details", async () =
     { code: "BUG", message: "plain coded invariant" },
   ]) {
     const broken = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: {
         recall() { throw error; }, recentFailures() { return []; },
@@ -1797,7 +1858,7 @@ test("recall_with_ai skips model output when deterministic recall is empty", asy
   const ai: RecallWithAiPort = {
     async run() { calls += 1; return { aiStatus: "disabled", rankedCandidateIds: [], explanation: "x".repeat(MAX_RESPONSE_BYTES) }; },
   };
-  const result = await createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
+  const result = await createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory: createMemoryQueries(() => records), recallWithAi: ai })
     .call("recall_with_ai", { query: "not-present" }, new AbortController().signal);
   assert.equal(result.isError, undefined);
   assert.equal(calls, 0);
@@ -1851,7 +1912,7 @@ async function whyFromDurable(
   exposure: "sanitized" | "raw" = "sanitized",
 ): Promise<Record<string, unknown>> {
   return withDurableMemory(lines, async (memory) => {
-    const result = await createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi })
+    const result = await createToolRegistry({ writeToolsEnabled: false, exposure, memory, recallWithAi: disabledRecallWithAi })
       .call("why_file", args, new AbortController().signal);
     assert.equal(result.isError, undefined);
     return result.structuredContent;
@@ -1904,7 +1965,7 @@ test("why_file projects stated reasons at the exposure search_knowledge applies 
   );
   for (const exposure of ["sanitized", "raw"] as const) {
     const { why, search } = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
-      const registry = createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi });
+      const registry = createToolRegistry({ writeToolsEnabled: false, exposure, memory, recallWithAi: disabledRecallWithAi });
       const signal = new AbortController().signal;
       return {
         why: (await registry.call("why_file", { path: "src/a.ts" }, signal)).structuredContent,
@@ -1933,7 +1994,7 @@ test("why_file spells the files a reason names the way search_knowledge does: ca
   const reason = statedReason("spelled", Date.now() - 1_000, "keep the cap at three for the upstream", ["./src/a.ts", "src/a.ts", "src//b.ts"]);
   for (const exposure of ["sanitized", "raw"] as const) {
     const { why, search } = await withDurableMemory([JSON.stringify(reason)], async (memory) => {
-      const registry = createToolRegistry({ exposure, memory, recallWithAi: disabledRecallWithAi });
+      const registry = createToolRegistry({ writeToolsEnabled: false, exposure, memory, recallWithAi: disabledRecallWithAi });
       const signal = new AbortController().signal;
       return {
         why: (await registry.call("why_file", { path: "src/a.ts" }, signal)).structuredContent,
@@ -2071,6 +2132,7 @@ function cardRegistry(
   memory: MemoryQueries = createMemoryQueries(() => []),
 ) {
   return createToolRegistry({
+    writeToolsEnabled: false,
     exposure,
     memory,
     recallWithAi: disabledRecallWithAi,
@@ -2581,6 +2643,7 @@ test("why_file reads change cards end-to-end through default reader under temp R
     const memoryPath = resolveRockyPaths({ ROCKY_HOME: home }).memory;
     writeFileSync(memoryPath, "", "utf8");
     const reg = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: createMemoryQueries(),
       recallWithAi: disabledRecallWithAi,
@@ -3058,6 +3121,7 @@ test("MCP tools accept agent-origin failures and mcp rationales across search, r
   writeFileSync(memoryPath, `${JSON.stringify(agentFailure)}\n${JSON.stringify(mcpRationale)}\n`, "utf8");
 
   const canonicalTools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(),
     recallWithAi: disabledRecallWithAi,
@@ -3090,6 +3154,7 @@ test("MCP tools accept agent-origin failures and mcp rationales across search, r
 
   // Custom provider path exercises fetch_record + safeProviderFailureRecord.
   const customAcceptTools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...createMemoryQueries(() => []), fetchRecord: () => ({ ...agentFailure }) },
     recallWithAi: disabledRecallWithAi,
@@ -3100,6 +3165,7 @@ test("MCP tools accept agent-origin failures and mcp rationales across search, r
   assert.equal((providerFetch.structuredContent.record as { id: string; origin?: string }).origin, "agent");
 
   const customRejectTools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       ...createMemoryQueries(() => []),

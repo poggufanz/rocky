@@ -35,6 +35,7 @@ const expectedCatalog = [
   "bundle_get",
   "session_timeline",
   "attempt_history",
+  "note_expectation",
 ] as const;
 
 class ModernHealthSession implements ProcessSession {
@@ -174,19 +175,21 @@ const registration: McpRegistration = {
   env: { ROCKY_MCP_EXPOSURE: "sanitized" },
 };
 
-test("MCP catalog exports one versioned fourteen-tool source and registry order follows it", () => {
-  // These exports intentionally do not come from setup: health consumes the
-  // read-only MCP catalog without importing any setup writer.
+test("MCP catalog exports one frozen fifteen-tool contract and registry order follows it", () => {
   assert.equal(MCP_TOOL_CATALOG_CONTRACT.version, MCP_TOOL_CATALOG_VERSION);
   assert.strictEqual(MCP_TOOL_CATALOG_CONTRACT.tools, MCP_TOOL_CATALOG);
   assert.equal(Object.isFrozen(MCP_TOOL_CATALOG_CONTRACT), true);
   assert.equal(Object.isFrozen(MCP_TOOL_CATALOG_CONTRACT.tools), true);
+  const { writeTools } = MCP_TOOL_CATALOG_CONTRACT;
+  assert.deepEqual(writeTools, ["note_expectation"]);
+  assert.equal(Object.isFrozen(writeTools), true);
   assert.equal(Reflect.set(MCP_TOOL_CATALOG_CONTRACT, "version", 2), false);
   assert.throws(() => (MCP_TOOL_CATALOG as unknown as string[]).push("mutated"), TypeError);
   assert.equal(MCP_TOOL_CATALOG_VERSION, 1);
   assert.deepEqual([...MCP_TOOL_CATALOG.slice(0, 8)], [...expectedCatalog.slice(0, 8)]);
   assert.deepEqual([...MCP_TOOL_CATALOG], [...expectedCatalog]);
   const registry = createToolRegistry({
+    writeToolsEnabled: true,
     exposure: "sanitized",
     memory: {} as MemoryQueries,
     recallWithAi: disabledRecallWithAi,
@@ -195,9 +198,24 @@ test("MCP catalog exports one versioned fourteen-tool source and registry order 
   const teach = registry.list().find((definition) => definition.name === "teach_lookup");
   assert.ok(teach !== undefined);
   assert.match(teach.description, /change card/i);
+  const note = registry.list().at(-1);
+  assert.ok(note);
+  assert.equal(note.name, "note_expectation");
+  assert.equal(note.description,
+    "Before re-running a failing command, you may record what you expect to pass. Stored as your statement; Rocky only records what ran next.");
+  assert.deepEqual(note.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
+  for (const definition of registry.list().slice(0, -1)) {
+    assert.equal(definition.annotations.readOnlyHint, true, definition.name);
+    assert.equal(definition.annotations.idempotentHint, true, definition.name);
+  }
 });
 
-test("health rejects legacy four-tool servers and accepts exact fourteen plus foreign extras", async () => {
+test("health rejects four-tool servers and accepts the catalog plus foreign extras", async () => {
   const old = fakeModernRunner(expectedCatalog.slice(0, 4));
   const oldResult = await checkMcpRegistration(registration, old, 250);
   assert.equal(oldResult.healthy, false);
@@ -207,6 +225,22 @@ test("health rejects legacy four-tool servers and accepts exact fourteen plus fo
   const modernResult = await checkMcpRegistration(registration, modern, 250);
   assert.equal(modernResult.healthy, true);
   assert.equal(modernResult.era, "modern");
+});
+
+test("health requires all read tools and allows a missing write tool in both eras", async (t) => {
+  const readTools = expectedCatalog.slice(0, -1);
+  for (const [era, runner] of [["modern", fakeModernRunner], ["legacy", fakeLegacyRunner]] as const) {
+    await t.test(era, async () => {
+      const readOnly = await checkMcpRegistration(registration, runner(readTools), 250);
+      assert.equal(readOnly.healthy, true, readOnly.detail);
+      assert.equal(readOnly.era, era);
+      const incomplete = await checkMcpRegistration(
+        registration, runner(expectedCatalog.filter((name) => name !== "attempt_history")), 250,
+      );
+      assert.equal(incomplete.healthy, false);
+      assert.equal(incomplete.era, era);
+    });
+  }
 });
 
 test("health rejects duplicate, malformed, and case-variant descriptors in both eras", async (t) => {
@@ -254,7 +288,7 @@ test("setup status contract names host/MCP registration and agent-hook scope, no
   assert.match(`${help.stdout}${help.stderr}`, /spool and Ollama\/model health\s+are not\s+checked/iu);
 });
 
-test("isolated real rocky MCP child process passes versioned fourteen-tool health", { timeout: 10_000 }, async (t) => {
+test("isolated real rocky MCP child process passes catalog health", { timeout: 10_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rocky-mcp-health-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const result = await checkMcpRegistration({

@@ -99,7 +99,7 @@ function assertReadOnlyImport(imported: SourceImport, localPath: string): void {
   assert.equal(writer, undefined, `writer import reachable from ${localPath}: ${writer ?? "unknown"}`);
 }
 
-function assertReadOnlyGraph(roots: readonly string[], graphSourceRoot: string, allowed: ReadonlySet<string>): void {
+function* sourceGraph(roots: readonly string[], graphSourceRoot: string) {
   const reachable = new Set<string>();
   const pending = [...roots];
 
@@ -108,25 +108,32 @@ function assertReadOnlyGraph(roots: readonly string[], graphSourceRoot: string, 
     if (reachable.has(path)) continue;
     reachable.add(path);
     const localPath = relative(graphSourceRoot, path).replaceAll("\\", "/");
-    assert.ok(allowed.has(localPath), `forbidden MCP dependency: ${localPath}`);
-    assert.doesNotMatch(localPath, /(?:^|\/)(?:run|hook|setup|model)(?:[.-]|\.ts$)|^ui\//);
-
-    for (const imported of sourceImports(path)) {
-      assertReadOnlyImport(imported, localPath);
+    const imports = sourceImports(path);
+    yield { path, localPath, imports };
+    for (const imported of imports) {
       if (!imported.specifier.startsWith(".")) continue;
       const target = sourceTarget(path, imported.specifier);
       assert.ok(existsSync(target), `unresolved relative import ${imported.specifier} from ${localPath}`);
       pending.push(target);
     }
   }
+}
 
+function assertReadOnlyGraph(roots: readonly string[], graphSourceRoot: string, allowed: ReadonlySet<string>): void {
+  const reachable = new Set<string>();
+  for (const { localPath, imports } of sourceGraph(roots, graphSourceRoot)) {
+    reachable.add(localPath);
+    assert.ok(allowed.has(localPath), `forbidden MCP dependency: ${localPath}`);
+    assert.doesNotMatch(localPath, /(?:^|\/)(?:run|hook|setup|model)(?:[.-]|\.ts$)|^ui\//);
+    for (const imported of imports) assertReadOnlyImport(imported, localPath);
+  }
   for (const forbidden of [
     "core/memory.ts",
     "commands/run.ts",
     "commands/hook.ts",
     "ui/rocky.ts",
   ]) {
-    assert.equal([...reachable].some((path) => relative(graphSourceRoot, path).replaceAll("\\", "/") === forbidden), false);
+    assert.equal(reachable.has(forbidden), false);
   }
 }
 
@@ -163,6 +170,8 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     // mutation APIs through this module.
     "core/fs-safety.ts",
     "core/git-diff.ts",
+    // Read-only write toggle and shared identifier validation.
+    "core/mcp-write-input.ts",
     "core/memory-query.ts",
     "core/memory-read.ts",
     "core/package-info.ts",
@@ -187,6 +196,7 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "ai/recall-ai.ts",
     "ai/schema.ts",
     "mcp/attempts-projection.ts",
+    "mcp/expectation-broker.ts",
     "mcp/privacy.ts",
     "mcp/protocol.ts",
     "mcp/server.ts",
@@ -208,6 +218,24 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     assert.equal(allowed.has(writable), false, `writable core module must remain outside MCP allowlist: ${writable}`);
   }
   assertReadOnlyGraph(roots, sourceRoot, allowed);
+});
+
+test("only expectation-broker spawns the Rocky CLI from the MCP graph", () => {
+  const processImports: Record<string, readonly string[]> = {};
+  const execPathUsers: string[] = [];
+  for (const { path, localPath, imports } of sourceGraph([entry], sourceRoot)) {
+    assert.notEqual(localPath, "core/memory.ts");
+    const names = imports.filter(({ specifier }) => specifier === "child_process" || specifier === "node:child_process")
+      .flatMap(({ importedNames }) => importedNames);
+    if (names.length > 0) processImports[localPath] = names;
+    if (readFileSync(path, "utf8").includes("process.execPath")) execPathUsers.push(localPath);
+  }
+  assert.deepEqual(processImports, {
+    "core/git-diff.ts": ["spawnSync"],
+    "core/compare-data.ts": ["execFileSync"],
+    "mcp/expectation-broker.ts": ["spawn"],
+  });
+  assert.deepEqual(execPathUsers.sort(), ["commands/mcp.ts", "mcp/expectation-broker.ts"]);
 });
 
 test("MCP graph rejects a forbidden module reached through export-from", () => {

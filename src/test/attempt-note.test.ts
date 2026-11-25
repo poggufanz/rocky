@@ -233,6 +233,31 @@ test("renders the reference sentence", () => {
   assert.equal(note.bytes, Buffer.byteLength(expectedText, "utf8"));
 });
 
+test("prior-attempts note never carries expectation text", () => {
+  const failure = makeFailure({ id: "f1", ts: REF_NOW - 2 * MIN_MS });
+  const rationale: RationaleRecord = {
+    kind: "rationale",
+    id: "r1",
+    ts: REF_NOW - MIN_MS,
+    v: 1,
+    cwd: failure.cwd,
+    agent: "generic",
+    rationale_fidelity: "raw",
+    source: "mcp",
+    excerpt: "ZZ-EXPECT-MARKER",
+    expectedCommand: "npm test",
+    links: { failureId: failure.id },
+  };
+  const note = priorAttemptsNote(
+    [failure, rationale],
+    completeCoverage(2),
+    { fingerprints: [failure.fingerprint], cwd: failure.cwd },
+    { now: REF_NOW, cardsFor: undefined, platform: "linux" },
+  );
+  assert.ok(note);
+  assert.doesNotMatch(note.text, /ZZ-EXPECT-MARKER/u);
+});
+
 test("drops clauses without data", () => {
   const fp = "3f2a9c1e44d0b7a1";
   const { records } = buildReferenceScenario(fp);

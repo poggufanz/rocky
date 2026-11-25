@@ -274,7 +274,7 @@ test("canonical fetch not-found carries skipped-line coverage", async (t) => {
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
   });
-  const tools = createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(), recallWithAi: disabledRecallWithAi });
+  const tools = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory: createMemoryQueries(), recallWithAi: disabledRecallWithAi });
   const result = await tools.call("fetch_record", { id: "missing" }, new AbortController().signal);
   assert.equal(result.isError, true);
   const structured = result.structuredContent as {
@@ -314,6 +314,7 @@ test("hostile coverage stays explicit on bounded and AI-error MCP paths", async 
     coverage: () => malformed,
   };
   const tools = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory,
     recallWithAi: { run: async () => { const error = new Error("storage"); (error as Error & { code?: string }).code = "EIO"; throw error; } },
@@ -350,7 +351,7 @@ test("MCP rejects clean coverage with impossible byte equality", async () => {
     whyFile: () => [],
     coverage: () => impossible,
   };
-  const result = await createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi })
+  const result = await createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi })
     .call("stats", {}, new AbortController().signal);
   const structured = result.structuredContent as { memoryCoverageIncomplete?: boolean; memoryCoverage?: { complete?: boolean; truncated?: number } };
   assert.equal(structured.memoryCoverageIncomplete, true);
@@ -366,6 +367,7 @@ test("MCP rejects clean coverage with impossible byte equality", async () => {
     reason: "file-size-cap" as const,
   };
   const boundaryResult = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: { ...memory, coverage: () => atBoundary },
     recallWithAi: disabledRecallWithAi,
@@ -395,6 +397,7 @@ test("MCP provider read errors cannot become clean fallback answers", async () =
     coverage: () => clean,
   };
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory,
     recallWithAi: { run: async () => { const error = new Error("AI down"); (error as Error & { code?: string }).code = "EIO"; throw error; } },
@@ -439,7 +442,7 @@ test("legitimate skipped-only coverage is preserved", async () => {
       complete: false,
     }),
   };
-  const tools = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+  const tools = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
   const result = await tools.call("stats", {}, new AbortController().signal);
   const structured = result.structuredContent as {
     memoryCoverageIncomplete?: boolean;
@@ -605,7 +608,7 @@ test("production stats single-flight shares one witness batch and revalidates ne
     else process.env.ROCKY_HOME = previous;
   });
   const queries = createMemoryQueries();
-  const tools = createToolRegistry({ exposure: "sanitized", memory: queries, recallWithAi: disabledRecallWithAi });
+  const tools = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory: queries, recallWithAi: disabledRecallWithAi });
   const signal = new AbortController().signal;
   // Prime the immutable in-envelope snapshot, then issue the expensive
   // content-witness probe concurrently. Without single-flight this performs
@@ -664,7 +667,7 @@ test("canonical stats single-flight shares witness scans across distinct cwd ans
     else process.env.ROCKY_HOME = previous;
   });
   const queries = createMemoryQueries();
-  const tools = createToolRegistry({ exposure: "raw", memory: queries, recallWithAi: disabledRecallWithAi });
+  const tools = createToolRegistry({ writeToolsEnabled: false, exposure: "raw", memory: queries, recallWithAi: disabledRecallWithAi });
   const signal = new AbortController().signal;
   await tools.call("stats", { cwd: "/cwd-0" }, signal);
   const before = memoryReadMetrics();
@@ -687,7 +690,7 @@ test("custom-loader query providers are not coalesced as durable snapshot reader
       fingerprint: "custom-fingerprint", signature: ["false"], excerpt: "false",
     }];
   });
-  const tools = createToolRegistry({ exposure: "raw", memory, recallWithAi: disabledRecallWithAi });
+  const tools = createToolRegistry({ writeToolsEnabled: false, exposure: "raw", memory, recallWithAi: disabledRecallWithAi });
   await Promise.all(Array.from({ length: 20 }, (_, index) => tools.call("stats", { cwd: `/custom-${index}` }, new AbortController().signal)));
   assert.equal(loads, 20);
 });

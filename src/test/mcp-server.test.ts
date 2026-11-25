@@ -519,6 +519,7 @@ test("dispatcher emits discovery, catalog, initialize, and ping envelopes", asyn
 
 function realRegistryWithStats(stats: () => typeof statsPayload) {
   return createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: {
       recall: () => [],
@@ -554,6 +555,7 @@ for (const era of ["modern", "legacy"] as const) {
   test(`${era} operational ToolExecutionError stays a successful isError tool result`, async () => {
     const sent: JsonRpcResponse[] = [];
     const server = serverWith(createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: createMemoryQueries(() => { throw new ToolExecutionError("memory_unavailable", "memory unavailable"); }),
       recallWithAi: disabledRecallWithAi,

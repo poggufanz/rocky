@@ -1759,6 +1759,7 @@ test("MCP coverage keeps tail fields under the seam cap", async (t) => {
   writeFileSync(join(home, "memory.jsonl"), failureLines(60), "utf8");
 
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(),
     recallWithAi: disabledRecallWithAi,
@@ -1781,6 +1782,7 @@ test("MCP coverage rejects malformed tail fields", async (t) => {
   withRecordCap(t, 50);
   const callRecallWithCoverage = async (coverage: unknown): Promise<MemoryCoverage> => {
     const registry = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: {
         ...createMemoryQueries(() => []),

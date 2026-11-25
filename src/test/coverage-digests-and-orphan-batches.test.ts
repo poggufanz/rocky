@@ -72,6 +72,7 @@ function emptyMemory(overrides: Record<string, unknown> = {}): MemoryQueries {
 
 function registry(memory: MemoryQueries, exposure: "sanitized" | "raw" = "sanitized") {
   return createToolRegistry({
+    writeToolsEnabled: false,
     exposure,
     memory,
     recallWithAi: disabledRecallWithAi,

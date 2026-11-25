@@ -37,6 +37,14 @@ const SECRET_DEFINITIONS: ReadonlyArray<SecretDefinition> = [
     fragmentSource: "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{4,}|github_pat_[A-Za-z0-9_]{4,}",
   },
   {
+    replacementLabel: "gitlab token",
+    detectionKind: "gitlab token",
+    source: "glpat-[A-Za-z0-9_-]{8,}",
+    leadingBoundary: true,
+    trailingBoundary: true,
+    fragmentSource: "glpat-[A-Za-z0-9_-]{4,}",
+  },
+  {
     replacementLabel: "slack token",
     detectionKind: "slack token",
     source: "xox[baprs]-[A-Za-z0-9-]{10,}",
@@ -351,7 +359,7 @@ function normalizeSecretBoundaryInput(text: string): SecretBoundaryInput {
 
 const EXACT_PLACEHOLDER_VALUE = /^(?:(?:test|example|dummy|placeholder)(?:[-_ ](?:password|secret|token|key|value)(?:[-_ ]\d{1,4})?)?|changeme)$/i;
 const INDIRECT_SECRET_VALUE = /^(?:process\.env\.[A-Za-z_][A-Za-z0-9_]*|env\.[A-Za-z_][A-Za-z0-9_]*|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^>]+>)$/i;
-const SECRET_TOKEN_PREFIX = /^(?:AKIA|github_pat_|gh[opurs]_|xox[baprs]-|sk-(?:[A-Za-z0-9]+-)*|npm_)/;
+const SECRET_TOKEN_PREFIX = /^(?:AKIA|github_pat_|gh[opurs]_|glpat-|xox[baprs]-|sk-(?:[A-Za-z0-9]+-)*|npm_)/;
 
 function assignmentValue(definition: SecretDefinition, match: RegExpExecArray): string | undefined {
   const groups = definition.assignmentValueGroups;
@@ -505,6 +513,21 @@ function collectReplacements(text: string, context: SecretBoundaryContext): Repl
 
 /** Stable disclosure that a logical-record continuation was removed conservatively. */
 export const AMBIGUOUS_SECRET_CONTINUATION = "[redacted ambiguous continuation]";
+
+const SECRET_REDACTION_MARKERS = [
+  ...SECRET_DEFINITIONS.map(({ replacementLabel }) => `[redacted ${replacementLabel}]`),
+  AMBIGUOUS_SECRET_CONTINUATION,
+];
+
+/** A stored value with a redaction marker has lost information needed for comparison. */
+export function hasSecretRedaction(text: string, mayBeTruncated = false): boolean {
+  if (SECRET_REDACTION_MARKERS.some((marker) => text.includes(marker))) return true;
+  if (!mayBeTruncated) return false;
+  const start = text.lastIndexOf("[");
+  if (start === -1) return false;
+  const suffix = text.slice(start);
+  return SECRET_REDACTION_MARKERS.some((marker) => marker.startsWith(suffix));
+}
 
 function preserveLogicalControls(replacement: Replacement, input: SecretBoundaryInput): Replacement {
   const controls = input.logicalControls.filter(

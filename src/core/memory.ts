@@ -41,7 +41,7 @@ import { resolveRockyPaths } from "./state-paths.js";
 import type { RockyPaths } from "./state-paths.js";
 import { boundTripleMechanism, getMemoryRecordOffsets, isCompleteMemoryCoverage, isKnownPathPlatform, isSafeNonNegativeInteger, loadMemoryChecked, MAX_MEMORY_FILE_BYTES, MAX_RATIONALE_FILES, MAX_RATIONALE_FILE_CHARS, MAX_MEMORY_LINE_BYTES, MAX_MEMORY_RECORDS, maxSupportedMemoryRecords, MEMORY_FORMAT_VERSION, sameCwd, tailReadable, windowCovered } from "./memory-read.js";
 import type { AgentStamp, AliasRecord, AssociationRecord, BriefRunRecord, ExplainRecord, FailureRecord, FixRecord, GuardOutcome, GuardRecord, InvariantTouchRecord, KnownRationaleSource, MemoryCoverage, MemoryLoadResult, MemoryRecord, NoteRecord, RationaleRecord, TripleRecord } from "./memory-read.js";
-import { MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, type GitAnchor } from "./memory-read.js";
+import { MAX_EXPECTED_COMMAND_CODE_POINTS, MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, parseExpectedCommand, type GitAnchor } from "./memory-read.js";
 import { flattenControls, redactSecretsAtBoundary } from "./redact.js";
 import { plausibleFilePath } from "./compare-data.js";
 import { utf8Slice, utf8SliceFromEnd } from "./utf8.js";
@@ -1780,8 +1780,14 @@ export function recordRationale(
     git?: GitAnchor;
   },
   paths?: RockyPaths,
+  options: { requireReadableTail?: boolean } = {},
 ): RationaleRecord {
   const ts = input.ts ?? Date.now();
+  // Each code point uses at most two UTF-16 code units.
+  const prefix = input.expectedCommand?.slice(0, MAX_EXPECTED_COMMAND_CODE_POINTS * 2);
+  const bounded = prefix === undefined
+    ? undefined
+    : parseExpectedCommand([...prefix].slice(0, MAX_EXPECTED_COMMAND_CODE_POINTS).join(""));
   const rec: RationaleRecord = {
     kind: "rationale",
     id: randomUUID(),
@@ -1792,12 +1798,18 @@ export function recordRationale(
     rationale_fidelity: input.rationale_fidelity,
     source: input.source,
     excerpt: boundRationaleExcerpt(input.text),
+    ...(bounded === undefined ? {} : { expectedCommand: bounded }),
     ...(input.pointer === undefined ? {} : { pointer: input.pointer }),
     ...(input.links === undefined ? {} : { links: input.links }),
     ...(boundedRationaleFiles(input.files) ?? {}),
     ...boundGitAnchor(input.git),
   };
-  withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
+  withMemoryTransaction((transaction) => {
+    if (options.requireReadableTail === true && !tailReadable(transaction.coverage)) {
+      throw new Error("Rocky rationale requires a readable memory tail");
+    }
+    transaction.append(rec);
+  }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
 }
 

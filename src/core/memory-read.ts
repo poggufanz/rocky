@@ -863,7 +863,7 @@ export function differentAgentSession(a: AgentStamp | undefined, b: AgentStamp |
   return false;
 }
 
-function parseExpectedCommand(value: unknown): string | undefined {
+export function parseExpectedCommand(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_EXPECTED_COMMAND_CODE_POINTS * 2) return undefined;
   if (STAMP_CONTROL_CHARS.test(value)) return undefined;
   const codePoints = [...value].length;

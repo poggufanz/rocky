@@ -144,13 +144,13 @@ class McpCliProcess {
   private readonly stderrChunks: Buffer[] = [];
   private readonly closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 
-  constructor(home: string, exposure = "sanitized", preload?: string) {
+  constructor(home: string, exposure = "sanitized", preload?: string, writeSetting?: "off") {
     this.child = spawn(process.execPath, [
       ...(preload === undefined ? [] : ["--require", preload]),
       cli, "mcp",
     ], {
       cwd: repoRoot,
-      env: { ...process.env, ROCKY_HOME: home, ROCKY_MCP_EXPOSURE: exposure },
+      env: { ...process.env, ROCKY_HOME: home, ROCKY_MCP_EXPOSURE: exposure, ROCKY_MCP_WRITE: writeSetting },
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.lineIterator = createInterface({ input: this.child.stdout, crlfDelay: Infinity })[Symbol.asyncIterator]();
@@ -232,7 +232,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 function assertToolCatalog(response: JsonRpcResponse): void {
   assert.deepEqual((response.result?.tools as { name: string }[]).map((tool) => tool.name), [
     "recall", "recent_failures", "stats", "recall_with_ai", "search_knowledge", "fetch_record", "why_file", "teach_lookup",
-    "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline", "attempt_history",
+    "activity_recent", "activity_for_file", "bundles_list", "bundle_get", "session_timeline", "attempt_history", "note_expectation",
   ]);
   assert.equal(JSON.stringify(response).includes('"cwd"'), false);
 }
@@ -259,6 +259,7 @@ test("compiled CLI serves modern discovery, listing, and every read-only tool wi
   const home = seedHome(t);
   const before = snapshotTree(home);
   const server = new McpCliProcess(home);
+  t.after(() => { server.child.kill(); });
 
   const discovery = await server.request(modernRequest("modern-discover", "server/discover"));
   assert.deepEqual(discovery.result?.supportedVersions, ["2026-07-28"]);
@@ -282,6 +283,33 @@ test("compiled CLI serves modern discovery, listing, and every read-only tool wi
   assert.ok(server.stdoutLines.length > 0);
   server.assertJsonOnlyStdout();
   assert.deepEqual(snapshotTree(home), before);
+});
+
+test("compiled MCP command honors both write toggles and wires the enabled broker", { timeout: PROCESS_HANG_GUARD_MS * 3 }, async (t) => {
+  for (const setting of ["enabled", "environment", "sentinel"] as const) {
+    await t.test(setting, async (subtest) => {
+      const home = seedHome(subtest);
+      if (setting === "sentinel") writeFileSync(join(home, "mcp-write-off"), "");
+      const before = snapshotTree(home);
+      const server = new McpCliProcess(home, "sanitized", undefined, setting === "environment" ? "off" : undefined);
+      try {
+        const { result } = await server.request(modernRequest("list", "tools/list"));
+        const definitions = result?.tools as { name: string }[];
+        assert.equal(definitions.length, setting === "enabled" ? 15 : 14);
+        const response = await server.request(modernRequest("note", "tools/call", {
+          name: "note_expectation", arguments: { text: "The next run should pass." },
+        }));
+        if (setting === "enabled") {
+          assert.equal(structured(response).recorded, true);
+        } else {
+          assert.deepEqual(response.error, { code: -32602, message: "Invalid params" });
+          assert.deepEqual(snapshotTree(home), before);
+        }
+      } finally {
+        await server.close();
+      }
+    });
+  }
 });
 
 test("MCP keeps stats responsive during one local-AI request and sends strictest sanitized evidence", { timeout: PROCESS_HANG_GUARD_MS * 3 }, async (t) => {
@@ -343,6 +371,7 @@ test("MCP tool registry returns busy without queuing and only accepts a fully va
     },
   };
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => records),
     recallWithAi: singleFlightRecallAi(deferred),
@@ -357,6 +386,7 @@ test("MCP tool registry returns busy without queuing and only accepts a fully va
   assert.deepEqual((await first).structuredContent.rankedCandidateIds, ["c2", "c1"]);
 
   const reordered = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => records),
     recallWithAi: { async run() { return { aiStatus: "used", rankedCandidateIds: ["c2", "c1"] }; } },
@@ -390,6 +420,7 @@ test("MCP tool registry returns busy without queuing and only accepts a fully va
     },
   ]) {
     const rejected = await createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: createMemoryQueries(() => records),
       recallWithAi: { async run() { return outcome; } },
@@ -421,6 +452,7 @@ test("MCP keeps sparse projected IDs aligned with original AI candidates", async
     whyFile() { return []; },
   };
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw",
     memory,
     recallWithAi: {
@@ -473,6 +505,7 @@ test("MCP rejects a used ranking that includes a known but unhanded sparse candi
   };
   let handedCandidateIds: string[] | undefined;
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "raw",
     memory,
     recallWithAi: {
@@ -505,6 +538,7 @@ test("MCP rejects a used ranking that includes a known but unhanded sparse candi
 test("compiled CLI serves a separate legacy lifecycle and reloads externally appended memory", { timeout: PROCESS_HANG_GUARD_MS * 3 }, async (t) => {
   const home = seedHome(t);
   const server = new McpCliProcess(home);
+  t.after(() => { server.child.kill(); });
 
   const initialized = await server.request({
     jsonrpc: "2.0",

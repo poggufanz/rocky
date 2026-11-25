@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MemoryCoverage, MemoryRecord, RationaleRecord, RationaleSource, TripleRecord } from "../core/memory-read.js";
@@ -37,13 +37,15 @@ test("why --add writes human rationale linked to latest failure", async () => {
   assert.equal((rec as { links?: { failureId?: string } }).links?.failureId, failure.id);
 });
 
-test("why --add with empty memory still records unlinked", async () => {
-  process.env.ROCKY_HOME = realpathSync(mkdtempSync(join(tmpdir(), "rocky-why2-")));
+test("why --add with empty memory still records unlinked", () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-why2-")));
+  process.env.ROCKY_HOME = home;
   assert.equal(why(["--add", "context note"]), 0);
-  const { loadMemory } = await import("../core/memory-read.js");
-  const rec = loadMemory().find((r) => r.kind === "rationale");
-  assert.ok(rec);
-  assert.equal((rec as RationaleRecord).links, undefined);
+  const stored = JSON.parse(readFileSync(join(home, "memory.jsonl"), "utf8"));
+  assert.equal(stored.kind, "rationale");
+  assert.equal(stored.source, "human");
+  assert.equal(stored.links, undefined);
+  assert.equal(Object.hasOwn(stored, "expectedCommand"), false);
 });
 
 test("why --add refuses empty text and writes nothing", async () => {

@@ -146,7 +146,8 @@ function hasRequiredTools(result: unknown): boolean {
     }
     names.add(tool.name);
   }
-  return MCP_TOOL_CATALOG_CONTRACT.tools.every((name) => names.has(name));
+  const { tools, writeTools } = MCP_TOOL_CATALOG_CONTRACT;
+  return tools.every((name) => names.has(name) || writeTools.some((writeTool) => writeTool === name));
 }
 
 async function cleanup(

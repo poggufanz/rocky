@@ -76,6 +76,7 @@ test("MCP why_file bounds and validates hostile possible evidence without throwi
     coverageIncomplete: true,
   };
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({ whyFileEvidence: () => evidence }),
     recallWithAi: disabledRecallWithAi,
@@ -92,6 +93,7 @@ test("MCP why_file bounds and validates hostile possible evidence without throwi
 
 test("MCP why_file possible evidence forces conservative coverage", async () => {
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({ whyFileEvidence: () => ({
       matches: [],
@@ -119,6 +121,7 @@ test("MCP why_file bounds hostile custom matches before response projection", as
     },
   }));
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({ whyFileEvidence: () => ({
       matches,
@@ -136,6 +139,7 @@ test("MCP why_file bounds hostile custom matches before response projection", as
 
 test("legacy custom MemoryQueries keep missing triple coverage conservatively unknown", async () => {
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [legacyTriple()] }),
     recallWithAi: disabledRecallWithAi,
@@ -167,6 +171,7 @@ test("MCP legacy why fallback preserves origin-platform path identity", async ()
     },
   };
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [record] }),
     recallWithAi: disabledRecallWithAi,
@@ -189,6 +194,7 @@ test("MCP legacy why fallback discloses missing-platform coverage conservatively
     },
   };
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [record] }),
     recallWithAi: disabledRecallWithAi,
@@ -213,6 +219,7 @@ test("MCP custom why evidence cannot associate an unrelated match", async () => 
     },
   };
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({
       whyFileEvidence: () => ({
@@ -239,6 +246,7 @@ test("MCP legacy why fallback refuses ambiguous suffix rationale", async () => {
     },
   });
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({ whyFile: () => [
       suffix("one", "one/src/missing.ts"),
@@ -572,6 +580,7 @@ test("MCP why_file sanitizes control chars and oversized values in every card st
   };
 
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({}),
     recallWithAi: disabledRecallWithAi,
@@ -662,6 +671,7 @@ test("MCP why_file skips forged card file lines with wrong types and handles hos
     writeFileSync(resolveRockyPaths({ ROCKY_HOME: home }).memory, "", "utf8");
 
     const registry = createToolRegistry({
+      writeToolsEnabled: false,
       exposure: "sanitized",
       memory: createMemoryQueries(),
       recallWithAi: disabledRecallWithAi,
@@ -691,6 +701,7 @@ test("MCP why_file skips forged card file lines with wrong types and handles hos
     get() { throw new Error("hostile getter"); },
   });
   const fallbackRes = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({}),
     recallWithAi: disabledRecallWithAi,
@@ -752,6 +763,7 @@ test("MCP why_file redacts non-32-hex forged card_id and flags sub-16KiB charact
   ];
 
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: memoryWith({}),
     recallWithAi: disabledRecallWithAi,

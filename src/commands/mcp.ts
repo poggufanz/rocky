@@ -1,9 +1,12 @@
 import { createOllamaClient } from "../ai/ollama.js";
 import { createRecallAiPort, singleFlightRecallAi } from "../ai/recall-ai.js";
 import { parseExposure } from "../core/config-read.js";
+import { mcpWriteDisabled } from "../core/mcp-write-input.js";
 import { createMemoryQueries } from "../core/memory-query.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../core/package-info.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { safeTerminalBlock, safeTerminalLine } from "../core/terminal-sanitize.js";
+import { createExpectationBroker } from "../mcp/expectation-broker.js";
 import { runMcpStdio } from "../mcp/server.js";
 import { createToolRegistry } from "../mcp/tools.js";
 import { asSentence, parseNoArgs, reportCliUsage } from "./cli-args.js";
@@ -40,6 +43,14 @@ export async function mcp(argv: readonly string[] = []): Promise<number> {
     exposure,
     memory: createMemoryQueries(),
     recallWithAi,
+    writeToolsEnabled: !mcpWriteDisabled(process.env, resolveRockyPaths().home),
+    expectationBroker: createExpectationBroker({
+      execPath: process.execPath,
+      entry: process.argv[1],
+      cwd: process.cwd(),
+      env: process.env,
+      timeoutMs: 2000,
+    }),
   });
   await runMcpStdio(
     { input: process.stdin, output: process.stdout, diagnostics: process.stderr },

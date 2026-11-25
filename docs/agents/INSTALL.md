@@ -128,9 +128,9 @@ If `notify` already has a value, keep the existing entries and ask the human how
 
 The blocks above are the capture lane. Codex uses the notify lane; other harnesses need no pre-tool wiring.
 
-## Step 5 — MCP read access, manual per host *(human approval for config edits)*
+## Step 5 — MCP registration, manual per host *(human approval for config edits)*
 
-Rocky's MCP server is read-only, local stdio, sanitized projection by default. Register it wherever this harness reads MCP config:
+Rocky's MCP server runs over local stdio with sanitized projection by default. It exposes fourteen read-only tools and `note_expectation`, which writes agent testimony to local memory. To run with read access only, set `ROCKY_MCP_WRITE=off` in the server environment or create `<ROCKY_HOME>/mcp-write-off`. Register Rocky wherever this harness reads MCP config:
 
 **Generic MCP host / OpenCode / anything with a JSON `mcpServers` map:**
 

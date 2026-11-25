@@ -238,6 +238,7 @@ test("orphan discovery cannot classify a stale append lock with a live owner as 
 
 test("custom mixed stats expose safe uncertainty bounds instead of a fabricated total", async () => {
   const result = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: emptyMemory({ stats: () => ({ failures: 100, fixEvents: 100, triples: 100, notes: 100, possibleFixes: 100 }) }),
     recallWithAi: disabledRecallWithAi,
@@ -250,6 +251,7 @@ test("custom mixed stats expose safe uncertainty bounds instead of a fabricated 
 
 test("coincident bounds clamp an infeasible supplied total instead of trusting it", async () => {
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: emptyMemory({ stats: () => ({ failures: 2, fixEvents: 3, possibleFixes: 0, triples: 0, notes: 0, total: 999_999 }) }),
     recallWithAi: disabledRecallWithAi,
@@ -258,6 +260,7 @@ test("coincident bounds clamp an infeasible supplied total instead of trusting i
   assert.equal(high.total, 5);
   assert.equal(high.totalExact, undefined);
   const low = await createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: emptyMemory({ stats: () => ({ failures: 2, fixEvents: 3, possibleFixes: 0, triples: 0, notes: 0, total: 0 }) }),
     recallWithAi: disabledRecallWithAi,
@@ -278,7 +281,7 @@ test("sanitized hostile knowledge IDs use collision-resistant registry handles t
     searchKnowledge: () => records.map((record) => ({ id: record.id, ts: record.ts, kind: "failure", snippet: record.excerpt, score: 1 })),
     fetchRecord: (id: string) => records.find((record) => record.id === id),
   });
-  const registry = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+  const registry = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
   const search = await registry.call("search_knowledge", { query: "failure" }, signal);
   const items = (search.structuredContent as { items?: Array<{ id: string }> }).items ?? [];
   assert.equal(items.length, 2);
@@ -300,7 +303,7 @@ test("every handle returned by one hostile search resolves for immediate fetch_r
     searchKnowledge: () => records.map((record) => ({ id: record.id, ts: record.ts, kind: "failure", snippet: record.excerpt, score: 1 })),
     fetchRecord: (id: string) => byId.get(id),
   });
-  const registry = createToolRegistry({ exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
+  const registry = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory, recallWithAi: disabledRecallWithAi });
   const search = await registry.call("search_knowledge", { query: "f" }, signal);
   const items = (search.structuredContent as { items?: Array<{ id: string }> }).items ?? [];
   assert.ok(items.length >= 100);
@@ -322,6 +325,7 @@ test("core and custom why remain ambiguous when redacted display paths have dist
   assert.deepEqual(core.matches, []);
   assert.equal(core.coverageIncomplete, true);
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: emptyMemory({ whyFile: () => [first, second] }),
     recallWithAi: disabledRecallWithAi,

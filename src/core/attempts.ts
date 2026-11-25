@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { commandFingerprint } from "./fingerprint.js";
+import { commandFingerprint, commandIdentity } from "./fingerprint.js";
 import {
   canonicalFingerprint,
   fingerprintMigrationIndex,
@@ -11,6 +11,7 @@ import {
   cwdIdentityKey,
   differentAgentSession,
   isOperationalMemoryRecord,
+  MAX_EXPECTED_COMMAND_CODE_POINTS,
   tailReadable,
   type AssociationRecord,
   type FailureRecord,
@@ -19,7 +20,7 @@ import {
   type MemoryRecord,
   type RationaleRecord,
 } from "./memory-read.js";
-import { sanitizeTestimony } from "./redact.js";
+import { hasSecretRedaction, sanitizeTestimony } from "./redact.js";
 
 export type AttemptOutcome =
   | "passed" | "possible_pass" | "same_failure" | "different_failure" | "no_later_run" | "unknown";
@@ -84,7 +85,10 @@ interface IndexedAssociation {
 interface IndexedRationale {
   record: RationaleRecord;
   order: number;
+  expectationCwdKey?: string;
 }
+
+type Expectation = NonNullable<Attempt["expectations"]>[number];
 
 interface FailureGroup {
   key: string;
@@ -162,16 +166,65 @@ function findMatchingAssociation(
   return best?.record;
 }
 
+function observeExpectation(
+  rationale: RationaleRecord,
+  command: string | undefined,
+  cwdRuns: readonly IndexedRunRecord[],
+  defaultPlatform: NodeJS.Platform,
+): Expectation["observed"] {
+  if (command === undefined || command.trim().length === 0) return "not_comparable";
+  // Capping the stored command can cut through a replacement marker.
+  if (command !== rationale.expectedCommand
+    || hasSecretRedaction(command, [...command].length === MAX_EXPECTED_COMMAND_CODE_POINTS)) return "not_comparable";
+  const defaultIdentity = commandIdentity(command, { platform: defaultPlatform });
+  if (!defaultIdentity.reliable) return "not_comparable";
+  const identities = new Map([[defaultPlatform, defaultIdentity]]);
+
+  let lo = 0;
+  let hi = cwdRuns.length;
+  while (lo < hi) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (cwdRuns[mid]!.record.ts <= rationale.ts) lo = mid + 1;
+    else hi = mid;
+  }
+
+  const windowEnd = rationale.ts + LINK_WINDOW_MS;
+  // ponytail: Rationales carry no session stamp. Filter on agent.session once they do.
+  for (let index = lo; index < cwdRuns.length; index += 1) {
+    const { record } = cwdRuns[index]!;
+    if (record.ts > windowEnd) break;
+    if (record.identityReliable !== true) continue;
+    const platform = record.platform ?? defaultPlatform;
+    let expected = identities.get(platform);
+    if (expected === undefined) {
+      expected = commandIdentity(command, { platform });
+      identities.set(platform, expected);
+    }
+    if (expected.reliable && expected.value === record.commandIdentity) {
+      if (hasSecretRedaction(record.cmd) || sanitizeTestimony(record.cmd) !== record.cmd) return "not_comparable";
+      return record.kind === "fix" ? "same_command_passed" : "same_command_failed";
+    }
+  }
+  return "no_matching_run";
+}
+
 function buildTestimony(
   rationales: readonly IndexedRationale[] | undefined,
-): { changes: Attempt["changes"]; stated?: Attempt["stated"] } {
+  recordsByCwdKey: ReadonlyMap<string, readonly IndexedRunRecord[]>,
+  defaultPlatform: NodeJS.Platform,
+): Pick<Attempt, "changes" | "stated" | "expectations"> {
   if (rationales === undefined || rationales.length === 0) {
     return { changes: { state: "unknown" } };
   }
   let newestAny: IndexedRationale | undefined;
   let newestWithFiles: IndexedRationale | undefined;
+  let mcpRationales: IndexedRationale[] | undefined;
   for (let i = 0; i < rationales.length; i += 1) {
     const item = rationales[i]!;
+    if (item.record.source === "mcp") {
+      (mcpRationales ??= []).push(item);
+      continue;
+    }
     if (newestAny === undefined || compareByTsOrder(item, newestAny) > 0) {
       newestAny = item;
     }
@@ -195,7 +248,20 @@ function buildTestimony(
         recordId: newestAny.record.id,
       }
     : undefined;
-  return stated === undefined ? { changes } : { changes, stated };
+  const testimony: Pick<Attempt, "changes" | "stated" | "expectations"> = { changes };
+  if (stated !== undefined) testimony.stated = stated;
+  if (mcpRationales !== undefined) {
+    testimony.expectations = mcpRationales.sort(compareByTsOrder).map(({ record, expectationCwdKey }) => {
+      const command = record.expectedCommand === undefined ? undefined : sanitizeTestimony(record.expectedCommand);
+      return {
+        text: sanitizeTestimony(record.excerpt),
+        ...(command === undefined ? {} : { command }),
+        rationaleId: record.id,
+        observed: observeExpectation(record, command, recordsByCwdKey.get(expectationCwdKey!) ?? [], defaultPlatform),
+      };
+    });
+  }
+  return testimony;
 }
 
 function emptyCounts(): Record<AttemptOutcome, number> & { attempts: number } {
@@ -367,20 +433,6 @@ export function buildProblems(
     return { entries: [], coverage, ungroupedLegacy };
   }
 
-  for (let i = 0; i < deferredFixes.length; i += 1) {
-    const { record, order } = deferredFixes[i]!;
-    const cwdKey = resolveCwdKey(record.cwd, record.platform);
-    if (!neededCwdKeys.has(cwdKey)) continue;
-    if (!collectNonFailuresNow) fixesById.set(record.id, record);
-    addToMapArray(recordsByCwdKey, cwdKey, {
-      kind: "fix",
-      record,
-      order,
-      cwdKey,
-      cwdIndex: -1,
-    });
-  }
-
   if (!collectNonFailuresNow) {
     for (let i = 0; i < deferredAssociations.length; i += 1) {
       const { record, order } = deferredAssociations[i]!;
@@ -395,6 +447,36 @@ export function buildProblems(
         addToMapArray(rationalesByFailureId, failureId, { record, order });
       }
     }
+  }
+
+  if (rationalesByFailureId.size > 0) {
+    for (const group of keptGroups) {
+      for (const { record: failure } of group.failures) {
+        const rationales = rationalesByFailureId.get(failure.id);
+        if (rationales === undefined) continue;
+        for (const rationale of rationales) {
+          if (rationale.record.source !== "mcp") continue;
+          // Rationales have no platform stamp. Use the linked failure's platform when available.
+          const cwdKey = resolveCwdKey(rationale.record.cwd, failure.platform);
+          rationale.expectationCwdKey = cwdKey;
+          neededCwdKeys.add(cwdKey);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < deferredFixes.length; i += 1) {
+    const { record, order } = deferredFixes[i]!;
+    const cwdKey = resolveCwdKey(record.cwd, record.platform);
+    if (!neededCwdKeys.has(cwdKey)) continue;
+    if (!collectNonFailuresNow) fixesById.set(record.id, record);
+    addToMapArray(recordsByCwdKey, cwdKey, {
+      kind: "fix",
+      record,
+      order,
+      cwdKey,
+      cwdIndex: -1,
+    });
   }
 
   for (const cwdKey of neededCwdKeys) {
@@ -496,7 +578,9 @@ export function buildProblems(
       counts.attempts += 1;
       counts[outcome] += 1;
 
-      const { changes, stated } = buildTestimony(rationalesByFailureId.get(failure.id));
+      const { changes, stated, expectations } = buildTestimony(
+        rationalesByFailureId.get(failure.id), recordsByCwdKey, defaultPlatform,
+      );
       const session = failure.agent !== undefined
         ? (failure.agent.agentId !== undefined
             ? { vendor: failure.agent.vendor, agentId: failure.agent.agentId }
@@ -517,6 +601,7 @@ export function buildProblems(
       if (unknownReason !== undefined) attempt.unknownReason = unknownReason;
       if (session !== undefined) attempt.session = session;
       if (stated !== undefined) attempt.stated = stated;
+      if (expectations !== undefined) attempt.expectations = expectations;
       attempts.push(attempt);
     }
 
