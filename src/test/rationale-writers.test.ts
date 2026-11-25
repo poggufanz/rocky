@@ -14,7 +14,43 @@ test("recordRationale caps excerpt head+tail and stamps envelope", async () => {
   assert.ok(Buffer.byteLength(rec.excerpt, "utf8") <= MAX_RATIONALE_EXCERPT_BYTES);
   assert.ok(rec.excerpt.includes(" … "), "head+tail marker present when truncated");
   const line = readFileSync(join(process.env.ROCKY_HOME!, "memory.jsonl"), "utf8").trim();
-  assert.equal(JSON.parse(line).kind, "rationale");
+  const stored = JSON.parse(line);
+  assert.equal(stored.kind, "rationale");
+  assert.equal(Object.hasOwn(stored, "expectedCommand"), false);
+});
+
+test("recordRationale round-trips expectedCommand and raw fidelity", async () => {
+  process.env.ROCKY_HOME = realpathSync(mkdtempSync(join(tmpdir(), "rocky-rw-")));
+  const { recordRationale } = await import("../core/memory.js");
+  const { loadMemoryChecked } = await import("../core/memory-read.js");
+  const input = {
+    cwd: process.env.ROCKY_HOME,
+    source: "mcp",
+    rationale_fidelity: "raw",
+    agent: "generic",
+    text: "expect auth tests pass",
+    links: { failureId: "f1" },
+  } as const;
+
+  recordRationale({ ...input, expectedCommand: "npm test -- auth" });
+  recordRationale({ ...input, expectedCommand: "x".repeat(250) });
+  const supplementaryCharacter = "\u{10348}";
+  recordRationale({ ...input, expectedCommand: supplementaryCharacter.repeat(250) });
+  for (const expectedCommand of ["", "bad\ncommand"]) {
+    const stored = recordRationale({ ...input, expectedCommand });
+    assert.equal(Object.hasOwn(stored, "expectedCommand"), false);
+  }
+
+  const { records } = loadMemoryChecked();
+  const [first, second, third] = records;
+  assert.equal(first?.kind, "rationale");
+  assert.equal(first.expectedCommand, "npm test -- auth");
+  assert.equal(first.source, "mcp");
+  assert.equal(first.rationale_fidelity, "raw");
+  assert.equal(second?.kind, "rationale");
+  assert.equal(second.expectedCommand, "x".repeat(200));
+  assert.equal(third?.kind, "rationale");
+  assert.equal(third.expectedCommand, supplementaryCharacter.repeat(200));
 });
 
 test("recordAlias appends add and retract records", async () => {
