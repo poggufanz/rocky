@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { joinAttemptCards } from "../core/attempt-cards.js";
 import { buildProblems, type Attempt, type ProblemEntry } from "../core/attempts.js";
 import {
-  FIXTOUCH_WINDOW_MS, fixTouchCachePath, writeFixTouchCache, type FixTouchEntry,
+  FIXTOUCH_WINDOW_MS, fixTouchCachePath, fixTouchEnabled, writeFixTouchCache, type FixTouchEntry,
 } from "../core/fixtouch-cache.js";
 import { createMemoryQueries, loadDurableMemorySnapshot } from "../core/memory-query.js";
 import { loadMemoryChecked, tailReadable } from "../core/memory-read.js";
@@ -55,5 +55,6 @@ export function rebuildFixTouchCache({ home, now }: { home: string; now: number 
     platform,
     rootFor: (cwd) => resolveGitRootForCwd(cwd, existsSync) ?? cwd,
   });
+  if (!fixTouchEnabled(home)) return false;
   return writeFixTouchCache(fixTouchCachePath(home), { v: 1, builtAt: now, entries });
 }

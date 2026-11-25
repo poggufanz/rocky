@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -138,6 +138,7 @@ function writeEvidence(home: string, repo: string, ts: number, files: string[]) 
 
 test("rebuilds from memory and cards across repository roots using the supplied home", (t) => {
   const home = makeHome(t);
+  writeFileSync(join(home, "fixtouch-on"), "");
   const first = writeEvidence(home, "auth", FAILURE_TS, FILES);
   const second = writeEvidence(home, "api", FAILURE_TS + 15_000, ["src/client.ts"]);
 
@@ -153,6 +154,7 @@ test("rebuilds from memory and cards across repository roots using the supplied 
 
 test("rebuilds observed paths even when desk tool text is disabled", (t) => {
   const home = makeHome(t);
+  writeFileSync(join(home, "fixtouch-on"), "");
   const previousHome = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
   t.after(() => {
@@ -171,12 +173,33 @@ test("rebuilds observed paths even when desk tool text is disabled", (t) => {
   });
 });
 
+test("rebuild with no marker returns false without creating the derived directory", (t) => {
+  const home = makeHome(t);
+  writeEvidence(home, "auth", FAILURE_TS, FILES);
+
+  assert.equal(rebuildFixTouchCache({ home, now: NOW }), false);
+  assert.equal(existsSync(dirname(fixTouchCachePath(home))), false);
+});
+
+test("rebuild with no marker preserves existing cache bytes", (t) => {
+  const home = makeHome(t);
+  writeEvidence(home, "auth", FAILURE_TS, FILES);
+  const file = fixTouchCachePath(home);
+  const oldCache = Buffer.from(`{ "v": 1, "builtAt": ${NOW - 1}, "entries": [] }\r\n`);
+  mkdirSync(dirname(file));
+  writeFileSync(file, oldCache);
+
+  assert.equal(rebuildFixTouchCache({ home, now: NOW }), false);
+  assert.deepEqual(readFileSync(file), oldCache);
+});
+
 for (const [condition, writeMemory] of [
   ["the memory path is a directory", (path: string) => mkdirSync(path)],
   ["malformed records exceed the readable coverage allowance", (path: string) => writeFileSync(path, "invalid\n".repeat(4))],
 ] as const) {
   test(`preserves the existing cache bytes when ${condition}`, (t) => {
     const home = makeHome(t);
+    writeFileSync(join(home, "fixtouch-on"), "");
     const file = fixTouchCachePath(home);
     const oldCache = Buffer.from(`{ "v": 1, "builtAt": ${NOW - 1}, "entries": [] }\r\n`);
     mkdirSync(dirname(file));
@@ -202,4 +225,17 @@ test("refreshes only after a fix write with the opt-in marker present", async (t
 
   await refreshFixTouchAfterFix(fix, { home, now: NOW });
   assert.equal(readFixTouchCache(file, NOW)?.entries.length, 2);
+});
+
+test("refresh skips the write when the marker is removed during import", async (t) => {
+  const home = makeHome(t);
+  const { fix } = writeEvidence(home, "auth", FAILURE_TS, FILES);
+  const marker = join(home, "fixtouch-on");
+  writeFileSync(marker, "");
+
+  const refresh = refreshFixTouchAfterFix(fix, { home, now: NOW });
+  unlinkSync(marker);
+  await refresh;
+
+  assert.equal(existsSync(dirname(fixTouchCachePath(home))), false);
 });

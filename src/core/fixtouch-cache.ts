@@ -38,6 +38,7 @@ export async function refreshFixTouchAfterFix(
   try {
     if (!fixTouchEnabled(deps.home)) return;
     const { rebuildFixTouchCache } = await import("../commands/fixtouch-refresh.js");
+    if (!fixTouchEnabled(deps.home)) return;
     rebuildFixTouchCache({ home: deps.home, now: deps.now });
   } catch {
     // Best-effort; a stale or missing cache only makes the gate silent.
