@@ -1,5 +1,6 @@
 //! Read-only Listening store reader and worker-backed change card engine.
 
+pub mod attempts;
 pub mod attribute;
 pub mod detail;
 pub mod query;
