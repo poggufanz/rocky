@@ -88,9 +88,17 @@ export function clusterBootstrapDiff(
   const count = diffs.length;
   if (count === 0) return undefined;
   diffs.sort((a, b) => a - b);
+
+  // Compare levels at the nearest integer rank so floating-point error in
+  // the computed rank cannot move a level across its boundary.
+  const nearestTailRank = Math.round(((1 - opts.level) / 2) * count);
+  const boundaryLevel = (count - 2 * nearestTailRank) / count;
+  const tailRank = opts.level > boundaryLevel ? nearestTailRank - 1 : nearestTailRank;
+
+  // The upper ceiling trims the same number of replicates from the other tail.
   return {
-    lower: diffs[Math.floor(((1 - opts.level) / 2) * count)]!,
-    upper: diffs[Math.ceil(((1 + opts.level) / 2) * count) - 1]!,
+    lower: diffs[tailRank]!,
+    upper: diffs[count - tailRank - 1]!,
   };
 }
 

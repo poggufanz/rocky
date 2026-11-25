@@ -19,6 +19,13 @@ const bootstrapOptions = {
   level: 0.9,
 };
 
+const rankBoundaryClusters: readonly StudyCluster[] = [
+  { arm: "shown", successes: 0, total: 1 },
+  { arm: "shown", successes: 1, total: 1 },
+  { arm: "held", successes: 0, total: 1 },
+  { arm: "held", successes: 1, total: 1 },
+];
+
 test("Newcombe method 10 matches the worked example", () => {
   const result = newcombeDiff(56, 70, 48, 80, 1.959964);
   assert.ok(result);
@@ -67,6 +74,22 @@ test("cluster bootstrap is deterministic and pools counts within each arm", () =
   const interval = clusterBootstrapDiff(clusters, options);
   assert.deepEqual(interval, { lower: -0.25, upper: 0.5 });
   assert.deepEqual(clusterBootstrapDiff(clusters, options), interval);
+});
+
+test("cluster bootstrap uses index 100 for the lower bound of 2,000 replicates at 90%", () => {
+  // This seed gives 100 differences of -1 followed by differences of -0.5.
+  const options = { ...bootstrapOptions, seed: 464 };
+  assert.deepEqual(clusterBootstrapDiff(rankBoundaryClusters, options), { lower: -0.5, upper: 1 });
+  assert.deepEqual(
+    clusterBootstrapDiff(rankBoundaryClusters, { ...options, level: 0.9000000000000001 }),
+    { lower: -1, upper: 1 },
+  );
+});
+
+test("cluster bootstrap preserves an integer upper rank", () => {
+  // This seed puts 0 at index 13 and 0.5 at index 14.
+  const options = { resamples: 25, seed: 46, level: 0.12 };
+  assert.deepEqual(clusterBootstrapDiff(rankBoundaryClusters, options), { lower: 0, upper: 0 });
 });
 
 test("cluster bootstrap yields a point interval for uniform arm outcomes", () => {
