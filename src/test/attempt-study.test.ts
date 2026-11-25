@@ -197,10 +197,10 @@ function fixture(): AttemptStudyInput {
       note({ session: null, anchorFailureId: null }),
       note({ session: "", anchorFailureId: null }),
       note({ anchorFailureId: null }),
-      note({ anchorFailureId: "mismatch" }),
-      note({ arm: "held", anchorFailureId: "missing" }),
-      note({ ts: START - 1, anchorFailureId: "too-early", latencyMs: 90 }),
-      note({ ts: DEADLINE + 1, anchorFailureId: "too-late", latencyMs: 100, lane: "watch" }),
+      note({ session: "m", anchorFailureId: "mismatch" }),
+      note({ ts: START + 103, arm: "held", session: "s2", anchorFailureId: "missing", key: exposureKeyHash("missing") }),
+      note({ ts: START - 1, anchorFailureId: "too-early", key: exposureKeyHash("too-early"), latencyMs: 90 }),
+      note({ ts: DEADLINE + 1, anchorFailureId: "too-late", key: exposureKeyHash("too-late"), latencyMs: 100, lane: "watch" }),
       note({ kind: "skip", reason: "lock_busy", latencyMs: 9_000 }),
       note({ kind: "skip", reason: "wrapped" }),
       note({ kind: "skip", reason: "wrapped", ts: DEADLINE + 1 }),
@@ -227,8 +227,9 @@ function render(report: AttemptStudyReport, home: string): string[] {
   return lines;
 }
 
-test("only assigned note rows with a session and anchor request memory joins", () => {
-  assert.deepEqual(anchorIds(fixture().rows), new Set(["a1", "a3", "b1", "mismatch", "missing", "too-early", "too-late"]));
+test("only assigned note rows with a session, anchor and key request memory joins", () => {
+  const rows = [...fixture().rows, note({ anchorFailureId: "no-key", key: null })];
+  assert.deepEqual(anchorIds(rows), new Set(["a1", "a3", "b1", "mismatch", "missing", "too-early", "too-late"]));
 });
 
 test("without a marker the report counts all eligible rows and hides outcomes", () => {
@@ -303,6 +304,48 @@ test("the day stop counts rows dated after the deadline at the instant it is rea
   assert.deepEqual(report.latency.watch, { n: 1, p95: 50 });
 });
 
+test("a readable secondary episode keeps its place when the primary anchor is missing", () => {
+  const input = fixture();
+  const rows = input.rows.map((row) => row.anchorFailureId === "missing" ? { ...row, ts: START + 101 } : row);
+  const report = buildAttemptStudy({ ...input, start, rows, now: DEADLINE });
+  assert.equal(report.phase, "stopped");
+  assert.deepEqual(report.arms.held, { episodes: 1, primaryUnits: 1, outOfTail: 1 });
+  assert.deepEqual(report.primary.held, { n: 0, passed: 0 });
+  assert.equal(report.secondary.clusters.held, 1);
+  assert.equal(report.secondary.diff, 0.5);
+  assert.deepEqual(report.expectations.held, { no_matching_run: 1 });
+});
+
+test("retries contribute outcome evidence to the first episode for a session and key", () => {
+  const first = makeProblem(KEY, [
+    { id: "a1", ts: START + 10, session: "s1", outcome: "same_failure" },
+    { id: "a2", ts: START + 20, session: "s1", outcome: "same_failure" },
+    { id: "a3", ts: START + 30, session: "s1", outcome: "passed" },
+  ]);
+  const other = makeProblem("other", [
+    { id: "b1", ts: START + 11, session: "s1", outcome: "no_later_run" },
+  ]);
+  const held = cohort(0, 1, 0, 0);
+  const report = buildAttemptStudy({
+    ...held, now: DEADLINE,
+    rows: [
+      ...held.rows,
+      note({ ts: START + 30, anchorFailureId: "a3" }),
+      note({ ts: START + 10, anchorFailureId: "a1", delivered: false, bytes: 0 }),
+      note({ ts: START + 10, anchorFailureId: "a2" }),
+      note({ ts: START + 11, anchorFailureId: "b1", key: exposureKeyHash("other") }),
+    ],
+    entries: [...held.entries, first.entry, other.entry],
+    records: [...held.records, ...first.records, ...other.records],
+  });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.arms.shown.episodes, 2);
+  assert.equal(report.excluded.duplicateAnchor, 2);
+  assert.deepEqual(report.primary.shown, { n: 1, passed: 1 });
+  assert.equal(report.secondary.diff, 0.5);
+  assert.equal(report.sameFailure.shown, 1);
+});
+
 function cohort(shown: number, held: number, shownPasses: number, heldPasses: number): AttemptStudyInput {
   const rows: ExposureRow[] = [];
   const entries: ProblemEntry[] = [];
@@ -352,6 +395,43 @@ test("unit stop excludes episodes later in file order at the same timestamp", ()
   assert.equal(report.meanDeliveredBytes, 100);
 });
 
+test("an enrollment keeps its stop slot after its anchor leaves the memory tail", () => {
+  const input = cohort(151, 150, 1, 0);
+  const full = buildAttemptStudy(input);
+  const rolled = buildAttemptStudy({
+    ...input,
+    entries: input.entries.filter((entry) => entry.key !== "shown-0"),
+    records: input.records.filter((record) => record.id !== "shown-0" && record.id !== "fix-shown-0"),
+  });
+  assert.equal(full.phase, "stopped");
+  assert.equal(rolled.phase, "stopped");
+  for (const report of [full, rolled]) {
+    assert.equal(report.stopReason, "units");
+    assert.equal(report.primaryUnits, 300);
+    assert.equal(report.excluded.afterStop, 1);
+    assert.equal(report.arms.shown.primaryUnits, 150);
+  }
+  assert.equal(full.arms.shown.outOfTail, 0);
+  assert.deepEqual(full.primary.shown, { n: 150, passed: 1 });
+  assert.equal(rolled.arms.shown.outOfTail, 1);
+  assert.deepEqual(rolled.primary.shown, { n: 149, passed: 0 });
+  assert.deepEqual(rolled.secondary.clusters, { shown: 149, held: 150 });
+});
+
+test("the unit stop caps enrollment when two sessions arrive on the deadline", () => {
+  const input = cohort(151, 150, 0, 0);
+  const rows = input.rows.map((row) => row.anchorFailureId === "shown-150" || row.anchorFailureId === "held-149"
+    ? { ...row, ts: DEADLINE }
+    : row);
+  const report = buildAttemptStudy({ ...input, rows, now: DEADLINE });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.stopReason, "units");
+  assert.equal(report.primaryUnits, 300);
+  assert.equal(report.excluded.afterStop, 1);
+  assert.equal(report.primary.shown.n, 151);
+  assert.equal(report.primary.held.n, 149);
+});
+
 test("future exposures do not count toward a running report", () => {
   const input = cohort(150, 150, 0, 0);
   const rows = input.rows.map((row) => row.anchorFailureId === "held-149"
@@ -387,7 +467,7 @@ test("absent and invalid markers include every episode regardless of now", () =>
 test("conflicting in-window arms exclude the entire session before counting primary units", () => {
   const input = fixture();
   const rows = input.rows.map((row) => row.anchorFailureId === "a3" ? { ...row, arm: "held" as const } : row);
-  const report = buildAttemptStudy({ ...input, rows });
+  const report = buildAttemptStudy({ ...input, start, rows });
   assert.equal(report.excluded.armConflict, 2);
   assert.equal(report.arms.shown.episodes, 0);
   assert.equal(report.arms.held.episodes, 1);

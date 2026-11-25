@@ -2,7 +2,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "
 import { join } from "node:path";
 import { ADVISORY_LOG_MAX_BYTES, exposureKeyHash, type ExposureRow } from "./attempt-note-state.js";
 import type { Attempt, ProblemEntry } from "./attempts.js";
-import type { MemoryRecord } from "./memory-read.js";
+import type { MemoryCoverage, MemoryRecord } from "./memory-read.js";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "./fs-safety.js";
 import {
   BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, Z90, clusterBootstrapDiff, mde, newcombeDiff,
@@ -133,6 +133,7 @@ export interface AttemptStudyInput {
   logFull: boolean;
   records: readonly MemoryRecord[];
   entries: readonly ProblemEntry[];
+  coverage?: MemoryCoverage;
   start: StudyStart;
   now: number;
 }
@@ -164,6 +165,7 @@ interface StudyCounts {
   logFull: boolean;
   latency: Record<Lane, { n: number; p95: number | undefined }>;
   meanDeliveredBytes?: number;
+  memoryCoverage?: Pick<MemoryCoverage, "complete" | "scanned" | "skipped" | "truncated" | "window" | "reason" | "oldestTs">;
 }
 
 interface StartedStudy extends StudyCounts {
@@ -191,10 +193,10 @@ export type AttemptStudyReport =
   | (StartedStudy & { phase: "running" })
   | StoppedStudy;
 
-type CandidateRow = ExposureRow & { kind: "note"; arm: Arm; session: string; anchorFailureId: string };
+type CandidateRow = ExposureRow & { kind: "note"; arm: Arm; session: string; anchorFailureId: string; key: string };
 type Candidate = { row: CandidateRow; order: number };
 type Anchor = { entry: ProblemEntry; attempt: Attempt; keyHash: string };
-type Episode = Candidate & { anchor: Anchor };
+type Episode = Candidate & { anchor: Anchor | undefined };
 type SessionEpisodes = { arm: Arm; episodes: Episode[] };
 type Cutoff = { ts: number; order: number };
 
@@ -204,25 +206,37 @@ function afterCutoff(ts: number, order: number, cutoff: Cutoff): boolean {
 
 function isCandidate(row: ExposureRow): row is CandidateRow {
   return row.kind === "note" && (row.arm === "shown" || row.arm === "held")
-    && row.session !== null && row.session.length > 0 && row.anchorFailureId !== null;
+    && row.session !== null && row.session.length > 0 && row.anchorFailureId !== null && row.key !== null;
 }
 
 export function anchorIds(rows: readonly ExposureRow[]): Set<string> {
   return new Set(rows.filter(isCandidate).map((row) => row.anchorFailureId));
 }
 
-function indexCandidates(rows: readonly ExposureRow[]): Map<string, Candidate> {
+function firstCandidates(rows: readonly ExposureRow[]): Candidate[] {
   const byAnchor = new Map<string, Candidate>();
   for (const [order, row] of rows.entries()) {
     if (!isCandidate(row)) continue;
     const prior = byAnchor.get(row.anchorFailureId);
     if (prior === undefined || row.ts < prior.row.ts) byAnchor.set(row.anchorFailureId, { row, order });
   }
-  return byAnchor;
+
+  const sorted = [...byAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order);
+  const keysBySession = new Map<string, Set<string>>();
+  return sorted.filter(({ row }) => {
+    let keys = keysBySession.get(row.session);
+    if (keys === undefined) {
+      keys = new Set();
+      keysBySession.set(row.session, keys);
+    }
+    if (keys.has(row.key)) return false;
+    keys.add(row.key);
+    return true;
+  });
 }
 
 function countLogRows(
-  rows: readonly ExposureRow[], reportThrough: number, candidates: ReadonlyMap<string, Candidate>, excluded: Excluded,
+  rows: readonly ExposureRow[], reportThrough: number, candidateOrders: ReadonlySet<number>, excluded: Excluded,
 ): Record<string, number> {
   const skips = new Map<string, number>();
   for (const [order, row] of rows.entries()) {
@@ -231,7 +245,7 @@ function countLogRows(
       const reason = row.reason ?? "unknown";
       skips.set(reason, (skips.get(reason) ?? 0) + 1);
     } else if (isCandidate(row)) {
-      if (candidates.get(row.anchorFailureId)?.order !== order) excluded.duplicateAnchor++;
+      if (!candidateOrders.has(order)) excluded.duplicateAnchor++;
     } else if (row.arm === null || row.arm === "unassigned") {
       excluded.unassigned++;
     } else if (row.arm === "human") {
@@ -256,11 +270,11 @@ function indexAnchors(entries: readonly ProblemEntry[]): Map<string, Anchor> {
   return anchors;
 }
 
-function findUnitStop(episodes: readonly Episode[], deadline: number, now: number): Cutoff | undefined {
+function findUnitStop(episodes: readonly Episode[], through: number): Cutoff | undefined {
   const arms = new Map<string, Arm | null>();
   let units = 0;
   for (const { row, order } of episodes) {
-    if (row.ts >= deadline || row.ts > now) break;
+    if (row.ts > through) break;
     const arm = arms.get(row.session);
     if (arm === undefined) {
       arms.set(row.session, row.arm);
@@ -292,8 +306,12 @@ function collectSessions(
       counts.excluded.armConflict += session.episodes.length;
       continue;
     }
-    counts.arms[session.arm].episodes += session.episodes.length;
-    counts.arms[session.arm].primaryUnits++;
+    const arm = counts.arms[session.arm];
+    arm.primaryUnits++;
+    for (const { anchor } of session.episodes) {
+      if (anchor === undefined) arm.outOfTail++;
+      else arm.episodes++;
+    }
     included.push(session);
   }
   counts.primaryUnits = included.length;
@@ -323,7 +341,7 @@ function countOperations(rows: readonly ExposureRow[], start: number, cutoff: Cu
 }
 
 function analyzeEpisode(
-  { row, anchor }: Episode, sessionByFailure: ReadonlyMap<string, string>,
+  anchor: Anchor, session: string, sessionByFailure: ReadonlyMap<string, string>,
   repeats: RepeatCounts, expectations: ExpectationCounts,
 ): { passed: boolean; sameFailure: number } {
   const priorSets = new Set<string>();
@@ -336,7 +354,7 @@ function analyzeEpisode(
       if (attempt.changes.state === "observed") priorSets.add([...attempt.changes.files].sort().join("\n"));
       continue;
     }
-    if (attempt !== anchor.attempt && sessionByFailure.get(attempt.failureId) !== row.session) continue;
+    if (attempt !== anchor.attempt && sessionByFailure.get(attempt.failureId) !== session) continue;
     if (attempt.outcome === "passed") passed = true;
     if (attempt.outcome === "same_failure") sameFailure++;
     if (attempt.changes.state === "observed") postSets.push([...attempt.changes.files].sort().join("\n"));
@@ -363,25 +381,31 @@ function analyzeSessions(
     }
   }
   const primary = {
-    shown: { n: arms.shown.primaryUnits, passed: 0 },
-    held: { n: arms.held.primaryUnits, passed: 0 },
+    shown: { n: 0, passed: 0 },
+    held: { n: 0, passed: 0 },
   };
   const repeatFileSet = { shown: { subset: 0, repeats: 0 }, held: { subset: 0, repeats: 0 } };
   const expectations: ByArm<ExpectationCounts> = { shown: {}, held: {} };
   const sameFailure = { shown: 0, held: 0 };
   const successes = { shown: 0, held: 0 };
+  const clusterCounts = { shown: 0, held: 0 };
   const clusters: StudyCluster[] = [];
   for (const { arm, episodes } of sessions) {
-    const cluster: StudyCluster = { arm, successes: 0, total: episodes.length };
-    for (const [index, episode] of episodes.entries()) {
-      const result = analyzeEpisode(episode, sessionByFailure, repeatFileSet[arm], expectations[arm]);
-      if (result.passed) {
-        cluster.successes++;
-        if (index === 0) primary[arm].passed++;
+    const cluster: StudyCluster = { arm, successes: 0, total: 0 };
+    for (const [index, { row, anchor }] of episodes.entries()) {
+      if (anchor === undefined) continue;
+      const result = analyzeEpisode(anchor, row.session, sessionByFailure, repeatFileSet[arm], expectations[arm]);
+      cluster.total++;
+      if (result.passed) cluster.successes++;
+      if (index === 0) {
+        primary[arm].n++;
+        if (result.passed) primary[arm].passed++;
       }
       sameFailure[arm] += result.sameFailure;
     }
+    if (cluster.total === 0) continue;
     successes[arm] += cluster.successes;
+    clusterCounts[arm]++;
     clusters.push(cluster);
   }
   const { shown, held } = primary;
@@ -403,7 +427,7 @@ function analyzeSessions(
       ...bootstrap,
       ...(secondaryDiff === undefined ? {} : { diff: secondaryDiff }),
       resamples: BOOTSTRAP_RESAMPLES,
-      clusters: { shown: shown.n, held: held.n },
+      clusters: clusterCounts,
     },
     sameFailure: {
       shown: arms.shown.episodes === 0 ? undefined : sameFailure.shown / arms.shown.episodes,
@@ -416,7 +440,7 @@ function analyzeSessions(
 }
 
 export function buildAttemptStudy(input: AttemptStudyInput): AttemptStudyReport {
-  const { rows, entries, records, start, now } = input;
+  const { rows, entries, records, coverage, start, now } = input;
   const counts: StudyCounts = {
     v: 1, primaryUnits: 0,
     arms: {
@@ -433,37 +457,33 @@ export function buildAttemptStudy(input: AttemptStudyInput): AttemptStudyReport 
       hookfail: { n: 0, p95: undefined }, "tool-result": { n: 0, p95: undefined },
     },
   };
-  const candidatesByAnchor = indexCandidates(rows);
-  const candidates = [...candidatesByAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order);
+  if (coverage !== undefined) {
+    const { complete, scanned, skipped, truncated, window, reason, oldestTs } = coverage;
+    counts.memoryCoverage = { complete, scanned, skipped, truncated, window, reason, oldestTs };
+  }
 
+  const candidates = firstCandidates(rows);
   const startTs = start.state === "set" ? start.ts : -Infinity;
   const deadline = start.state === "set" ? start.ts + STUDY_STOP_DAYS * DAY_MS : Infinity;
   const anchors = indexAnchors(entries);
-  const resolved: Episode[] = [];
-  for (const candidate of candidates) {
-    const { row } = candidate;
-    if (row.ts < startTs || row.ts > deadline) continue;
-    const anchor = anchors.get(row.anchorFailureId);
-    if (anchor !== undefined && row.key === anchor.keyHash) resolved.push({ ...candidate, anchor });
-  }
-  const unitStop = start.state === "set" ? findUnitStop(resolved, deadline, now) : undefined;
+  const episodes = candidates.map((candidate) => ({ ...candidate, anchor: anchors.get(candidate.row.anchorFailureId) }));
+  // Enrollment comes from the exposure log even after its memory evidence rolls out of the tail.
+  const enrollment = episodes.filter(({ row, anchor }) =>
+    row.ts >= startTs && (anchor === undefined || row.key === anchor.keyHash));
+  const unitStop = start.state === "set" ? findUnitStop(enrollment, Math.min(deadline, now)) : undefined;
   const running = start.state === "set" && unitStop === undefined && now < deadline;
   // A stopped report can disclose later rows as afterStop. A running report ends at now.
   const reportThrough = running ? now : Infinity;
   const cutoff = unitStop ?? { ts: Math.min(reportThrough, deadline), order: Infinity };
-  counts.skips = countLogRows(rows, reportThrough, candidatesByAnchor, counts.excluded);
+  counts.skips = countLogRows(rows, reportThrough, new Set(candidates.map(({ order }) => order)), counts.excluded);
 
-  for (const { row, order } of candidates) {
+  for (const { row, order, anchor } of episodes) {
     if (row.ts > reportThrough) break;
     if (row.ts < startTs) counts.excluded.beforeStart++;
     else if (afterCutoff(row.ts, order, cutoff)) counts.excluded.afterStop++;
-    else {
-      const anchor = anchors.get(row.anchorFailureId);
-      if (anchor === undefined) counts.arms[row.arm].outOfTail++;
-      else if (row.key !== anchor.keyHash) counts.excluded.keyMismatch++;
-    }
+    else if (anchor !== undefined && row.key !== anchor.keyHash) counts.excluded.keyMismatch++;
   }
-  const sessions = collectSessions(resolved, cutoff, counts);
+  const sessions = collectSessions(enrollment, cutoff, counts);
   countOperations(rows, startTs, cutoff, counts);
   if (start.state !== "set") return { ...counts, phase: "not-started", start };
 
@@ -572,7 +592,7 @@ export function renderAttemptStudyText(report: AttemptStudyReport, home: string)
   const excluded = tallyText(report.excluded);
   if (excluded.length > 0) details.push(`excluded: ${excluded}.`);
   if (shown.outOfTail > 0 || held.outOfTail > 0) {
-    details.push(`out of memory read, not counted: shown ${shown.outOfTail}, held ${held.outOfTail}.`);
+    details.push(`missing from memory read: shown ${shown.outOfTail}, held ${held.outOfTail}. Outcome counts exclude these episodes.`);
   }
   const skips = skipTallyText(report.skips);
   if (skips.length > 0) details.push(`skips: ${skips}.`);

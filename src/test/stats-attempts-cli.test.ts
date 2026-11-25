@@ -97,7 +97,7 @@ test("stats --attempts reports a running study without outcomes or filesystem wr
     arm: "shown", key: exposureKeyHash(`output:${FINGERPRINT}:${CWD}`), cwdHash: FINGERPRINT,
     anchorFailureId: failure.id, latencyMs: 10, delivered: true, bytes: 100,
   };
-  writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n`);
+  writeFileSync(join(home, "memory.jsonl"), `${JSON.stringify(failure)}\n{broken\n`);
   writeFileSync(join(home, "advisories.jsonl"), `${JSON.stringify(exposure)}\n`);
   writeFileSync(join(home, STUDY_START_FILE), `${new Date(START).toISOString()}\n`);
   mkdirSync(join(home, "desk"));
@@ -113,11 +113,13 @@ test("stats --attempts reports a running study without outcomes or filesystem wr
   assert.equal(report.phase, "running");
   assert.equal(report.primaryUnits, 1, out.stdout);
   assert.equal(report.arms.shown.episodes, 1);
+  assert.deepEqual(report.memoryCoverage, { complete: false, scanned: 2, skipped: 1, truncated: 0 });
   assert.doesNotMatch(out.stdout, /"(?:primary|secondary|sameFailure|repeatFileSet|expectations|verdict|passed)":/u);
 
   const textOut = await captureOutput(() => stats(["--attempts"], { now: NOW }));
   assert.equal(textOut.code, 0);
   assert.match(textOut.stderr, /shown: 1 episodes/);
+  assert.match(textOut.stderr, /memory coverage incomplete/);
   assert.deepEqual(fileSnapshot(home), before);
   assert.equal(existsSync(join(home, "gate-state")), false);
   assert.equal(existsSync(join(home, "derived")), false);

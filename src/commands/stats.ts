@@ -122,7 +122,7 @@ async function statsAttempts(json: boolean, deps?: StatsDeps): Promise<number> {
   const cardsFor = makeCardsFor({ home, toolText: toolTextAllowed(home) });
   const { entries } = joinAttemptCards(kept, records, cardsFor, { platform: process.platform });
   const start = readStudyStart(home, now);
-  const report = buildAttemptStudy({ rows, malformed, logFull, records, entries, start, now });
+  const report = buildAttemptStudy({ rows, malformed, logFull, records, entries, coverage, start, now });
   if (json) {
     const { writeStdoutQuietEpipe } = await import("./attempts.js");
     await writeStdoutQuietEpipe(`${JSON.stringify(report)}\n`);
