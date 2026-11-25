@@ -20,6 +20,7 @@ export interface ExpectationBroker {
 }
 
 const STDOUT_CAP_BYTES = 4 * 1024;
+const MAX_ACTIVE_WRITERS = 4;
 const CHILD_DECLINE_REASONS = new Set(["duplicate", "cap", "disabled", "invalid_input", "memory_unavailable"]);
 const BROKER_FAILED = Object.freeze({ recorded: false, reason: "broker_failed", linkedFailure: false });
 const TIMEOUT = Object.freeze({ recorded: false, reason: "timeout", linkedFailure: false });
@@ -29,17 +30,15 @@ function parseReply(stdout: Buffer): ExpectationReply {
     const value: unknown = JSON.parse(stdout.toString("utf8"));
     if (typeof value !== "object" || value === null || Array.isArray(value)) return BROKER_FAILED;
     const { recorded, id, reason, linkedFailure } = value as Record<string, unknown>;
-    if (typeof recorded !== "boolean" || typeof linkedFailure !== "boolean"
-      || (id !== undefined && typeof id !== "string")
-      || (reason !== undefined && (typeof reason !== "string" || !CHILD_DECLINE_REASONS.has(reason)))) {
-      return BROKER_FAILED;
+    if (recorded === true && typeof id === "string" && id.length > 0
+      && reason === undefined && typeof linkedFailure === "boolean") {
+      return { recorded: true, id, linkedFailure };
     }
-    return {
-      recorded,
-      ...(id === undefined ? {} : { id }),
-      ...(reason === undefined ? {} : { reason }),
-      linkedFailure,
-    };
+    if (recorded === false && id === undefined && linkedFailure === false
+      && typeof reason === "string" && CHILD_DECLINE_REASONS.has(reason)) {
+      return { recorded: false, reason, linkedFailure: false };
+    }
+    return BROKER_FAILED;
   } catch {
     return BROKER_FAILED;
   }
@@ -52,10 +51,12 @@ export function createExpectationBroker(opts: {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
 }): ExpectationBroker {
+  let activeWriters = 0;
   return {
     async note(payload, signal) {
-      if (opts.entry === undefined) return BROKER_FAILED;
+      if (opts.entry === undefined || activeWriters >= MAX_ACTIVE_WRITERS) return BROKER_FAILED;
       if (signal.aborted) return TIMEOUT;
+      activeWriters += 1;
       try {
         const input = JSON.stringify(payload);
         // Production supplies process.execPath and the Rocky entry point here.
@@ -101,6 +102,8 @@ export function createExpectationBroker(opts: {
         });
       } catch {
         return BROKER_FAILED;
+      } finally {
+        activeWriters -= 1;
       }
     },
   };

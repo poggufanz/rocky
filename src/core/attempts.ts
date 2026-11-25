@@ -11,6 +11,7 @@ import {
   cwdIdentityKey,
   differentAgentSession,
   isOperationalMemoryRecord,
+  MAX_EXPECTED_COMMAND_CODE_POINTS,
   tailReadable,
   type AssociationRecord,
   type FailureRecord,
@@ -19,7 +20,7 @@ import {
   type MemoryRecord,
   type RationaleRecord,
 } from "./memory-read.js";
-import { sanitizeTestimony } from "./redact.js";
+import { hasSecretRedaction, sanitizeTestimony } from "./redact.js";
 
 export type AttemptOutcome =
   | "passed" | "possible_pass" | "same_failure" | "different_failure" | "no_later_run" | "unknown";
@@ -167,11 +168,14 @@ function findMatchingAssociation(
 
 function observeExpectation(
   rationale: RationaleRecord,
+  command: string | undefined,
   cwdRuns: readonly IndexedRunRecord[],
   defaultPlatform: NodeJS.Platform,
 ): Expectation["observed"] {
-  const command = rationale.expectedCommand;
   if (command === undefined || command.trim().length === 0) return "not_comparable";
+  // Capping the stored command can cut through a replacement marker.
+  if (command !== rationale.expectedCommand
+    || hasSecretRedaction(command, [...command].length === MAX_EXPECTED_COMMAND_CODE_POINTS)) return "not_comparable";
   const defaultIdentity = commandIdentity(command, { platform: defaultPlatform });
   if (!defaultIdentity.reliable) return "not_comparable";
   const identities = new Map([[defaultPlatform, defaultIdentity]]);
@@ -197,6 +201,7 @@ function observeExpectation(
       identities.set(platform, expected);
     }
     if (expected.reliable && expected.value === record.commandIdentity) {
+      if (hasSecretRedaction(record.cmd) || sanitizeTestimony(record.cmd) !== record.cmd) return "not_comparable";
       return record.kind === "fix" ? "same_command_passed" : "same_command_failed";
     }
   }
@@ -246,12 +251,15 @@ function buildTestimony(
   const testimony: Pick<Attempt, "changes" | "stated" | "expectations"> = { changes };
   if (stated !== undefined) testimony.stated = stated;
   if (mcpRationales !== undefined) {
-    testimony.expectations = mcpRationales.sort(compareByTsOrder).map(({ record, expectationCwdKey }) => ({
-      text: sanitizeTestimony(record.excerpt),
-      ...(record.expectedCommand === undefined ? {} : { command: sanitizeTestimony(record.expectedCommand) }),
-      rationaleId: record.id,
-      observed: observeExpectation(record, recordsByCwdKey.get(expectationCwdKey!) ?? [], defaultPlatform),
-    }));
+    testimony.expectations = mcpRationales.sort(compareByTsOrder).map(({ record, expectationCwdKey }) => {
+      const command = record.expectedCommand === undefined ? undefined : sanitizeTestimony(record.expectedCommand);
+      return {
+        text: sanitizeTestimony(record.excerpt),
+        ...(command === undefined ? {} : { command }),
+        rationaleId: record.id,
+        observed: observeExpectation(record, command, recordsByCwdKey.get(expectationCwdKey!) ?? [], defaultPlatform),
+      };
+    });
   }
   return testimony;
 }

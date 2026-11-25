@@ -2,6 +2,7 @@ import { mcpWriteDisabled, safeOpaqueIdentifier } from "../core/mcp-write-input.
 import { LINK_WINDOW_MS } from "../core/memory-query.js";
 import {
   cwdIdentityKey,
+  isOperationalMemoryRecord,
   loadMemoryChecked,
   MAX_EXPECTED_COMMAND_CODE_POINTS,
   tailReadable,
@@ -97,7 +98,7 @@ export function noteExpectationHook(stdin: Buffer, opts: { now: number; cwd: str
     // records. If that changes, move the checks into withMemoryTransaction.
     let recentCount = 0;
     for (const record of records) {
-      if (record.kind !== "rationale" || record.source !== "mcp") continue;
+      if (record.kind !== "rationale" || record.source !== "mcp" || !isOperationalMemoryRecord(record, now)) continue;
       if (record.ts >= now - DEDUP_WINDOW_MS && record.excerpt === excerpt
         && record.expectedCommand === expectedCommand && record.links?.failureId === failureId
         && cwdIdentityKey(record.cwd, process.platform) === cwdKey) return decline("duplicate");
@@ -114,7 +115,7 @@ export function noteExpectationHook(stdin: Buffer, opts: { now: number; cwd: str
       text,
       ...(expectedCommand === undefined ? {} : { expectedCommand }),
       ...(failureId === undefined ? {} : { links: { failureId } }),
-    }, paths);
+    }, paths, { requireReadableTail: true });
     const reply: NoteExpectationReply = { recorded: true, id: record.id, linkedFailure: failureId !== undefined };
     return JSON.stringify(reply);
   } catch {

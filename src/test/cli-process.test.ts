@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { fingerprint, FINGERPRINT_ALGORITHM_VERSION } from "../core/fingerprint.js";
 import { quoteShellPath } from "../core/shell-quote.js";
 import { PACKAGE_VERSION } from "../core/package-info.js";
+import { causalWordViolations } from "./causal-words.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -180,6 +181,11 @@ test("help, recall, stats, and hook status finish successfully without external 
     const result = runCli(sandbox, args);
     assertCompleted(result, 0);
     assertNoDetectorMarkers(sandbox);
+    if (args[1] === "--all") {
+      const mcpHelp = result.stdout.match(/rocky mcp\s+serve read-only memory tools over stdio\.\r?\n +note_expectation write tool enabled by default\./u);
+      assert.ok(mcpHelp);
+      assert.deepEqual(causalWordViolations(mcpHelp[0].split(/\r?\n/u)), []);
+    }
   }
 });
 

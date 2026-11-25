@@ -7,6 +7,7 @@ import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked,
 import { recordRationale } from "../core/memory.js";
 import { LINK_WINDOW_MS, MAX_WHY_RECORDS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
 import type { MemoryCoverage, MemoryRecord, RationaleLinks, RationaleRecord, RationaleSource } from "../core/memory-read.js";
+import { sanitizeTestimony } from "../core/redact.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { createTtyPromptPort } from "../setup/prompt.js";
 import { truncateUtf8 } from "../mcp/privacy.js";
@@ -134,7 +135,7 @@ function exportSince(value: string, now: number): number | undefined {
 }
 
 // `export` is reserved as a command name, so this function keeps the explicit suffix.
-// stdout carries raw JSONL data; say/out remain the prefixed and supporting stderr sinks.
+// stdout carries JSONL data; say/out remain the prefixed and supporting stderr sinks.
 export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): number {
   const { speak, support, records, coverage } = resolve(deps);
   const now = deps.now ?? Date.now();
@@ -175,7 +176,18 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
     && (cutoff === undefined || record.ts >= cutoff)
   ));
   const stdout = deps.stdout ?? console.log;
-  for (const record of selected) stdout(JSON.stringify(record));
+  for (const record of selected) {
+    if (record.kind === "rationale" && record.source === "mcp") {
+      const { excerpt, expectedCommand } = record;
+      stdout(JSON.stringify({
+        ...record,
+        excerpt: sanitizeTestimony(excerpt),
+        ...(expectedCommand === undefined ? {} : { expectedCommand: sanitizeTestimony(expectedCommand) }),
+      }));
+    } else {
+      stdout(JSON.stringify(record));
+    }
+  }
   speak(`Exported ${selected.length} record${selected.length === 1 ? "" : "s"}.`);
   return 0;
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -181,6 +182,17 @@ function isolatedDirectory(t: TestContext) {
   return root;
 }
 
+function isolatedMemory(t: TestContext) {
+  const home = isolatedDirectory(t);
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+  });
+  return home;
+}
+
 test("broker sends stdin and returns the parsed reply", async () => {
   const response = await createExpectationBroker(brokerOptions("echo")).note(payload, new AbortController().signal);
   assert.deepEqual(response, { recorded: true, id: payload.text, linkedFailure: true });
@@ -198,6 +210,22 @@ test("broker preserves the five child decline reasons", async () => {
   for (const reason of ["duplicate", "cap", "disabled", "invalid_input", "memory_unavailable"]) {
     const response = await broker.note({ ...payload, text: reason }, signal);
     assert.deepEqual(response, { recorded: false, reason, linkedFailure: false });
+  }
+});
+
+test("broker rejects inconsistent success and decline reply fields", async () => {
+  const broker = createExpectationBroker(brokerOptions("reply"));
+  const signal = new AbortController().signal;
+  for (const reply of [
+    { recorded: true, linkedFailure: false },
+    { recorded: true, id: "", linkedFailure: false },
+    { recorded: true, id: "rationale-1", reason: "cap", linkedFailure: false },
+    { recorded: true, reason: "cap", linkedFailure: false },
+    { recorded: false, linkedFailure: false },
+    { recorded: false, id: "rationale-1", reason: "duplicate", linkedFailure: false },
+    { recorded: false, reason: "disabled", linkedFailure: true },
+  ]) {
+    assert.deepEqual(await broker.note({ ...payload, text: JSON.stringify(reply) }, signal), brokerFailed);
   }
 });
 
@@ -222,6 +250,7 @@ for (const stop of ["timeout", "abort"] as const) {
     const options = brokerOptions("hang");
     const broker = createExpectationBroker({
       ...options,
+      timeoutMs: stop === "abort" ? 10_000 : options.timeoutMs,
       env: { ...options.env, EXPECTATION_CHILD_PID_FILE: pidFile },
     });
     const controller = new AbortController();
@@ -230,25 +259,107 @@ for (const stop of ["timeout", "abort"] as const) {
     if (stop === "abort") {
       const deadline = started + 1750;
       while (!existsSync(pidFile) && performance.now() < deadline) await delay(10);
-      assert.ok(existsSync(pidFile), "child did not start before abort");
       controller.abort();
+      assert.ok(existsSync(pidFile), "child did not start before abort");
     }
     assert.deepEqual(await pending, timedOut);
-    assert.ok(performance.now() - started < 2500, "broker exceeded its timeout allowance");
+    assert.ok(performance.now() - started < 2500, `broker did not settle promptly on ${stop}`);
     const pid = Number(readFileSync(pidFile, "utf8"));
     assert.ok(Number.isSafeInteger(pid) && pid > 0);
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   });
 }
 
-test("runMcpStdio writes one MCP rationale through the CLI and reads it as testimony", { timeout: 10_000 }, async (t) => {
-  const home = isolatedDirectory(t);
-  const priorHome = process.env.ROCKY_HOME;
-  process.env.ROCKY_HOME = home;
-  t.after(() => {
-    if (priorHome === undefined) delete process.env.ROCKY_HOME;
-    else process.env.ROCKY_HOME = priorHome;
+test("broker caps active writer children at four and reuses a slot after the child closes", { timeout: 10_000 }, async (t) => {
+  const pidFile = join(isolatedDirectory(t), "pids");
+  const options = brokerOptions("hang");
+  const broker = createExpectationBroker({
+    ...options, timeoutMs: 15_000,
+    env: { ...options.env, EXPECTATION_CHILD_PID_FILE: pidFile },
   });
+  const children = Array.from({ length: 4 }, () => new AbortController());
+  const pending = children.map(({ signal }) => broker.note(payload, signal));
+  const overflow = new AbortController();
+  const replacement = new AbortController();
+  const readPids = () => existsSync(pidFile) ? readFileSync(pidFile, "utf8").trim().split(/\s+/u).filter(Boolean) : [];
+  const waitForPids = async (count: number) => {
+    const deadline = performance.now() + 3500;
+    while (readPids().length < count && performance.now() < deadline) await delay(10);
+    assert.equal(new Set(readPids()).size, count);
+  };
+  let next: Promise<unknown> | undefined;
+  let denied: Promise<unknown> | undefined;
+  try {
+    await waitForPids(4);
+    denied = broker.note(payload, overflow.signal);
+    assert.deepEqual(await Promise.race([denied, delay(500, "still waiting", { ref: false })]), brokerFailed);
+    children[0]!.abort();
+    assert.deepEqual(await pending[0], timedOut);
+    next = broker.note(payload, replacement.signal);
+    await waitForPids(5);
+    replacement.abort();
+    assert.deepEqual(await next, timedOut);
+  } finally {
+    for (const child of [...children, overflow, replacement]) child.abort();
+    await Promise.all([...pending, denied, next]);
+  }
+});
+
+test("GitLab tokens in expectations stay out of memory, CLI output, and both MCP exposures", async (t) => {
+  const home = isolatedMemory(t);
+  const entry = join(packageRoot, "dist", "index.js");
+  const memoryPath = join(home, "memory.jsonl");
+  const options = brokerOptions("");
+  const env = { ...options.env, ROCKY_HOME: home, ROCKY_MCP_WRITE: undefined };
+  const token = "glpat-Fixture_0123-4567";
+  const failure: FailureRecord = {
+    kind: "failure", id: noteArgs.failureId, ts: Date.now() - 60_000, cwd: home, cmd: noteArgs.command,
+    exitCode: 1, fingerprint: "0123456789abcdef", signature: ["test failed"], excerpt: "test failed",
+  };
+  writeFileSync(memoryPath, JSON.stringify(failure) + "\n");
+  const expectationBroker = createExpectationBroker({ ...options, entry, cwd: home, env });
+  const note = await expectationBroker.note({
+    ...payload, text: "expect " + token + " to work", command: "check " + token,
+  }, new AbortController().signal);
+  assert.equal(note.recorded, true);
+  assert.equal(note.linkedFailure, true);
+  assert.equal(readFileSync(memoryPath, "utf8").includes(token), false);
+  const stored = loadMemory(memoryPath).find((record) => record.kind === "rationale");
+  assert.ok(stored);
+  assert.equal(stored.excerpt, "expect [redacted gitlab token] to work");
+  assert.equal(stored.expectedCommand, "check [redacted gitlab token]");
+
+  const cli = spawnSync(process.execPath, [entry, "attempts", failure.fingerprint, "--json"], {
+    cwd: home, env, encoding: "utf8", timeout: 10_000,
+  });
+  assert.ifError(cli.error);
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal((cli.stdout + cli.stderr).includes(token), false);
+  assert.match(cli.stdout, /expect \[redacted gitlab token\] to work/u);
+  assert.match(cli.stdout, /check \[redacted gitlab token\]/u);
+
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const { server, responses } = messageServer(createToolRegistry({
+      exposure,
+      memory: createMemoryQueries(),
+      recallWithAi: disabledRecallWithAi,
+      writeToolsEnabled: false,
+    }));
+    server.accept(modern(1, "tools/call", {
+      name: "attempt_history", arguments: { fingerprint: failure.fingerprint },
+    }));
+    await server.whenIdle();
+    const { entries } = result(responses[0]).structuredContent as { entries: ProjectedProblemEntry[] };
+    assert.equal(JSON.stringify(responses).includes(token), false);
+    const [expectation] = entries[0]!.attempts[0]!.expectations!;
+    const redaction = exposure === "raw" ? "[redacted gitlab token]" : "[redacted]";
+    assert.equal(expectation.text, "expect " + redaction + " to work");
+    assert.equal(expectation.command, "check " + redaction);
+  }
+});
+
+test("runMcpStdio writes one MCP rationale through the CLI and reads it as testimony", { timeout: 10_000 }, async (t) => {
+  const home = isolatedMemory(t);
   const memoryPath = join(home, "memory.jsonl");
   const failure: FailureRecord = {
     kind: "failure", id: noteArgs.failureId, ts: Date.now() - 60_000, cwd: home, cmd: noteArgs.command,

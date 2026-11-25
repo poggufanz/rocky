@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildProblems, selectProblemEntries, type AttemptOutcome } from "../core/attempts.js";
 import { commandFingerprint, commandIdentity, fingerprint, legacyFingerprint } from "../core/fingerprint.js";
+import { boundCommand } from "../core/memory.js";
 import {
   MEMORY_FORMAT_VERSION,
   resolveMemoryRecords,
@@ -271,6 +272,30 @@ test("expectation text and command are sanitized on read", () => {
   }
   assert.equal(attempt.stated, undefined);
   assert.deepEqual(attempt.changes, { state: "unknown" });
+});
+
+test("different quoted passwords with the same stored identity are not comparable", () => {
+  const failure = makeFailure({ id: "f1", ts: NOW - 120_000 });
+  const expected = `deploy "password='violet-sample'"`;
+  const fix = makeFix({ id: "passed", ts: NOW, cmd: boundCommand(`deploy "password='cobalt-sample'"`) });
+  assert.equal(fix.cmd, sanitizeTestimony(expected));
+  assert.equal(fix.identityReliable, true);
+  const rationale: RationaleRecord = {
+    kind: "rationale", v: 1, id: "r1", ts: NOW - 60_000, cwd: failure.cwd,
+    source: "mcp", agent: "codex", rationale_fidelity: "raw", excerpt: "deploy should pass",
+    expectedCommand: sanitizeTestimony(expected), links: { failureId: failure.id },
+  };
+  const rawImport = { ...rationale, id: "raw-import", expectedCommand: expected };
+  const clipped = {
+    ...rationale, id: "clipped",
+    expectedCommand: sanitizeTestimony('deploy ' + 'a'.repeat(178) + ' secret="first"').slice(0, 200),
+  };
+  assert.ok(clipped.expectedCommand.endsWith("[redacted pass"));
+  const records = [failure, rationale, rawImport, clipped, fix];
+  const { entries } = buildProblems(records, completeCoverage(records.length), { now: NOW });
+  assert.deepEqual(entries[0]!.attempts[0]!.expectations?.map(({ rationaleId, observed }) => [rationaleId, observed]), [
+    ["r1", "not_comparable"], ["raw-import", "not_comparable"], ["clipped", "not_comparable"],
+  ]);
 });
 
 test("expectations use the first reliable run in the cwd and the eight-hour window", () => {

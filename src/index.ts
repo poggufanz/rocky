@@ -132,6 +132,7 @@ usage:
                             --ai passes through to recall and what. Type help
                             inside for the command list, quit or exit to leave.
   rocky mcp                 serve read-only memory tools over stdio.
+                            note_expectation write tool enabled by default.
   rocky setup               configure detected MCP hosts with sanitized exposure.
   rocky setup --check       verify owned host registrations and the rocky MCP tools.
   rocky setup --remove      remove owned rocky registrations from detected hosts,

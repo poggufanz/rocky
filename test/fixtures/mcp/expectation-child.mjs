@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -16,8 +16,11 @@ switch (process.env.EXPECTATION_CHILD_MODE) {
       recorded: false, reason: payload.text, linkedFailure: false,
     }) + "\n");
     break;
+  case "reply":
+    process.stdout.write(payload.text + "\n");
+    break;
   case "hang":
-    writeFileSync(process.env.EXPECTATION_CHILD_PID_FILE, String(process.pid));
+    appendFileSync(process.env.EXPECTATION_CHILD_PID_FILE, String(process.pid) + "\n");
     setTimeout(() => process.exit(2), 10_000);
     break;
   case "garbage":
@@ -27,10 +30,10 @@ switch (process.env.EXPECTATION_CHILD_MODE) {
     process.stdout.write('{"recorded":"true","linkedFailure":false}\n');
     break;
   case "oversized":
-    process.stdout.write('{"recorded":true,"linkedFailure":false}\n'.padEnd(4097));
+    process.stdout.write('{"recorded":true,"id":"rationale-1","linkedFailure":false}\n'.padEnd(4097));
     break;
   case "exit-1":
-    process.stdout.write('{"recorded":true,"linkedFailure":false}\n');
+    process.stdout.write('{"recorded":true,"id":"rationale-1","linkedFailure":false}\n');
     process.exitCode = 1;
     break;
   default:

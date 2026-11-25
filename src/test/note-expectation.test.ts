@@ -11,7 +11,9 @@ import {
   noteExpectationHook,
   type NoteExpectationReply,
 } from "../commands/note-expectation.js";
+import { recordRationale } from "../core/memory.js";
 import { loadMemory, loadMemoryChecked, tailReadable, type FailureRecord, type MemoryRecord, type RationaleRecord } from "../core/memory-read.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { causalWordViolations } from "./causal-words.js";
 import { withRecordCap } from "./memory-cap-fixture.js";
 
@@ -218,12 +220,93 @@ test("accepts exactly 200 code points and enforces the stdin byte cap", (t) => {
   assert.equal(notes()[0].expectedCommand, text);
 });
 
+test("future-dated MCP rationales do not count toward deduplication or the cap", (t) => {
+  const { invoke, seed, notes, cwd } = fixture(t);
+  seed(...Array.from({ length: 100 }, (_, i): RationaleRecord => ({
+    kind: "rationale", v: 1, id: `rationale-future-${i}`, ts: now + minute,
+    cwd, agent: "codex", source: "mcp", rationale_fidelity: "raw",
+    excerpt: payload.text, expectedCommand: payload.command,
+  })));
+
+  assert.equal(invoke({ ...payload, text: "A different expectation." }).recorded, true);
+  assert.equal(invoke().recorded, true);
+  assert.deepEqual(invoke(), { recorded: false, reason: "duplicate", linkedFailure: false });
+  assert.equal(notes().filter((record) => record.ts === now).length, 2);
+});
+
 test("returns memory_unavailable without writing when memory is a directory", (t) => {
   const { invoke, home, memory } = fixture(t);
   mkdirSync(memory);
   assert.deepEqual(invoke(), { recorded: false, reason: "memory_unavailable", linkedFailure: false });
   assert.deepEqual(readdirSync(home), ["memory.jsonl"]);
   assert.deepEqual(readdirSync(memory), []);
+});
+
+test("declines when the memory tail becomes unreadable as the writer takes the lock", (t) => {
+  const { cwd, env, home, memory, seed } = fixture(t);
+  seed(failure("failure-before", now - hour, cwd));
+  const original = readFileSync(memory, "utf8");
+  const malformed = "invalid JSON\nanother invalid line\n";
+  const lock = memory + ".triple.lock";
+  const preload = join(home, "damage-at-lock.cjs");
+  writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const open = fs.openSync;',
+    'fs.openSync = (path, flags, ...rest) => {',
+    '  const fd = open(path, flags, ...rest);',
+    `  if (path === ${JSON.stringify(lock)} && flags === "wx") {`,
+    `    fs.appendFileSync(${JSON.stringify(memory)}, ${JSON.stringify(malformed)});`,
+    '  }',
+    '  return fd;',
+    '};',
+    'require("node:module").syncBuiltinESMExports();',
+  ].join("\n"));
+
+  assert.equal(tailReadable(loadMemoryChecked(memory, now).coverage), true);
+  const result = spawnSync(process.execPath, ["--require", preload, entry, "hook", "note-expectation"], {
+    cwd: home, env: { ...process.env, ...env, ROCKY_MCP_WRITE: undefined },
+    input: JSON.stringify(payload), encoding: "utf8", timeout: 10_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    recorded: false, reason: "memory_unavailable", linkedFailure: false,
+  });
+  assert.equal(readFileSync(memory, "utf8"), original + malformed);
+  assert.equal(existsSync(lock), false);
+
+  const human = recordRationale({
+    cwd, ts: now, agent: "human", rationale_fidelity: "raw", source: "human", text: "Human note.",
+  }, resolveRockyPaths(env, undefined, cwd));
+  assert.equal(readFileSync(memory, "utf8"), original + malformed + JSON.stringify(human) + "\n");
+});
+
+test("CLI export sanitizes imported MCP testimony fields", (t) => {
+  const { cwd, env, home, memory, seed } = fixture(t);
+  const token = "glpat-FakeExport-12345";
+  const imported: RationaleRecord = {
+    kind: "rationale", v: 1, id: "rationale-imported", ts: now, cwd,
+    agent: "codex", source: "mcp", rationale_fidelity: "raw",
+    excerpt: `expect \u202e${token} to work`, expectedCommand: `check ${token}\u202e`,
+  };
+  const withoutCommand: RationaleRecord = {
+    kind: "rationale", v: 1, id: "rationale-no-command", ts: now, cwd,
+    agent: "codex", source: "mcp", rationale_fidelity: "raw", excerpt: imported.excerpt,
+  };
+  seed(imported, withoutCommand);
+  const original = readFileSync(memory, "utf8");
+  const result = spawnSync(process.execPath, [entry, "export"], {
+    cwd: home, env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.includes(token), false);
+  assert.doesNotMatch(result.stdout, /\u202e/u);
+  assert.deepEqual(result.stdout.trimEnd().split("\n").map((line) => JSON.parse(line)), [
+    { ...imported, excerpt: "expect [redacted gitlab token] to work", expectedCommand: "check [redacted gitlab token]" },
+    { ...withoutCommand, excerpt: "expect [redacted gitlab token] to work" },
+  ]);
+  assert.equal(readFileSync(memory, "utf8"), original);
 });
 
 test("sanitizes testimony and commands on write and deduplicates the stored values", (t) => {

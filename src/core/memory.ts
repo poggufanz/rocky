@@ -1780,6 +1780,7 @@ export function recordRationale(
     git?: GitAnchor;
   },
   paths?: RockyPaths,
+  options: { requireReadableTail?: boolean } = {},
 ): RationaleRecord {
   const ts = input.ts ?? Date.now();
   // Each code point uses at most two UTF-16 code units.
@@ -1803,7 +1804,12 @@ export function recordRationale(
     ...(boundedRationaleFiles(input.files) ?? {}),
     ...boundGitAnchor(input.git),
   };
-  withMemoryTransaction((transaction) => { transaction.append(rec); }, paths ?? resolveRockyPaths(), { now: ts });
+  withMemoryTransaction((transaction) => {
+    if (options.requireReadableTail === true && !tailReadable(transaction.coverage)) {
+      throw new Error("Rocky rationale requires a readable memory tail");
+    }
+    transaction.append(rec);
+  }, paths ?? resolveRockyPaths(), { now: ts });
   return rec;
 }
 
