@@ -105,7 +105,7 @@ fn early_related_for_other_rev_is_dropped_and_new_rev_clears_rows() {
     assert!(detail.on_related("c1", 2, &items));
     assert_eq!(detail.related_rows(UiLang::En)[0].files, None);
 
-    detail.reopen(2, None);
+    detail.retarget(2, Some(QuoteLang::En));
     detail.on_detail(
         2,
         card_with_rev("c1", 3),
@@ -114,6 +114,33 @@ fn early_related_for_other_rev_is_dropped_and_new_rev_clears_rows() {
         vec![],
         UiLang::En,
     );
+    assert!(detail.related_rows(UiLang::En).is_empty());
+}
+
+#[test]
+fn reconnect_clears_displayed_and_buffered_related_attempts_at_same_rev() {
+    let (mut detail, _) = DetailModel::open("c1".into(), 1, None);
+    let card = card_with_rev("c1", 2);
+    let items = [RelatedAttempt {
+        date: "2026-11-12".into(),
+        outcome: AttemptOutcome::Passed,
+        files: vec![],
+        more: 0,
+    }];
+
+    detail.on_detail(1, card.clone(), vec![], vec![], vec![], UiLang::En);
+    assert!(detail.on_related("c1", card.rev, &items));
+    assert_eq!(detail.related_rows(UiLang::En).len(), 1);
+    detail.reopen(2, None);
+    detail.on_detail(2, card.clone(), vec![], vec![], vec![], UiLang::En);
+    assert!(matches!(detail.state(), DetailState::Ready(_)));
+    assert!(detail.related_rows(UiLang::En).is_empty());
+
+    detail.reopen(3, None);
+    assert!(!detail.on_related("c1", card.rev, &items));
+    detail.reopen(4, None);
+    detail.on_detail(4, card, vec![], vec![], vec![], UiLang::En);
+    assert!(matches!(detail.state(), DetailState::Ready(_)));
     assert!(detail.related_rows(UiLang::En).is_empty());
 }
 

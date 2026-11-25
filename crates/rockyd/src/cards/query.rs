@@ -232,8 +232,9 @@ impl CardQueryLoop {
                     ServerMsg::CardDetail { card, .. } => Some((card.card_id.clone(), card.rev)),
                     _ => None,
                 };
-                let _ = pending.reply.send(msg);
-                if let Some((card_id, rev)) = related_key {
+                if pending.reply.send(msg).is_ok()
+                    && let Some((card_id, rev)) = related_key
+                {
                     self.related.request(&card_id, rev);
                 }
             }
@@ -442,6 +443,8 @@ mod tests {
 
     use super::*;
 
+    const ATTEMPTS_REPLY: &[u8] = br#"{"v":1,"entries":[{"attempts":[{"ts":86400000,"outcome":"passed","changes":{"state":"unknown"}}]}]}"#;
+
     fn wait_reply(rx: &mpsc::Receiver<ServerMsg>, queries: &mut CardQueryLoop) -> ServerMsg {
         for _ in 0..200 {
             queries.service();
@@ -451,6 +454,21 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         panic!("timed out waiting for query reply");
+    }
+
+    fn wait_related(queries: &mut CardQueryLoop) -> Vec<ServerMsg> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let messages = queries.take_related();
+            if !messages.is_empty() {
+                return messages;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for related attempts"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn seed_query_card(home: &Path, card_id: &str, rev: u32) -> Card {
@@ -597,7 +615,6 @@ mod tests {
         let owned = BTreeSet::from([card.root]);
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let gate_rx = std::sync::Mutex::new(gate_rx);
-        let body = br#"{"v":1,"entries":[{"attempts":[{"ts":86400000,"outcome":"passed","changes":{"state":"unknown"}}]}]}"#.to_vec();
         let mut queries = CardQueryLoop::new(home, 1);
         queries.set_attempts_runner(Arc::new(move |_id: &str| {
             gate_rx
@@ -605,7 +622,7 @@ mod tests {
                 .unwrap()
                 .recv_timeout(Duration::from_secs(5))
                 .ok()?;
-            Some(body.clone())
+            Some(ATTEMPTS_REPLY.to_vec())
         }));
         let (reply_tx, reply_rx) = mpsc::sync_channel(4);
         queries.card_detail(1, "c1".into(), owned, None, reply_tx);
@@ -615,22 +632,41 @@ mod tests {
         assert!(queries.take_related().is_empty());
         gate_tx.send(()).unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let related = loop {
-            let messages = queries.take_related();
-            if !messages.is_empty() {
-                break messages;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for related attempts"
-            );
-            thread::sleep(Duration::from_millis(5));
-        };
         assert!(matches!(
-            related.as_slice(),
+            wait_related(&mut queries).as_slice(),
             [ServerMsg::RelatedAttempts { card_id, rev: 2, .. }] if card_id == "c1"
         ));
+    }
+
+    #[test]
+    fn dropped_card_detail_receiver_does_not_broadcast_cached_attempts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let card = seed_query_card(&home, "c1", 2);
+        let owned = BTreeSet::from([card.root]);
+        let mut queries = CardQueryLoop::new(home, 1);
+        queries.set_attempts_runner(Arc::new(|_| Some(ATTEMPTS_REPLY.to_vec())));
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        queries.card_detail(1, "c1".into(), owned.clone(), None, reply_tx);
+        assert!(matches!(
+            wait_reply(&reply_rx, &mut queries),
+            ServerMsg::CardDetail { id: 1, .. }
+        ));
+        assert_eq!(wait_related(&mut queries).len(), 1);
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        drop(reply_rx);
+        queries.card_detail(2, "c1".into(), owned, None, reply_tx);
+
+        // The later query's reply confirms the worker and service loop processed the dropped reply.
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        queries.cards(3, None, None, 20, None, reply_tx);
+        assert!(matches!(
+            wait_reply(&reply_rx, &mut queries),
+            ServerMsg::Cards { id: 3, .. }
+        ));
+        assert!(queries.take_related().is_empty());
     }
 
     #[test]

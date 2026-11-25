@@ -78,6 +78,8 @@ impl DetailModel {
         self.pending_id = Some(id);
         self.reopened = true;
         self.state = DetailState::Loading;
+        self.related.clear();
+        self.related_early = None;
         self.pending.clear();
         self.settled_early.clear();
         if self.target != target {

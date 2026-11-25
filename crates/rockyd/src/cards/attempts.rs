@@ -307,10 +307,9 @@ impl RelatedAttemptsLoop {
             self.ready.extend(cached.clone());
             return;
         }
-        if self.in_flight.as_ref() == Some(&key) || self.queued.as_ref() == Some(&key) {
-            return;
-        }
-        if self.in_flight.is_some() {
+        if self.in_flight.as_ref() == Some(&key) {
+            self.queued = None;
+        } else if self.in_flight.is_some() {
             self.queued = Some(key);
         } else {
             self.start(key);
@@ -605,7 +604,6 @@ mod tests {
         lp.request("b", 1);
         lp.request("c", 1);
         lp.request("c", 1);
-        lp.request("a", 1);
         assert_eq!(*calls.lock().unwrap(), ["a"]);
         gate_tx.send(()).unwrap();
         gate_tx.send(()).unwrap();
@@ -619,6 +617,21 @@ mod tests {
             .collect();
         assert_eq!(ids, ["a", "c"]);
         assert_eq!(*calls.lock().unwrap(), ["a", "c"]);
+    }
+
+    #[test]
+    fn in_flight_request_supersedes_queued_lookup() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut lp = RelatedAttemptsLoop::new(counting_runner(calls.clone(), None));
+
+        lp.request("a", 1);
+        lp.request("b", 1);
+        assert_eq!(lp.queued, Some(("b".into(), 1)));
+
+        lp.request("a", 1);
+        assert!(lp.queued.is_none());
+        wait_for_silent_completion(&mut lp);
+        assert_eq!(*calls.lock().unwrap(), ["a"]);
     }
 
     #[test]
