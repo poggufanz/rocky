@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildProblems, type Attempt, type ProblemEntry } from "../core/attempts.js";
 import { commandIdentity } from "../core/fingerprint.js";
 import {
   MEMORY_FORMAT_VERSION,
+  parseMemoryRecord,
+  resolveMemoryRecords,
   type AgentStamp,
   type AssociationRecord,
   type FailureRecord,
@@ -281,10 +284,6 @@ test("sanitized carries no cwd, session, or record internals", () => {
 
   const set = buildProblems([failure, fix, rationale], completeCoverage(3), { now: NOW });
   const entry = set.entries[0]!;
-  entry.attempts[0]!.expectations = [
-    { text: "should pass", command: "npm test", rationaleId: "rationale-1", observed: "same_command_passed" },
-  ];
-
   const truncation: Truncation = { fields: [] };
   const projected = projectProblemEntries(set.entries, "sanitized", 10, truncation);
   assert.equal(projected.length, 1);
@@ -386,6 +385,98 @@ test("attempts keep the newest N and count the rest", () => {
   assert.equal(pEntry.firstSeen, set.entries[0]!.firstSeenTs);
   assert.equal(pEntry.lastSeen, set.entries[0]!.lastSeenTs);
   assert.equal(pEntry.counts.attempts, 5);
+});
+
+test("sanitized projects the fixture expectation as testimony and redacts key literals", () => {
+  const fixturePath = new URL("../../fixtures/attempts/21-expectation-same-command-passed.json", import.meta.url);
+  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as { now: number; lines: unknown[] };
+  const records = fixture.lines.map((line) => {
+    const record = parseMemoryRecord(line);
+    assert.ok(record !== undefined);
+    return record;
+  });
+  resolveMemoryRecords(records, fixture.now);
+  const { entries } = buildProblems(records, completeCoverage(records.length), { now: fixture.now, cwd: "/app" });
+  const expectations = entries[0]!.attempts[0]!.expectations!;
+  // Add values at the projection boundary so upstream redaction cannot mask a regression.
+  const keyLiteral = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+  expectations.push({
+    text: `expect auth tests pass with ${keyLiteral}`,
+    command: `npm test -- ${keyLiteral}`,
+    rationaleId: keyLiteral,
+    observed: "same_command_passed",
+  }, {
+    text: "expect auth suite pass",
+    rationaleId: "r2",
+    observed: "not_comparable",
+  });
+
+  const projected = projectProblemEntries(entries, "sanitized", 10, { fields: [] });
+  const projectedExpectations = projected[0]!.attempts[0]!.expectations;
+  assert.deepEqual(projectedExpectations, [
+    { text: "expect auth tests pass", command: "npm test", rationaleId: "r1", observed: "same_command_passed", testimony: true },
+    {
+      text: "expect auth tests pass with [redacted]",
+      command: "npm test -- [redacted]",
+      rationaleId: "[redacted]",
+      observed: "same_command_passed",
+      testimony: true,
+    },
+    { text: "expect auth suite pass", rationaleId: "r2", observed: "not_comparable", testimony: true },
+  ]);
+  assert.equal(JSON.stringify(projected).includes(keyLiteral), false);
+
+  const raw = projectProblemEntries(entries, "raw", 10, { fields: [] });
+  assert.deepEqual(raw[0]!.attempts[0]!.expectations?.[1], { ...expectations[1], testimony: true });
+});
+
+test("expectation text and command are capped at 200 code points under both exposures", () => {
+  const failure = makeFailure({ id: "failure-1", ts: NOW - 5 * MINUTE });
+  const { entries } = buildProblems([failure], completeCoverage(), { now: NOW, cwd: "/workspace/app" });
+  const atCap = `${"a ".repeat(99)}x\u{1D306}`;
+  entries[0]!.attempts[0]!.expectations = [{
+    text: `${atCap} tail`,
+    command: `${atCap} argument`,
+    rationaleId: "r1",
+    observed: "no_matching_run",
+  }];
+
+  for (const exposure of ["sanitized", "raw"] as const) {
+    const truncation: Truncation = { fields: [] };
+    const projected = projectProblemEntries(entries, exposure, 10, truncation);
+    const attempt = projected[0]!.attempts[0]!;
+    assert.deepEqual(attempt.expectations, [{
+      text: atCap, command: atCap, rationaleId: "r1", observed: "no_matching_run", testimony: true,
+    }]);
+    assert.deepEqual(truncation.fields, [
+      "entries[0].attempts[0].expectations[0].text",
+      "entries[0].attempts[0].expectations[0].command",
+    ]);
+  }
+});
+
+test("an attempts cap of one keeps expectations only for the newest attempt", () => {
+  const failure = makeFailure({ id: "failure-1", ts: NOW - 5 * MINUTE });
+  const nextFailure = makeFailure({ id: "failure-2", ts: NOW - 3 * MINUTE });
+  const earlier = makeRationale({
+    id: "r1", ts: NOW - 4 * MINUTE, source: "mcp", excerpt: "earlier expectation", links: { failureId: failure.id },
+  });
+  const latest = makeRationale({
+    id: "r2", ts: NOW - 2 * MINUTE, source: "mcp", excerpt: "newest expectation", links: { failureId: nextFailure.id },
+  });
+  const { entries } = buildProblems([failure, earlier, nextFailure, latest], completeCoverage(4), {
+    now: NOW, cwd: "/workspace/app",
+  });
+  const projected = projectProblemEntries(entries, "sanitized", 1, { fields: [] });
+  const entry = projected[0]!;
+  assert.equal(entry.attemptsOmitted, 1);
+  assert.equal(entry.attempts.length, 1);
+  const attempt = entry.attempts[0]!;
+  assert.equal(attempt.failureId, "failure-2");
+  assert.deepEqual(attempt.expectations, [
+    { text: "newest expectation", rationaleId: "r2", observed: "not_comparable", testimony: true },
+  ]);
+  assert.equal(JSON.stringify(projected).includes("earlier expectation"), false);
 });
 
 test("stated text is redacted and capped at 240", () => {

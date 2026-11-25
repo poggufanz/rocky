@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
@@ -198,6 +198,35 @@ test("snapshot: default listing", async (t) => {
     ].join("\n"),
   );
 });
+
+for (const [fixtureName, label] of [
+  ["21-expectation-same-command-passed.json", "passed"],
+  ["22-expectation-same-command-failed.json", "failed"],
+  ["23-expectation-no-matching-run.json", "none yet"],
+  ["24-expectation-not-comparable.json", "not comparable"],
+] as const) {
+  test(`snapshot: agent expectation with next matching run ${label}`, async (t) => {
+    const home = freshHome(t);
+    const fixturePath = new URL(`../../fixtures/attempts/${fixtureName}`, import.meta.url);
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as { now: number; lines: unknown[] };
+    writeFileSync(join(home, "memory.jsonl"), fixture.lines.map((line) => `${JSON.stringify(line)}\n`).join(""), "utf8");
+
+    const out = await captureOutput(() =>
+      attempts(["aaaa000000000021"], { memory: createMemoryQueries(), now: fixture.now, cwd: "/app" }),
+    );
+
+    assert.equal(out.code, 0);
+    assert.equal(out.stdout, "");
+    const lines = out.stderr.split("\n");
+    const rowIndex = lines.findIndex((line) => /^  \d{4}-\d{2}-\d{2}/u.test(line));
+    assert.ok(rowIndex >= 0);
+    const expectationLines = lines.slice(rowIndex + 1, -2);
+    assert.deepEqual(expectationLines, [
+      `    agent expected: expect auth tests pass  next matching run: ${label}`,
+    ]);
+    assert.deepEqual(causalWordViolations(expectationLines), []);
+  });
+}
 
 test("snapshot: tail header names newest window", async (t) => {
   withRecordCap(t, 4);

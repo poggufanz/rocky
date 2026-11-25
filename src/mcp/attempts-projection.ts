@@ -16,6 +16,7 @@ export const ATTEMPT_HISTORY_NOTICE =
 const MAX_SIGNATURE_LINES = 3;
 const MAX_CHANGES_FILES = 8;
 const MAX_STATED_CODE_POINTS = 240;
+const MAX_EXPECTATION_CODE_POINTS = 200;
 
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/u;
 const HEX_16_RE = /^[0-9a-f]{16}$/u;
@@ -41,6 +42,13 @@ export interface ProjectedAttempt {
     source: string;
     testimony: true;
   };
+  expectations?: {
+    text: string;
+    command?: string;
+    rationaleId: string;
+    observed: NonNullable<Attempt["expectations"]>[number]["observed"];
+    testimony: true;
+  }[];
 }
 
 export interface ProjectedProblemEntry {
@@ -280,6 +288,25 @@ function projectAttempt(
       source: attempt.stated.source,
       testimony: true,
     };
+  }
+  if (attempt.expectations !== undefined) {
+    projected.expectations = attempt.expectations.map((expectation, index) => {
+      const path = `${attemptPath}.expectations[${index}]`;
+      const textPath = `${path}.text`;
+      const text = projectText(expectation.text, exposure, textPath, truncation);
+      const item: NonNullable<ProjectedAttempt["expectations"]>[number] = {
+        text: sliceCodePoints(text, MAX_EXPECTATION_CODE_POINTS, textPath, truncation),
+        rationaleId: projectOpaqueId(expectation.rationaleId, `${path}.rationaleId`, truncation, exposure === "sanitized"),
+        observed: expectation.observed,
+        testimony: true,
+      };
+      if (expectation.command !== undefined) {
+        const commandPath = `${path}.command`;
+        const command = projectText(expectation.command, exposure, commandPath, truncation);
+        item.command = sliceCodePoints(command, MAX_EXPECTATION_CODE_POINTS, commandPath, truncation);
+      }
+      return item;
+    });
   }
 
   return projected;
