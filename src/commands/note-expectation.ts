@@ -4,7 +4,7 @@ import {
   cwdIdentityKey,
   loadMemoryChecked,
   MAX_EXPECTED_COMMAND_CODE_POINTS,
-  windowCovered,
+  tailReadable,
   type MemoryRecord,
 } from "../core/memory-read.js";
 import { boundRationaleExcerpt, recordRationale } from "../core/memory.js";
@@ -87,7 +87,7 @@ export function noteExpectationHook(stdin: Buffer, opts: { now: number; cwd: str
     if (text.length === 0 || expectedCommand?.length === 0) return decline("invalid_input");
 
     const { records, coverage } = loadMemoryChecked(paths.memory, now);
-    if (!windowCovered(coverage, now, CAP_WINDOW_MS)) return decline("memory_unavailable");
+    if (!tailReadable(coverage)) return decline("memory_unavailable");
     const cwdKey = cwdIdentityKey(cwd, process.platform);
     const failureId = linkFailure(records, cwdKey, now, input.failureId);
     const excerpt = boundRationaleExcerpt(text);

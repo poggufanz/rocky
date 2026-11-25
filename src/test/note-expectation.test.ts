@@ -11,8 +11,9 @@ import {
   noteExpectationHook,
   type NoteExpectationReply,
 } from "../commands/note-expectation.js";
-import { loadMemory, type FailureRecord, type MemoryRecord, type RationaleRecord } from "../core/memory-read.js";
+import { loadMemory, loadMemoryChecked, tailReadable, type FailureRecord, type MemoryRecord, type RationaleRecord } from "../core/memory-read.js";
 import { causalWordViolations } from "./causal-words.js";
+import { withRecordCap } from "./memory-cap-fixture.js";
 
 const minute = 60_000;
 const hour = 60 * minute;
@@ -131,6 +132,40 @@ test("caps MCP rationales across cwds and excludes records exactly 24 hours old"
     ...prior[0], id: "rationale-human", source: "human",
   });
   assert.equal(invoke().recorded, true);
+});
+
+test("uses the readable short tail for deduplication, the cap, and new writes", (t) => {
+  withRecordCap(t, 101);
+  const { invoke, seed, notes, memory, cwd, elsewhere } = fixture(t);
+  const matching: RationaleRecord = {
+    kind: "rationale", v: 1, id: "rationale-matching", ts: now - minute,
+    cwd, agent: "codex", source: "mcp", rationale_fidelity: "raw",
+    excerpt: payload.text, expectedCommand: payload.command,
+  };
+  seed(
+    failure("failure-outside-tail", now - 25 * hour, elsewhere),
+    { ...matching, id: "rationale-human", ts: now - 6 * hour, source: "human" },
+    failure("failure-in-tail", now - 6 * hour, elsewhere),
+    ...Array.from({ length: 98 }, (_, i) => ({
+      ...matching, id: `rationale-prior-${i}`, cwd: elsewhere,
+    })),
+    matching,
+  );
+  const { coverage } = loadMemoryChecked(memory, now);
+  assert.equal(coverage.window, "tail");
+  assert.equal(coverage.oldestTs, now - 6 * hour);
+  assert.equal(tailReadable(coverage), true);
+
+  assert.deepEqual(invoke(), { recorded: false, reason: "duplicate", linkedFailure: false });
+  const result = invoke({ ...payload, text: "A new expectation." });
+  assert.ok(result.id);
+  assert.deepEqual(result, { recorded: true, id: result.id, linkedFailure: false });
+  assert.equal(notes().find((record) => record.id === result.id)?.excerpt, "A new expectation.");
+  const atCap = readFileSync(memory);
+  assert.deepEqual(invoke({ ...payload, text: "Another expectation." }), {
+    recorded: false, reason: "cap", linkedFailure: false,
+  });
+  assert.deepEqual(readFileSync(memory), atCap);
 });
 
 test("checks both write toggles before parsing, leaving memory untouched", (t) => {
