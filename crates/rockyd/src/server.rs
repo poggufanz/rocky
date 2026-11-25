@@ -1,4 +1,4 @@
-//! Desk client server (protocol v5): a single-instance user-only connection
+//! Desk client server (protocol v6): a single-instance user-only connection
 //! endpoint (a named pipe on Windows, a unix socket elsewhere), per-client
 //! threads, and a non-blocking broadcast hub.
 

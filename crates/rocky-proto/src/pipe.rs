@@ -1,4 +1,4 @@
-//! Pipe protocol v5 between rockyd and rocky-desk: one JSON object per line.
+//! Pipe protocol v6 between rockyd and rocky-desk: one JSON object per line.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::settings::Settings;
 use crate::translate::{QuoteLang, QuoteTranslation, TranslatePair, TranslateStatus};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 pub const LINE_CAP: usize = 64 * 1024;
 pub const CLIENT_QUEUE_CAP: usize = 1024;
 /// Limit for [`TargetHealth::fights_10m`].
@@ -461,6 +461,12 @@ pub enum ServerMsg {
         quote_key: String,
         to: QuoteLang,
     },
+    /// Earlier attempts on errors joined to one change card, sent after its `CardDetail`.
+    RelatedAttempts {
+        card_id: String,
+        rev: u32,
+        items: Vec<RelatedAttempt>,
+    },
     Translate {
         status: TranslateStatus,
     },
@@ -471,6 +477,36 @@ pub enum ServerMsg {
         pages: u32,
         missing: bool,
     },
+}
+
+/// One earlier attempt row for the desk card detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelatedAttempt {
+    /// UTC date of the failed run, `YYYY-MM-DD`.
+    pub date: String,
+    pub outcome: AttemptOutcome,
+    /// Observed repo-relative edits, at most three.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    /// Observed files not listed in `files`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub more: u32,
+}
+
+/// What the next run after an attempt did, as `rocky attempts` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    Passed,
+    PossiblePass,
+    SameFailure,
+    DifferentFailure,
+    NoLaterRun,
+    Unknown,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// One line of a block's code snippet in a card detail reply.
@@ -554,10 +590,11 @@ mod tests {
     use serde_json::json;
 
     use crate::pipe::{
-        AgentKey, AgentStatus, CaptureHealth, CaptureState, ClientMsg, CmdName, ConsentState,
-        GapReason, Health, LINE_CAP, Outcome, PendingRepo, RepoDecisionState, RepoEntry, RepoInfo,
-        ServerMsg, SetupAction, SetupHealth, SetupTarget, Status, StatusOp, TargetState,
-        TimelineEntry, TimelineKind, WireError, WorktreeEntry, decode, encode,
+        AgentKey, AgentStatus, AttemptOutcome, CaptureHealth, CaptureState, ClientMsg, CmdName,
+        ConsentState, GapReason, Health, LINE_CAP, Outcome, PendingRepo, RelatedAttempt,
+        RepoDecisionState, RepoEntry, RepoInfo, ServerMsg, SetupAction, SetupHealth, SetupTarget,
+        Status, StatusOp, TargetState, TimelineEntry, TimelineKind, WireError, WorktreeEntry,
+        decode, encode,
     };
     use crate::settings::Settings;
 
@@ -587,9 +624,9 @@ mod tests {
     }
 
     #[test]
-    fn encode_uses_v5() {
+    fn encode_uses_v6() {
         let s = encode(&ClientMsg::Subscribe);
-        assert_eq!(s, "{\"v\":5,\"type\":\"subscribe\"}\n");
+        assert_eq!(s, "{\"v\":6,\"type\":\"subscribe\"}\n");
     }
     #[test]
     fn v1_line_is_a_version_error() {
@@ -601,14 +638,14 @@ mod tests {
     #[test]
     fn decode_rejects_other_major_before_body() {
         assert!(matches!(
-            decode::<ClientMsg>(r#"{"v":6,"type":"brand_new"}"#),
-            Err(WireError::Version(6))
+            decode::<ClientMsg>(r#"{"v":7,"type":"brand_new"}"#),
+            Err(WireError::Version(7))
         ));
     }
     #[test]
     fn decode_rejects_long_line() {
         let line = format!(
-            r#"{{"v":5,"type":"hello","client":"{}","version":"x"}}"#,
+            r#"{{"v":6,"type":"hello","client":"{}","version":"x"}}"#,
             "a".repeat(LINE_CAP)
         );
         assert!(matches!(
@@ -618,7 +655,7 @@ mod tests {
     }
     #[test]
     fn show_wire_shape() {
-        assert_eq!(encode(&ServerMsg::Show), "{\"v\":5,\"type\":\"show\"}\n");
+        assert_eq!(encode(&ServerMsg::Show), "{\"v\":6,\"type\":\"show\"}\n");
     }
     #[test]
     fn every_client_msg_roundtrips() {
@@ -814,7 +851,7 @@ mod tests {
             assert_eq!(decode::<ServerMsg>(encode(&m).trim_end()).unwrap(), m);
         }
         let legacy: ServerMsg =
-            decode(r#"{"v":5,"type":"ack","id":8,"ok":true,"error":null}"#).unwrap();
+            decode(r#"{"v":6,"type":"ack","id":8,"ok":true,"error":null}"#).unwrap();
         assert_eq!(
             legacy,
             ServerMsg::Ack {
@@ -836,16 +873,16 @@ mod tests {
         );
     }
     #[test]
-    fn quit_messages_round_trip_at_protocol_5() {
+    fn quit_messages_round_trip_at_protocol_6() {
         assert_eq!(
             encode(&ClientMsg::Cmd {
                 name: CmdName::Quit,
                 id: 7,
             }),
-            "{\"v\":5,\"type\":\"cmd\",\"name\":\"quit\",\"id\":7}\n"
+            "{\"v\":6,\"type\":\"cmd\",\"name\":\"quit\",\"id\":7}\n"
         );
         assert_eq!(
-            decode::<ServerMsg>(r#"{"v":5,"type":"quit"}"#).unwrap(),
+            decode::<ServerMsg>(r#"{"v":6,"type":"quit"}"#).unwrap(),
             ServerMsg::Quit
         );
     }
@@ -875,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_messages_round_trip_at_protocol_5() {
+    fn setup_messages_round_trip_at_protocol_6() {
         let setup = ClientMsg::Setup {
             id: 4,
             action: SetupAction::HarnessOn {
@@ -884,7 +921,7 @@ mod tests {
         };
         assert_eq!(
             encode(&setup),
-            "{\"v\":5,\"type\":\"setup\",\"id\":4,\"action\":{\"name\":\"harness_on\",\"harness\":\"codex\"}}\n"
+            "{\"v\":6,\"type\":\"setup\",\"id\":4,\"action\":{\"name\":\"harness_on\",\"harness\":\"codex\"}}\n"
         );
         let client = [
             setup,
@@ -924,7 +961,7 @@ mod tests {
 
     #[test]
     fn consent_plan_without_new_fields_decodes() {
-        let old = r#"{"v":5,"type":"consent_plan","id":1,"consent":"approved","targets":[]}"#;
+        let old = r#"{"v":6,"type":"consent_plan","id":1,"consent":"approved","targets":[]}"#;
         let ServerMsg::ConsentPlan {
             harness_off,
             shell_hook,
@@ -974,13 +1011,13 @@ mod tests {
 
     #[test]
     fn health_without_setup_decodes_to_default() {
-        let bare = r#"{"v":5,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false}}"#;
+        let bare = r#"{"v":6,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false}}"#;
         let ServerMsg::Health { health } = decode::<ServerMsg>(bare).unwrap() else {
             panic!("expected a health frame");
         };
         assert_eq!(health.setup, SetupHealth::default());
 
-        let with_target = r#"{"v":5,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"setup":{"targets":[{"harness":"codex","kind":"mcp","path":"p","state":"foreign"}]}}}"#;
+        let with_target = r#"{"v":6,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"setup":{"targets":[{"harness":"codex","kind":"mcp","path":"p","state":"foreign"}]}}}"#;
         let ServerMsg::Health { health } = decode::<ServerMsg>(with_target).unwrap() else {
             panic!("expected a health frame");
         };
@@ -992,8 +1029,8 @@ mod tests {
 
     #[test]
     fn health_without_capture_decodes_to_empty() {
-        let v5 = r#"{"v":5,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"settings_unreadable":false,"setup":{}}}"#;
-        let ServerMsg::Health { health } = decode::<ServerMsg>(v5).unwrap() else {
+        let v6 = r#"{"v":6,"type":"health","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false,"settings_unreadable":false,"setup":{}}}"#;
+        let ServerMsg::Health { health } = decode::<ServerMsg>(v6).unwrap() else {
             panic!("expected a health frame");
         };
         assert!(health.capture.is_empty());
@@ -1139,7 +1176,7 @@ mod tests {
         ];
         for msg in &client_msgs {
             let wire = encode(msg);
-            assert!(wire.starts_with("{\"v\":5,"), "bad wire: {wire}");
+            assert!(wire.starts_with("{\"v\":6,"), "bad wire: {wire}");
             let back: ClientMsg = decode(&wire).unwrap();
             assert_eq!(&back, msg);
         }
@@ -1212,17 +1249,66 @@ mod tests {
         ];
         for msg in &server_msgs {
             let wire = encode(msg);
-            assert!(wire.starts_with("{\"v\":5,"), "bad wire: {wire}");
+            assert!(wire.starts_with("{\"v\":6,"), "bad wire: {wire}");
             let back: ServerMsg = decode(&wire).unwrap();
             assert_eq!(&back, msg);
         }
     }
 
     #[test]
+    fn related_attempts_round_trips_and_omits_empty_files() {
+        let msg = ServerMsg::RelatedAttempts {
+            card_id: "c1".to_string(),
+            rev: 3,
+            items: vec![
+                RelatedAttempt {
+                    date: "2026-11-12".to_string(),
+                    outcome: AttemptOutcome::SameFailure,
+                    files: vec!["src/auth.ts".to_string()],
+                    more: 2,
+                },
+                RelatedAttempt {
+                    date: "2026-11-13".to_string(),
+                    outcome: AttemptOutcome::NoLaterRun,
+                    files: Vec::new(),
+                    more: 0,
+                },
+            ],
+        };
+        let line = encode(&msg);
+        assert!(line.starts_with("{\"v\":6,\"type\":\"related_attempts\""));
+        assert!(!line.contains("\"files\":[]"));
+        assert!(!line.contains("\"more\":0"));
+        assert_eq!(decode::<ServerMsg>(line.trim_end()).unwrap(), msg);
+    }
+
+    #[test]
+    fn attempt_outcome_uses_cli_snake_case_names() {
+        for (o, s) in [
+            (AttemptOutcome::Passed, "passed"),
+            (AttemptOutcome::PossiblePass, "possible_pass"),
+            (AttemptOutcome::SameFailure, "same_failure"),
+            (AttemptOutcome::DifferentFailure, "different_failure"),
+            (AttemptOutcome::NoLaterRun, "no_later_run"),
+            (AttemptOutcome::Unknown, "unknown"),
+        ] {
+            assert_eq!(serde_json::to_string(&o).unwrap(), format!("\"{s}\""));
+        }
+    }
+
+    #[test]
+    fn protocol_five_lines_are_a_version_mismatch() {
+        assert!(matches!(
+            decode::<ServerMsg>(r#"{"v":5,"type":"quit"}"#),
+            Err(WireError::Version(5))
+        ));
+    }
+
+    #[test]
     fn agent_status_prompt_round_trips_and_omits_when_none() {
         use crate::pipe::PromptText;
 
-        let legacy = r#"{"v":5,"type":"status","op":"upsert","agent":{"key":{"session_id":"s1","agent_id":""},"agent_type":null,"status":"working","action":null,"summary":null,"failures":0,"last_event_ms":10,"quiet_10m":false,"repo":{"root":null,"name":"rocky","branch":null}}}"#;
+        let legacy = r#"{"v":6,"type":"status","op":"upsert","agent":{"key":{"session_id":"s1","agent_id":""},"agent_type":null,"status":"working","action":null,"summary":null,"failures":0,"last_event_ms":10,"quiet_10m":false,"repo":{"root":null,"name":"rocky","branch":null}}}"#;
         let ServerMsg::Status { agent: decoded, .. } = decode::<ServerMsg>(legacy).unwrap() else {
             panic!("expected status frame");
         };
@@ -1255,7 +1341,7 @@ mod tests {
 
     #[test]
     fn timeline_entry_dur_ms_round_trips_and_omits_when_none() {
-        let legacy = r#"{"v":5,"type":"timeline","id":1,"key":{"session_id":"s1","agent_id":""},"entries":[{"ms":100,"kind":"tool","tool_name":"Read","text":"a.rs","outcome":"ok"}]}"#;
+        let legacy = r#"{"v":6,"type":"timeline","id":1,"key":{"session_id":"s1","agent_id":""},"entries":[{"ms":100,"kind":"tool","tool_name":"Read","text":"a.rs","outcome":"ok"}]}"#;
         let ServerMsg::Timeline { entries, .. } = decode::<ServerMsg>(legacy).unwrap() else {
             panic!("expected timeline frame");
         };
@@ -1327,7 +1413,7 @@ mod tests {
         };
 
         // Old ClientMsg::Cards without translate_to parses with None.
-        let old_cards_req = r#"{"v":5,"type":"cards","id":5,"limit":20}"#;
+        let old_cards_req = r#"{"v":6,"type":"cards","id":5,"limit":20}"#;
         assert_eq!(
             decode::<ClientMsg>(old_cards_req).unwrap(),
             ClientMsg::Cards {
@@ -1352,7 +1438,7 @@ mod tests {
         );
 
         // Old ClientMsg::CardDetail without translate_to parses with None.
-        let old_req = r#"{"v":5,"type":"card_detail","id":1,"card_id":"c1"}"#;
+        let old_req = r#"{"v":6,"type":"card_detail","id":1,"card_id":"c1"}"#;
         assert_eq!(
             decode::<ClientMsg>(old_req).unwrap(),
             ClientMsg::CardDetail {
@@ -1399,7 +1485,7 @@ mod tests {
         }
 
         // Old ServerMsg::Cards without translations parses with empty Vec.
-        let old_cards = r#"{"v":5,"type":"cards","id":10,"items":[]}"#;
+        let old_cards = r#"{"v":6,"type":"cards","id":10,"items":[]}"#;
         assert_eq!(
             decode::<ServerMsg>(old_cards).unwrap(),
             ServerMsg::Cards {
@@ -1424,7 +1510,7 @@ mod tests {
         // Old ServerMsg::CardDetail without translations or pending parses with empty Vecs.
         let card_json = serde_json::to_string(&sample_card).unwrap();
         let old_detail =
-            format!(r#"{{"v":5,"type":"card_detail","id":12,"card":{card_json},"snippets":[]}}"#);
+            format!(r#"{{"v":6,"type":"card_detail","id":12,"card":{card_json},"snippets":[]}}"#);
         assert_eq!(
             decode::<ServerMsg>(&old_detail).unwrap(),
             ServerMsg::CardDetail {
@@ -1449,7 +1535,7 @@ mod tests {
         );
 
         // Old ServerMsg::Snapshot without translate parses with TranslateStatus::default().
-        let old_snap = r#"{"v":5,"type":"snapshot","agents":[],"aggregate":"idle","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false},"settings":{"v":1}}"#;
+        let old_snap = r#"{"v":6,"type":"snapshot","agents":[],"aggregate":"idle","health":{"spool_pending":0,"spool_dropped":0,"dropped_events":0,"bad_files":0,"late_events":0,"hook_newer_than_daemon":false},"settings":{"v":1}}"#;
         let ServerMsg::Snapshot { translate, .. } = decode::<ServerMsg>(old_snap).unwrap() else {
             panic!("expected Snapshot");
         };
@@ -1513,7 +1599,7 @@ mod tests {
         // QuoteSettled requires `to` (no serde default).
         assert!(matches!(
             decode::<ServerMsg>(
-                r#"{"v":5,"type":"quote_settled","card_id":"c1","quote_key":"cafebabe"}"#
+                r#"{"v":6,"type":"quote_settled","card_id":"c1","quote_key":"cafebabe"}"#
             ),
             Err(WireError::Malformed)
         ));

@@ -302,7 +302,7 @@ fn long_line_disconnects_client() {
     // No hello: one over-long line must be dropped without reading it all.
     let big = "x".repeat(LINE_CAP + 100);
     client.send(&format!(
-        "{{\"v\":5,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
+        "{{\"v\":6,\"type\":\"hello\",\"client\":\"{big}\"}}\n"
     ));
     assert!(client.read_line().is_none(), "expected EOF");
 }
