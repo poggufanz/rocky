@@ -771,6 +771,12 @@ export function isForbiddenModelPayload(path) {
   return !MODEL_CODE_EXCEPTIONS.has(normalized) && /model|weight/i.test(normalized);
 }
 
+export function isForbiddenPackArtifact(path) {
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized === "dist/core/fixtouch-cache.js") return false;
+  return /(^|\/)test(\/|$)|\.test\.|(^|\/)src(\/|$)|fixture|cache|validation|\.rocky-managed\.json/i.test(normalized);
+}
+
 // npm 11 and older print the dry-run manifest as [entry]; npm 12 prints
 // { "<package name>": entry }. Anything else holds no entry.
 export function packManifestEntries(parsed) {
@@ -792,8 +798,7 @@ function parseManifest(stdout) {
   const paths = packed.files.map((file) => file.path);
   for (const path of paths) {
     if (!allowedPackPath(path)) throw new StepError(`unexpected packed path: ${path}`);
-    const normalized = path.replaceAll("\\", "/");
-    if (/(^|\/)test(\/|$)|\.test\.|(^|\/)src(\/|$)|fixture|cache|validation|\.rocky-managed\.json/i.test(normalized)) {
+    if (isForbiddenPackArtifact(path)) {
       throw new StepError(`forbidden source or test payload: ${path}`);
     }
     if (isForbiddenModelPayload(path)) {

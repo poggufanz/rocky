@@ -116,14 +116,6 @@ function allowedPackPath(path: string): boolean {
     || path === "assets/teach-agent.en.md";
 }
 
-function assertNoForbiddenArtifact(path: string): void {
-  const normalized = path.replaceAll("\\", "/");
-  assert.doesNotMatch(normalized, /(^|\/)test(\/|$)|\.test\.|(^|\/)src(\/|$)|fixture|cache|validation|\.rocky-managed\.json/i);
-  if (normalized !== "dist/commands/model.js" && normalized !== "dist/gui/models-dev.js") {
-    assert.doesNotMatch(normalized, /model|weight/i);
-  }
-}
-
 function spawnDiagnostic(result: ReturnType<typeof spawnSync>): string {
   return JSON.stringify({
     error: result.error?.message ?? null,
@@ -362,7 +354,6 @@ test("npm pack dry-run exposes only the bounded production payload", async (t) =
   assert.ok(paths.length > 0);
   for (const path of paths) {
     assert.equal(allowedPackPath(path), true, `unexpected packed path: ${path}`);
-    assertNoForbiddenArtifact(path);
   }
   for (const required of [
     "LICENSE",
@@ -383,6 +374,7 @@ test("npm pack dry-run exposes only the bounded production payload", async (t) =
   const releaseGate = await import(pathToFileURL(join(packageRoot, "scripts", "release-check.mjs")).href) as {
     allowedPackPath(path: string): boolean;
     isForbiddenModelPayload(path: string): boolean;
+    isForbiddenPackArtifact(path: string): boolean;
   };
   for (const path of paths) {
     assert.equal(
@@ -390,12 +382,16 @@ test("npm pack dry-run exposes only the bounded production payload", async (t) =
       true,
       `release-check allowlist rejects a shipped path: ${path}`,
     );
+    assert.equal(releaseGate.isForbiddenPackArtifact(path), false, `forbidden source or test payload: ${path}`);
     assert.equal(
       releaseGate.isForbiddenModelPayload(path),
       false,
       `release-check treats a shipped path as a model payload: ${path}`,
     );
   }
+  assert.equal(releaseGate.isForbiddenPackArtifact("dist/core/fixtouch-cache.js"), false);
+  assert.equal(releaseGate.isForbiddenPackArtifact("dist/core/fixtouch-cache.json"), true);
+  assert.equal(releaseGate.isForbiddenPackArtifact("dist/core/.cache/attempts-hot.json"), true);
   assert.equal(
     releaseGate.isForbiddenModelPayload("weights/model.gguf"),
     true,
