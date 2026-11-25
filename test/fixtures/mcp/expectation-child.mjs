@@ -11,6 +11,11 @@ switch (process.env.EXPECTATION_CHILD_MODE) {
       recorded: true, id: payload.text, linkedFailure: payload.failureId !== undefined,
     }) + "\n");
     break;
+  case "decline":
+    process.stdout.write(JSON.stringify({
+      recorded: false, reason: payload.text, linkedFailure: false,
+    }) + "\n");
+    break;
   case "hang":
     writeFileSync(process.env.EXPECTATION_CHILD_PID_FILE, String(process.pid));
     setTimeout(() => process.exit(2), 10_000);

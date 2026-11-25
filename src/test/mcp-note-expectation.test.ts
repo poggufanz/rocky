@@ -186,6 +186,21 @@ test("broker sends stdin and returns the parsed reply", async () => {
   assert.deepEqual(response, { recorded: true, id: payload.text, linkedFailure: true });
 });
 
+test("broker returns broker_failed for an unknown child reason", async () => {
+  const broker = createExpectationBroker(brokerOptions("decline"));
+  const response = await broker.note({ ...payload, text: "unexpected child diagnostic" }, new AbortController().signal);
+  assert.deepEqual(response, brokerFailed);
+});
+
+test("broker preserves the five child decline reasons", async () => {
+  const broker = createExpectationBroker(brokerOptions("decline"));
+  const signal = new AbortController().signal;
+  for (const reason of ["duplicate", "cap", "disabled", "invalid_input", "memory_unavailable"]) {
+    const response = await broker.note({ ...payload, text: reason }, signal);
+    assert.deepEqual(response, { recorded: false, reason, linkedFailure: false });
+  }
+});
+
 for (const mode of ["garbage", "malformed", "oversized", "exit-1"]) {
   test(`broker returns broker_failed for ${mode} child output`, async () => {
     const response = await createExpectationBroker(brokerOptions(mode)).note(payload, new AbortController().signal);

@@ -20,6 +20,7 @@ export interface ExpectationBroker {
 }
 
 const STDOUT_CAP_BYTES = 4 * 1024;
+const CHILD_DECLINE_REASONS = new Set(["duplicate", "cap", "disabled", "invalid_input", "memory_unavailable"]);
 const BROKER_FAILED = Object.freeze({ recorded: false, reason: "broker_failed", linkedFailure: false });
 const TIMEOUT = Object.freeze({ recorded: false, reason: "timeout", linkedFailure: false });
 
@@ -29,7 +30,8 @@ function parseReply(stdout: Buffer): ExpectationReply {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return BROKER_FAILED;
     const { recorded, id, reason, linkedFailure } = value as Record<string, unknown>;
     if (typeof recorded !== "boolean" || typeof linkedFailure !== "boolean"
-      || (id !== undefined && typeof id !== "string") || (reason !== undefined && typeof reason !== "string")) {
+      || (id !== undefined && typeof id !== "string")
+      || (reason !== undefined && (typeof reason !== "string" || !CHILD_DECLINE_REASONS.has(reason)))) {
       return BROKER_FAILED;
     }
     return {
