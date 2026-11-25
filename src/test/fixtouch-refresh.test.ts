@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { collectFixTouchEntries, rebuildFixTouchCache } from "../commands/fixtouch-refresh.js";
+import { hookFail, hookSuccess } from "../commands/hook.js";
+import { toolResultHook } from "../commands/tool-result-hook.js";
 import type { Attempt, AttemptOutcome, ProblemEntry } from "../core/attempts.js";
 import { fixTouchCachePath, readFixTouchCache, refreshFixTouchAfterFix } from "../core/fixtouch-cache.js";
 import { commandIdentity } from "../core/fingerprint.js";
-import { canonicalPath, type FailureRecord, type FixRecord } from "../core/memory-read.js";
+import { canonicalPath, loadMemoryChecked, type FailureRecord, type FixRecord } from "../core/memory-read.js";
 import type { StoredCard } from "../desk/cards-record.js";
 import { cardsFilePath } from "../listening/cards-path.js";
+import { failurePayload, passPayload } from "./tool-result-hook-fixture.js";
 
 const NOW = 1_700_000_120_000;
 const FAILURE_TS = NOW - 60_000;
@@ -239,3 +244,90 @@ test("refresh skips the write when the marker is removed during import", async (
 
   assert.equal(existsSync(dirname(fixTouchCachePath(home))), false);
 });
+
+test("fix-touch writes are reachable only through the confirmed fix call sites", () => {
+  const sourceRoot = fileURLToPath(new URL("../../src/", import.meta.url));
+  const calls = new Map([
+    ["rebuildFixTouchCache", [] as string[]],
+    ["writeFixTouchCache", [] as string[]],
+    ["refreshFixTouchAfterFix", [] as string[]],
+  ]);
+
+  function scan(dir: string): void {
+    for (const entry of readdirSync(join(sourceRoot, dir), { withFileTypes: true })) {
+      const file = dir ? `${dir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (file !== "test") scan(file);
+        continue;
+      }
+      if (!file.endsWith(".ts")) continue;
+      const source = ts.createSourceFile(file, readFileSync(join(sourceRoot, file), "utf8"), ts.ScriptTarget.Latest);
+      function visit(node: ts.Node): void {
+        if (ts.isCallExpression(node)) {
+          const callee = ts.isPropertyAccessExpression(node.expression) ? node.expression.name : node.expression;
+          if (ts.isIdentifier(callee)) {
+            calls.get(callee.text)?.push(file);
+            if (callee.text === "refreshFixTouchAfterFix") {
+              const fix = node.arguments[0];
+              assert.ok(fix && ts.isPropertyAccessExpression(fix) && fix.name.text === "fix", file);
+            }
+          }
+        }
+        ts.forEachChild(node, visit);
+      }
+      visit(source);
+    }
+  }
+  scan("");
+
+  assert.deepEqual(calls.get("rebuildFixTouchCache"), ["core/fixtouch-cache.ts"]);
+  assert.deepEqual(calls.get("writeFixTouchCache"), ["commands/fixtouch-refresh.ts"]);
+  assert.deepEqual(calls.get("refreshFixTouchAfterFix")?.sort(), [
+    "commands/hook.ts", "commands/run.ts", "commands/tool-result-hook.ts",
+  ]);
+});
+
+for (const lane of ["shell hook", "tool-result hook"] as const) {
+  for (const { name, optIn, cmd, outcome } of [
+    { name: "refreshes the cache for a confirmed fix with opt-in", optIn: true, cmd: CMD, outcome: "fix" },
+    { name: "leaves the derived directory absent without opt-in", optIn: false, cmd: CMD, outcome: "fix" },
+    { name: "leaves the cache absent for a possible association", optIn: true, cmd: "npm run lint", outcome: "association" },
+  ] as const) {
+    test(`${lane} ${name}`, async (t) => {
+      const home = makeHome(t);
+      const cwd = join(home, "repo");
+      mkdirSync(cwd);
+      const previousHome = process.env.ROCKY_HOME;
+      process.env.ROCKY_HOME = home;
+      t.after(() => {
+        if (previousHome === undefined) delete process.env.ROCKY_HOME;
+        else process.env.ROCKY_HOME = previousHome;
+      });
+      if (optIn) writeFileSync(join(home, "fixtouch-on"), "");
+
+      const cache = fixTouchCachePath(home);
+      if (lane === "shell hook") {
+        assert.equal(hookFail(CMD, 1, cwd), 0);
+      } else {
+        assert.equal(await toolResultHook(Buffer.from(failurePayload({ cwd }))), "{}");
+      }
+      assert.equal(existsSync(join(home, "pending")), true);
+      assert.equal(existsSync(cache), false);
+
+      if (lane === "shell hook") {
+        assert.equal(await hookSuccess(cmd, cwd), 0);
+      } else {
+        const payload = passPayload({ cwd, tool_input: { command: cmd } });
+        assert.equal(await toolResultHook(Buffer.from(payload)), "{}");
+      }
+
+      const { records } = loadMemoryChecked(join(home, "memory.jsonl"));
+      assert.deepEqual(records.map((record) => record.kind), ["failure", outcome]);
+      if (optIn) {
+        assert.equal(existsSync(cache), outcome === "fix");
+      } else {
+        assert.equal(existsSync(dirname(cache)), false);
+      }
+    });
+  }
+}

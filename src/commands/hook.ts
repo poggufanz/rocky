@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { CANCEL_CODES } from "../core/exec.js";
 import { commandFingerprintCandidates, commandIdentity } from "../core/fingerprint.js";
+import { refreshFixTouchAfterFix } from "../core/fixtouch-cache.js";
 import { renderGuardRules, rulesFileIsPristine } from "../core/guard-rules.js";
 import {
   addHookBlockBytes,
@@ -281,7 +282,7 @@ export function isTypoSymptom(cmd: string, exitCode: number): boolean {
 }
 
 /** A command succeeded while the pending flag existed. Try to link a fix. */
-export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): number {
+export async function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions = {}): Promise<number> {
   if (!isUsableHookCwd(cwd)) return 0;
   try {
     drainGuardPending();
@@ -290,6 +291,7 @@ export function hookSuccess(cmd: string, cwd: string, options: ResolveFixOptions
   }
   try {
     const result = resolveFixOnSuccess(cmd, cwd, options);
+    await refreshFixTouchAfterFix(result.fix, { home: resolveRockyPaths().home, now: Date.now() });
     if (result.confirmedResolved > 0) {
       sayTty(phrase("fix-linked"));
       // The hook speaks one prompt late, so this line can read as being about

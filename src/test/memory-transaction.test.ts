@@ -830,7 +830,7 @@ test("a concurrent new failure cannot be lost by pending clear", { timeout: 30_0
   assert.equal(existsSync(join(home, "pending")), true);
 });
 
-test("partial confirmed resolution keeps pending for another recent failure", (t) => {
+test("partial confirmed resolution keeps pending for another recent failure", async (t) => {
   const home = sandbox(t, "rocky-partial-pending-");
   const cwd = home;
   const resolvedCmd = "npm run build";
@@ -842,7 +842,7 @@ test("partial confirmed resolution keeps pending for another recent failure", (t
   const original = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
   try {
-    assert.equal(hookSuccess(resolvedCmd, cwd), 0);
+    assert.equal(await hookSuccess(resolvedCmd, cwd), 0);
   } finally {
     if (original === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = original;
@@ -856,7 +856,7 @@ test("partial confirmed resolution keeps pending for another recent failure", (t
   assert.equal(existsSync(join(home, "pending")), true);
 });
 
-test("weak-only candidate records association but never clears pending", (t) => {
+test("weak-only candidate records association but never clears pending", async (t) => {
   const home = sandbox(t, "rocky-weak-pending-");
   const cwd = home;
   const failedCmd = "npm run broken-alpha";
@@ -865,7 +865,7 @@ test("weak-only candidate records association but never clears pending", (t) => 
   const original = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
   try {
-    assert.equal(hookSuccess(successCmd, cwd), 0);
+    assert.equal(await hookSuccess(successCmd, cwd), 0);
   } finally {
     if (original === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = original;
@@ -1044,7 +1044,7 @@ test("watch failure excerpt keeps the decisive line first and redacts secrets", 
   assert.doesNotMatch(rec.excerpt, /ghp_abcdef/u);
 });
 
-test("a no-link success never clears pending without a confirmed resolution", (t) => {
+test("a no-link success never clears pending without a confirmed resolution", async (t) => {
   const home = sandbox(t, "rocky-no-confirmed-pending-");
   const cwd = home;
   const now = 1_800_000_000_000;
@@ -1053,7 +1053,7 @@ test("a no-link success never clears pending without a confirmed resolution", (t
   process.env.ROCKY_HOME = home;
   try {
     memory.clearPendingIfResolved([], LINK_WINDOW_MS, now);
-    assert.equal(hookSuccess("npm run unrelated", cwd, { now }), 0);
+    assert.equal(await hookSuccess("npm run unrelated", cwd, { now }), 0);
   } finally {
     if (original === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = original;
@@ -1931,7 +1931,7 @@ test("live owner lock is bounded bookkeeping and preserves child success", { tim
   assert.match(result.stderr, /Could not write to memory, so this run is not recorded\./u);
 });
 
-test("hook bookkeeping also returns zero when a live owner keeps the lock", (t) => {
+test("hook bookkeeping also returns zero when a live owner keeps the lock", async (t) => {
   const home = sandbox(t, "rocky-hook-live-lock-");
   const cwd = home;
   const cmd = "npm run build";
@@ -1945,7 +1945,7 @@ test("hook bookkeeping also returns zero when a live owner keeps the lock", (t) 
   process.env.ROCKY_HOME = home;
   Date.now = () => first ? (first = false, base) : base + 6_000;
   try {
-    assert.equal(hookSuccess(cmd, cwd), 0);
+    assert.equal(await hookSuccess(cmd, cwd), 0);
   } finally {
     Date.now = originalNow;
     if (originalHome === undefined) delete process.env.ROCKY_HOME;
