@@ -2,10 +2,11 @@
  * Advisory PreToolUse dispatcher — `rocky hook gate-event`.
  *
  * A Claude Code PreToolUse hook calls this once per tool call. It runs
- * deterministic, local advisory checks (prompt clarity and failure-cycle
- * detection against `<ROCKY_HOME>/gate-state/<session>.cycles.json`) and
- * returns either `{}` when silent or one `additionalContext` note for the
- * agent.
+ * deterministic, local advisory checks for prompt clarity and failure cycles
+ * (against `<ROCKY_HOME>/gate-state/<session>.cycles.json`). Fix-touch checks
+ * the derived cache for edits between failing and passing runs when enabled
+ * by `<ROCKY_HOME>/fixtouch-on`.
+ * The hook returns `{}` when silent or one `additionalContext` advisory.
  *
  * Hard rule: `gateEvent` NEVER throws, NEVER denies an edit, and NEVER
  * returns a non-zero exit code. Unparseable stdin, an unrecognized vendor
@@ -15,7 +16,11 @@
  * note can still print.
  */
 
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import {
+  closeSync, fstatSync, lstatSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync, type BigIntStats,
+} from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { sanitizeSessionId } from "../core/agent-session.js";
 import { clarityNudgeLine } from "../core/prompt-clarity.js";
 import {
@@ -27,6 +32,12 @@ import {
   saveCycleState,
 } from "../core/failure-cycle.js";
 import { fingerprint } from "../core/fingerprint.js";
+import {
+  FIXTOUCH_CMD_MAX, FIXTOUCH_PATH_MAX, FIXTOUCH_SIGNATURE_MAX,
+  fileGitRoot, findFixTouchEntry, fixTouchCachePath, fixTouchEnabled,
+  fixTouchPathKey, readFixTouchCache, readFixTouchFile, rootKey, sanitizeField,
+} from "../core/fixtouch-cache.js";
+import { sameFilesystemIdentity } from "../core/fs-safety.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { logHookError } from "../commands/agent-hook.js";
 
@@ -36,6 +47,11 @@ const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"])
 /** Known PreToolUse payload shapes accepted by `gate-event`. */
 const KNOWN_GATE_VENDORS: ReadonlySet<string> = new Set(["claude-code", "generic"]);
 const EXPLICIT_FINGERPRINT = /^[0-9a-f]{16}$/u;
+const MAX_GATE_STDOUT_BYTES = 1024;
+const MAX_FIXTOUCH_SHOWN_KEYS = 256;
+// Allows all 256 keys even when cache roots and paths need JSON escapes.
+const MAX_FIXTOUCH_STATE_BYTES = 2 * 1024 * 1024;
+const FIXTOUCH_STALE_LOCK_MS = 5_000;
 
 export interface GateInput {
   vendor: string;
@@ -119,6 +135,121 @@ export function cycleNudge(input: GateInput, env: NodeJS.ProcessEnv): string {
   }
 }
 
+function readShownFixTouches(stateFile: string): string[] | undefined {
+  const text = readFixTouchFile(stateFile, MAX_FIXTOUCH_STATE_BYTES);
+  if (text === null) return [];
+  if (text === undefined) return undefined;
+  const shown: unknown = JSON.parse(text);
+  return Array.isArray(shown) && shown.every((key) => typeof key === "string")
+    ? shown.slice(-MAX_FIXTOUCH_SHOWN_KEYS)
+    : undefined;
+}
+
+function acquireFixTouchLock(lockFile: string): number | undefined {
+  try {
+    return openSync(lockFile, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+
+  const existing = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+  if (existing !== undefined) {
+    if (!existing.isFile() || Date.now() - Number(existing.mtimeMs) <= FIXTOUCH_STALE_LOCK_MS) return undefined;
+    // Another process may have replaced the stale lock since it was observed.
+    const current = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+    if (current !== undefined) {
+      if (!sameFilesystemIdentity(existing, current) || existing.mtimeNs !== current.mtimeNs) return undefined;
+      try {
+        unlinkSync(lockFile);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+  return openSync(lockFile, "wx", 0o600);
+}
+
+function markFixTouchShown(stateFile: string, key: string): boolean {
+  const lockFile = `${stateFile}.lock`;
+  let lockFd: number | undefined;
+  let lock: BigIntStats | undefined;
+  let temp: string | undefined;
+  try {
+    const parent = dirname(stateFile);
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const directory = lstatSync(parent, { bigint: true });
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return false;
+    lockFd = acquireFixTouchLock(lockFile);
+    if (lockFd === undefined) return false;
+    lock = fstatSync(lockFd, { bigint: true });
+    const shown = readShownFixTouches(stateFile);
+    if (shown === undefined || shown.includes(key)) return false;
+    const next = [...shown, key].slice(-MAX_FIXTOUCH_SHOWN_KEYS);
+    const tempPath = `${stateFile}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    const fd = openSync(tempPath, "wx", 0o600);
+    temp = tempPath;
+    try {
+      writeFileSync(fd, JSON.stringify(next), "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    const current = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+    if (!sameFilesystemIdentity(lock, current) ||
+        !sameFilesystemIdentity(directory, lstatSync(parent, { bigint: true }))) return false;
+    renameSync(tempPath, stateFile);
+    temp = undefined;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (temp !== undefined) {
+      try { unlinkSync(temp); } catch { /* Best effort after an unsuccessful update. */ }
+    }
+    if (lockFd !== undefined) {
+      try {
+        const current = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+        if (sameFilesystemIdentity(lock, current)) unlinkSync(lockFile);
+      } catch { /* Best-effort cleanup. */ }
+      try { closeSync(lockFd); } catch { /* Best-effort cleanup. */ }
+    }
+  }
+}
+
+function fixTouchNote(
+  input: GateInput, env: NodeJS.ProcessEnv, now: number,
+): { text: string; markShown: () => boolean } | undefined {
+  try {
+    const { home } = resolveRockyPaths(env);
+    if (!fixTouchEnabled(home)) return undefined;
+    if (!GATED_TOOLS.has(input.toolName)) return undefined;
+    const { filePath, cwd, sessionKey } = input;
+    if (filePath === undefined) return undefined;
+    const abs = isAbsolute(filePath) ? filePath : resolve(cwd || process.cwd(), filePath);
+    const root = fileGitRoot(abs) ?? (cwd ? resolve(cwd) : undefined);
+    if (root === undefined) return undefined;
+    const rel = relative(root, abs).replaceAll("\\", "/");
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
+
+    const cache = readFixTouchCache(fixTouchCachePath(home), now);
+    const entry = findFixTouchEntry(cache, root, rel, process.platform);
+    if (entry === undefined) return undefined;
+    const date = new Date(entry.ts).toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(date)) return undefined;
+    const key = `${rootKey(root, process.platform)}\n${fixTouchPathKey(rel, process.platform)}`;
+    const stateFile = join(home, "gate-state", `${sessionKey}.fixtouch.json`);
+    const shown = readShownFixTouches(stateFile);
+    if (shown === undefined || shown.includes(key)) return undefined;
+
+    const path = sanitizeField(rel, FIXTOUCH_PATH_MAX);
+    const cmd = sanitizeField(entry.cmd, FIXTOUCH_CMD_MAX);
+    const signature = sanitizeField(entry.signature, FIXTOUCH_SIGNATURE_MAX);
+    const text = `Earlier record for ${path}: edited between a failing and a passing run of ${cmd} (${date}, error "${signature}"). Rocky records order, not cause.`;
+    return { text, markShown: () => markFixTouchShown(stateFile, key) };
+  } catch {
+    return undefined;
+  }
+}
+
 function silent(): string {
   return "{}";
 }
@@ -182,10 +313,13 @@ function dispatch(vendor: string, stdinJson: string): string {
     ...(failureFingerprint === undefined ? {} : { fingerprint: failureFingerprint }),
   };
 
-  const note = [clarityNudge(input, process.env), cycleNudge(input, process.env)]
-    .filter((s) => s.length > 0)
-    .join(" ");
-  return note.length === 0 ? silent() : advise(note);
+  const base = [clarityNudge(input, process.env), cycleNudge(input, process.env)].filter((s) => s.length > 0);
+  const baseOut = base.length === 0 ? silent() : advise(base.join(" "));
+  const touch = fixTouchNote(input, process.env, Date.now());
+  if (touch === undefined) return baseOut;
+  const withTouch = advise([...base, touch.text].join(" "));
+  if (Buffer.byteLength(withTouch, "utf8") > MAX_GATE_STDOUT_BYTES) return baseOut;
+  return touch.markShown() ? withTouch : baseOut;
 }
 
 /** Never throws, never denies, never returns a non-zero exit code. */

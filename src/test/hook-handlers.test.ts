@@ -37,13 +37,13 @@ function assertPlainSpeech(tty: string): void {
   }
 }
 
-function captureTty<T>(fn: () => T): { result: T; tty: string } {
+async function captureTty(fn: () => number | Promise<number>): Promise<{ result: number; tty: string }> {
   const scratch = mkdtempSync(join(tmpdir(), "rocky-capture-speech-"));
   const speechFile = join(scratch, "speech.txt");
   const previous = process.env.ROCKY_HOOK_SPEECH_FILE;
   process.env.ROCKY_HOOK_SPEECH_FILE = speechFile;
   try {
-    const result = fn();
+    const result = await fn();
     flushHookSpeech();
     const tty = existsSync(speechFile) ? readFileSync(speechFile, "utf8") : "";
     return { result, tty };
@@ -56,12 +56,12 @@ function captureTty<T>(fn: () => T): { result: T; tty: string } {
 
 const cwd = mkdtempSync(join(tmpdir(), "rocky-cwd-"));
 
-test("hookFail records nothing and says nothing for cancel exits", () => {
+test("hookFail records nothing and says nothing for cancel exits", async () => {
   const cancelHome = mkdtempSync(join(tmpdir(), "rocky-hook-cancel-"));
   process.env.ROCKY_HOME = cancelHome;
   try {
     for (const code of [130, 143]) {
-      const { result, tty } = captureTty(() => hookFail("kimi --resume", code, "/tmp/somewhere"));
+      const { result, tty } = await captureTty(() => hookFail("kimi --resume", code, "/tmp/somewhere"));
       assert.equal(result, 0);
       assert.equal(tty, "");
     }
@@ -79,8 +79,8 @@ test("hookFail records origin:hook failure and sets pending", () => {
   assert.ok(existsSync(memory.pendingPath()));
 });
 
-test("hookSuccess links fix to recent same-base failure in same cwd and clears pending", () => {
-  const code = hookSuccess("npm run build", cwd);
+test("hookSuccess links fix to recent same-base failure in same cwd and clears pending", async () => {
+  const code = await hookSuccess("npm run build", cwd);
   assert.equal(code, 0);
   const records = memory.loadMemory();
   const fixes = records.filter((r) => r.kind === "fix");
@@ -89,17 +89,17 @@ test("hookSuccess links fix to recent same-base failure in same cwd and clears p
   assert.ok(!existsSync(memory.pendingPath()), "pending cleared once resolved");
 });
 
-test("hookSuccess with nothing to link records no fix", () => {
+test("hookSuccess with nothing to link records no fix", async () => {
   const beforeCount = memory.loadMemory().filter((r) => r.kind === "fix").length;
-  hookSuccess("totally different-program", cwd);
+  await hookSuccess("totally different-program", cwd);
   const afterCount = memory.loadMemory().filter((r) => r.kind === "fix").length;
   assert.equal(afterCount, beforeCount);
 });
 
-test("hookSuccess does not change process cwd", () => {
+test("hookSuccess does not change process cwd", async () => {
   memory.recordHookFailure("another program", 1, cwd);
   const before = process.cwd();
-  hookSuccess("another program", cwd);
+  await hookSuccess("another program", cwd);
   assert.equal(process.cwd(), before);
 
   const fixes = memory.loadMemory().filter((record) => record.kind === "fix");
@@ -109,12 +109,12 @@ test("hookSuccess does not change process cwd", () => {
 const LINK_LINE = `rocky: ${phrase("fix-linked")}\n`;
 const RECURRENCE_SAME_LINE = `rocky: ${phrase("fix-recurrence-same")}\n`;
 
-test("hookSuccess states what was recorded, then names the command the late line is about", () => {
+test("hookSuccess states what was recorded, then names the command the late line is about", async () => {
   process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-link-voice-"));
   const linkCwd = mkdtempSync(join(tmpdir(), "rocky-hook-link-voice-cwd-"));
   try {
     assert.equal(hookFail("node hello.js", 1, linkCwd), 0);
-    const { result, tty } = captureTty(() => hookSuccess("node hello.js", linkCwd));
+    const { result, tty } = await captureTty(() => hookSuccess("node hello.js", linkCwd));
     assert.equal(result, 0);
     assert.equal(tty, `${LINK_LINE}    command: node hello.js\n`);
     assert.doesNotMatch(tty, /\bfixed\b|you fixed it|remember(s|ed)? the fix|something between/i);
@@ -124,7 +124,7 @@ test("hookSuccess states what was recorded, then names the command the late line
   }
 });
 
-test("hookSuccess names the linked command through boundCommand, never the raw argument", () => {
+test("hookSuccess names the linked command through boundCommand, never the raw argument", async () => {
   const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-link-bound-"));
   const linkCwd = mkdtempSync(join(tmpdir(), "rocky-hook-link-bound-cwd-"));
   // Built at runtime so no token-shaped literal sits in this source file.
@@ -140,7 +140,7 @@ test("hookSuccess names the linked command through boundCommand, never the raw a
   writeFileSync(join(isolatedHome, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
   process.env.ROCKY_HOME = isolatedHome;
   try {
-    const { result, tty } = captureTty(() => hookSuccess(cmd, linkCwd));
+    const { result, tty } = await captureTty(() => hookSuccess(cmd, linkCwd));
     assert.equal(result, 0);
     assert.equal(tty, `${LINK_LINE}    command: node deploy.js --token [redacted github token]\n`);
     assert.equal(tty.includes(token), false, "the raw secret must never reach the terminal");
@@ -149,10 +149,10 @@ test("hookSuccess names the linked command through boundCommand, never the raw a
   }
 });
 
-test("hookSuccess says nothing, not even the command, when no failure links", () => {
+test("hookSuccess says nothing, not even the command, when no failure links", async () => {
   process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-link-silent-"));
   try {
-    const { result, tty } = captureTty(() => hookSuccess("node nothing-failed-before.js", cwd));
+    const { result, tty } = await captureTty(() => hookSuccess("node nothing-failed-before.js", cwd));
     assert.equal(result, 0);
     assert.equal(tty, "");
   } finally {
@@ -215,12 +215,12 @@ function seedElsewhereFix(failCwd: string, fixCwd: string, cmd: string, exitCode
   process.env.ROCKY_HOME = isolatedHome;
 }
 
-test("hookFail admits when the remembered fix's cwd differs from the cwd argument", () => {
+test("hookFail admits when the remembered fix's cwd differs from the cwd argument", async () => {
   const failCwd = mkdtempSync(join(tmpdir(), "rocky-elsewhere-fail-"));
   const fixCwd = mkdtempSync(join(tmpdir(), "rocky-elsewhere-fix-"));
   seedElsewhereFix(failCwd, fixCwd, "elsewhere-test-cmd", 1);
   try {
-    const { result, tty } = captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
+    const { result, tty } = await captureTty(() => hookFail("elsewhere-test-cmd", 1, failCwd));
     assert.equal(result, 0);
     assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
     assert.match(tty, /But that fix comes from a different directory\./);
@@ -232,12 +232,12 @@ test("hookFail admits when the remembered fix's cwd differs from the cwd argumen
   }
 });
 
-test("hookFail compares elsewhere against linked failure cwd, not invocation cwd", () => {
+test("hookFail compares elsewhere against linked failure cwd, not invocation cwd", async () => {
   const failCwd = mkdtempSync(join(tmpdir(), "rocky-linked-failure-source-"));
   const fixCwd = mkdtempSync(join(tmpdir(), "rocky-linked-fix-current-"));
   seedElsewhereFix(failCwd, fixCwd, "linked-cwd-test-cmd", 1);
   try {
-    const { result, tty } = captureTty(() => hookFail("linked-cwd-test-cmd", 1, fixCwd));
+    const { result, tty } = await captureTty(() => hookFail("linked-cwd-test-cmd", 1, fixCwd));
     assert.equal(result, 0);
     assert.match(tty, /But that fix comes from a different directory\./);
     assert.match(tty, new RegExp(`place: ${fixCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
@@ -248,11 +248,11 @@ test("hookFail compares elsewhere against linked failure cwd, not invocation cwd
   }
 });
 
-test("hookFail says nothing extra when the remembered fix's cwd matches the cwd argument", () => {
+test("hookFail says nothing extra when the remembered fix's cwd matches the cwd argument", async () => {
   const sameCwd = mkdtempSync(join(tmpdir(), "rocky-samecwd-"));
   seedElsewhereFix(sameCwd, sameCwd, "samecwd-test-cmd", 1);
   try {
-    const { result, tty } = captureTty(() => hookFail("samecwd-test-cmd", 1, sameCwd));
+    const { result, tty } = await captureTty(() => hookFail("samecwd-test-cmd", 1, sameCwd));
     assert.equal(result, 0);
     assert.doesNotMatch(tty, /different directory/);
     assert.doesNotMatch(tty, /place:/);
@@ -283,11 +283,11 @@ test("a Git Bash hook failure and a rocky run success in the same directory link
   }
 });
 
-test("hookSuccess says the command passes now when the failure was recorded under the Git Bash spelling", GIT_BASH_ONLY, () => {
+test("hookSuccess says the command passes now when the failure was recorded under the Git Bash spelling", GIT_BASH_ONLY, async () => {
   process.env.ROCKY_HOME = mkdtempSync(join(tmpdir(), "rocky-hook-spelling-works-"));
   try {
     hookFail("node fail.js", 1, process.cwd().replaceAll("\\", "/"));
-    const { result, tty } = captureTty(() => hookSuccess("node fail.js", process.cwd()));
+    const { result, tty } = await captureTty(() => hookSuccess("node fail.js", process.cwd()));
     assert.equal(result, 0);
     assert.ok(tty.includes(LINK_LINE), tty);
   } finally {
@@ -298,12 +298,12 @@ test("hookSuccess says the command passes now when the failure was recorded unde
 test(
   "hookFail does not call a same-directory fix 'a different directory' because it was recorded under another spelling",
   { skip: process.platform !== "win32" },
-  () => {
+  async () => {
     const gitBash = "C:/Users/x/p";
     const native = "C:\\Users\\x\\p";
     seedElsewhereFix(gitBash, native, "spelling-test-cmd", 1);
     try {
-      const { result, tty } = captureTty(() => hookFail("spelling-test-cmd", 1, gitBash));
+      const { result, tty } = await captureTty(() => hookFail("spelling-test-cmd", 1, gitBash));
       assert.equal(result, 0);
       assert.ok(tty.includes(RECURRENCE_SAME_LINE), tty);
       assert.equal(/different directory/.test(tty), false);
@@ -316,11 +316,11 @@ test(
 test(
   "on POSIX hookFail drops a Windows-literal cwd without speaking or writing memory",
   { skip: process.platform === "win32" },
-  () => {
+  async () => {
     const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-spelling-posix-drop-"));
     process.env.ROCKY_HOME = isolatedHome;
     try {
-      const { result, tty } = captureTty(() => hookFail("spelling-test-cmd", 1, "C:/Users/x/p"));
+      const { result, tty } = await captureTty(() => hookFail("spelling-test-cmd", 1, "C:/Users/x/p"));
       assert.equal(result, 0);
       assert.equal(tty, "");
       assert.equal(existsSync(join(isolatedHome, "memory.jsonl")), false);
@@ -357,7 +357,7 @@ test(
  * match can carry a `cmd` whose identity differs from the currently
  * failing command, so `hookFail` must not present it as "you fix with:".
  */
-test("hookFail admits a fingerprint-matched fix may be a different command, not the fix", () => {
+test("hookFail admits a fingerprint-matched fix may be a different command, not the fix", async () => {
   const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-diffcmd-"));
   const diffCwd = mkdtempSync(join(tmpdir(), "rocky-diffcmd-cwd-"));
   const seededCmd = "cat file123.txt";
@@ -385,7 +385,7 @@ test("hookFail admits a fingerprint-matched fix may be a different command, not 
     // instead of a same-command match by coincidence).
     assert.equal(commandFingerprint(currentCmd, 1), seededFingerprint);
 
-    const { result, tty } = captureTty(() => hookFail(currentCmd, 1, diffCwd));
+    const { result, tty } = await captureTty(() => hookFail(currentCmd, 1, diffCwd));
     assert.equal(result, 0);
     assert.doesNotMatch(tty, /you fix with/);
     assert.match(tty, /Last time, you ran:/);
@@ -403,7 +403,7 @@ test("the elsewhere-admission lines follow the output rules", () => {
   assert.deepEqual(validateOutputLine("Possible only. Check before acting."), []);
 });
 
-test("hookFail speaks the full-record hint with the quoted command last, and plainly", () => {
+test("hookFail speaks the full-record hint with the quoted command last, and plainly", async () => {
   const isolatedHome = mkdtempSync(join(tmpdir(), "rocky-hook-hint-"));
   const hintCwd = mkdtempSync(join(tmpdir(), "rocky-hook-hint-cwd-"));
   const prevAdvisory = process.env.ROCKY_ATTEMPT_ADVISORY;
@@ -416,7 +416,7 @@ test("hookFail speaks the full-record hint with the quoted command last, and pla
       signature: ["hint-test-cmd"], excerpt: "exit 1", origin: "hook",
     };
     writeFileSync(join(isolatedHome, "memory.jsonl"), `${JSON.stringify(failure)}\n`, "utf8");
-    const { result, tty } = captureTty(() => hookFail("hint-test-cmd", 1, hintCwd));
+    const { result, tty } = await captureTty(() => hookFail("hint-test-cmd", 1, hintCwd));
     assert.equal(result, 0);
     assert.equal(
       tty,
@@ -430,7 +430,7 @@ test("hookFail speaks the full-record hint with the quoted command last, and pla
   }
 });
 
-test("hookFail says when memory cannot be read or written, plainly, and still exits 0", () => {
+test("hookFail says when memory cannot be read or written, plainly, and still exits 0", async () => {
   const brokenHome = mkdtempSync(join(tmpdir(), "rocky-hook-broken-memory-"));
   const brokenCwd = mkdtempSync(join(tmpdir(), "rocky-hook-broken-memory-cwd-"));
   // A directory where the memory file belongs: it opens as neither a readable
@@ -439,7 +439,7 @@ test("hookFail says when memory cannot be read or written, plainly, and still ex
   mkdirSync(join(brokenHome, "memory.jsonl"));
   process.env.ROCKY_HOME = brokenHome;
   try {
-    const { result, tty } = captureTty(() => hookFail("broken-memory-cmd", 1, brokenCwd));
+    const { result, tty } = await captureTty(() => hookFail("broken-memory-cmd", 1, brokenCwd));
     assert.equal(result, 0);
     assert.match(tty, /^rocky: Memory coverage is incomplete, so no prior fix is claimed\. Check the details below\.$/m);
     assert.match(tty, /^rocky: The memory file could not be written\. This event was not recorded\.$/m);
@@ -462,7 +462,7 @@ test("the memory-open failure line, which only a defensive catch can reach, foll
 
 const RUNNING_AS_ROOT = { skip: process.getuid?.() === 0 && "root bypasses file mode; a read-only memory file cannot be exercised" };
 
-test("hookFail says when only the write fails, naming the memory file", RUNNING_AS_ROOT, () => {
+test("hookFail says when only the write fails, naming the memory file", RUNNING_AS_ROOT, async () => {
   const readOnlyHome = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-memory-"));
   const readOnlyCwd = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-memory-cwd-"));
   const memoryPath = join(readOnlyHome, "memory.jsonl");
@@ -470,7 +470,7 @@ test("hookFail says when only the write fails, naming the memory file", RUNNING_
   chmodSync(memoryPath, 0o444);
   process.env.ROCKY_HOME = readOnlyHome;
   try {
-    const { result, tty } = captureTty(() => hookFail("readonly-memory-cmd", 1, readOnlyCwd));
+    const { result, tty } = await captureTty(() => hookFail("readonly-memory-cmd", 1, readOnlyCwd));
     assert.equal(result, 0);
     assert.equal(
       tty,
@@ -483,7 +483,7 @@ test("hookFail says when only the write fails, naming the memory file", RUNNING_
   }
 });
 
-test("hookFail discloses incomplete memory coverage without claiming a prior fix", () => {
+test("hookFail discloses incomplete memory coverage without claiming a prior fix", async () => {
   const partialHome = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-"));
   const partialCwd = mkdtempSync(join(tmpdir(), "rocky-hook-partial-memory-cwd-"));
   // Two unparseable lines exceed the skipped-line allowance, which triggers
@@ -491,7 +491,7 @@ test("hookFail discloses incomplete memory coverage without claiming a prior fix
   writeFileSync(join(partialHome, "memory.jsonl"), "this line is not json\nthis line is also not json\n", "utf8");
   process.env.ROCKY_HOME = partialHome;
   try {
-    const { result, tty } = captureTty(() => hookFail("partial-memory-cmd", 1, partialCwd));
+    const { result, tty } = await captureTty(() => hookFail("partial-memory-cmd", 1, partialCwd));
     assert.equal(result, 0);
     assert.match(tty, /^rocky: Memory coverage is incomplete, so no prior fix is claimed\. Check the details below\.$/m);
     assert.match(tty, /^ {4}\S/m, "a detail line follows the notice");
@@ -502,7 +502,7 @@ test("hookFail discloses incomplete memory coverage without claiming a prior fix
   }
 });
 
-test("hookSuccess says when the fix link cannot be written, plainly, and still exits 0", RUNNING_AS_ROOT, () => {
+test("hookSuccess says when the fix link cannot be written, plainly, and still exits 0", RUNNING_AS_ROOT, async () => {
   const readOnlyHome = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-success-"));
   const readOnlyCwd = mkdtempSync(join(tmpdir(), "rocky-hook-readonly-success-cwd-"));
   const memoryPath = join(readOnlyHome, "memory.jsonl");
@@ -512,7 +512,7 @@ test("hookSuccess says when the fix link cannot be written, plainly, and still e
     // fix to link, and the write that would record the link is the one that fails.
     assert.equal(hookFail("readonly-success-cmd", 1, readOnlyCwd), 0);
     chmodSync(memoryPath, 0o444);
-    const { result, tty } = captureTty(() => hookSuccess("readonly-success-cmd", readOnlyCwd));
+    const { result, tty } = await captureTty(() => hookSuccess("readonly-success-cmd", readOnlyCwd));
     assert.equal(result, 0);
     assert.equal(
       tty,

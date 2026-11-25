@@ -100,6 +100,8 @@ written to `memory.jsonl`:
   atomic format (`500`-key cap), enforcing a 30-minute per-key cooldown when no
   session identifier is present.
 
+The edit gate's `<ROCKY_HOME>/derived/attempts-hot.json` is a rebuildable, non-evidence cache and is safe to delete.
+
 ### Exposure log row (`advisories.jsonl`)
 
 One JSON object per line. Eligible moments write `kind: "note"`:

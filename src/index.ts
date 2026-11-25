@@ -731,7 +731,7 @@ async function main(): Promise<number> {
       case "_hooksuccess":
         try {
           const { hookSuccess } = await import("./commands/hook.js");
-          return hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
+          return await hookSuccess(rest[0] ?? "", rest[1] ?? process.cwd());
         } finally {
           flushHookSpeech();
         }

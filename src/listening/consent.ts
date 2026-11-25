@@ -9,6 +9,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, realpathSyn
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { isPathInside } from "../desk/cards-record.js";
+import { fixTouchCachePath } from "../core/fixtouch-cache.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { canonicalPath } from "../core/memory-read.js";
 import { cardsFilePath } from "./cards-path.js";
@@ -226,22 +227,30 @@ export function purgeRepoCapture(
   if (!revoked.ok) return { ok: false, freedBytes: 0, reason: revoked.reason };
   const root = revoked.root ?? typed;
   let freedBytes = 0;
-  for (const spelling of spellings) {
-    const purged = purgeListeningStore(spelling, home);
-    if (!purged.ok) return { ok: false, freedBytes, reason: purged.reason };
-    freedBytes += purged.freedBytes;
+  try {
+    for (const spelling of spellings) {
+      const purged = purgeListeningStore(spelling, home);
+      if (!purged.ok) return { ok: false, freedBytes, reason: purged.reason };
+      freedBytes += purged.freedBytes;
+    }
+    for (const spelling of spellings) {
+      const removed = deleteCardsFile(cardsFilePath(spelling, home));
+      if (!removed.ok) return { ok: false, freedBytes, reason: "cards-delete-failed" };
+      freedBytes += removed.freedBytes;
+    }
+    if (skipped !== undefined) return { ok: true, freedBytes, root, cardsScrubSkipped: skipped };
+    const scrubbed = scrubCardsAcrossLogs(spellings, home, env.userHome);
+    freedBytes += scrubbed.freedBytes;
+    return scrubbed.incomplete.length > 0
+      ? { ok: true, freedBytes, root, cardsIncomplete: scrubbed.incomplete }
+      : { ok: true, freedBytes, root };
+  } finally {
+    // The shared cache can contain cards removed by even a partial purge.
+    try {
+      const cacheFile = fixTouchCachePath(rockyHome);
+      if (lstatSync(dirname(cacheFile), { throwIfNoEntry: false })?.isDirectory()) unlinkSync(cacheFile);
+    } catch { /* Best-effort invalidation of derived data. */ }
   }
-  for (const spelling of spellings) {
-    const removed = deleteCardsFile(cardsFilePath(spelling, home));
-    if (!removed.ok) return { ok: false, freedBytes, reason: "cards-delete-failed" };
-    freedBytes += removed.freedBytes;
-  }
-  if (skipped !== undefined) return { ok: true, freedBytes, root, cardsScrubSkipped: skipped };
-  const scrubbed = scrubCardsAcrossLogs(spellings, home, env.userHome);
-  freedBytes += scrubbed.freedBytes;
-  return scrubbed.incomplete.length > 0
-    ? { ok: true, freedBytes, root, cardsIncomplete: scrubbed.incomplete }
-    : { ok: true, freedBytes, root };
 }
 
 /**

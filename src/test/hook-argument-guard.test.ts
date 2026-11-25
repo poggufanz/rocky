@@ -9,7 +9,7 @@ import { parseMemoryRecord } from "../core/memory-read.js";
 
 const GUARD_PENDING_ENTRY = "1799000000\tcancelled\trm\\s+-rf\t/repo\trm -rf /tmp/x\n";
 
-function withTempRockyHome(t: TestContext, fn: (home: string, absDir: string) => void): void {
+async function withTempRockyHome(t: TestContext, fn: (home: string, absDir: string) => void | Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rocky-hook-guard-"));
   const home = join(root, "home");
   const absDir = join(root, "repo");
@@ -19,7 +19,7 @@ function withTempRockyHome(t: TestContext, fn: (home: string, absDir: string) =>
   const previous = process.env.ROCKY_HOME;
   process.env.ROCKY_HOME = home;
   try {
-    fn(home, absDir);
+    await fn(home, absDir);
   } finally {
     if (previous === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = previous;
@@ -27,7 +27,7 @@ function withTempRockyHome(t: TestContext, fn: (home: string, absDir: string) =>
 }
 
 test("hookFail drops a non-integer exit code", (t) => {
-  withTempRockyHome(t, (home, absDir) => {
+  return withTempRockyHome(t, (home, absDir) => {
     const memoryPath = join(home, "memory.jsonl");
     const pendingPath = join(home, "pending");
     const guardPending = guardPendingPath(home);
@@ -46,7 +46,7 @@ test("hookFail drops a non-integer exit code", (t) => {
 });
 
 test("hookFail drops a relative or junk cwd", (t) => {
-  withTempRockyHome(t, (home) => {
+  return withTempRockyHome(t, (home) => {
     const memoryPath = join(home, "memory.jsonl");
     const pendingPath = join(home, "pending");
     const guardPending = guardPendingPath(home);
@@ -65,7 +65,7 @@ test("hookFail drops a relative or junk cwd", (t) => {
 });
 
 test("hookSuccess drops a junk cwd", (t) => {
-  withTempRockyHome(t, (home, absDir) => {
+  return withTempRockyHome(t, async (home, absDir) => {
     assert.equal(hookFail("npm test", 1, absDir), 0);
     const memoryPath = join(home, "memory.jsonl");
     const pendingPath = join(home, "pending");
@@ -75,7 +75,7 @@ test("hookSuccess drops a junk cwd", (t) => {
     assert.equal(existsSync(pendingPath), true);
 
     for (const cwd of ["=", "", "relative/dir"]) {
-      assert.equal(hookSuccess("npm test", cwd), 0);
+      assert.equal(await hookSuccess("npm test", cwd), 0);
       assert.equal(readFileSync(memoryPath, "utf8"), beforeMemory, `expected memory unchanged for cwd=${JSON.stringify(cwd)}`);
       assert.equal(existsSync(pendingPath), true, `expected pending retained for cwd=${JSON.stringify(cwd)}`);
       assert.equal(
@@ -88,7 +88,7 @@ test("hookSuccess drops a junk cwd", (t) => {
 });
 
 test("hookFail still records a valid failure", (t) => {
-  withTempRockyHome(t, (home, absDir) => {
+  return withTempRockyHome(t, (home, absDir) => {
     assert.equal(hookFail("npm test", 1, absDir), 0);
     const memoryPath = join(home, "memory.jsonl");
     assert.equal(existsSync(memoryPath), true);
@@ -104,7 +104,7 @@ test("hookFail still records a valid failure", (t) => {
 });
 
 test("hookFail accepts PowerShell FileSystem UNC cwd on win32 and drops relative FileSystem cwd", { skip: process.platform !== "win32" }, (t) => {
-  withTempRockyHome(t, (home) => {
+  return withTempRockyHome(t, (home) => {
     const relCwd = "Microsoft.PowerShell.Core\\FileSystem::relative";
     const memoryPath = join(home, "memory.jsonl");
     const pendingPath = join(home, "pending");
@@ -124,9 +124,9 @@ test("hookFail accepts PowerShell FileSystem UNC cwd on win32 and drops relative
   });
 });
 
-test("hookFail accepts PowerShell drive locations on win32 while still dropping '='", { skip: process.platform !== "win32" }, (t) => {
+test("hookFail accepts PowerShell drive locations on win32 while still dropping '='", { skip: process.platform !== "win32" }, async (t) => {
   for (const driveCwd of ["Temp:\\", "Work:\\repo"]) {
-    withTempRockyHome(t, (home) => {
+    await withTempRockyHome(t, (home) => {
       const memoryPath = join(home, "memory.jsonl");
       assert.equal(hookFail("npm test", 1, driveCwd), 0);
       assert.equal(existsSync(memoryPath), true);
@@ -140,7 +140,7 @@ test("hookFail accepts PowerShell drive locations on win32 while still dropping 
   }
 
   for (const junkCwd of ["=", "http://x", "file:///C:/x"]) {
-    withTempRockyHome(t, (home) => {
+    await withTempRockyHome(t, (home) => {
       const memoryPath = join(home, "memory.jsonl");
       const pendingPath = join(home, "pending");
       assert.equal(hookFail("npm test", 1, junkCwd), 0);
@@ -151,7 +151,7 @@ test("hookFail accepts PowerShell drive locations on win32 while still dropping 
 });
 
 test("failure writers refuse NaN and non-safe integers", (t) => {
-  withTempRockyHome(t, (home, absDir) => {
+  return withTempRockyHome(t, (home, absDir) => {
     const memoryPath = join(home, "memory.jsonl");
     for (const exitCode of [Number.NaN, 1.5, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
       assert.throws(() => recordHookFailure("x", exitCode, absDir), {

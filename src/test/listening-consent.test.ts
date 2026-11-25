@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { fixTouchCachePath } from "../core/fixtouch-cache.js";
 import { cardsFilePath } from "../listening/cards-path.js";
 import { purgeRepoCapture, setRepoCapture } from "../listening/consent.js";
 import {
@@ -263,6 +264,29 @@ test("purge succeeds when no card file exists", (t) => {
   const purged = purgeRepoCapture(root, { yes: true, actor: "cli", onRevoke: "delete" }, home);
   assert.equal(purged.ok, true);
   assert.equal(purged.freedBytes, 0);
+});
+
+test("purge invalidates the shared fix-touch cache after confirmation", (t) => {
+  const home = freshHome();
+  const root = gitRepo();
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  const options = { yes: true, actor: "cli", onRevoke: "delete" } as const;
+  assert.equal(setRepoCapture(root, true, options, home).ok, true);
+  const cache = fixTouchCachePath(home);
+  mkdirSync(dirname(cache));
+  writeFileSync(cache, JSON.stringify({
+    v: 1,
+    builtAt: Date.now(),
+    entries: [{ root, path: "src/file.ts", cmd: "npm test", signature: "TypeError", ts: Date.now() }],
+  }));
+
+  assert.equal(purgeRepoCapture(root, { ...options, yes: false }, home).ok, false);
+  assert.equal(existsSync(cache), true);
+  assert.equal(purgeRepoCapture(root, options, home).ok, true);
+  assert.equal(existsSync(cache), false);
 });
 
 test("purge leaves a linked worktree's card file alone", (t) => {

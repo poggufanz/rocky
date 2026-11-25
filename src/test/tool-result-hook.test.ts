@@ -14,6 +14,7 @@ import { canonicalPath, cwdIdentityKey, loadMemoryChecked } from "../core/memory
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
 import { cardsFilePath } from "../listening/cards-path.js";
+import { failurePayload, passPayload } from "./tool-result-hook-fixture.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const entry = join(packageRoot, "dist", "index.js");
@@ -110,30 +111,6 @@ function seedAgentFailures(
   }
   writeFileSync(memoryPath, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
   return fp;
-}
-
-function failurePayload(overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({
-    hook_event_name: "PostToolUseFailure",
-    tool_name: "Bash",
-    tool_input: { command: "npm test" },
-    error: "Exit code 1\nError: Cannot find module 'express'\n",
-    session_id: "s1",
-    tool_use_id: "toolu_fail_1",
-    ...overrides,
-  });
-}
-
-function passPayload(overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({
-    hook_event_name: "PostToolUse",
-    tool_name: "Bash",
-    tool_input: { command: "npm test" },
-    tool_response: { stdout: "all green\n", stderr: "", interrupted: false },
-    session_id: "s1",
-    tool_use_id: "toolu_pass_1",
-    ...overrides,
-  });
 }
 
 test("process: failure payload writes one agent failure and prints {}", (t) => {

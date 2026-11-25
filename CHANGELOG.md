@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+Opt-in fix-touch note in the edit gate (`fixtouch-on`), read from a derived cache rebuilt after confirmed fixes.
+
 `rocky mcp` adds `note_expectation`, an opt-out write tool that records an agent's stated expectation before rerunning a command. Rocky redacts the note and optional expected command before storing them locally and links the note to a recent failure in the same directory when one is available. `rocky attempts` and MCP `attempt_history` show linked expectations alongside any later matching run Rocky recorded. Disable writes with `ROCKY_MCP_WRITE=off` or `<ROCKY_HOME>/mcp-write-off`.
 
 The prior-attempts note's problem grouping no longer recomputes a command hash for every remembered failure: current-format failure records with a stored signature are classified from that signature; shell-hook records are classified as command failures directly; older records, or records without a signature array, still recompute the command hash. Measured on a 9,998-record real memory, single-fingerprint grouping dropped from 170–190 ms to about 14 ms and building the note dropped to about 12–19 ms; memory load is unchanged.

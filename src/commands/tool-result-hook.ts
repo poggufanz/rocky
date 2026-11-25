@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import type { AttemptNote } from "../core/attempt-note.js";
+import { refreshFixTouchAfterFix } from "../core/fixtouch-cache.js";
 import type { MemoryCoverage, MemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { parseToolResultPayload, TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
@@ -89,10 +90,11 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
     if (event.kind === "pass") {
       if (!existsSync(resolveRockyPaths().pending)) return EMPTY_RESPONSE;
       const { resolveFixOnSuccess } = await import("../core/memory.js");
-      resolveFixOnSuccess(event.cmd, event.cwd, {
+      const result = resolveFixOnSuccess(event.cmd, event.cwd, {
         agent: event.agent,
         lockWaitMs: TOOL_RESULT_LOCK_WAIT_MS,
       });
+      await refreshFixTouchAfterFix(result.fix, { home: resolveRockyPaths().home, now: Date.now() });
       return EMPTY_RESPONSE;
     }
 

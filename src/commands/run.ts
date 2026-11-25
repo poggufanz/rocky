@@ -14,6 +14,7 @@ import { agentStampFromEnv } from "../core/agent-session.js";
 import { commandIdentity, fingerprintCandidates } from "../core/fingerprint.js";
 import { CANCEL_CODES, runProcess, type ExecResult } from "../core/exec.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
+import { refreshFixTouchAfterFix } from "../core/fixtouch-cache.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import {
   boundCommand,
@@ -44,7 +45,7 @@ export async function run(cmd: string, processRunner: (cmd: string) => Promise<E
   if (result.started) {
     try {
       if (result.code === 0) {
-        onSuccess(cmd, agent);
+        await onSuccess(cmd, agent);
       } else if (!CANCEL_CODES.has(result.code)) {
         onFailure(cmd, result, agent);
       }
@@ -325,6 +326,7 @@ export function linkFixOnSuccess(
   return result;
 }
 
-function onSuccess(cmd: string, agent?: AgentStamp): void {
-  linkFixOnSuccess(cmd, process.cwd(), false, { agent });
+async function onSuccess(cmd: string, agent?: AgentStamp): Promise<void> {
+  const result = linkFixOnSuccess(cmd, process.cwd(), false, { agent });
+  await refreshFixTouchAfterFix(result.fix, { home: resolveRockyPaths().home, now: Date.now() });
 }

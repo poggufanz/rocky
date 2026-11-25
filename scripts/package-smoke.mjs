@@ -25,7 +25,7 @@ import {
   nodeOptionsRequire,
   shouldRunInstalledSetup,
 } from "./package-smoke-support.mjs";
-import { packManifestEntries } from "./release-check.mjs";
+import { isForbiddenPackArtifact, packManifestEntries } from "./release-check.mjs";
 
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_BINARY = "rocky";
@@ -151,11 +151,8 @@ function assertPackResult(packed) {
   const paths = packed.files.map((file) => file.path).sort();
   for (const path of paths) {
     assert.equal(allowedPackPath(path), true, `unexpected packed path: ${path}`);
+    assert.equal(isForbiddenPackArtifact(path), false, `forbidden source or test payload: ${path}`);
     const normalized = path.replaceAll("\\", "/");
-    assert.doesNotMatch(
-      normalized,
-      /(^|\/)test(\/|$)|\.test\.|(^|\/)src(\/|$)|fixture|cache|validation|\.rocky-managed\.json/i,
-    );
     // the no-weights guard exempts the two source files whose names say
     // "model" without shipping one: the model command and the models.dev
     // name catalog the gui renders

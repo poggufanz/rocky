@@ -1,0 +1,356 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import test, { type TestContext } from "node:test";
+import {
+  boundCodePoints,
+  FIXTOUCH_PATH_MAX,
+  findFixTouchEntry,
+  fixTouchCachePath,
+  fixTouchEnabled,
+  readFixTouchCache,
+  rootKey,
+  sanitizeField,
+  writeFixTouchCache,
+  type FixTouchCache,
+  type FixTouchEntry,
+} from "../core/fixtouch-cache.js";
+
+const now = 1_800_000_000_000;
+const contentWindow = 30 * 86_400_000;
+const entry: FixTouchEntry = {
+  root: "/repo",
+  path: "src/file.ts",
+  cmd: "npm test",
+  signature: "TypeError: token undefined",
+  ts: now - 100,
+};
+const cache: FixTouchCache = { v: 1, builtAt: now, entries: [entry] };
+
+function fixture(t: TestContext): { home: string; file: string } {
+  const home = mkdtempSync(join(tmpdir(), "rocky-fixtouch-"));
+  const previous = process.env.ROCKY_HOME;
+  process.env.ROCKY_HOME = home;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ROCKY_HOME;
+    else process.env.ROCKY_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  });
+  return { home, file: fixTouchCachePath(home) };
+}
+
+test("fix-touch is enabled by an empty marker file", (t) => {
+  const { home, file } = fixture(t);
+  assert.equal(file, join(home, "derived", "attempts-hot.json"));
+  assert.equal(fixTouchEnabled(home), false);
+  writeFileSync(join(home, "fixtouch-on"), "");
+  assert.equal(fixTouchEnabled(home), true);
+});
+
+test("cache writing creates a private directory and replaces the file without temporary leftovers", (t) => {
+  const { file } = fixture(t);
+  assert.equal(writeFixTouchCache(file, cache), true);
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+
+  const updated = { ...cache, entries: [] };
+  assert.equal(writeFixTouchCache(file, updated), true);
+  assert.deepEqual(readFixTouchCache(file, now), updated);
+  assert.deepEqual(readdirSync(dirname(file)), ["attempts-hot.json"]);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(dirname(file)).mode & 0o777, 0o700);
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+  }
+});
+
+test("a failed replacement preserves the destination and removes the temporary file", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(file, { recursive: true });
+  writeFileSync(join(file, "keep"), "existing data");
+
+  assert.equal(writeFixTouchCache(file, cache), false);
+  assert.equal(readFileSync(join(file, "keep"), "utf8"), "existing data");
+  assert.deepEqual(readdirSync(dirname(file)), ["attempts-hot.json"]);
+});
+
+test("a rejected publication preserves the existing cache and removes the staged file", (t) => {
+  const { file } = fixture(t);
+  const existing = Buffer.from(`${JSON.stringify(cache)}\n`);
+  mkdirSync(dirname(file));
+  writeFileSync(file, existing);
+  const updated = { ...cache, entries: [] };
+  let staged: string | undefined;
+
+  assert.equal(writeFixTouchCache(file, updated, {
+    beforePublish: () => {
+      staged = readFileSync(`${file}.${process.pid}.tmp`, "utf8");
+      return false;
+    },
+  }), false);
+  assert.equal(staged, JSON.stringify(updated));
+  assert.deepEqual(readFileSync(file), existing);
+  assert.deepEqual(readdirSync(dirname(file)), ["attempts-hot.json"]);
+});
+
+test("cache writing keeps a newest-first prefix within 256 KiB", (t) => {
+  const { file } = fixture(t);
+  const entries = Array.from({ length: 5_000 }, (_, index) => ({
+    ...entry,
+    path: `src/${"a".repeat(FIXTOUCH_PATH_MAX - "src/".length)}`,
+    cmd: "🪨".repeat(95),
+    signature: "s".repeat(135),
+    ts: entry.ts + index,
+  }));
+
+  assert.equal(writeFixTouchCache(file, { ...cache, entries }), true);
+  assert.ok(statSync(file).size <= 256 * 1024);
+  const written = readFixTouchCache(file, now);
+  assert.ok(written);
+  assert.ok(written.entries.length > 0 && written.entries.length < entries.length);
+  assert.deepEqual(written.entries.map(({ ts }: FixTouchEntry) => ts),
+    Array.from({ length: written.entries.length }, (_, index) => entry.ts + 4_999 - index));
+  assert.deepEqual(written.entries[0], {
+    root: entry.root,
+    path: entries[4_999].path,
+    cmd: "🪨".repeat(80),
+    signature: "s".repeat(120),
+    ts: entry.ts + 4_999,
+  });
+});
+
+test("cache reads ignore missing, oversized, malformed, and out-of-date files", (t) => {
+  const { file } = fixture(t);
+  assert.equal(readFixTouchCache(file, now), undefined);
+  mkdirSync(dirname(file));
+  const invalid = [
+    ["oversized valid JSON", JSON.stringify(cache).padEnd(256 * 1024 + 1)],
+    ["invalid JSON", "{"],
+    ["null document", "null"],
+    ["unknown version", JSON.stringify({ ...cache, v: 2 })],
+    ["string timestamp", JSON.stringify({ ...cache, builtAt: String(now) })],
+    ["non-finite timestamp", '{"v":1,"builtAt":1e999,"entries":[]}'],
+    ["older than seven days", JSON.stringify({ ...cache, builtAt: now - 7 * 86_400_000 - 1 })],
+    ["over a minute ahead", JSON.stringify({ ...cache, builtAt: now + 60_001 })],
+    ["missing entries array", JSON.stringify({ ...cache, entries: {} })],
+  ];
+  for (const [label, contents] of invalid) {
+    writeFileSync(file, contents);
+    assert.equal(readFixTouchCache(file, now), undefined, label);
+  }
+
+  for (const builtAt of [now - 7 * 86_400_000, now + 60_000]) {
+    const boundary = { ...cache, builtAt };
+    writeFileSync(file, JSON.stringify(boundary).padEnd(256 * 1024));
+    assert.deepEqual(readFixTouchCache(file, now), boundary);
+  }
+});
+
+test("cache reads drop invalid entries and preserve valid neighbors", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const validAtBounds = {
+    ...entry,
+    root: "/" + "r".repeat(1_023),
+    path: "p".repeat(160),
+    cmd: "🪨".repeat(80),
+    signature: "s".repeat(120),
+  };
+  const invalid = [
+    null,
+    { ...entry, root: 1 },
+    { ...entry, root: "" },
+    { ...entry, path: null },
+    { ...entry, path: "" },
+    { ...entry, path: "/outside.ts" },
+    { ...entry, path: "C:\\outside.ts" },
+    { ...entry, path: "\\\\server\\share\\outside.ts" },
+    { ...entry, path: "../outside.ts" },
+    { ...entry, path: "..outside.ts" },
+    { ...entry, path: "\u202e../outside.ts" },
+    { ...entry, path: "\u202e" },
+    { ...entry, cmd: 1 },
+    { ...entry, signature: [] },
+    { ...entry, ts: "1e999" },
+    { ...entry, ts: null },
+    { ...validAtBounds, root: validAtBounds.root + "r" },
+    { ...validAtBounds, path: validAtBounds.path + "p" },
+    { ...validAtBounds, cmd: validAtBounds.cmd + "\u202e" },
+    { ...validAtBounds, signature: validAtBounds.signature + "s" },
+  ];
+  const nonFinite = JSON.stringify({ ...entry, ts: "non-finite" }).replace('"non-finite"', "1e999");
+  const entries = [JSON.stringify(entry), ...invalid.map((invalidEntry) => JSON.stringify(invalidEntry)),
+    nonFinite, JSON.stringify(validAtBounds)];
+  writeFileSync(file, `{"v":1,"builtAt":${now},"entries":[${entries.join(",")}]}`);
+
+  assert.deepEqual(readFixTouchCache(file, now), { ...cache, entries: [entry, validAtBounds] });
+});
+
+test("cache writes keep the exact 30-day cutoff relative to the build time", (t) => {
+  const { file } = fixture(t);
+  const builtAt = now - 60_000;
+  const cutoff = { ...entry, path: "src/cutoff.ts", ts: builtAt - contentWindow };
+  const expired = { ...cutoff, path: "src/expired.ts", ts: cutoff.ts - 1 };
+
+  assert.equal(writeFixTouchCache(file, { ...cache, builtAt, entries: [expired, cutoff, entry] }), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...cache, builtAt, entries: [entry, cutoff] });
+});
+
+test("cache reads age entries against the read time even when the cache is fresh", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const builtAt = now - 60_000;
+  const cutoff = { ...entry, path: "src/cutoff.ts", ts: now - contentWindow };
+  const expired = { ...cutoff, path: "src/expired.ts", ts: cutoff.ts - 1 };
+  writeFileSync(file, JSON.stringify({ ...cache, builtAt, entries: [entry, expired, cutoff] }));
+
+  const read = readFixTouchCache(file, now);
+  assert.deepEqual(read, { ...cache, builtAt, entries: [entry, cutoff] });
+  assert.equal(findFixTouchEntry(read, expired.root, expired.path, "linux"), undefined);
+});
+
+test("cache reads and writes bound entry timestamps against their respective clocks", (t) => {
+  const { file } = fixture(t);
+  const builtAt = 1_000;
+  const readAt = 2_000;
+  const atWriterLimit = { ...entry, ts: builtAt + 60_000 };
+  const atReaderLimit = { ...entry, ts: readAt + 60_000 };
+  const tooFarAhead = { ...entry, ts: atReaderLimit.ts + 1 };
+  const negative = { ...entry, ts: -1 };
+  const epoch = { ...entry, ts: 0 };
+  const input = { ...cache, builtAt, entries: [tooFarAhead, atReaderLimit, atWriterLimit, negative, epoch] };
+
+  mkdirSync(dirname(file));
+  writeFileSync(file, JSON.stringify(input));
+  assert.deepEqual(readFixTouchCache(file, readAt), { ...input, entries: [atReaderLimit, atWriterLimit, epoch] });
+
+  assert.equal(writeFixTouchCache(file, input), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...input, entries: [atWriterLimit, epoch] });
+});
+
+test("cache reads and writes drop year-10000 entries even at a year-10000 clock", (t) => {
+  const { file } = fixture(t);
+  const builtAt = Date.UTC(10000, 0, 1);
+  const lastFourDigitYear = { ...entry, ts: builtAt - 1 };
+  const input = { ...cache, builtAt, entries: [{ ...entry, ts: builtAt }, lastFourDigitYear] };
+  const expected = { ...input, entries: [lastFourDigitYear] };
+
+  mkdirSync(dirname(file));
+  writeFileSync(file, JSON.stringify(input));
+  assert.deepEqual(readFixTouchCache(file, builtAt), expected);
+
+  assert.equal(writeFixTouchCache(file, input), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), expected);
+});
+
+test("commands and signatures are sanitized on both read and write", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const fabricatedToken = `ghp_${"a1".repeat(18)}`;
+  const tainted = {
+    ...cache,
+    entries: [{
+      ...entry,
+      cmd: `gh api\n${fabricatedToken}\u202e\u2028--silent\u2029--verbose`,
+      signature: 'TypeError: "token"\n\u202eundefined',
+    }],
+  };
+  const sanitized = {
+    ...cache,
+    entries: [{
+      ...entry,
+      cmd: "gh api [redacted github token] --silent --verbose",
+      signature: "TypeError: 'token'",
+    }],
+  };
+
+  writeFileSync(file, JSON.stringify(tainted));
+  assert.deepEqual(readFixTouchCache(file, now), sanitized);
+  assert.equal(writeFixTouchCache(file, tainted), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), sanitized);
+});
+
+test("cache reads and writes omit paths whose identity would change", (t) => {
+  const { file } = fixture(t);
+  const prefix = `src/${"a".repeat(FIXTOUCH_PATH_MAX - "src/".length)}`;
+  const longPath = `${prefix}.ts`;
+  const mutated = "src/\u202efile\u2028one\u2029two.ts";
+  const safeLookingPath = "src/file one two.ts";
+  assert.equal(Array.from(longPath).length, 163);
+  const input = { ...cache, entries: [entry, { ...entry, path: longPath }, { ...entry, path: mutated }] };
+
+  assert.equal(writeFixTouchCache(file, input), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), cache);
+  const written = readFixTouchCache(file, now);
+  assert.deepEqual(written, cache);
+  for (const path of [longPath, prefix, mutated, safeLookingPath]) {
+    assert.equal(findFixTouchEntry(written, entry.root, path, "linux"), undefined);
+  }
+
+  writeFileSync(file, JSON.stringify(input));
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+});
+
+test("only the first signature line survives every supported separator", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const entries = ["\r\n", "\n", "\r", "\u2028", "\u2029"].map((separator) => ({
+    ...entry,
+    signature: `Error "first"${separator}later line`,
+  }));
+  const expected = { ...cache, entries: entries.map(() => ({ ...entry, signature: "Error 'first'" })) };
+
+  writeFileSync(file, JSON.stringify({ ...cache, entries }));
+  assert.deepEqual(readFixTouchCache(file, now), expected);
+  assert.equal(writeFixTouchCache(file, { ...cache, entries }), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), expected);
+});
+
+test("stored and loaded cache paths use forward slashes", (t) => {
+  const { file } = fixture(t);
+  const backslashCache = { ...cache, entries: [{ ...entry, path: "src\\file.ts" }] };
+
+  assert.equal(writeFixTouchCache(file, backslashCache), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), cache);
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+
+  writeFileSync(file, JSON.stringify(backslashCache));
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+});
+
+test("cache reads and writes drop paths outside the repository", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const invalid = ["src/../../outside.ts", "src\\..\\..\\outside.ts", "C:outside.ts", "/outside.ts",
+    "\\outside.ts", "src/\u202e../outside.ts"].map((path) => ({ ...entry, path }));
+  const mixed = { ...cache, entries: [...invalid, entry] };
+
+  writeFileSync(file, JSON.stringify(mixed));
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+  assert.equal(writeFixTouchCache(file, mixed), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), cache);
+});
+
+test("matching picks the newest entry and uses the platform's path comparison", (t) => {
+  fixture(t);
+  const older = { ...entry, root: "c:/repo" };
+  const newer = { ...older, root: "C:\\Repo\\", path: "Src\\File.ts", ts: older.ts + 1 };
+  const anotherRoot = { ...newer, root: "C:/elsewhere", ts: newer.ts + 1 };
+  const anotherPath = { ...newer, path: "src/other.ts", ts: newer.ts + 1 };
+  const windowsCache = { ...cache, entries: [older, anotherRoot, newer, anotherPath] };
+  assert.equal(findFixTouchEntry(windowsCache, "c:/REPO", "SRC/File.ts", "win32"), newer);
+  assert.equal(findFixTouchEntry(undefined, "c:/REPO", "SRC/File.ts", "win32"), undefined);
+
+  assert.equal(findFixTouchEntry(cache, "/repo/", "src/file.ts", "linux"), entry);
+  assert.equal(findFixTouchEntry(cache, "/Repo", "src/file.ts", "linux"), undefined);
+  assert.equal(findFixTouchEntry(cache, "/repo", "src/File.ts", "linux"), undefined);
+});
+
+test("root aliases and field bounds preserve meaningful characters", (t) => {
+  fixture(t);
+  assert.equal(rootKey("C:", "win32"), rootKey("C:/", "win32"));
+  assert.equal(rootKey("C:", "win32"), rootKey("c:\\", "win32"));
+  assert.equal(rootKey("/repo/", "linux"), rootKey("/repo", "linux"));
+  assert.equal(rootKey("/", "linux"), "/");
+  assert.equal(boundCodePoints("a🪨z", 2), "a🪨");
+  assert.equal(sanitizeField("a\u202e🪨z", 2), "a🪨");
+});
