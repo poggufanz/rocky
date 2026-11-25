@@ -2,7 +2,7 @@ import {
   closeSync, constants, existsSync, mkdirSync, openSync, readSync,
   renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { FixRecord } from "./memory-read.js";
 import { sanitizeTestimony } from "./redact.js";
 
@@ -24,6 +24,17 @@ export function fixTouchEnabled(home: string): boolean {
 
 export function fixTouchCachePath(home: string): string {
   return join(home, "derived", "attempts-hot.json");
+}
+
+/** Walk parent directories for a .git marker, including for files not written yet. */
+export function fileGitRoot(absPath: string): string | undefined {
+  let dir = dirname(resolve(absPath));
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
 }
 
 /**
@@ -59,7 +70,7 @@ export function rootKey(root: string, platform: NodeJS.Platform = process.platfo
   return platform === "win32" ? trimmed.toLowerCase() : trimmed;
 }
 
-function pathKey(path: string, platform: NodeJS.Platform): string {
+export function fixTouchPathKey(path: string, platform: NodeJS.Platform): string {
   return platform === "win32" ? path.replaceAll("\\", "/").toLowerCase() : path;
 }
 
@@ -176,10 +187,10 @@ export function findFixTouchEntry(
 ): FixTouchEntry | undefined {
   if (cache === undefined) return undefined;
   const targetRoot = rootKey(root, platform);
-  const targetPath = pathKey(path, platform);
+  const targetPath = fixTouchPathKey(path, platform);
   let newest: FixTouchEntry | undefined;
   for (const entry of cache.entries) {
-    if (rootKey(entry.root, platform) === targetRoot && pathKey(entry.path, platform) === targetPath &&
+    if (rootKey(entry.root, platform) === targetRoot && fixTouchPathKey(entry.path, platform) === targetPath &&
         (newest === undefined || entry.ts > newest.ts)) newest = entry;
   }
   return newest;
