@@ -34,7 +34,7 @@ Requires Node.js 18 or newer. The package name is `@poggufanz/rocky-cli`; the un
 
 Current release: `@poggufanz/rocky-cli@2.0.0`. See the [release notes](https://github.com/poggufanz/rocky/releases/tag/v2.0.0) or the full [changelog](CHANGELOG.md).
 
-**Agent self-setup (any harness).** Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP read access, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
+**Agent self-setup (any harness).** Working with an agent outside Claude Code or Codex (OpenCode, Gemini CLI, anything else)? [docs/agents/INSTALL.md](docs/agents/INSTALL.md) covers the shell hook, the notify rationale lane, and optional MCP registration, and every step that edits your files asks for approval first. On Claude Code and Codex, `rocky setup --agent-hooks` and `rocky setup` capture more, automatically. To hand it to the agent:
 
 ```text
 Fetch and follow instructions from https://raw.githubusercontent.com/poggufanz/rocky/main/docs/agents/INSTALL.md
@@ -93,7 +93,7 @@ The first run fails and Rocky remembers it; the second run works, and Rocky know
 | `rocky check` | Scans a pending push for secrets, checks new npm package names after consent, and asks one comprehension question. |
 | Nervous System | Supported Claude Code and Codex hooks record bounded intent, path, excerpt, and stated-rationale evidence. |
 | Dictionary | `rocky what`, `rocky how`, `rocky why`, `rocky digest`, `rocky quiz`, and `rocky export` turn remembered changes back into plain explanations. |
-| `rocky mcp` | Exposes bounded memory and knowledge tools over local stdio, with sanitized output by default. |
+| `rocky mcp` | Serves 14 read-only tools and one write tool (`note_expectation`, for agent testimony) over local stdio. Sanitized output is the default. |
 | Concepts & advisory gate | A concept lexicon (`rocky concepts`) plus an advisory PreToolUse hook (`rocky hook gate-event`) that prints `{}` or an `additionalContext` note and never denies. |
 | Host setup | `rocky setup` registers supported hosts after consent; `rocky setup --remove` also removes a voice skill left by an older release (refuses while desk consent is approved). |
 | `rocky hook` | Manage the optional Bash, WSL, and PowerShell shell hooks. |
