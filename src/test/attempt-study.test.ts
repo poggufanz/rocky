@@ -237,14 +237,14 @@ test("without a marker the report counts all eligible rows and hides outcomes", 
   assert.deepEqual(report.start, { state: "absent" });
   assert.equal(report.primaryUnits, 2);
   assert.deepEqual(report.arms, {
-    shown: { episodes: 2, primaryUnits: 1, outOfTail: 2 },
+    shown: { episodes: 2, primaryUnits: 1, outOfTail: 1 },
     held: { episodes: 1, primaryUnits: 1, outOfTail: 1 },
   });
   assert.deepEqual(report.excluded, {
     unassigned: 2, human: 1, noSession: 2, noAnchor: 1, duplicateAnchor: 2,
     keyMismatch: 1, armConflict: 0, beforeStart: 0, afterStop: 0,
   });
-  assert.deepEqual({ ...report.skips }, { lock_busy: 1, wrapped: 2 });
+  assert.deepEqual({ ...report.skips }, { lock_busy: 1, wrapped: 1 });
   assert.equal(report.malformed, 1);
   assert.equal(report.logFull, true);
   assertNoOutcomes(report);
@@ -252,7 +252,7 @@ test("without a marker the report counts all eligible rows and hides outcomes", 
 
 test("running study reports operational counts without exposing outcomes", () => {
   const input = fixture();
-  const report = buildAttemptStudy({ ...input, rows: input.rows.filter((row) => row.ts <= input.now), start });
+  const report = buildAttemptStudy({ ...input, start });
   assert.equal(report.phase, "running");
   assert.deepEqual(report.start, { state: "set", iso: "2026-12-01T00:00:00.000Z" });
   assert.equal(report.day, 5);
@@ -324,16 +324,40 @@ test("unit stop uses the earliest 300 primary units, regardless of file order", 
   assert.equal(report.excluded.afterStop, 10);
 });
 
-test("episodes tied at the unit cutoff stay in the timestamp window", () => {
+test("unit stop excludes episodes later in file order at the same timestamp", () => {
   const input = cohort(151, 150, 0, 0);
-  const rows = input.rows.map((row) => row.anchorFailureId === "shown-150"
-    ? { ...row, ts: START + 299_000 }
-    : row);
+  const rows = input.rows.map((row) => {
+    if (row.anchorFailureId === "shown-150") return { ...row, ts: START + 299_000 };
+    if (row.anchorFailureId === "held-149") return { ...row, latencyMs: 50, bytes: 500 };
+    return row;
+  });
   const report = buildAttemptStudy({ ...input, rows });
   assert.equal(report.phase, "stopped");
   assert.equal(report.stopReason, "units");
-  assert.equal(report.primaryUnits, 301);
-  assert.equal(report.excluded.afterStop, 0);
+  assert.equal(report.primaryUnits, 300);
+  assert.equal(report.primary.shown.n + report.primary.held.n, 300);
+  assert.equal(report.primary.shown.n, 151);
+  assert.equal(report.primary.held.n, 149);
+  assert.equal(report.excluded.afterStop, 1);
+  assert.deepEqual(report.latency.run, { n: 300, p95: 10 });
+  assert.equal(report.meanDeliveredBytes, 100);
+});
+
+test("future exposures do not count toward a pre-stop report", () => {
+  const input = cohort(150, 150, 0, 0);
+  const rows = input.rows.map((row) => row.anchorFailureId === "held-149"
+    ? { ...row, ts: input.now + 1, bytes: 500 }
+    : row);
+  for (const studyStart of [start, { state: "absent" }] as const) {
+    const report = buildAttemptStudy({ ...input, rows, start: studyStart });
+    assert.equal(report.phase, studyStart.state === "set" ? "running" : "not-started");
+    assert.equal(report.primaryUnits, 299);
+    assert.deepEqual(report.arms.held, { primaryUnits: 149, episodes: 149, outOfTail: 0 });
+    assert.equal(report.excluded.afterStop, 0);
+    assert.deepEqual(report.latency.run, { n: 299, p95: 10 });
+    assert.equal(report.meanDeliveredBytes, 100);
+    assertNoOutcomes(report);
+  }
 });
 
 test("conflicting in-window arms exclude the entire session before counting primary units", () => {
@@ -378,12 +402,37 @@ test("empty arm gives an inconclusive verdict and no fabricated interval in text
   assert.doesNotMatch(lines.join("\n"), /NaN|undefined|90% CI/u);
 });
 
+test("same-failure mean is available only for arms with observed episodes", () => {
+  for (const [shown, held, emptyArm, observedArm, meanLine] of [
+    [1, 0, "held", "shown", "same failure after the note: shown 0.0 per episode, no held episodes."],
+    [0, 1, "shown", "held", "same failure after the note: no shown episodes, held 0.0 per episode."],
+  ] as const) {
+    const report = buildAttemptStudy({ ...cohort(shown, held, 0, 0), now: DEADLINE });
+    assert.equal(report.phase, "stopped");
+    assert.equal(report.sameFailure[emptyArm], undefined);
+    assert.equal(report.sameFailure[observedArm], 0);
+    assert.equal(JSON.stringify(report.sameFailure), JSON.stringify({ [observedArm]: 0 }));
+    assert.ok(render(report, CWD).includes(meanLine));
+  }
+});
+
+test("text groups unrecognized skip reasons while JSON preserves their raw tallies", () => {
+  const input = fixture();
+  const rows = [
+    note({ kind: "skip", reason: "wrapped" }),
+    note({ kind: "skip", reason: "fixed" }),
+    note({ kind: "skip", reason: "line\nwith a question?" }),
+  ];
+  const report = buildAttemptStudy({ ...input, rows });
+  assert.deepEqual(report.skips, { wrapped: 1, fixed: 1, "line\nwith a question?": 1 });
+  assert.ok(render(report, CWD).includes("skips: wrapped 1, other 2."));
+});
+
 test("pre-stop text distinguishes absent and invalid markers and hides outcome numbers", () => {
   const input = fixture();
-  const stoppedRowsRemoved = input.rows.filter((row) => row.ts <= input.now);
   const absent = buildAttemptStudy(input);
   const invalid = buildAttemptStudy({ ...input, start: { state: "invalid" } });
-  const running = buildAttemptStudy({ ...input, rows: stoppedRowsRemoved, start });
+  const running = buildAttemptStudy({ ...input, start });
   const path = join(CWD, "attempt-study-start");
   const heads = [
     "Attempt study not started. No start marker at " + path + ".",

@@ -180,7 +180,7 @@ interface StoppedStudy extends StartedStudy {
   stopReason: "units" | "days";
   primary: ByArm<PrimaryCounts> & Partial<DiffInterval> & { mde?: number };
   secondary: Partial<DiffInterval> & { resamples: typeof BOOTSTRAP_RESAMPLES; clusters: ByArm<number> };
-  sameFailure: ByArm<number>;
+  sameFailure: ByArm<number | undefined>;
   repeatFileSet: ByArm<RepeatCounts>;
   expectations: ByArm<ExpectationCounts>;
   verdict: Verdict;
@@ -194,8 +194,13 @@ export type AttemptStudyReport =
 type CandidateRow = ExposureRow & { kind: "note"; arm: Arm; session: string; anchorFailureId: string };
 type Candidate = { row: CandidateRow; order: number };
 type Anchor = { entry: ProblemEntry; attempt: Attempt; keyHash: string };
-type Episode = { row: CandidateRow; anchor: Anchor };
+type Episode = Candidate & { anchor: Anchor };
 type SessionEpisodes = { arm: Arm; episodes: Episode[] };
+type Cutoff = { ts: number; order: number };
+
+function afterCutoff(ts: number, order: number, cutoff: Cutoff): boolean {
+  return ts > cutoff.ts || (ts === cutoff.ts && order > cutoff.order);
+}
 
 function isCandidate(row: ExposureRow): row is CandidateRow {
   return row.kind === "note" && (row.arm === "shown" || row.arm === "held")
@@ -206,9 +211,12 @@ export function anchorIds(rows: readonly ExposureRow[]): Set<string> {
   return new Set(rows.filter(isCandidate).map((row) => row.anchorFailureId));
 }
 
-function collectCandidates(rows: readonly ExposureRow[], excluded: Excluded, skips: Map<string, number>): CandidateRow[] {
+function collectCandidates(
+  rows: readonly ExposureRow[], now: number, excluded: Excluded, skips: Map<string, number>,
+): Candidate[] {
   const byAnchor = new Map<string, Candidate>();
   for (const [order, row] of rows.entries()) {
+    if (row.ts > now) continue;
     if (row.kind === "skip") {
       const reason = row.reason ?? "unknown";
       skips.set(reason, (skips.get(reason) ?? 0) + 1);
@@ -226,7 +234,7 @@ function collectCandidates(rows: readonly ExposureRow[], excluded: Excluded, ski
       excluded.noAnchor++;
     }
   }
-  return [...byAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order).map(({ row }) => row);
+  return [...byAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order);
 }
 
 function indexAnchors(entries: readonly ProblemEntry[]): Map<string, Anchor> {
@@ -240,34 +248,31 @@ function indexAnchors(entries: readonly ProblemEntry[]): Map<string, Anchor> {
   return anchors;
 }
 
-function findUnitStop(episodes: readonly Episode[], deadline: number, now: number): number | undefined {
+function findUnitStop(episodes: readonly Episode[], deadline: number): Cutoff | undefined {
   const arms = new Map<string, Arm | null>();
   let units = 0;
-  let ts: number | undefined;
-  for (const { row } of episodes) {
-    if (row.ts >= deadline || row.ts > now) break;
-    // Include every episode at the cutoff timestamp, including any arm conflicts.
-    if (row.ts !== ts && units >= STUDY_STOP_UNITS) return ts;
-    ts = row.ts;
+  for (const { row, order } of episodes) {
+    if (row.ts >= deadline) break;
     const arm = arms.get(row.session);
     if (arm === undefined) {
       arms.set(row.session, row.arm);
       units++;
+      if (units === STUDY_STOP_UNITS) return { ts: row.ts, order };
     } else if (arm !== null && arm !== row.arm) {
       arms.set(row.session, null);
       units--;
     }
   }
-  return units >= STUDY_STOP_UNITS ? ts : undefined;
+  return undefined;
 }
 
 function collectSessions(
-  episodes: readonly Episode[], end: number, counts: StudyCounts,
+  episodes: readonly Episode[], cutoff: Cutoff, counts: StudyCounts,
 ): SessionEpisodes[] {
   const sessions = new Map<string, SessionEpisodes>();
   for (const episode of episodes) {
     const { row } = episode;
-    if (row.ts > end) break;
+    if (afterCutoff(row.ts, episode.order, cutoff)) break;
     const session = sessions.get(row.session);
     if (session === undefined) sessions.set(row.session, { arm: row.arm, episodes: [episode] });
     else session.episodes.push(episode);
@@ -287,13 +292,13 @@ function collectSessions(
   return included;
 }
 
-function countOperations(rows: readonly ExposureRow[], start: number, end: number, counts: StudyCounts): void {
+function countOperations(rows: readonly ExposureRow[], start: number, cutoff: Cutoff, counts: StudyCounts): void {
   const latency: Record<Lane, number[]> = { run: [], watch: [], hookfail: [], "tool-result": [] };
   let delivered = 0;
   let totalBytes = 0;
   let meanBytes = 0;
-  for (const row of rows) {
-    if (row.kind !== "note" || row.ts < start || row.ts > end) continue;
+  for (const [order, row] of rows.entries()) {
+    if (row.kind !== "note" || row.ts < start || afterCutoff(row.ts, order, cutoff)) continue;
     latency[row.lane].push(row.latencyMs);
     if (row.delivered) {
       delivered++;
@@ -393,8 +398,8 @@ function analyzeSessions(
       clusters: { shown: shown.n, held: held.n },
     },
     sameFailure: {
-      shown: sameFailure.shown / (arms.shown.episodes || 1),
-      held: sameFailure.held / (arms.held.episodes || 1),
+      shown: arms.shown.episodes === 0 ? undefined : sameFailure.shown / arms.shown.episodes,
+      held: arms.held.episodes === 0 ? undefined : sameFailure.held / arms.held.episodes,
     },
     repeatFileSet,
     expectations,
@@ -421,35 +426,36 @@ export function buildAttemptStudy(input: AttemptStudyInput): AttemptStudyReport 
     },
   };
   const skips = new Map<string, number>();
-  const candidates = collectCandidates(rows, counts.excluded, skips);
+  const candidates = collectCandidates(rows, now, counts.excluded, skips);
   counts.skips = Object.fromEntries(skips);
 
   const startTs = start.state === "set" ? start.ts : -Infinity;
   const deadline = start.state === "set" ? start.ts + STUDY_STOP_DAYS * DAY_MS : Infinity;
   const anchors = indexAnchors(entries);
   const resolved: Episode[] = [];
-  for (const row of candidates) {
+  for (const candidate of candidates) {
+    const { row } = candidate;
     if (row.ts < startTs || row.ts > deadline) continue;
     const anchor = anchors.get(row.anchorFailureId);
-    if (anchor !== undefined && row.key === anchor.keyHash) resolved.push({ row, anchor });
+    if (anchor !== undefined && row.key === anchor.keyHash) resolved.push({ ...candidate, anchor });
   }
-  const unitStop = start.state === "set" ? findUnitStop(resolved, deadline, now) : undefined;
-  const end = unitStop ?? deadline;
+  const unitStop = start.state === "set" ? findUnitStop(resolved, deadline) : undefined;
+  const cutoff = unitStop ?? { ts: Math.min(now, deadline), order: Infinity };
 
-  for (const row of candidates) {
+  for (const { row, order } of candidates) {
     if (row.ts < startTs) counts.excluded.beforeStart++;
-    else if (row.ts > end) counts.excluded.afterStop++;
+    else if (afterCutoff(row.ts, order, cutoff)) counts.excluded.afterStop++;
     else {
       const anchor = anchors.get(row.anchorFailureId);
       if (anchor === undefined) counts.arms[row.arm].outOfTail++;
       else if (row.key !== anchor.keyHash) counts.excluded.keyMismatch++;
     }
   }
-  const sessions = collectSessions(resolved, end, counts);
-  countOperations(rows, startTs, end, counts);
+  const sessions = collectSessions(resolved, cutoff, counts);
+  countOperations(rows, startTs, cutoff, counts);
   if (start.state !== "set") return { ...counts, phase: "not-started", start };
 
-  const day = Math.max(1, Math.min(STUDY_STOP_DAYS, Math.floor(((unitStop ?? now) - start.ts) / DAY_MS) + 1));
+  const day = Math.max(1, Math.min(STUDY_STOP_DAYS, Math.floor((cutoff.ts - start.ts) / DAY_MS) + 1));
   const started: StartedStudy = { ...counts, start: { state: "set", iso: new Date(start.ts).toISOString() }, day };
   if (unitStop === undefined && now < deadline) return { ...started, phase: "running" };
   return {
@@ -478,6 +484,21 @@ function tallyText(tallies: Record<string, number | undefined>): string {
   return Object.entries(tallies).filter(([, n]) => n).map(([key, n]) => `${key} ${n}`).join(", ");
 }
 
+const DISPLAYABLE_SKIP_REASONS = new Set([
+  "interrupt", "background", "no-exit-header", "wrapped", "undecidable", "lock_busy", "coverage", "hook-duplicate",
+]);
+
+function skipTallyText(skips: Record<string, number>): string {
+  const tallies: Record<string, number> = {};
+  let other = 0;
+  for (const [reason, count] of Object.entries(skips)) {
+    if (DISPLAYABLE_SKIP_REASONS.has(reason)) tallies[reason] = count;
+    else other += count;
+  }
+  if (other > 0) tallies.other = other;
+  return tallyText(tallies);
+}
+
 const VERDICT_TEXT: Record<Verdict, string> = {
   on: "Verdict: on. The note becomes default on.",
   off: "Verdict: off. The note stays off.",
@@ -498,8 +519,14 @@ function renderOutcomes(report: StoppedStudy): string[] {
   if (secondary.diff !== undefined && secondary.lower !== undefined && secondary.upper !== undefined) {
     details.push(`secondary, all episodes: ${points(secondary.diff)} points, 90% CI ${points(secondary.lower)} to ${points(secondary.upper)} (session bootstrap, ${secondary.resamples} resamples).`);
   }
+  const shownMean = sameFailure.shown === undefined
+    ? "no shown episodes"
+    : `shown ${sameFailure.shown.toFixed(1)} per episode`;
+  const heldMean = sameFailure.held === undefined
+    ? "no held episodes"
+    : `held ${sameFailure.held.toFixed(1)}${sameFailure.shown === undefined ? " per episode" : ""}`;
   details.push(
-    `same failure after the note: shown ${sameFailure.shown.toFixed(1)} per episode, held ${sameFailure.held.toFixed(1)}.`,
+    `same failure after the note: ${shownMean}, ${heldMean}.`,
     `repeated file set: shown ${repeatFileSet.shown.repeats} of ${repeatFileSet.shown.subset} episodes with observed edits, held ${repeatFileSet.held.repeats} of ${repeatFileSet.held.subset}.`,
     `expectations after the note: shown ${tallyText(expectations.shown) || "none"}; held ${tallyText(expectations.held) || "none"}.`,
     "Analyses beyond these are exploratory.",
@@ -535,7 +562,7 @@ export function renderAttemptStudyText(report: AttemptStudyReport, home: string)
   if (shown.outOfTail > 0 || held.outOfTail > 0) {
     details.push(`out of memory read, not counted: shown ${shown.outOfTail}, held ${held.outOfTail}.`);
   }
-  const skips = tallyText(report.skips);
+  const skips = skipTallyText(report.skips);
   if (skips.length > 0) details.push(`skips: ${skips}.`);
   if (report.malformed > 0) details.push(`malformed rows: ${report.malformed}.`);
   if (report.logFull) details.push("Exposure log is full. New rows are not written.");
