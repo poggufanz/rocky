@@ -207,6 +207,21 @@ test("cache reads and writes bound entry timestamps against their respective clo
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...input, entries: [atWriterLimit, epoch] });
 });
 
+test("cache reads and writes drop year-10000 entries even at a year-10000 clock", (t) => {
+  const { file } = fixture(t);
+  const builtAt = Date.UTC(10000, 0, 1);
+  const lastFourDigitYear = { ...entry, ts: builtAt - 1 };
+  const input = { ...cache, builtAt, entries: [{ ...entry, ts: builtAt }, lastFourDigitYear] };
+  const expected = { ...input, entries: [lastFourDigitYear] };
+
+  mkdirSync(dirname(file));
+  writeFileSync(file, JSON.stringify(input));
+  assert.deepEqual(readFixTouchCache(file, builtAt), expected);
+
+  assert.equal(writeFixTouchCache(file, input), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), expected);
+});
+
 test("path, command, and signature are sanitized on both read and write", (t) => {
   const { file } = fixture(t);
   mkdirSync(dirname(file));

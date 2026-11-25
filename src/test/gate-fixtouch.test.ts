@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -160,22 +163,51 @@ test("leftover temp files leave future fix-touch state writes available", (t) =>
   assert.equal(f.edit(), "{}");
 });
 
-test("fix-touch defers while a writer is live and recovers when that writer exits", (t) => {
+test("fix-touch reclaims a stale lock even when it contains a live PID", (t) => {
+  const f = fixture(t);
+  f.enable();
+  f.seed();
+  mkdirSync(f.stateDir);
+  const stateFile = join(f.stateDir, "s1.fixtouch.json");
+  const lock = `${stateFile}.lock`;
+  writeFileSync(lock, String(process.pid));
+  const stale = new Date(NOW - 10_000);
+  utimesSync(lock, stale, stale);
+  assert.equal(f.edit(), advice(TOUCH_TEXT));
+  assert.equal(existsSync(lock), false);
+  assert.deepEqual(JSON.parse(readFileSync(stateFile, "utf8")), [`${rootKey(f.cwd)}\n${REL}`]);
+  assert.equal(f.edit(), "{}");
+});
+
+test("two overlapping first edits emit exactly one fix-touch advisory", (t) => {
   const f = fixture(t);
   f.enable();
   f.seed();
   const stateFile = join(f.stateDir, "s1.fixtouch.json");
-  const writers = `${stateFile}.writers`;
-  mkdirSync(writers, { recursive: true });
-  writeFileSync(join(writers, `${process.pid}.feedbeef`), "");
-  assert.equal(f.edit(), "{}");
-  assert.equal(existsSync(stateFile), false);
-
-  t.mock.method(process, "kill", () => {
-    throw Object.assign(new Error("writer exited"), { code: "ESRCH" });
-  });
-  assert.equal(f.edit(), advice(TOUCH_TEXT));
-  assert.equal(existsSync(writers), false);
+  const lock = `${stateFile}.lock`;
+  const originalOpen = fs.openSync;
+  let competing: string | undefined;
+  fs.openSync = (...args: Parameters<typeof originalOpen>) => {
+    const fd = originalOpen(...args);
+    if (args[0] === lock && args[1] === "wx" && competing === undefined) {
+      const fresh = new Date(NOW);
+      utimesSync(lock, fresh, fresh);
+      competing = f.edit();
+    }
+    return fd;
+  };
+  syncBuiltinESMExports();
+  let winner: string;
+  try {
+    winner = f.edit();
+  } finally {
+    fs.openSync = originalOpen;
+    syncBuiltinESMExports();
+  }
+  assert.equal(competing, "{}");
+  assert.equal(winner, advice(TOUCH_TEXT));
+  assert.equal(existsSync(lock), false);
+  assert.deepEqual(JSON.parse(readFileSync(stateFile, "utf8")), [`${rootKey(f.cwd)}\n${REL}`]);
   assert.equal(f.edit(), "{}");
 });
 

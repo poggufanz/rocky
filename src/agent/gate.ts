@@ -18,8 +18,8 @@
 
 import { randomBytes } from "node:crypto";
 import {
-  closeSync, mkdirSync, openSync, readdirSync, readFileSync,
-  renameSync, rmdirSync, statSync, unlinkSync, writeFileSync,
+  closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync,
+  renameSync, statSync, unlinkSync, writeFileSync, type BigIntStats,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { sanitizeSessionId } from "../core/agent-session.js";
@@ -38,6 +38,7 @@ import {
   fileGitRoot, findFixTouchEntry, fixTouchCachePath, fixTouchEnabled,
   fixTouchPathKey, readFixTouchCache, rootKey, sanitizeField,
 } from "../core/fixtouch-cache.js";
+import { sameFilesystemIdentity } from "../core/fs-safety.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { logHookError } from "../commands/agent-hook.js";
 
@@ -51,7 +52,7 @@ const MAX_GATE_STDOUT_BYTES = 1024;
 const MAX_FIXTOUCH_SHOWN_KEYS = 256;
 // Allows all 256 keys even when cache roots and paths need JSON escapes.
 const MAX_FIXTOUCH_STATE_BYTES = 2 * 1024 * 1024;
-const FIXTOUCH_WRITER = /^([1-9]\d{0,9})\.[a-f0-9]{8}$/u;
+const FIXTOUCH_STALE_LOCK_MS = 5_000;
 
 export interface GateInput {
   vendor: string;
@@ -145,44 +146,44 @@ function readShownFixTouches(stateFile: string): string[] | undefined {
     : undefined;
 }
 
-function hasOtherFixTouchWriter(directory: string, owner: string): boolean {
-  for (const name of readdirSync(directory)) {
-    if (name === owner) continue;
-    const match = FIXTOUCH_WRITER.exec(name);
-    if (match === null) continue;
-    const pid = Number(match[1]);
-    if (pid > 0x7fff_ffff) continue;
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
-        try { unlinkSync(join(directory, name)); } catch { /* Best-effort cleanup. */ }
-        continue;
+function acquireFixTouchLock(lockFile: string): number | undefined {
+  try {
+    return openSync(lockFile, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+
+  const existing = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+  if (existing !== undefined) {
+    if (!existing.isFile() || Date.now() - Number(existing.mtimeMs) <= FIXTOUCH_STALE_LOCK_MS) return undefined;
+    // Another process may have replaced the stale lock since it was observed.
+    const current = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+    if (current !== undefined) {
+      if (!sameFilesystemIdentity(existing, current) || existing.mtimeNs !== current.mtimeNs) return undefined;
+      try {
+        unlinkSync(lockFile);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    return true;
   }
-  return false;
+  return openSync(lockFile, "wx", 0o600);
 }
 
 function markFixTouchShown(stateFile: string, key: string): boolean {
-  const writers = `${stateFile}.writers`;
-  let claim: string | undefined;
+  const lockFile = `${stateFile}.lock`;
+  let lockFd: number | undefined;
+  let lock: BigIntStats | undefined;
   let temp: string | undefined;
   try {
-    mkdirSync(writers, { recursive: true, mode: 0o700 });
-    const owner = `${process.pid}.${randomBytes(4).toString("hex")}`;
-    const claimPath = join(writers, owner);
-    const claimFd = openSync(claimPath, "wx", 0o600);
-    claim = claimPath;
-    closeSync(claimFd);
-    // Publish our claim before looking for live peers. A concurrent writer can
-    // defer its advisory rather than racing this read and replacement.
-    if (hasOtherFixTouchWriter(writers, owner)) return false;
+    mkdirSync(dirname(stateFile), { recursive: true, mode: 0o700 });
+    lockFd = acquireFixTouchLock(lockFile);
+    if (lockFd === undefined) return false;
+    lock = fstatSync(lockFd, { bigint: true });
     const shown = readShownFixTouches(stateFile);
     if (shown === undefined || shown.includes(key)) return false;
     const next = [...shown, key].slice(-MAX_FIXTOUCH_SHOWN_KEYS);
-    const tempPath = `${stateFile}.${owner}.tmp`;
+    const tempPath = `${stateFile}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     const fd = openSync(tempPath, "wx", 0o600);
     temp = tempPath;
     try {
@@ -190,6 +191,8 @@ function markFixTouchShown(stateFile: string, key: string): boolean {
     } finally {
       closeSync(fd);
     }
+    const current = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+    if (!sameFilesystemIdentity(lock, current)) return false;
     renameSync(tempPath, stateFile);
     temp = undefined;
     return true;
@@ -199,9 +202,12 @@ function markFixTouchShown(stateFile: string, key: string): boolean {
     if (temp !== undefined) {
       try { unlinkSync(temp); } catch { /* Best effort after an unsuccessful update. */ }
     }
-    if (claim !== undefined) {
-      try { unlinkSync(claim); } catch { /* Best-effort cleanup. */ }
-      try { rmdirSync(writers); } catch { /* A peer can still own a claim. */ }
+    if (lockFd !== undefined) {
+      try {
+        const current = lstatSync(lockFile, { bigint: true, throwIfNoEntry: false });
+        if (sameFilesystemIdentity(lock, current)) unlinkSync(lockFile);
+      } catch { /* Best-effort cleanup. */ }
+      try { closeSync(lockFd); } catch { /* Best-effort cleanup. */ }
     }
   }
 }

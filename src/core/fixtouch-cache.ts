@@ -14,6 +14,7 @@ export const FIXTOUCH_PATH_MAX = 160;
 export const FIXTOUCH_CMD_MAX = 80;
 export const FIXTOUCH_SIGNATURE_MAX = 120;
 const ROOT_MAX = 1024;
+const YEAR_10000_UTC = Date.UTC(10000, 0, 1);
 
 export interface FixTouchEntry { root: string; path: string; cmd: string; signature: string; ts: number }
 export interface FixTouchCache { v: 1; builtAt: number; entries: FixTouchEntry[] }
@@ -82,7 +83,8 @@ function isRelativeCachePath(path: string): boolean {
 function sanitizeEntry(entry: FixTouchEntry, oldestTs: number, newestTs: number): FixTouchEntry | undefined {
   const { root, path, cmd, signature, ts } = entry;
   if (root.length === 0 || Array.from(root).length > ROOT_MAX ||
-      !Number.isFinite(ts) || ts < oldestTs || ts > newestTs) return undefined;
+      !Number.isFinite(ts) || ts < 0 || ts >= YEAR_10000_UTC ||
+      ts < oldestTs || ts > newestTs) return undefined;
 
   const normalizedPath = path.replaceAll("\\", "/");
   if (!isRelativeCachePath(normalizedPath)) return undefined;
@@ -138,7 +140,7 @@ export function readFixTouchCache(file: string, now: number): FixTouchCache | un
         cache.builtAt < now - FIXTOUCH_CACHE_MAX_AGE_MS ||
         cache.builtAt > now + FIXTOUCH_FUTURE_SKEW_MS || !Array.isArray(cache.entries)) return undefined;
 
-    const oldestTs = Math.max(0, now - FIXTOUCH_WINDOW_MS);
+    const oldestTs = now - FIXTOUCH_WINDOW_MS;
     const newestTs = now + FIXTOUCH_FUTURE_SKEW_MS;
     const entries = cache.entries.map((entry) => readEntry(entry, oldestTs, newestTs))
       .filter((entry) => entry !== undefined);
@@ -152,7 +154,7 @@ export function writeFixTouchCache(file: string, cache: FixTouchCache): boolean 
   let temp: string | undefined;
   try {
     if (cache.v !== 1 || !Number.isFinite(cache.builtAt)) return false;
-    const oldestTs = Math.max(0, cache.builtAt - FIXTOUCH_WINDOW_MS);
+    const oldestTs = cache.builtAt - FIXTOUCH_WINDOW_MS;
     const newestTs = cache.builtAt + FIXTOUCH_FUTURE_SKEW_MS;
     const entries = cache.entries.map((entry) => sanitizeEntry(entry, oldestTs, newestTs))
       .filter((entry) => entry !== undefined);
