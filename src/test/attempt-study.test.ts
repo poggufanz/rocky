@@ -237,14 +237,14 @@ test("without a marker the report counts all eligible rows and hides outcomes", 
   assert.deepEqual(report.start, { state: "absent" });
   assert.equal(report.primaryUnits, 2);
   assert.deepEqual(report.arms, {
-    shown: { episodes: 2, primaryUnits: 1, outOfTail: 1 },
+    shown: { episodes: 2, primaryUnits: 1, outOfTail: 2 },
     held: { episodes: 1, primaryUnits: 1, outOfTail: 1 },
   });
   assert.deepEqual(report.excluded, {
     unassigned: 2, human: 1, noSession: 2, noAnchor: 1, duplicateAnchor: 2,
     keyMismatch: 1, armConflict: 0, beforeStart: 0, afterStop: 0,
   });
-  assert.deepEqual({ ...report.skips }, { lock_busy: 1, wrapped: 1 });
+  assert.deepEqual({ ...report.skips }, { lock_busy: 1, wrapped: 2 });
   assert.equal(report.malformed, 1);
   assert.equal(report.logFull, true);
   assertNoOutcomes(report);
@@ -259,6 +259,7 @@ test("running study reports operational counts without exposing outcomes", () =>
   assert.equal(report.primaryUnits, 2);
   assert.equal(report.excluded.beforeStart, 1);
   assert.equal(report.excluded.afterStop, 0);
+  assert.deepEqual(report.skips, { lock_busy: 1, wrapped: 1 });
   assert.deepEqual(report.latency.watch, { n: 1, p95: 50 });
   assert.deepEqual(report.latency.hookfail, { n: 1, p95: 10 });
   assert.equal(report.meanDeliveredBytes, 1300 / 12);
@@ -292,6 +293,14 @@ test("day stop uses in-window primary units and session clusters with separate d
   assert.deepEqual(report.repeatFileSet, { shown: { subset: 1, repeats: 1 }, held: { subset: 1, repeats: 0 } });
   assert.deepEqual({ ...report.expectations.shown }, { same_command_failed: 1, same_command_passed: 1 });
   assert.deepEqual({ ...report.expectations.held }, { no_matching_run: 1 });
+});
+
+test("the day stop counts rows dated after the deadline at the instant it is reached", () => {
+  const report = buildAttemptStudy({ ...fixture(), start, now: DEADLINE });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.stopReason, "days");
+  assert.equal(report.excluded.afterStop, 1);
+  assert.deepEqual(report.latency.watch, { n: 1, p95: 50 });
 });
 
 function cohort(shown: number, held: number, shownPasses: number, heldPasses: number): AttemptStudyInput {
@@ -343,19 +352,34 @@ test("unit stop excludes episodes later in file order at the same timestamp", ()
   assert.equal(report.meanDeliveredBytes, 100);
 });
 
-test("future exposures do not count toward a pre-stop report", () => {
+test("future exposures do not count toward a running report", () => {
   const input = cohort(150, 150, 0, 0);
   const rows = input.rows.map((row) => row.anchorFailureId === "held-149"
     ? { ...row, ts: input.now + 1, bytes: 500 }
     : row);
-  for (const studyStart of [start, { state: "absent" }] as const) {
+  const report = buildAttemptStudy({ ...input, rows });
+  assert.equal(report.phase, "running");
+  assert.equal(report.primaryUnits, 299);
+  assert.deepEqual(report.arms.held, { primaryUnits: 149, episodes: 149, outOfTail: 0 });
+  assert.equal(report.excluded.afterStop, 0);
+  assert.deepEqual(report.latency.run, { n: 299, p95: 10 });
+  assert.equal(report.meanDeliveredBytes, 100);
+  assertNoOutcomes(report);
+});
+
+test("absent and invalid markers include every episode regardless of now", () => {
+  const input = cohort(150, 150, 0, 0);
+  const rows = input.rows.map((row) => row.anchorFailureId === "held-149"
+    ? { ...row, ts: input.now + 1, bytes: 500 }
+    : row);
+  for (const studyStart of [{ state: "absent" }, { state: "invalid" }] as const) {
     const report = buildAttemptStudy({ ...input, rows, start: studyStart });
-    assert.equal(report.phase, studyStart.state === "set" ? "running" : "not-started");
-    assert.equal(report.primaryUnits, 299);
-    assert.deepEqual(report.arms.held, { primaryUnits: 149, episodes: 149, outOfTail: 0 });
+    assert.equal(report.phase, "not-started");
+    assert.equal(report.primaryUnits, 300);
+    assert.deepEqual(report.arms.held, { primaryUnits: 150, episodes: 150, outOfTail: 0 });
     assert.equal(report.excluded.afterStop, 0);
-    assert.deepEqual(report.latency.run, { n: 299, p95: 10 });
-    assert.equal(report.meanDeliveredBytes, 100);
+    assert.deepEqual(report.latency.run, { n: 300, p95: 10 });
+    assert.equal(report.meanDeliveredBytes, 30_400 / 300);
     assertNoOutcomes(report);
   }
 });

@@ -211,19 +211,27 @@ export function anchorIds(rows: readonly ExposureRow[]): Set<string> {
   return new Set(rows.filter(isCandidate).map((row) => row.anchorFailureId));
 }
 
-function collectCandidates(
-  rows: readonly ExposureRow[], now: number, excluded: Excluded, skips: Map<string, number>,
-): Candidate[] {
+function indexCandidates(rows: readonly ExposureRow[]): Map<string, Candidate> {
   const byAnchor = new Map<string, Candidate>();
   for (const [order, row] of rows.entries()) {
-    if (row.ts > now) continue;
+    if (!isCandidate(row)) continue;
+    const prior = byAnchor.get(row.anchorFailureId);
+    if (prior === undefined || row.ts < prior.row.ts) byAnchor.set(row.anchorFailureId, { row, order });
+  }
+  return byAnchor;
+}
+
+function countLogRows(
+  rows: readonly ExposureRow[], reportThrough: number, candidates: ReadonlyMap<string, Candidate>, excluded: Excluded,
+): Record<string, number> {
+  const skips = new Map<string, number>();
+  for (const [order, row] of rows.entries()) {
+    if (row.ts > reportThrough) continue;
     if (row.kind === "skip") {
       const reason = row.reason ?? "unknown";
       skips.set(reason, (skips.get(reason) ?? 0) + 1);
     } else if (isCandidate(row)) {
-      const prior = byAnchor.get(row.anchorFailureId);
-      if (prior !== undefined) excluded.duplicateAnchor++;
-      if (prior === undefined || row.ts < prior.row.ts) byAnchor.set(row.anchorFailureId, { row, order });
+      if (candidates.get(row.anchorFailureId)?.order !== order) excluded.duplicateAnchor++;
     } else if (row.arm === null || row.arm === "unassigned") {
       excluded.unassigned++;
     } else if (row.arm === "human") {
@@ -234,7 +242,7 @@ function collectCandidates(
       excluded.noAnchor++;
     }
   }
-  return [...byAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order);
+  return Object.fromEntries(skips);
 }
 
 function indexAnchors(entries: readonly ProblemEntry[]): Map<string, Anchor> {
@@ -248,11 +256,11 @@ function indexAnchors(entries: readonly ProblemEntry[]): Map<string, Anchor> {
   return anchors;
 }
 
-function findUnitStop(episodes: readonly Episode[], deadline: number): Cutoff | undefined {
+function findUnitStop(episodes: readonly Episode[], deadline: number, now: number): Cutoff | undefined {
   const arms = new Map<string, Arm | null>();
   let units = 0;
   for (const { row, order } of episodes) {
-    if (row.ts >= deadline) break;
+    if (row.ts >= deadline || row.ts > now) break;
     const arm = arms.get(row.session);
     if (arm === undefined) {
       arms.set(row.session, row.arm);
@@ -425,9 +433,8 @@ export function buildAttemptStudy(input: AttemptStudyInput): AttemptStudyReport 
       hookfail: { n: 0, p95: undefined }, "tool-result": { n: 0, p95: undefined },
     },
   };
-  const skips = new Map<string, number>();
-  const candidates = collectCandidates(rows, now, counts.excluded, skips);
-  counts.skips = Object.fromEntries(skips);
+  const candidatesByAnchor = indexCandidates(rows);
+  const candidates = [...candidatesByAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order);
 
   const startTs = start.state === "set" ? start.ts : -Infinity;
   const deadline = start.state === "set" ? start.ts + STUDY_STOP_DAYS * DAY_MS : Infinity;
@@ -439,10 +446,15 @@ export function buildAttemptStudy(input: AttemptStudyInput): AttemptStudyReport 
     const anchor = anchors.get(row.anchorFailureId);
     if (anchor !== undefined && row.key === anchor.keyHash) resolved.push({ ...candidate, anchor });
   }
-  const unitStop = start.state === "set" ? findUnitStop(resolved, deadline) : undefined;
-  const cutoff = unitStop ?? { ts: Math.min(now, deadline), order: Infinity };
+  const unitStop = start.state === "set" ? findUnitStop(resolved, deadline, now) : undefined;
+  const running = start.state === "set" && unitStop === undefined && now < deadline;
+  // A stopped report can disclose later rows as afterStop. A running report ends at now.
+  const reportThrough = running ? now : Infinity;
+  const cutoff = unitStop ?? { ts: Math.min(reportThrough, deadline), order: Infinity };
+  counts.skips = countLogRows(rows, reportThrough, candidatesByAnchor, counts.excluded);
 
   for (const { row, order } of candidates) {
+    if (row.ts > reportThrough) break;
     if (row.ts < startTs) counts.excluded.beforeStart++;
     else if (afterCutoff(row.ts, order, cutoff)) counts.excluded.afterStop++;
     else {
@@ -457,7 +469,7 @@ export function buildAttemptStudy(input: AttemptStudyInput): AttemptStudyReport 
 
   const day = Math.max(1, Math.min(STUDY_STOP_DAYS, Math.floor((cutoff.ts - start.ts) / DAY_MS) + 1));
   const started: StartedStudy = { ...counts, start: { state: "set", iso: new Date(start.ts).toISOString() }, day };
-  if (unitStop === undefined && now < deadline) return { ...started, phase: "running" };
+  if (running) return { ...started, phase: "running" };
   return {
     ...started,
     phase: "stopped",
