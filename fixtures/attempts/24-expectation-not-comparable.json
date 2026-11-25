@@ -1,0 +1,54 @@
+{
+  "now": 1700000000000,
+  "lines": [
+    {
+      "kind": "failure",
+      "id": "f1",
+      "ts": 1699999820000,
+      "cwd": "/app",
+      "cmd": "npm test",
+      "exitCode": 1,
+      "fingerprint": "aaaa000000000021",
+      "fingerprintV": 2,
+      "signature": ["error: assertion failed"],
+      "excerpt": "Error: assertion failed",
+      "origin": "run",
+      "commandIdentity": "[\"npm\",\"test\"]",
+      "identityV": 1,
+      "identityReliable": true,
+      "platform": "linux"
+    },
+    {
+      "kind": "rationale",
+      "id": "r1",
+      "ts": 1699999880000,
+      "v": 1,
+      "cwd": "/app",
+      "agent": "generic",
+      "rationale_fidelity": "raw",
+      "source": "mcp",
+      "excerpt": "expect auth tests pass",
+      "links": {
+        "failureId": "f1"
+      }
+    }
+  ],
+  "expect": {
+    "entries": [
+      {
+        "cwd": "/app",
+        "keyStrength": "output",
+        "outcomes": ["no_later_run"],
+        "expectations": [
+          [
+            {
+              "text": "expect auth tests pass",
+              "rationaleId": "r1",
+              "observed": "not_comparable"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

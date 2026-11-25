@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { commandFingerprint } from "./fingerprint.js";
+import { commandFingerprint, commandIdentity } from "./fingerprint.js";
 import {
   canonicalFingerprint,
   fingerprintMigrationIndex,
@@ -86,6 +86,8 @@ interface IndexedRationale {
   order: number;
 }
 
+type Expectation = NonNullable<Attempt["expectations"]>[number];
+
 interface FailureGroup {
   key: string;
   problemId?: string;
@@ -162,16 +164,61 @@ function findMatchingAssociation(
   return best?.record;
 }
 
+function observeExpectation(
+  rationale: RationaleRecord,
+  cwdRuns: readonly IndexedRunRecord[],
+  defaultPlatform: NodeJS.Platform,
+): Expectation["observed"] {
+  const command = rationale.expectedCommand;
+  if (command === undefined || command.trim().length === 0) return "not_comparable";
+  const defaultIdentity = commandIdentity(command, { platform: defaultPlatform });
+  if (!defaultIdentity.reliable) return "not_comparable";
+  const identities = new Map([[defaultPlatform, defaultIdentity]]);
+
+  let lo = 0;
+  let hi = cwdRuns.length;
+  while (lo < hi) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (cwdRuns[mid]!.record.ts <= rationale.ts) lo = mid + 1;
+    else hi = mid;
+  }
+
+  const windowEnd = rationale.ts + LINK_WINDOW_MS;
+  // ponytail: Rationales carry no session stamp. Filter on agent.session once they do.
+  for (let index = lo; index < cwdRuns.length; index += 1) {
+    const { record } = cwdRuns[index]!;
+    if (record.ts > windowEnd) break;
+    if (record.identityReliable !== true) continue;
+    const platform = record.platform ?? defaultPlatform;
+    let expected = identities.get(platform);
+    if (expected === undefined) {
+      expected = commandIdentity(command, { platform });
+      identities.set(platform, expected);
+    }
+    if (expected.reliable && expected.value === record.commandIdentity) {
+      return record.kind === "fix" ? "same_command_passed" : "same_command_failed";
+    }
+  }
+  return "no_matching_run";
+}
+
 function buildTestimony(
   rationales: readonly IndexedRationale[] | undefined,
-): { changes: Attempt["changes"]; stated?: Attempt["stated"] } {
+  cwdRuns: readonly IndexedRunRecord[],
+  defaultPlatform: NodeJS.Platform,
+): Pick<Attempt, "changes" | "stated" | "expectations"> {
   if (rationales === undefined || rationales.length === 0) {
     return { changes: { state: "unknown" } };
   }
   let newestAny: IndexedRationale | undefined;
   let newestWithFiles: IndexedRationale | undefined;
+  let mcpRationales: IndexedRationale[] | undefined;
   for (let i = 0; i < rationales.length; i += 1) {
     const item = rationales[i]!;
+    if (item.record.source === "mcp") {
+      (mcpRationales ??= []).push(item);
+      continue;
+    }
     if (newestAny === undefined || compareByTsOrder(item, newestAny) > 0) {
       newestAny = item;
     }
@@ -195,7 +242,17 @@ function buildTestimony(
         recordId: newestAny.record.id,
       }
     : undefined;
-  return stated === undefined ? { changes } : { changes, stated };
+  const testimony: Pick<Attempt, "changes" | "stated" | "expectations"> = { changes };
+  if (stated !== undefined) testimony.stated = stated;
+  if (mcpRationales !== undefined) {
+    testimony.expectations = mcpRationales.sort(compareByTsOrder).map(({ record }) => ({
+      text: sanitizeTestimony(record.excerpt),
+      ...(record.expectedCommand === undefined ? {} : { command: sanitizeTestimony(record.expectedCommand) }),
+      rationaleId: record.id,
+      observed: observeExpectation(record, cwdRuns, defaultPlatform),
+    }));
+  }
+  return testimony;
 }
 
 function emptyCounts(): Record<AttemptOutcome, number> & { attempts: number } {
@@ -367,6 +424,7 @@ export function buildProblems(
     return { entries: [], coverage, ungroupedLegacy };
   }
 
+  // Selected attempts can observe runs from other fingerprints in the same directory.
   for (let i = 0; i < deferredFixes.length; i += 1) {
     const { record, order } = deferredFixes[i]!;
     const cwdKey = resolveCwdKey(record.cwd, record.platform);
@@ -496,7 +554,9 @@ export function buildProblems(
       counts.attempts += 1;
       counts[outcome] += 1;
 
-      const { changes, stated } = buildTestimony(rationalesByFailureId.get(failure.id));
+      const { changes, stated, expectations } = buildTestimony(
+        rationalesByFailureId.get(failure.id), cwdList, defaultPlatform,
+      );
       const session = failure.agent !== undefined
         ? (failure.agent.agentId !== undefined
             ? { vendor: failure.agent.vendor, agentId: failure.agent.agentId }
@@ -517,6 +577,7 @@ export function buildProblems(
       if (unknownReason !== undefined) attempt.unknownReason = unknownReason;
       if (session !== undefined) attempt.session = session;
       if (stated !== undefined) attempt.stated = stated;
+      if (expectations !== undefined) attempt.expectations = expectations;
       attempts.push(attempt);
     }
 

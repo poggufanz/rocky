@@ -242,6 +242,115 @@ test("stated is sanitized", () => {
   assert.equal(attempt.stated?.text, sanitized);
 });
 
+test("expectation text and command are sanitized on read", () => {
+  const hostile = "ok \u202etxet AKIAABCDEFGHIJKLMNOP\u001b[31m";
+  const failure = makeFailure({ id: "f1", ts: NOW - 120_000 });
+  const rationale: RationaleRecord = {
+    kind: "rationale",
+    id: "r1",
+    ts: NOW - 60_000,
+    v: 1,
+    cwd: "/app",
+    agent: "generic",
+    rationale_fidelity: "raw",
+    source: "mcp",
+    excerpt: hostile,
+    expectedCommand: "npm test " + hostile,
+    links: { failureId: failure.id },
+    files: ["src/auth.ts"],
+  };
+  const records = [failure, rationale];
+  const { entries } = buildProblems(records, completeCoverage(records.length), { now: NOW });
+  const attempt = entries[0]!.attempts[0]!;
+  const expectation = attempt.expectations?.[0];
+  assert.ok(expectation);
+  assert.ok(expectation.command);
+  for (const value of [expectation.text, expectation.command]) {
+    assert.doesNotMatch(value, /[\u202e\u001b]|AKIAABCDEFGHIJKLMNOP/u);
+    assert.match(value, /\[redacted aws access key\]/i);
+  }
+  assert.equal(attempt.stated, undefined);
+  assert.deepEqual(attempt.changes, { state: "unknown" });
+});
+
+test("expectations use the first reliable run in the cwd and the eight-hour window", () => {
+  const expectedAt = NOW - 8 * HOUR;
+  const failure = makeFailure({ id: "f1", ts: expectedAt - 60_000, agent: {
+    vendor: "claude-code", session: "original",
+  } });
+  const rationale: RationaleRecord = {
+    kind: "rationale",
+    id: "r1",
+    ts: expectedAt,
+    v: 1,
+    cwd: "/app",
+    agent: "generic",
+    rationale_fidelity: "raw",
+    source: "mcp",
+    excerpt: "Expect tests to pass.",
+    expectedCommand: "npm test",
+    links: { failureId: failure.id },
+  };
+  const records: MemoryRecord[] = [
+    failure,
+    { ...rationale, id: "later", ts: expectedAt + 60_000 },
+    makeFix({ id: "same-ts", ts: expectedAt }),
+    makeFix({ id: "wrong-cwd", ts: expectedAt + 1, cwd: "/other" }),
+    makeFix({ id: "unreliable-run", ts: expectedAt + 2, identityReliable: false }),
+    rationale,
+    { ...rationale, id: "unreliable-expectation", expectedCommand: "npm test && npm run lint" },
+    makeFailure({
+      id: "first-at-end",
+      ts: NOW,
+      fingerprint: "bbbb000000000022",
+      agent: { vendor: "claude-code", session: "later" },
+    }),
+    makeFix({ id: "second-at-end", ts: NOW }),
+    { ...rationale, id: "future-note", ts: NOW + 1 },
+  ];
+  const coverage = completeCoverage(records.length);
+  const opts = { now: NOW, fingerprint: failure.fingerprint };
+  const report = buildProblems(records, coverage, opts);
+  assert.deepEqual(
+    report.entries[0]!.attempts[0]!.expectations?.map(({ rationaleId, observed }) => [rationaleId, observed]),
+    [
+      ["r1", "same_command_failed"],
+      ["unreliable-expectation", "not_comparable"],
+      ["later", "same_command_failed"],
+    ],
+  );
+  const beforeRuns = buildProblems(records, coverage, { ...opts, now: NOW - 1 });
+  assert.equal(beforeRuns.entries[0]!.attempts[0]!.expectations?.[0]?.observed, "no_matching_run");
+  const pastWindow = makeFix({ id: "after-window", ts: NOW + 1 });
+  const onlyPastWindow = [failure, rationale, pastWindow];
+  const afterWindow = buildProblems(onlyPastWindow, completeCoverage(3), { ...opts, now: pastWindow.ts });
+  assert.equal(afterWindow.entries[0]!.attempts[0]!.expectations?.[0]?.observed, "no_matching_run");
+});
+
+test("expectations match stored run platform and normalized Windows cwd", () => {
+  const failure = makeFailure({ id: "f1", ts: NOW - 120_000, cwd: "C:\\App", platform: "win32" });
+  const rationale: RationaleRecord = {
+    kind: "rationale",
+    id: "r1",
+    ts: NOW - 60_000,
+    v: 1,
+    cwd: "C:\\App",
+    agent: "generic",
+    rationale_fidelity: "raw",
+    source: "mcp",
+    excerpt: "Expect tests to pass.",
+    expectedCommand: "NPM test",
+    links: { failureId: failure.id },
+  };
+  const fix = makeFix({ id: "x1", ts: NOW, cwd: "c:/app/", platform: "win32" });
+  const { entries } = buildProblems([failure, rationale, fix], completeCoverage(3), {
+    now: NOW,
+    platform: "linux",
+    fingerprint: failure.fingerprint,
+  });
+  assert.equal(entries[0]!.attempts[0]!.expectations?.[0]?.observed, "same_command_passed");
+});
+
 test("single fingerprint mode returns one entry", () => {
   const f1 = makeFailure({ id: "f1", ts: NOW - 120_000, fingerprint: "aaaa000000000001" });
   const f2 = makeFailure({ id: "f2", ts: NOW - 60_000, fingerprint: "bbbb000000000002" });
