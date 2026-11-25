@@ -327,14 +327,45 @@ test("expectations use the first reliable run in the cwd and the eight-hour wind
   assert.equal(afterWindow.entries[0]!.attempts[0]!.expectations?.[0]?.observed, "no_matching_run");
 });
 
-test("expectations match stored run platform and normalized Windows cwd", () => {
+for (const mode of ["full", "single-fingerprint"] as const) {
+  test(`expectations use the rationale cwd for observations (${mode})`, () => {
+    const failure = makeFailure({ id: "f1", ts: NOW - 180_000, cwd: "/a" });
+    const rationale: RationaleRecord = {
+      kind: "rationale",
+      id: "r1",
+      ts: NOW - 120_000,
+      v: 1,
+      cwd: "/b",
+      agent: "generic",
+      rationale_fidelity: "raw",
+      source: "mcp",
+      excerpt: "Expect tests to pass.",
+      expectedCommand: "npm test",
+      links: { failureId: failure.id },
+    };
+    const failureCwdPass = makeFix({ id: "x1", ts: NOW - 60_000, cwd: "/a" });
+    const rationaleCwdPass = makeFix({ id: "x2", ts: NOW, cwd: "/b" });
+    const opts = { now: NOW, fingerprint: mode === "full" ? undefined : failure.fingerprint };
+
+    const wrongCwd = buildProblems([failure, rationale, failureCwdPass], completeCoverage(3), opts);
+    assert.equal(wrongCwd.entries[0]!.attempts[0]!.failureId, failure.id);
+    assert.equal(wrongCwd.entries[0]!.attempts[0]!.expectations?.[0]?.observed, "no_matching_run");
+
+    const matchingCwd = buildProblems(
+      [failure, rationale, failureCwdPass, rationaleCwdPass], completeCoverage(4), opts,
+    );
+    assert.equal(matchingCwd.entries[0]!.attempts[0]!.expectations?.[0]?.observed, "same_command_passed");
+  });
+}
+
+test("expectations match stored run platform and normalized Windows rationale cwd", () => {
   const failure = makeFailure({ id: "f1", ts: NOW - 120_000, cwd: "C:\\App", platform: "win32" });
   const rationale: RationaleRecord = {
     kind: "rationale",
     id: "r1",
     ts: NOW - 60_000,
     v: 1,
-    cwd: "C:\\App",
+    cwd: "C:\\Other",
     agent: "generic",
     rationale_fidelity: "raw",
     source: "mcp",
@@ -342,7 +373,7 @@ test("expectations match stored run platform and normalized Windows cwd", () => 
     expectedCommand: "NPM test",
     links: { failureId: failure.id },
   };
-  const fix = makeFix({ id: "x1", ts: NOW, cwd: "c:/app/", platform: "win32" });
+  const fix = makeFix({ id: "x1", ts: NOW, cwd: "c:/other/", platform: "win32" });
   const { entries } = buildProblems([failure, rationale, fix], completeCoverage(3), {
     now: NOW,
     platform: "linux",

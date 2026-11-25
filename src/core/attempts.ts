@@ -84,6 +84,7 @@ interface IndexedAssociation {
 interface IndexedRationale {
   record: RationaleRecord;
   order: number;
+  expectationCwdKey?: string;
 }
 
 type Expectation = NonNullable<Attempt["expectations"]>[number];
@@ -204,7 +205,7 @@ function observeExpectation(
 
 function buildTestimony(
   rationales: readonly IndexedRationale[] | undefined,
-  cwdRuns: readonly IndexedRunRecord[],
+  recordsByCwdKey: ReadonlyMap<string, readonly IndexedRunRecord[]>,
   defaultPlatform: NodeJS.Platform,
 ): Pick<Attempt, "changes" | "stated" | "expectations"> {
   if (rationales === undefined || rationales.length === 0) {
@@ -245,11 +246,11 @@ function buildTestimony(
   const testimony: Pick<Attempt, "changes" | "stated" | "expectations"> = { changes };
   if (stated !== undefined) testimony.stated = stated;
   if (mcpRationales !== undefined) {
-    testimony.expectations = mcpRationales.sort(compareByTsOrder).map(({ record }) => ({
+    testimony.expectations = mcpRationales.sort(compareByTsOrder).map(({ record, expectationCwdKey }) => ({
       text: sanitizeTestimony(record.excerpt),
       ...(record.expectedCommand === undefined ? {} : { command: sanitizeTestimony(record.expectedCommand) }),
       rationaleId: record.id,
-      observed: observeExpectation(record, cwdRuns, defaultPlatform),
+      observed: observeExpectation(record, recordsByCwdKey.get(expectationCwdKey!) ?? [], defaultPlatform),
     }));
   }
   return testimony;
@@ -424,21 +425,6 @@ export function buildProblems(
     return { entries: [], coverage, ungroupedLegacy };
   }
 
-  // Selected attempts can observe runs from other fingerprints in the same directory.
-  for (let i = 0; i < deferredFixes.length; i += 1) {
-    const { record, order } = deferredFixes[i]!;
-    const cwdKey = resolveCwdKey(record.cwd, record.platform);
-    if (!neededCwdKeys.has(cwdKey)) continue;
-    if (!collectNonFailuresNow) fixesById.set(record.id, record);
-    addToMapArray(recordsByCwdKey, cwdKey, {
-      kind: "fix",
-      record,
-      order,
-      cwdKey,
-      cwdIndex: -1,
-    });
-  }
-
   if (!collectNonFailuresNow) {
     for (let i = 0; i < deferredAssociations.length; i += 1) {
       const { record, order } = deferredAssociations[i]!;
@@ -453,6 +439,36 @@ export function buildProblems(
         addToMapArray(rationalesByFailureId, failureId, { record, order });
       }
     }
+  }
+
+  if (rationalesByFailureId.size > 0) {
+    for (const group of keptGroups) {
+      for (const { record: failure } of group.failures) {
+        const rationales = rationalesByFailureId.get(failure.id);
+        if (rationales === undefined) continue;
+        for (const rationale of rationales) {
+          if (rationale.record.source !== "mcp") continue;
+          // Rationales have no platform stamp. Use the linked failure's platform when available.
+          const cwdKey = resolveCwdKey(rationale.record.cwd, failure.platform);
+          rationale.expectationCwdKey = cwdKey;
+          neededCwdKeys.add(cwdKey);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < deferredFixes.length; i += 1) {
+    const { record, order } = deferredFixes[i]!;
+    const cwdKey = resolveCwdKey(record.cwd, record.platform);
+    if (!neededCwdKeys.has(cwdKey)) continue;
+    if (!collectNonFailuresNow) fixesById.set(record.id, record);
+    addToMapArray(recordsByCwdKey, cwdKey, {
+      kind: "fix",
+      record,
+      order,
+      cwdKey,
+      cwdIndex: -1,
+    });
   }
 
   for (const cwdKey of neededCwdKeys) {
@@ -555,7 +571,7 @@ export function buildProblems(
       counts[outcome] += 1;
 
       const { changes, stated, expectations } = buildTestimony(
-        rationalesByFailureId.get(failure.id), cwdList, defaultPlatform,
+        rationalesByFailureId.get(failure.id), recordsByCwdKey, defaultPlatform,
       );
       const session = failure.agent !== undefined
         ? (failure.agent.agentId !== undefined
