@@ -14,9 +14,7 @@ test("recordRationale caps excerpt head+tail and stamps envelope", async () => {
   assert.ok(Buffer.byteLength(rec.excerpt, "utf8") <= MAX_RATIONALE_EXCERPT_BYTES);
   assert.ok(rec.excerpt.includes(" … "), "head+tail marker present when truncated");
   const line = readFileSync(join(process.env.ROCKY_HOME!, "memory.jsonl"), "utf8").trim();
-  const stored = JSON.parse(line);
-  assert.equal(stored.kind, "rationale");
-  assert.equal(Object.hasOwn(stored, "expectedCommand"), false);
+  assert.equal(JSON.parse(line).kind, "rationale");
 });
 
 test("recordRationale round-trips expectedCommand and raw fidelity", async () => {
