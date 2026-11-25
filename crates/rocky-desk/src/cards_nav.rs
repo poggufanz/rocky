@@ -114,6 +114,13 @@ pub fn route_card_msg(
             }
             false
         }
+        ServerMsg::RelatedAttempts {
+            card_id,
+            rev,
+            items,
+        } => detail
+            .as_mut()
+            .is_some_and(|d| d.on_related(card_id, *rev, items)),
         ServerMsg::QuoteTranslated { card_id, item } => detail
             .as_mut()
             .is_some_and(|d| d.on_translated(card_id, item)),

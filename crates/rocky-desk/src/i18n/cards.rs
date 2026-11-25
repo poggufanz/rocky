@@ -4,6 +4,7 @@
 //! build until both English and Indonesian copy exist.
 
 use rocky_proto::cards::{CoverageReason, Label, SymbolKind};
+use rocky_proto::pipe::AttemptOutcome;
 use rocky_proto::translate::QuoteLang;
 
 use super::{UiLang, plural};
@@ -84,6 +85,18 @@ pub enum CardMsg {
     },
     TimelineMoreSteps {
         n: usize,
+    },
+    /// Heading of the earlier attempts section in card detail.
+    RelatedHeading,
+    /// Footer under the earlier attempts rows.
+    RelatedFooter,
+    /// Outcome label for one earlier attempt row.
+    AttemptOutcomeLabel {
+        outcome: AttemptOutcome,
+    },
+    /// Observed files beyond the listed ones.
+    RelatedMoreFiles {
+        n: u32,
     },
     BackDone,
     SettingCards,
@@ -186,6 +199,27 @@ pub fn card_samples() -> Vec<CardMsg> {
             error_names: Some("auth.ts".into()),
         },
         CardMsg::TimelineMoreSteps { n: 5 },
+        CardMsg::RelatedHeading,
+        CardMsg::RelatedFooter,
+        CardMsg::AttemptOutcomeLabel {
+            outcome: AttemptOutcome::Passed,
+        },
+        CardMsg::AttemptOutcomeLabel {
+            outcome: AttemptOutcome::PossiblePass,
+        },
+        CardMsg::AttemptOutcomeLabel {
+            outcome: AttemptOutcome::SameFailure,
+        },
+        CardMsg::AttemptOutcomeLabel {
+            outcome: AttemptOutcome::DifferentFailure,
+        },
+        CardMsg::AttemptOutcomeLabel {
+            outcome: AttemptOutcome::NoLaterRun,
+        },
+        CardMsg::AttemptOutcomeLabel {
+            outcome: AttemptOutcome::Unknown,
+        },
+        CardMsg::RelatedMoreFiles { n: 2 },
         CardMsg::BackDone,
         CardMsg::SettingCards,
         CardMsg::NoticeConsent,
@@ -298,6 +332,18 @@ fn card_en(msg: &CardMsg) -> String {
             format!("`{command}` failed (exit {exit_code}).{err} Edited {edits}. `{command}` passed.")
         }
         CardMsg::TimelineMoreSteps { n } => format!("+{n} more steps"),
+        CardMsg::RelatedHeading => "Earlier attempts".to_string(),
+        CardMsg::RelatedFooter => "Rocky records order, not cause.".to_string(),
+        CardMsg::AttemptOutcomeLabel { outcome } => match outcome {
+            AttemptOutcome::Passed => "passed",
+            AttemptOutcome::PossiblePass => "possible pass",
+            AttemptOutcome::SameFailure => "failed same way",
+            AttemptOutcome::DifferentFailure => "other error",
+            AttemptOutcome::NoLaterRun => "no later run",
+            AttemptOutcome::Unknown => "unknown",
+        }
+        .to_string(),
+        CardMsg::RelatedMoreFiles { n } => format!("+{n} more"),
         CardMsg::BackDone => "\u{2039} Done".to_string(),
         CardMsg::SettingCards => "Change cards".to_string(),
         CardMsg::NoticeConsent => {
@@ -413,6 +459,18 @@ fn card_id(msg: &CardMsg) -> String {
             format!("`{command}` gagal (exit {exit_code}).{err} {edits} diedit. `{command}` lulus.")
         }
         CardMsg::TimelineMoreSteps { n } => format!("+{n} langkah"),
+        CardMsg::RelatedHeading => "Percobaan sebelumnya".to_string(),
+        CardMsg::RelatedFooter => "Rocky mencatat urutan, bukan sebab.".to_string(),
+        CardMsg::AttemptOutcomeLabel { outcome } => match outcome {
+            AttemptOutcome::Passed => "lolos",
+            AttemptOutcome::PossiblePass => "mungkin lolos",
+            AttemptOutcome::SameFailure => "gagal sama",
+            AttemptOutcome::DifferentFailure => "gagal lain",
+            AttemptOutcome::NoLaterRun => "belum dijalankan lagi",
+            AttemptOutcome::Unknown => "tidak diketahui",
+        }
+        .to_string(),
+        CardMsg::RelatedMoreFiles { n } => format!("+{n} lagi"),
         CardMsg::BackDone => "\u{2039} Selesai".to_string(),
         CardMsg::SettingCards => "Kartu perubahan".to_string(),
         CardMsg::NoticeConsent => {

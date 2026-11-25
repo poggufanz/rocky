@@ -1,10 +1,10 @@
 //! Pure view-model for change card detail and execution timeline. The paged
-//! block diff lives in [`diff`].
+//! block diff lives in [`diff`], and earlier attempt rows live in [`related`].
 
 use std::collections::{HashMap, HashSet};
 
 use rocky_proto::cards::{Block, Card, CoverageState, FlowKind, FlowStep, Importance, Sequence};
-use rocky_proto::pipe::{BlockSnippet, ClientMsg, SnippetLine};
+use rocky_proto::pipe::{BlockSnippet, ClientMsg, RelatedAttempt, SnippetLine};
 use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
 
 use crate::cards_model::{
@@ -14,8 +14,10 @@ use crate::cards_model::{
 use crate::i18n::{CardMsg, UiLang, card_text, label_chip};
 
 mod diff;
+mod related;
 
 pub use diff::{DiffModel, DiffState};
+pub use related::RelatedRow;
 
 const MAX_TIMELINE_STEPS: usize = 12;
 const MAX_STEP_SUBS: usize = 3;
@@ -36,6 +38,9 @@ pub struct DetailModel {
     pending_id: Option<u64>,
     reopened: bool,
     state: DetailState,
+    rev: Option<u32>,
+    related: Vec<RelatedAttempt>,
+    related_early: Option<(u32, Vec<RelatedAttempt>)>,
     target: Option<QuoteLang>,
     translations: HashMap<String, QuoteTranslation>,
     pending: HashSet<String>,
@@ -56,6 +61,9 @@ impl DetailModel {
             pending_id: Some(id),
             reopened: false,
             state: DetailState::Loading,
+            rev: None,
+            related: Vec::new(),
+            related_early: None,
             target,
             translations: HashMap::new(),
             pending: HashSet::new(),
@@ -134,6 +142,15 @@ impl DetailModel {
     ) {
         if self.pending_id != Some(id) {
             return;
+        }
+        if self.rev != Some(card.rev) {
+            self.related.clear();
+        }
+        self.rev = Some(card.rev);
+        if let Some((rev, items)) = self.related_early.take()
+            && rev == card.rev
+        {
+            self.related = items;
         }
         self.pending_id = None;
         self.reopened = false;

@@ -590,6 +590,44 @@ fn card_copy_matches_brief_details() {
     );
 }
 
+#[test]
+fn related_attempts_copy_matches_cli_and_spec() {
+    use rocky_proto::pipe::AttemptOutcome as O;
+
+    let cases = [
+        (O::Passed, "passed", "lolos"),
+        (O::PossiblePass, "possible pass", "mungkin lolos"),
+        (O::SameFailure, "failed same way", "gagal sama"),
+        (O::DifferentFailure, "other error", "gagal lain"),
+        (O::NoLaterRun, "no later run", "belum dijalankan lagi"),
+        (O::Unknown, "unknown", "tidak diketahui"),
+    ];
+    for (outcome, en, id) in cases {
+        let message = CardMsg::AttemptOutcomeLabel { outcome };
+        assert_eq!(card_text(UiLang::En, &message), en);
+        assert_eq!(card_text(UiLang::Id, &message), id);
+    }
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::RelatedHeading),
+        "Earlier attempts"
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::RelatedHeading),
+        "Percobaan sebelumnya"
+    );
+    assert_eq!(
+        card_text(UiLang::En, &CardMsg::RelatedFooter),
+        "Rocky records order, not cause."
+    );
+    assert_eq!(
+        card_text(UiLang::Id, &CardMsg::RelatedFooter),
+        "Rocky mencatat urutan, bukan sebab."
+    );
+    let more = CardMsg::RelatedMoreFiles { n: 2 };
+    assert_eq!(card_text(UiLang::En, &more), "+2 more");
+    assert_eq!(card_text(UiLang::Id, &more), "+2 lagi");
+}
+
 fn card_msg_variant_count() -> usize {
     // Exhaustive guard so adding a CardMsg variant forces updating this count and card_samples().
     let check = |m: &CardMsg| match m {
@@ -630,6 +668,10 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::SequenceEditsMore { .. }
         | CardMsg::SequenceFixAfterFail { .. }
         | CardMsg::TimelineMoreSteps { .. }
+        | CardMsg::RelatedHeading
+        | CardMsg::RelatedFooter
+        | CardMsg::AttemptOutcomeLabel { .. }
+        | CardMsg::RelatedMoreFiles { .. }
         | CardMsg::BackDone
         | CardMsg::SettingCards
         | CardMsg::NoticeConsent
@@ -656,7 +698,7 @@ fn card_msg_variant_count() -> usize {
         | CardMsg::Translating => {}
     };
     let _ = check;
-    61
+    65
 }
 
 #[test]
