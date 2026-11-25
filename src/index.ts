@@ -193,6 +193,8 @@ usage:
   rocky hook tool-result claude-code
                             private Bash/PowerShell result endpoint; records unwrapped
                             agent failures and fixes; stdout is always {}.
+  rocky hook note-expectation
+                            private MCP endpoint that records an agent expectation.
 
 Memory lives in ~/.rocky/memory.jsonl. There is no telemetry. Outside calls:
 rocky check asks registry.npmjs.org whether a package exists (package name only,
@@ -238,7 +240,8 @@ type HookRequest =
   | { kind: "gate-event"; vendor: string }
   | { kind: "listen-event"; harnessId: string; surface: string }
   | { kind: "session-start"; vendor: "claude-code" }
-  | { kind: "tool-result"; vendor: "claude-code" };
+  | { kind: "tool-result"; vendor: "claude-code" }
+  | { kind: "note-expectation" };
 
 interface NotifyFlags {
   rationale?: string;
@@ -379,9 +382,12 @@ function parseHookArgs(argv: readonly string[]): HookRequest {
       return { kind: "tool-result", vendor };
     }
   }
+  if (subcommand === "note-expectation" && rest.length === 0) {
+    return { kind: "note-expectation" };
+  }
   throw new CliUsageError(
     "hook needs one known subcommand",
-    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>|listen-event <harnessId> --surface <surface>|session-start claude-code|tool-result claude-code",
+    "rocky hook install|uninstall|status|agent-event claude-code|codex|generic|gate-event <vendor>|listen-event <harnessId> --surface <surface>|session-start claude-code|tool-result claude-code|note-expectation",
   );
 }
 
@@ -497,7 +503,7 @@ interface JsonStdinHookSpec {
   onReadError: "drop" | "use-bytes";
 }
 
-/** Shared fail-open runner for JSON-stdout stdin hooks (`session-start`, `tool-result`). */
+/** Shared fail-open runner for JSON-stdout stdin hooks. */
 async function runJsonStdinHook(spec: JsonStdinHookSpec): Promise<number> {
   // Broken stdout pipes can emit async errors (for example EPIPE) after write() returns.
   process.stdout.on("error", () => {});
@@ -544,6 +550,21 @@ function runToolResult(): Promise<number> {
       return {
         maxBytes: TOOL_RESULT_STDIN_CAP_BYTES,
         handle: (bytes) => toolResultHook(bytes, startedAt),
+      };
+    },
+    onReadError: "drop",
+  });
+}
+
+function runNoteExpectation(): Promise<number> {
+  return runJsonStdinHook({
+    load: async () => {
+      const { NOTE_EXPECTATION_STDIN_CAP_BYTES, noteExpectationHook } = await import("./commands/note-expectation.js");
+      return {
+        maxBytes: NOTE_EXPECTATION_STDIN_CAP_BYTES,
+        handle: (bytes) => `${noteExpectationHook(Buffer.from(bytes), {
+          now: Date.now(), cwd: process.cwd(), env: process.env,
+        })}\n`,
       };
     },
     onReadError: "drop",
@@ -684,6 +705,11 @@ async function main(): Promise<number> {
           case "tool-result":
             if (parsed.kind === "tool-result") {
               return runToolResult();
+            }
+            break;
+          case "note-expectation":
+            if (parsed.kind === "note-expectation") {
+              return runNoteExpectation();
             }
             break;
         }

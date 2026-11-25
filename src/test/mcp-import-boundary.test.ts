@@ -163,6 +163,8 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     // mutation APIs through this module.
     "core/fs-safety.ts",
     "core/git-diff.ts",
+    // Read-only write toggle and shared identifier validation.
+    "core/mcp-write-input.ts",
     "core/memory-query.ts",
     "core/memory-read.ts",
     "core/package-info.ts",

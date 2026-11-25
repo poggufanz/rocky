@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import type { AttemptOutcome } from "../core/attempts.js";
 import type { Exposure } from "../core/config-read.js";
+import { safeOpaqueIdentifier } from "../core/mcp-write-input.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isSafeNonNegativeInteger, MAX_TRIPLE_FILES, RATIONALE_SOURCE_PATTERN } from "../core/memory-read.js";
 import { canonicalPath } from "../core/memory-read.js";
 import type { FailureOrigin, FailureRecord, FixRecord, LinkConfidence, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
@@ -12,6 +13,8 @@ import { redactSecretsAtBoundary, replaceAnsiAndControls, stripInvisibleControls
 import { configuredRockyHome } from "../core/state-paths.js";
 import { classifyPrompt, promptTitle, type PromptKind } from "../desk/card-text.js";
 import type { CardsForFile, CardsReadCoverage } from "../desk/cards-read.js";
+
+export { safeOpaqueIdentifier };
 
 export const MAX_FIELD_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -267,15 +270,6 @@ export function projectText(value: string, exposure: Exposure, path: string, tru
   const clipped = truncateUtf8(normalized, MAX_FIELD_BYTES);
   if (clipped.truncated) truncation.fields.push(path);
   return clipped.value;
-}
-
-const ROCKY_ID = /^(?:[0-9a-f]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|(?:triple|failure|fix|association|note)-[A-Za-z0-9._-]{1,96})$/iu;
-const SENSITIVE_ID_WORD = /(?:password|passwd|secret|token|credential|authorization|api[-_]?key|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|(?:AKIA|ASIA)[0-9A-Z]{16})/iu;
-
-export function safeOpaqueIdentifier(value: string): boolean {
-  return value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
-    && !SENSITIVE_ID_WORD.test(value)
-    && (ROCKY_ID.test(value) || (value.length <= 64 && /^[A-Za-z][A-Za-z0-9._:-]*$/u.test(value)));
 }
 
 function projectSignature(
