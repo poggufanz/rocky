@@ -215,6 +215,7 @@ function hostileMemory(): MemoryQueries {
 
 test("custom MCP query boundaries fail open to bounded safe schemas", async () => {
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: hostileMemory(),
     recallWithAi: disabledRecallWithAi,
@@ -292,7 +293,7 @@ test("durable MCP stats path matches the safe-path stats shape", async () => {
     ];
     writeFileSync(paths.memory, records.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
 
-    const registry = createToolRegistry({ exposure: "sanitized", memory: createMemoryQueries(), recallWithAi: disabledRecallWithAi });
+    const registry = createToolRegistry({ writeToolsEnabled: false, exposure: "sanitized", memory: createMemoryQueries(), recallWithAi: disabledRecallWithAi });
     const stats = await registry.call("stats", {}, new AbortController().signal);
     const content = stats.structuredContent as Record<string, unknown>;
     assert.equal(content.failures, 1);

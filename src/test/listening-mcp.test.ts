@@ -32,6 +32,7 @@ const NEW = [
 
 function registry() {
   return createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => []),
     recallWithAi: disabledRecallWithAi,

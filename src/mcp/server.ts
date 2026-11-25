@@ -21,7 +21,7 @@ import {
   SerializedJsonWriter,
   type DecodedLine,
 } from "./stdio.js";
-import { McpInvalidParamsError, type McpToolRegistry } from "./tools.js";
+import { McpInvalidParamsError, type McpToolRegistry, type ToolCallContext } from "./tools.js";
 
 export interface McpMessageServer {
   accept(value: unknown): void;
@@ -56,6 +56,7 @@ function requestResult(
   tools: McpToolRegistry,
   serverInfo: ServerInfo,
   signal: AbortSignal,
+  context: ToolCallContext,
 ): Promise<Record<string, unknown>> | Record<string, unknown> {
   switch (routed.method) {
     case "server/discover":
@@ -78,9 +79,17 @@ function requestResult(
     case "tools/call": {
       if (typeof routed.params.name !== "string") throw new McpInvalidParamsError("invalid params");
       const args = routed.params.arguments === undefined ? {} : routed.params.arguments;
-      return tools.call(routed.params.name, args, signal).then((result) => ({ ...result }));
+      return tools.call(routed.params.name, args, signal, context).then((result) => ({ ...result }));
     }
   }
+}
+
+function requestClientName(routed: Extract<RoutedMessage, { kind: "request" }>): string | undefined {
+  // Routing has already validated clientInfo for these two request shapes.
+  const clientInfo = routed.era === "modern"
+    ? (routed.params._meta as Record<string, unknown>)["io.modelcontextprotocol/clientInfo"]
+    : routed.method === "initialize" ? routed.params.clientInfo : undefined;
+  return (clientInfo as { name: string } | undefined)?.name;
 }
 
 export function createMcpMessageServer(deps: MessageServerDependencies): McpMessageServer {
@@ -88,6 +97,7 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
   const pending = new Set<Promise<void>>();
   const drainTimeoutMs = deps.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   let protocolState: ProtocolState = INITIAL_PROTOCOL_STATE;
+  let clientName: string | undefined;
   let accepting = true;
   let closeOutcome: "drained" | "timed_out" | undefined;
   let closing: Promise<"drained" | "timed_out"> | undefined;
@@ -119,10 +129,11 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
   const execute = async (
     routed: Extract<RoutedMessage, { kind: "request" }>,
     slot: InFlightSlot,
+    context: ToolCallContext,
   ): Promise<void> => {
     let response: JsonRpcResponse | undefined;
     try {
-      const result = await requestResult(routed, deps.tools, deps.serverInfo, slot.controller.signal);
+      const result = await requestResult(routed, deps.tools, deps.serverInfo, slot.controller.signal, context);
       response = resultResponse(routed.id, routed.era, result, deps.serverInfo);
     } catch (error) {
       if (!slot.cancelled) {
@@ -172,6 +183,8 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
         }
 
         protocolState = routed.nextState;
+        clientName = requestClientName(routed) ?? clientName;
+        const context = { clientName };
         const slot: InFlightSlot = {
           controller: new AbortController(),
           cancelled: false,
@@ -179,7 +192,7 @@ export function createMcpMessageServer(deps: MessageServerDependencies): McpMess
           phase: "running",
         };
         inFlight.set(routed.id, slot);
-        slot.work = Promise.resolve().then(() => execute(routed, slot));
+        slot.work = Promise.resolve().then(() => execute(routed, slot, context));
         track(slot.work);
       }
     }

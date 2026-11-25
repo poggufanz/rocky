@@ -66,6 +66,7 @@ test("why discloses incomplete coverage when requested path was omitted", () => 
 test("MCP why_file returns coverage summary independently of response truncation", async () => {
   const records: MemoryRecord[] = [triple(Array.from({ length: 10 }, (_, index) => file(`src/file-${index}.ts`)))];
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => records),
     recallWithAi: disabledRecallWithAi,

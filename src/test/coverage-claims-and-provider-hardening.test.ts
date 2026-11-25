@@ -74,6 +74,7 @@ function emptyMemory(overrides: Partial<MemoryQueries> = {}): MemoryQueries {
 
 function agentHookRegistry(memory: MemoryQueries) {
   return createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory,
     recallWithAi: disabledRecallWithAi,
@@ -423,7 +424,7 @@ test("only canonical in-process knowledge hits retain complete proof", async () 
     const customResult = await customRegistry.call("search_knowledge", { query: "button" }, new AbortController().signal);
     const customItem = (customResult.structuredContent.items as Array<Record<string, unknown>>)[0];
     assert.equal(customItem?.complete, false);
-    const canonicalRegistry = createToolRegistry({ exposure, memory: canonical, recallWithAi: disabledRecallWithAi });
+    const canonicalRegistry = createToolRegistry({ writeToolsEnabled: false, exposure, memory: canonical, recallWithAi: disabledRecallWithAi });
     const canonicalResult = await canonicalRegistry.call("search_knowledge", { query: "button" }, new AbortController().signal);
     const canonicalItem = (canonicalResult.structuredContent.items as Array<Record<string, unknown>>)[0];
     assert.equal(canonicalItem?.complete, true);

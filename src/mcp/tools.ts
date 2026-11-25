@@ -14,6 +14,7 @@ import { teachFromCards } from "../core/teach-cards.js";
 import { buildLadder, defaultTeachNeighbor, type Rung } from "../core/teach-ladder.js";
 import { gapRungFor, renderCardTeach, renderLadderCard, renderWitnessCard } from "../core/teach-render.js";
 import { ATTEMPT_HISTORY_NOTICE, projectProblemEntries, type ProjectedProblemEntry } from "./attempts-projection.js";
+import type { ExpectationBroker } from "./expectation-broker.js";
 import { projectExplain } from "./privacy.js";
 import { cardsForFile, makeCardsFor, resolveGitRootForCwd, toolTextAllowed, type CardsForFile } from "../desk/cards-read.js";
 import { readListeningTail } from "../listening/event-log-read.js";
@@ -26,6 +27,7 @@ import {
   projectDiffText,
   projectKnowledgeHits,
   projectMemoryRecord,
+  projectOpaqueId,
   projectRecallHits,
   projectRecallHitsForAi,
   projectRecentFailures,
@@ -44,7 +46,8 @@ import { gitProvenanceChain, resolveGitDiff } from "../core/git-diff.js";
 import { boundTripleRecord, isBoundedLinkBasis, isConfirmableLinkBasis, isKnownPathPlatform, isSafeNonNegativeInteger, MAX_MEMORY_FILE_BYTES, maxSupportedMemoryRecords, parseMemoryRecord } from "../core/memory-read.js";
 import type { FailureRecord, FixRecord, LinkConfidence, MemoryCoverage, MemoryRecord, RationaleRecord, TripleRecord } from "../core/memory-read.js";
 
-/** Versioned read-only catalog used by MCP discovery and setup health. */
+/** Versioned catalog used by MCP discovery and setup health. */
+const MCP_WRITE_TOOL_NAMES = Object.freeze(["note_expectation"] as const);
 const MCP_TOOL_NAMES = [
   "recall",
   "recent_failures",
@@ -60,11 +63,13 @@ const MCP_TOOL_NAMES = [
   "bundle_get",
   "session_timeline",
   "attempt_history",
+  ...MCP_WRITE_TOOL_NAMES,
 ] as const;
 const MCP_TOOL_NAMES_FROZEN = Object.freeze(MCP_TOOL_NAMES);
 export const MCP_TOOL_CATALOG_CONTRACT = Object.freeze({
   version: 1 as const,
   tools: MCP_TOOL_NAMES_FROZEN,
+  writeTools: MCP_WRITE_TOOL_NAMES,
 });
 /** Backward-compatible aliases for callers that consumed the original exports. */
 export const MCP_TOOL_CATALOG = MCP_TOOL_CATALOG_CONTRACT.tools;
@@ -77,10 +82,10 @@ export interface McpToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
   annotations: {
-    readOnlyHint: true;
-    destructiveHint: false;
-    idempotentHint: true;
-    openWorldHint: false;
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
   };
 }
 
@@ -90,9 +95,13 @@ export interface ToolCallResult {
   isError?: boolean;
 }
 
+export interface ToolCallContext {
+  clientName?: string;
+}
+
 export interface McpToolRegistry {
   list(): readonly McpToolDefinition[];
-  call(name: string, args: unknown, signal: AbortSignal): Promise<ToolCallResult>;
+  call(name: string, args: unknown, signal: AbortSignal, context?: ToolCallContext): Promise<ToolCallResult>;
 }
 
 export const TOOL_ENVELOPE_RESERVE_BYTES = 4 * 1024;
@@ -115,6 +124,8 @@ export interface CreateToolRegistryOptions {
   exposure: Exposure;
   memory: MemoryQueries;
   recallWithAi: RecallWithAiPort;
+  writeToolsEnabled: boolean;
+  expectationBroker?: ExpectationBroker;
   cards?: (path: string, limit: number) => CardsForFile;
   buildProblems?: typeof buildProblems;
   cardsFor?: (cwd: string) => CardJoin;
@@ -126,6 +137,8 @@ const ANNOTATIONS = {
   idempotentHint: true,
   openWorldHint: false,
 } as const;
+const EXPECTATION_NOTICE = "Stored as the agent's own statement. Rocky does not check or act on it.";
+const MAX_EXPECTATION_CODE_POINTS = 200;
 const RESPONSE_CAP_BYTES = MAX_RESPONSE_BYTES - TOOL_ENVELOPE_RESERVE_BYTES;
 const MAX_WHY_EVIDENCE_INPUTS = 256;
 const MAX_PROVIDER_NESTED_ITEMS = 256;
@@ -143,6 +156,32 @@ function objectArgs(args: unknown): Record<string, unknown> {
 
 function rejectUnknown(args: Record<string, unknown>, allowed: readonly string[]): void {
   if (Object.keys(args).some((key) => !allowed.includes(key))) throw new McpInvalidParamsError("invalid params");
+}
+
+function isExpectationString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_EXPECTATION_CODE_POINTS * 2
+    && [...value].length <= MAX_EXPECTATION_CODE_POINTS;
+}
+
+function parseExpectationArgs(args: unknown) {
+  const value = objectArgs(args);
+  rejectUnknown(value, ["text", "command", "failureId"]);
+  const { text, command, failureId } = value;
+  if (!isExpectationString(text) || (command !== undefined && !isExpectationString(command))
+    || (failureId !== undefined && (typeof failureId !== "string" || !safeOpaqueIdentifier(failureId)))) {
+    throw new McpInvalidParamsError("invalid params");
+  }
+  return {
+    text,
+    ...(command === undefined ? {} : { command }),
+    ...(failureId === undefined ? {} : { failureId }),
+  };
+}
+
+function expectationAgent(clientName = ""): Parameters<ExpectationBroker["note"]>[0]["agent"] {
+  if (/claude/i.test(clientName)) return "claude-code";
+  if (/codex/i.test(clientName)) return "codex";
+  return "generic";
 }
 
 function parseCwd(args: Record<string, unknown>, exposure: Exposure): string | undefined {
@@ -422,6 +461,16 @@ function descriptors(exposure: Exposure): readonly McpToolDefinition[] {
         limit: { type: "integer", minimum: 1, maximum: 10 },
         attempts: { type: "integer", minimum: 1, maximum: 20 },
       })), annotations: ANNOTATIONS,
+    },
+    {
+      name: "note_expectation", title: "Note expectation",
+      description: "Before re-running a failing command, you may record what you expect to pass. Stored as your statement; Rocky only records what ran next.",
+      inputSchema: schema({
+        text: { type: "string", minLength: 1, maxLength: MAX_EXPECTATION_CODE_POINTS },
+        command: { type: "string", minLength: 1, maxLength: MAX_EXPECTATION_CODE_POINTS },
+        failureId: { type: "string", minLength: 1, maxLength: 128 },
+      }, ["text"]),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
   ];
   const byName = new Map(definitions.map((definition) => [definition.name, definition] as const));
@@ -1873,7 +1922,10 @@ interface StatsFlightResult {
 }
 
 export function createToolRegistry(options: CreateToolRegistryOptions): McpToolRegistry {
-  const definitions = freezeDeep(descriptors(options.exposure));
+  const allDefinitions = descriptors(options.exposure);
+  const definitions = freezeDeep(options.writeToolsEnabled
+    ? allDefinitions
+    : allDefinitions.filter(({ name }) => !MCP_WRITE_TOOL_NAMES.some((writeName) => writeName === name)));
   // Snapshot optional provider method once. Clean legacy queries without a
   // witness omit coverage; any forced-failure path emits explicit unknown.
   let coverageReader: (() => unknown) | undefined;
@@ -2003,8 +2055,23 @@ export function createToolRegistry(options: CreateToolRegistryOptions): McpToolR
   const resolveKnowledgeId = (value: string): string => knowledgeHandles.get(value)?.raw ?? value;
   return {
     list: () => definitions,
-    async call(name, args, signal) {
+    async call(name, args, signal, context) {
       if (!definitions.some((definition) => definition.name === name)) throw new McpInvalidParamsError("unknown tool");
+      if (name === "note_expectation") {
+        const input = parseExpectationArgs(args);
+        const reply = await options.expectationBroker?.note({ ...input, agent: expectationAgent(context?.clientName) }, signal)
+          ?? { recorded: false, reason: "broker_failed", linkedFailure: false };
+        const { recorded, id, reason, linkedFailure } = reply;
+        return buildResult({
+          recorded,
+          ...(id === undefined ? {} : {
+            id: options.exposure === "sanitized" ? projectOpaqueId(id, "id", { fields: [] }, true) : id,
+          }),
+          ...(reason === undefined ? {} : { reason }),
+          linkedFailure,
+          notice: EXPECTATION_NOTICE,
+        });
+      }
       let pairedCoverage: MemoryCoverage | undefined;
       try {
         const canonicalMemory = hasCanonicalMemoryQueries(options.memory);

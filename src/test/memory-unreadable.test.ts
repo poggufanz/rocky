@@ -175,6 +175,7 @@ test("MCP tool path treats the same non-regular memory as empty", async () => {
   const home = unreadableHome("mcp-unreadable");
   const memoryPath = join(home, "memory.jsonl");
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => loadMemory(memoryPath)),
     recallWithAi: disabledRecallWithAi,

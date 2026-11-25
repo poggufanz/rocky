@@ -289,6 +289,7 @@ test("MCP why_file supports optional diff parameter and secret redaction", async
   };
 
   const registry = createToolRegistry({
+    writeToolsEnabled: false,
     exposure: "sanitized",
     memory: createMemoryQueries(() => [mockTriple]),
     recallWithAi: disabledRecallWithAi,
