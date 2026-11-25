@@ -4,7 +4,9 @@
 //! and bounds the child runtime and the reply size. A failed read leaves the section hidden.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::io::Read;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -16,7 +18,8 @@ use std::time::{Duration, Instant};
 use std::os::windows::process::CommandExt;
 
 use rocky_proto::pipe::{AttemptOutcome, RelatedAttempt, ServerMsg, encode};
-use serde::Deserialize;
+use serde::de::{MapAccess, Visitor, value::MapAccessDeserializer};
+use serde::{Deserialize, Deserializer};
 
 use crate::guard::records::{CliRecord, read_cli};
 use crate::history::civil_from_days;
@@ -47,22 +50,45 @@ pub fn valid_card_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
 }
 
+/// Requires a JSON object for records whose derived deserializer also accepts positional arrays.
+struct JsonObject<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for JsonObject<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for ObjectVisitor<T> {
+            type Value = JsonObject<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+                T::deserialize(MapAccessDeserializer::new(map)).map(JsonObject)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor(PhantomData))
+    }
+}
+
 #[derive(Deserialize)]
 struct RawReply {
     v: u32,
-    entries: Vec<RawEntry>,
+    entries: Vec<JsonObject<RawEntry>>,
 }
 
 #[derive(Deserialize)]
 struct RawEntry {
-    attempts: Vec<RawAttempt>,
+    attempts: Vec<JsonObject<RawAttempt>>,
 }
 
 #[derive(Deserialize)]
 struct RawAttempt {
     ts: f64,
     outcome: String,
-    changes: RawChanges,
+    changes: JsonObject<RawChanges>,
 }
 
 #[derive(Deserialize)]
@@ -94,26 +120,24 @@ fn utc_date(ms: u64) -> String {
 /// Parses version 1 CLI output into at most five newest-first rows.
 pub fn parse_attempts(stdout: &[u8]) -> Option<Vec<RelatedAttempt>> {
     let json = std::str::from_utf8(stdout).ok()?;
-    if !json.trim_start().starts_with('{') {
-        return None;
-    }
-    let reply: RawReply = serde_json::from_str(json).ok()?;
+    let JsonObject(reply): JsonObject<RawReply> = serde_json::from_str(json).ok()?;
     if reply.v != 1 {
         return None;
     }
     let mut rows: Vec<(f64, RelatedAttempt)> = reply
         .entries
         .into_iter()
-        .flat_map(|entry| entry.attempts)
-        .filter_map(|attempt| {
+        .flat_map(|JsonObject(entry)| entry.attempts)
+        .filter_map(|JsonObject(attempt)| {
             if !attempt.ts.is_finite() || attempt.ts < 0.0 {
                 return None;
             }
             let outcome = outcome(&attempt.outcome)?;
-            let (files, more) = if attempt.changes.state == "observed" {
-                let extra = attempt.changes.files.len().saturating_sub(MAX_FILES) as u64;
-                let files = attempt.changes.files.into_iter().take(MAX_FILES).collect();
-                let more = extra.saturating_add(attempt.changes.more);
+            let JsonObject(changes) = attempt.changes;
+            let (files, more) = if changes.state == "observed" {
+                let extra = changes.files.len().saturating_sub(MAX_FILES) as u64;
+                let files = changes.files.into_iter().take(MAX_FILES).collect();
+                let more = extra.saturating_add(changes.more);
                 (files, u32::try_from(more).unwrap_or(u32::MAX))
             } else {
                 (Vec::new(), 0)
@@ -279,6 +303,7 @@ impl RelatedAttemptsLoop {
         }
         let key = (card_id.to_string(), rev);
         if let Some(cached) = self.cache.get(&key) {
+            self.queued = None;
             self.ready.extend(cached.clone());
             return;
         }
@@ -514,6 +539,35 @@ mod tests {
     }
 
     #[test]
+    fn malformed_nested_reply_is_retried() {
+        let valid = reply(&format!(
+            r#"{{"attempts":[{}]}}"#,
+            attempt(DAY, "passed", r#"{"state":"unknown"}"#)
+        ));
+        for malformed in [
+            reply("[[]]"),
+            reply(r#"{"attempts":[[86400000,"passed",{"state":"unknown"}]]}"#),
+            reply(
+                r#"{"attempts":[{"ts":86400000,"outcome":"passed","changes":["unknown",[],0]}]}"#,
+            ),
+        ] {
+            let mut lp = RelatedAttemptsLoop::new(Arc::new(move |_| Some(malformed.clone())));
+            lp.request("c1", 1);
+            wait_for_silent_completion(&mut lp);
+
+            let valid = valid.clone();
+            lp.set_runner(Arc::new(move |_| Some(valid.clone())));
+            lp.request("c1", 1);
+            let messages = wait_msgs(&mut lp, 1);
+            assert!(matches!(
+                messages.as_slice(),
+                [ServerMsg::RelatedAttempts { card_id, rev: 1, items }]
+                    if card_id == "c1" && items.len() == 1 && items[0].outcome == AttemptOutcome::Passed
+            ));
+        }
+    }
+
+    #[test]
     fn cache_evicts_the_oldest_insertion_even_after_a_hit() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut lp = RelatedAttemptsLoop::new(counting_runner(calls.clone(), Some(reply(""))));
@@ -565,6 +619,44 @@ mod tests {
             .collect();
         assert_eq!(ids, ["a", "c"]);
         assert_eq!(*calls.lock().unwrap(), ["a", "c"]);
+    }
+
+    #[test]
+    fn cached_request_supersedes_queued_lookup() {
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (start_tx, start_rx) = mpsc::channel();
+        let gate_rx = Mutex::new(gate_rx);
+        let body = reply(&format!(
+            r#"{{"attempts":[{}]}}"#,
+            attempt(DAY, "passed", r#"{"state":"unknown"}"#)
+        ));
+        let mut lp = RelatedAttemptsLoop::new(Arc::new(move |card_id| {
+            start_tx.send(card_id.to_string()).unwrap();
+            if card_id == "a" {
+                let _ = gate_rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            }
+            Some(body.clone())
+        }));
+        let next_started = || start_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        lp.request("c", 1);
+        assert_eq!(next_started(), "c");
+        let cached = wait_msgs(&mut lp, 1);
+        assert_eq!(cached.len(), 1);
+
+        lp.request("a", 1);
+        assert_eq!(next_started(), "a");
+        lp.request("b", 1);
+        lp.request("c", 1);
+        assert_eq!(lp.service(), cached);
+
+        gate_tx.send(()).unwrap();
+        let messages = wait_msgs(&mut lp, 1);
+        assert!(matches!(
+            messages.as_slice(),
+            [ServerMsg::RelatedAttempts { card_id, .. }] if card_id == "a"
+        ));
+        wait_for_silent_completion(&mut lp);
+        assert!(start_rx.try_recv().is_err());
     }
 
     #[test]
