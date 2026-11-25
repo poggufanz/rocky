@@ -88,7 +88,7 @@ test("stats() treats a non-regular memory path as empty", async () => {
   const home = unreadableHome("stats-unreadable");
   process.env.ROCKY_HOME = home;
 
-  const { result, stderr } = await captureStderr(() => stats());
+  const { result, stderr } = await captureStderr(stats);
 
   assert.equal(result, 0);
   assert.doesNotMatch(stderr, /Memory file could not be opened\. No records were read\./);
@@ -104,7 +104,7 @@ test("recall() and stats() behave as today when memory.jsonl is simply absent", 
   const { result: recallResult } = await captureStderr(() => recall(["anything"]));
   assert.equal(recallResult, 0);
 
-  const { result: statsResult } = await captureStderr(() => stats());
+  const { result: statsResult } = await captureStderr(stats);
   assert.equal(statsResult, 0);
 });
 

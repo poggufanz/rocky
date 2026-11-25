@@ -22,6 +22,7 @@ import {
   type CycleEntry,
 } from "../core/failure-cycle.js";
 import { fingerprint, similarity, tokens } from "../core/fingerprint.js";
+import { CliUsageError } from "../commands/cli-args.js";
 import { parseStatsArgs, stats } from "../commands/stats.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
 import { validateOutputLine } from "../ui/phrases.js";
@@ -52,13 +53,17 @@ function withEnv(t: import("node:test").TestContext, name: string, value: string
   });
 }
 
-function captureOutput<T>(fn: () => T): { result: T; stdout: string; stderr: string } {
+async function captureOutput(fn: () => Promise<number>): Promise<{ result: number; stdout: string; stderr: string }> {
   const originalStdout = process.stdout.write;
   const originalStderr = process.stderr.write;
   let stdout = "";
   let stderr = "";
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    stdout += String(chunk);
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    // Keep node:test's binary report frames on the real stdout channel.
+    if (typeof chunk !== "string") {
+      return (originalStdout as (...args: unknown[]) => boolean).call(process.stdout, chunk, ...rest);
+    }
+    stdout += chunk;
     return true;
   }) as typeof process.stdout.write;
   process.stderr.write = ((chunk: string | Uint8Array) => {
@@ -66,7 +71,7 @@ function captureOutput<T>(fn: () => T): { result: T; stdout: string; stderr: str
     return true;
   }) as typeof process.stderr.write;
   try {
-    return { result: fn(), stdout, stderr };
+    return { result: await fn(), stdout, stderr };
   } finally {
     process.stdout.write = originalStdout;
     process.stderr.write = originalStderr;
@@ -186,11 +191,29 @@ test("rendered card and nudge line are plain statements that pass the output rul
   assert.ok(!renderCycleCard(3, 1).some((entry) => entry.includes("Count only")));
 });
 
-test("parseStatsArgs takes only --cycles", () => {
-  assert.equal(parseStatsArgs([]), false);
-  assert.equal(parseStatsArgs(["--cycles"]), true);
-  assert.throws(() => parseStatsArgs(["--bogus"]), /unexpected argument/);
-  assert.throws(() => parseStatsArgs(["--cycles", "--cycles"]), /unexpected argument/);
+const invalidStatsArgs = [
+  ["--json"],
+  ["--cycles", "--attempts"],
+  ["--attempts", "--attempts"],
+  ["--bogus"],
+  ["--cycles", "--json"],
+  ["--cycles", "--cycles"],
+  ["--attempts", "--json", "--json"],
+];
+
+test("parseStatsArgs accepts summary, cycles, and attempt study modes", () => {
+  assert.deepEqual(parseStatsArgs([]), { mode: "summary" });
+  assert.deepEqual(parseStatsArgs(["--cycles"]), { mode: "cycles" });
+  assert.deepEqual(parseStatsArgs(["--attempts"]), { mode: "attempts", json: false });
+  for (const argv of [["--attempts", "--json"], ["--json", "--attempts"]]) {
+    assert.deepEqual(parseStatsArgs(argv), { mode: "attempts", json: true });
+  }
+});
+
+test("parseStatsArgs rejects invalid flag combinations", () => {
+  for (const argv of invalidStatsArgs) {
+    assert.throws(() => parseStatsArgs(argv), CliUsageError, argv.join(" "));
+  }
 });
 
 function seedCycleMemory(t: import("node:test").TestContext): void {
@@ -212,7 +235,7 @@ function seedCycleMemory(t: import("node:test").TestContext): void {
 test("stats --cycles lists top fingerprints with counts from memory", async (t) => {
   withEnv(t, "ROCKY_VERBOSE", undefined);
   seedCycleMemory(t);
-  const { result, stderr } = captureOutput(() => stats(["--cycles"]));
+  const { result, stderr } = await captureOutput(() => stats(["--cycles"]));
   assert.equal(result, 0);
   assert.match(stderr, new RegExp(`${FP_A} x3`));
   assert.match(stderr, new RegExp(`${FP_B} x1`));
@@ -226,7 +249,7 @@ test("stats --cycles lists top fingerprints with counts from memory", async (t) 
 test("stats --cycles prints the raw memory counters under ROCKY_VERBOSE", async (t) => {
   withEnv(t, "ROCKY_VERBOSE", "1");
   seedCycleMemory(t);
-  const { result, stderr } = captureOutput(() => stats(["--cycles"]));
+  const { result, stderr } = await captureOutput(() => stats(["--cycles"]));
   assert.equal(result, 0);
   assert.match(stderr, /memory coverage: version 1, scanned 4, skipped 0, truncated 0, complete true/);
 });
@@ -234,13 +257,17 @@ test("stats --cycles prints the raw memory counters under ROCKY_VERBOSE", async 
 test("stats --cycles is honest when memory holds no failure", async (t) => {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rocky-stats-cycles-empty-")));
   withRockyHome(t, home);
-  const { result, stderr } = captureOutput(() => stats(["--cycles"]));
+  const { result, stderr } = await captureOutput(() => stats(["--cycles"]));
   assert.equal(result, 0);
   assert.match(stderr, /No failures recorded yet\. Nothing repeats\./);
 });
 
-test("stats still rejects unknown flags", async (t) => {
+test("stats returns a usage error for invalid flag combinations", async (t) => {
   withRockyHome(t, realpathSync(mkdtempSync(join(tmpdir(), "rocky-stats-cycles-usage-"))));
-  const { result } = captureOutput(() => stats(["--bogus"]));
-  assert.equal(result, 2);
+  for (const argv of invalidStatsArgs) {
+    const { result, stdout, stderr } = await captureOutput(() => stats(argv));
+    assert.equal(result, 2, argv.join(" "));
+    assert.equal(stdout, "");
+    assert.ok(stderr.includes("usage: rocky stats [--cycles | --attempts [--json]]"));
+  }
 });
