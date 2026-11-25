@@ -220,19 +220,7 @@ function firstCandidates(rows: readonly ExposureRow[]): Candidate[] {
     const prior = byAnchor.get(row.anchorFailureId);
     if (prior === undefined || row.ts < prior.row.ts) byAnchor.set(row.anchorFailureId, { row, order });
   }
-
-  const sorted = [...byAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order);
-  const keysBySession = new Map<string, Set<string>>();
-  return sorted.filter(({ row }) => {
-    let keys = keysBySession.get(row.session);
-    if (keys === undefined) {
-      keys = new Set();
-      keysBySession.set(row.session, keys);
-    }
-    if (keys.has(row.key)) return false;
-    keys.add(row.key);
-    return true;
-  });
+  return [...byAnchor.values()].sort((a, b) => a.row.ts - b.row.ts || a.order - b.order);
 }
 
 function countLogRows(
@@ -306,13 +294,23 @@ function collectSessions(
       counts.excluded.armConflict += session.episodes.length;
       continue;
     }
+    const seenKeys = new Set<string>();
+    const uniqueEpisodes: Episode[] = [];
+    for (const episode of session.episodes) {
+      if (seenKeys.has(episode.row.key)) {
+        counts.excluded.duplicateAnchor++;
+        continue;
+      }
+      seenKeys.add(episode.row.key);
+      uniqueEpisodes.push(episode);
+    }
     const arm = counts.arms[session.arm];
     arm.primaryUnits++;
-    for (const { anchor } of session.episodes) {
+    for (const { anchor } of uniqueEpisodes) {
       if (anchor === undefined) arm.outOfTail++;
       else arm.episodes++;
     }
-    included.push(session);
+    included.push({ arm: session.arm, episodes: uniqueEpisodes });
   }
   counts.primaryUnits = included.length;
   return included;

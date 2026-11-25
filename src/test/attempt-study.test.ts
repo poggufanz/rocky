@@ -553,3 +553,64 @@ test("pre-stop text distinguishes absent and invalid markers and hides outcome n
     assert.ok(lines.includes("Exposure log is full. New rows are not written."));
   }
 });
+
+test("before-start and key-mismatched anchors do not suppress a later valid episode for the same session and key", () => {
+  const keyA = "output:aaaaaaaaaaaaaaaa:fedcba0987654321";
+  const keyB = "output:bbbbbbbbbbbbbbbb:fedcba0987654321";
+  const pA = makeProblem(keyA, [
+    { id: "a-valid", ts: START + 2000, session: "s1", outcome: "passed" },
+  ]);
+  const pB = makeProblem(keyB, [
+    { id: "b-mismatch", ts: START + 1000, session: "s1", outcome: "same_failure" },
+  ]);
+  const hashA = exposureKeyHash(keyA);
+  const rows = [
+    note({ ts: START - 1000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "a-before" }),
+    note({ ts: START + 1000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "b-mismatch" }),
+    note({ ts: START + 2000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "a-valid" }),
+  ];
+  const report = buildAttemptStudy({
+    rows,
+    malformed: 0,
+    logFull: false,
+    records: [...pA.records, ...pB.records],
+    entries: [pA.entry, pB.entry],
+    start,
+    now: DEADLINE + DAY,
+  });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.primaryUnits, 1);
+  assert.equal(report.arms.shown.primaryUnits, 1);
+  assert.equal(report.arms.shown.episodes, 1);
+  assert.equal(report.excluded.beforeStart, 1);
+  assert.equal(report.excluded.keyMismatch, 1);
+  assert.equal(report.excluded.duplicateAnchor, 0);
+});
+
+test("same-key retry with a conflicting arm triggers armConflict rather than silent dedup", () => {
+  const keyA = "output:aaaaaaaaaaaaaaaa:fedcba0987654321";
+  const pA = makeProblem(keyA, [
+    { id: "a1", ts: START + 1000, session: "s1", outcome: "same_failure" },
+    { id: "a2", ts: START + 2000, session: "s1", outcome: "passed" },
+  ]);
+  const hashA = exposureKeyHash(keyA);
+  const rows = [
+    note({ ts: START + 1000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "a1" }),
+    note({ ts: START + 2000, session: "s1", arm: "held", key: hashA, anchorFailureId: "a2" }),
+  ];
+  const report = buildAttemptStudy({
+    rows,
+    malformed: 0,
+    logFull: false,
+    records: pA.records,
+    entries: [pA.entry],
+    start,
+    now: DEADLINE + DAY,
+  });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.primaryUnits, 0);
+  assert.equal(report.arms.shown.primaryUnits, 0);
+  assert.equal(report.arms.held.primaryUnits, 0);
+  assert.equal(report.excluded.armConflict, 2);
+  assert.equal(report.excluded.duplicateAnchor, 0);
+});
