@@ -1,0 +1,616 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
+import { ADVISORY_LOG_MAX_BYTES, exposureKeyHash, type ExposureRow } from "../core/attempt-note-state.js";
+import {
+  anchorIds, buildAttemptStudy, readExposureLog, readStudyStart, renderAttemptStudyText,
+  type AttemptStudyInput, type AttemptStudyReport,
+} from "../core/attempt-study.js";
+import { clusterBootstrapDiff, mde, newcombeDiff, Z90 } from "../core/attempt-study-math.js";
+import type { Attempt, ProblemEntry } from "../core/attempts.js";
+import type { FailureRecord, FixRecord, MemoryRecord } from "../core/memory-read.js";
+import { causalWordViolations } from "./causal-words.js";
+
+const DAY = 86_400_000;
+const START = Date.UTC(2026, 11, 1);
+const DEADLINE = START + 120 * DAY;
+const FINGERPRINT = "1234567890abcdef";
+const KEY = "output:1234567890abcdef:fedcba0987654321";
+const CMD = "npm test";
+const CWD = "/work/repo";
+const start = { state: "set", ts: START } as const;
+
+function tempHome(t: TestContext): string {
+  const home = mkdtempSync(join(tmpdir(), "rocky-attempt-study-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  return home;
+}
+
+function note(overrides: Partial<ExposureRow> = {}): ExposureRow {
+  return {
+    v: 1, ts: START + 100, session: "s1", lane: "run", kind: "note",
+    arm: "shown", key: exposureKeyHash(KEY), cwdHash: FINGERPRINT,
+    anchorFailureId: "a1", latencyMs: 10, delivered: true, bytes: 100,
+    ...overrides,
+  };
+}
+
+test("exposure reader distinguishes missing and unsafe files", (t) => {
+  const home = tempHome(t);
+  const log = join(home, "advisories.jsonl");
+  assert.deepEqual(readExposureLog(home), { state: "missing" });
+  assert.deepEqual(readExposureLog(join(home, "absent")), { state: "missing" });
+  writeFileSync(log, "");
+  truncateSync(log, ADVISORY_LOG_MAX_BYTES + 64 * 1024 + 1);
+  assert.deepEqual(readExposureLog(home), { state: "unreadable" });
+});
+
+test("exposure reader rejects a directory at the log path", (t) => {
+  const home = tempHome(t);
+  mkdirSync(join(home, "advisories.jsonl"));
+  assert.deepEqual(readExposureLog(home), { state: "unreadable" });
+});
+
+test("exposure reader rejects a symlink", { skip: process.platform === "win32" }, (t) => {
+  const home = tempHome(t);
+  const target = join(home, "target");
+  writeFileSync(target, JSON.stringify(note()));
+  symlinkSync(target, join(home, "advisories.jsonl"));
+  assert.deepEqual(readExposureLog(home), { state: "unreadable" });
+});
+
+test("exposure reader retains valid rows and checks the near-cap threshold", (t) => {
+  const home = tempHome(t);
+  const path = join(home, "advisories.jsonl");
+  const rows = [note(), note({ kind: "skip", arm: null, reason: "lock_busy" })];
+  const firstLine = JSON.stringify(rows[0]);
+  const otherLines = `\n{broken\n${JSON.stringify(rows[1])}\n`;
+  const writeAtSize = (size: number) => {
+    const padding = size - Buffer.byteLength(firstLine + otherLines);
+    writeFileSync(path, firstLine + " ".repeat(padding) + otherLines);
+  };
+
+  writeAtSize(ADVISORY_LOG_MAX_BYTES - 1025);
+  assert.deepEqual(readExposureLog(home), { state: "ok", rows, malformed: 1, logFull: false });
+  writeAtSize(ADVISORY_LOG_MAX_BYTES - 1024);
+  assert.deepEqual(readExposureLog(home), { state: "ok", rows, malformed: 1, logFull: true });
+});
+
+test("valid JSON with the wrong exposure shape counts as malformed", (t) => {
+  const home = tempHome(t);
+  const path = join(home, "advisories.jsonl");
+  const badRows: unknown[] = [
+    null, [], { ...note(), v: 2 }, { ...note(), ts: null }, { ...note(), session: 3 },
+    { ...note(), lane: "other" }, { ...note(), kind: "other" }, { ...note(), arm: "other" },
+    { ...note(), key: "xyz" }, { ...note(), cwdHash: null },
+    { ...note(), anchorFailureId: "a".repeat(129) }, { ...note(), latencyMs: -1 },
+    { ...note(), delivered: 1 }, { ...note(), bytes: -1 }, { ...note(), reason: "x".repeat(65) },
+    { ...note(), reason: null },
+  ];
+  writeFileSync(path, badRows.map((row) => JSON.stringify(row)).join("\n") + "\n\n");
+  assert.deepEqual(readExposureLog(home), {
+    state: "ok", rows: [], malformed: badRows.length + 1, logFull: false,
+  });
+});
+
+test("start marker accepts UTC dates and ISO timestamps up to sixty seconds ahead", (t) => {
+  const home = tempHome(t);
+  const path = join(home, "attempt-study-start");
+  assert.deepEqual(readStudyStart(home, START), { state: "absent" });
+  writeFileSync(path, "  2026-12-01\n");
+  assert.deepEqual(readStudyStart(home, START), start);
+  writeFileSync(path, "2026-12-01T07:01:00+07:00");
+  assert.deepEqual(readStudyStart(home, START), { state: "set", ts: START + 60_000 });
+  assert.deepEqual(readStudyStart(home, START - 1), { state: "invalid" });
+});
+
+test("start marker rejects invalid, oversized and non-file markers", (t) => {
+  const home = tempHome(t);
+  const path = join(home, "attempt-study-start");
+  for (const value of ["garbage", "Dec 1, 2026", "2026-02-30", "2026-12-01" + " ".repeat(247)]) {
+    writeFileSync(path, value);
+    assert.deepEqual(readStudyStart(home, START), { state: "invalid" }, value);
+  }
+  rmSync(path);
+  mkdirSync(path);
+  assert.deepEqual(readStudyStart(home, START), { state: "invalid" });
+});
+
+type FixtureAttempt = {
+  id: string;
+  ts: number;
+  session: string;
+  outcome: Attempt["outcome"];
+  files?: string[];
+  observed?: NonNullable<Attempt["expectations"]>[number]["observed"];
+};
+
+function makeProblem(key: string, evidence: FixtureAttempt[]): { entry: ProblemEntry; records: MemoryRecord[] } {
+  const records: MemoryRecord[] = [];
+  const counts: ProblemEntry["counts"] = {
+    attempts: evidence.length, passed: 0, possible_pass: 0, same_failure: 0,
+    different_failure: 0, no_later_run: 0, unknown: 0,
+  };
+  const attempts = evidence.map(({ id, ts, session, outcome, files, observed }, index): Attempt => {
+    const agent = { vendor: "claude-code" as const, session };
+    const failure: FailureRecord = {
+      kind: "failure", id, ts, cwd: CWD, cmd: CMD, exitCode: 1,
+      fingerprint: FINGERPRINT, signature: [], excerpt: "", agent,
+    };
+    records.push(failure);
+    const attempt: Attempt = {
+      failureId: id, ts, cmd: CMD, outcome, sessionScoped: true, session: { vendor: agent.vendor },
+      changes: files === undefined
+        ? { state: "unknown" }
+        : { state: "observed", files, more: 0, cardId: `card-${id}`, partial: false },
+    };
+    if (outcome === "passed") {
+      const fix: FixRecord = { kind: "fix", id: `fix-${id}`, ts: ts + 1, cwd: CWD, cmd: CMD, failureIds: [id], agent };
+      failure.resolvedBy = fix.id;
+      records.push(fix);
+      attempt.outcomeRecordId = fix.id;
+      attempt.outcomeTs = fix.ts;
+    } else if (outcome === "same_failure") {
+      attempt.outcomeRecordId = evidence[index + 1]?.id;
+      attempt.outcomeTs = evidence[index + 1]?.ts;
+    }
+    if (observed !== undefined) attempt.expectations = [{ text: "Compare run", rationaleId: `r-${id}`, observed }];
+    counts[outcome]++;
+    return attempt;
+  });
+  return {
+    entry: {
+      problemId: key, key, fingerprint: FINGERPRINT, family: [FINGERPRINT],
+      keyStrength: "output", cwd: CWD, signature: [], counts, attempts,
+      firstSeenTs: attempts[0]!.ts, lastSeenTs: attempts.at(-1)!.ts,
+      latestOutcome: attempts.at(-1)!.outcome, historyMayStartEarlier: false,
+    },
+    records,
+  };
+}
+
+function fixture(): AttemptStudyInput {
+  const first = makeProblem(KEY, [
+    { id: "prior", ts: START - 10, session: "prior", outcome: "passed", files: ["b.ts", "a.ts"] },
+    { id: "a1", ts: START + 90, session: "s1", outcome: "same_failure", files: ["a.ts", "b.ts"], observed: "same_command_failed" },
+    { id: "a2", ts: START + 95, session: "s1", outcome: "passed", observed: "same_command_passed" },
+    { id: "b1", ts: START + 97, session: "s2", outcome: "no_later_run", files: ["c.ts"], observed: "no_matching_run" },
+    { id: "foreign", ts: START + 99, session: "other", outcome: "passed", observed: "not_comparable" },
+  ]);
+  const otherKey = "other";
+  const other = makeProblem(otherKey, [
+    { id: "a3", ts: START + 100, session: "s1", outcome: "no_later_run" },
+    { id: "mismatch", ts: START + 102, session: "m", outcome: "no_later_run" },
+  ]);
+  return {
+    rows: [
+      note({ ts: START + 104, arm: "held", session: "duplicate" }),
+      note(),
+      note({ arm: "held", session: "duplicate-tie" }),
+      note({ ts: START + 101, anchorFailureId: "a3", key: exposureKeyHash(otherKey), bytes: 200 }),
+      note({ ts: START + 102, arm: "held", session: "s2", lane: "watch", anchorFailureId: "b1", latencyMs: 50, delivered: false, bytes: 0 }),
+      note({ arm: "unassigned", session: null, anchorFailureId: null, lane: "hookfail" }),
+      note({ arm: "human", session: null }),
+      note({ arm: null, session: null }),
+      note({ session: null, anchorFailureId: null }),
+      note({ session: "", anchorFailureId: null }),
+      note({ anchorFailureId: null }),
+      note({ session: "m", anchorFailureId: "mismatch" }),
+      note({ ts: START + 103, arm: "held", session: "s2", anchorFailureId: "missing", key: exposureKeyHash("missing") }),
+      note({ ts: START - 1, anchorFailureId: "too-early", key: exposureKeyHash("too-early"), latencyMs: 90 }),
+      note({ ts: DEADLINE + 1, anchorFailureId: "too-late", key: exposureKeyHash("too-late"), latencyMs: 100, lane: "watch" }),
+      note({ kind: "skip", reason: "lock_busy", latencyMs: 9_000 }),
+      note({ kind: "skip", reason: "wrapped" }),
+      note({ kind: "skip", reason: "wrapped", ts: DEADLINE + 1 }),
+    ],
+    entries: [first.entry, other.entry],
+    records: [...first.records, ...other.records],
+    start: { state: "absent" },
+    now: START + 4 * DAY,
+    malformed: 1,
+    logFull: true,
+  };
+}
+
+function assertNoOutcomes(report: AttemptStudyReport): void {
+  const json = JSON.stringify(report);
+  assert.doesNotMatch(json, /"(?:primary|secondary|sameFailure|repeatFileSet|expectations|verdict|passed)":/u);
+}
+
+function render(report: AttemptStudyReport, home: string): string[] {
+  const { head, details } = renderAttemptStudyText(report, home);
+  const lines = [head, ...details];
+  assert.deepEqual(causalWordViolations(lines), []);
+  assert.ok(lines.every((line) => !line.includes("?")));
+  return lines;
+}
+
+test("only assigned note rows with a session, anchor and key request memory joins", () => {
+  const rows = [...fixture().rows, note({ anchorFailureId: "no-key", key: null })];
+  assert.deepEqual(anchorIds(rows), new Set(["a1", "a3", "b1", "mismatch", "missing", "too-early", "too-late"]));
+});
+
+test("without a marker the report counts all eligible rows and hides outcomes", () => {
+  const report = buildAttemptStudy(fixture());
+  assert.equal(report.phase, "not-started");
+  assert.deepEqual(report.start, { state: "absent" });
+  assert.equal(report.primaryUnits, 2);
+  assert.deepEqual(report.arms, {
+    shown: { episodes: 2, primaryUnits: 1, outOfTail: 2 },
+    held: { episodes: 1, primaryUnits: 1, outOfTail: 1 },
+  });
+  assert.deepEqual(report.excluded, {
+    unassigned: 2, human: 1, noSession: 2, noAnchor: 1, duplicateAnchor: 2,
+    keyMismatch: 1, armConflict: 0, beforeStart: 0, afterStop: 0,
+  });
+  assert.deepEqual({ ...report.skips }, { lock_busy: 1, wrapped: 2 });
+  assert.equal(report.malformed, 1);
+  assert.equal(report.logFull, true);
+  assertNoOutcomes(report);
+});
+
+test("running study reports operational counts without exposing outcomes", () => {
+  const input = fixture();
+  const report = buildAttemptStudy({ ...input, start });
+  assert.equal(report.phase, "running");
+  assert.deepEqual(report.start, { state: "set", iso: "2026-12-01T00:00:00.000Z" });
+  assert.equal(report.day, 5);
+  assert.equal(report.primaryUnits, 2);
+  assert.equal(report.excluded.beforeStart, 1);
+  assert.equal(report.excluded.afterStop, 0);
+  assert.deepEqual(report.skips, { lock_busy: 1, wrapped: 1 });
+  assert.deepEqual(report.latency.watch, { n: 1, p95: 50 });
+  assert.deepEqual(report.latency.hookfail, { n: 1, p95: 10 });
+  assert.equal(report.meanDeliveredBytes, 1300 / 12);
+  assertNoOutcomes(report);
+});
+
+test("day stop uses in-window primary units and session clusters with separate denominators", () => {
+  const report = buildAttemptStudy({ ...fixture(), start, now: DEADLINE + DAY });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.stopReason, "days");
+  assert.equal(report.day, 120);
+  assert.equal(report.primaryUnits, 2);
+  assert.equal(report.excluded.beforeStart, 1);
+  assert.equal(report.excluded.afterStop, 1);
+  assert.deepEqual(report.arms, {
+    shown: { episodes: 2, primaryUnits: 1, outOfTail: 0 },
+    held: { episodes: 1, primaryUnits: 1, outOfTail: 1 },
+  });
+  assert.deepEqual(report.primary, {
+    shown: { n: 1, passed: 1 }, held: { n: 1, passed: 0 },
+    ...newcombeDiff(1, 1, 0, 1, Z90), mde: mde(1, 1, 0.5),
+  });
+  assert.deepEqual(report.secondary, {
+    diff: 0.5, clusters: { shown: 1, held: 1 }, resamples: 2000,
+    ...clusterBootstrapDiff([
+      { arm: "shown", successes: 1, total: 2 },
+      { arm: "held", successes: 0, total: 1 },
+    ], { resamples: 2000, seed: 0x5eed11, level: 0.9 }),
+  });
+  assert.deepEqual(report.sameFailure, { shown: 0.5, held: 0 });
+  assert.deepEqual(report.repeatFileSet, { shown: { subset: 1, repeats: 1 }, held: { subset: 1, repeats: 0 } });
+  assert.deepEqual({ ...report.expectations.shown }, { same_command_failed: 1, same_command_passed: 1 });
+  assert.deepEqual({ ...report.expectations.held }, { no_matching_run: 1 });
+});
+
+test("the day stop counts rows dated after the deadline at the instant it is reached", () => {
+  const report = buildAttemptStudy({ ...fixture(), start, now: DEADLINE });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.stopReason, "days");
+  assert.equal(report.excluded.afterStop, 1);
+  assert.deepEqual(report.latency.watch, { n: 1, p95: 50 });
+});
+
+test("a readable secondary episode keeps its place when the primary anchor is missing", () => {
+  const input = fixture();
+  const rows = input.rows.map((row) => row.anchorFailureId === "missing" ? { ...row, ts: START + 101 } : row);
+  const report = buildAttemptStudy({ ...input, start, rows, now: DEADLINE });
+  assert.equal(report.phase, "stopped");
+  assert.deepEqual(report.arms.held, { episodes: 1, primaryUnits: 1, outOfTail: 1 });
+  assert.deepEqual(report.primary.held, { n: 0, passed: 0 });
+  assert.equal(report.secondary.clusters.held, 1);
+  assert.equal(report.secondary.diff, 0.5);
+  assert.deepEqual(report.expectations.held, { no_matching_run: 1 });
+});
+
+test("retries contribute outcome evidence to the first episode for a session and key", () => {
+  const first = makeProblem(KEY, [
+    { id: "a1", ts: START + 10, session: "s1", outcome: "same_failure" },
+    { id: "a2", ts: START + 20, session: "s1", outcome: "same_failure" },
+    { id: "a3", ts: START + 30, session: "s1", outcome: "passed" },
+  ]);
+  const other = makeProblem("other", [
+    { id: "b1", ts: START + 11, session: "s1", outcome: "no_later_run" },
+  ]);
+  const held = cohort(0, 1, 0, 0);
+  const report = buildAttemptStudy({
+    ...held, now: DEADLINE,
+    rows: [
+      ...held.rows,
+      note({ ts: START + 30, anchorFailureId: "a3" }),
+      note({ ts: START + 10, anchorFailureId: "a1", delivered: false, bytes: 0 }),
+      note({ ts: START + 10, anchorFailureId: "a2" }),
+      note({ ts: START + 11, anchorFailureId: "b1", key: exposureKeyHash("other") }),
+    ],
+    entries: [...held.entries, first.entry, other.entry],
+    records: [...held.records, ...first.records, ...other.records],
+  });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.arms.shown.episodes, 2);
+  assert.equal(report.excluded.duplicateAnchor, 2);
+  assert.deepEqual(report.primary.shown, { n: 1, passed: 1 });
+  assert.equal(report.secondary.diff, 0.5);
+  assert.equal(report.sameFailure.shown, 1);
+});
+
+function cohort(shown: number, held: number, shownPasses: number, heldPasses: number): AttemptStudyInput {
+  const rows: ExposureRow[] = [];
+  const entries: ProblemEntry[] = [];
+  const records: MemoryRecord[] = [];
+  for (const [arm, n, passes] of [["shown", shown, shownPasses], ["held", held, heldPasses]] as const) {
+    for (let i = 0; i < n; i++) {
+      const id = `${arm}-${i}`;
+      const ts = START + (i * 2 + (arm === "held" ? 1 : 0)) * 1_000;
+      const { entry, records: evidence } = makeProblem(id, [
+        { id, ts, session: id, outcome: i < passes ? "passed" : "no_later_run" },
+      ]);
+      entries.push(entry);
+      records.push(...evidence);
+      rows.push(note({ ts, arm, session: id, anchorFailureId: id, key: exposureKeyHash(id) }));
+    }
+  }
+  return { rows, entries, records, start, now: START + DAY, malformed: 0, logFull: false };
+}
+
+test("unit stop uses the earliest 300 primary units, regardless of file order", () => {
+  const input = cohort(155, 155, 80, 80);
+  const report = buildAttemptStudy({ ...input, rows: [...input.rows].reverse(), now: DEADLINE + DAY });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.stopReason, "units");
+  assert.equal(report.primaryUnits, 300);
+  assert.equal(report.primary.shown.n, 150);
+  assert.equal(report.primary.held.n, 150);
+  assert.equal(report.excluded.afterStop, 10);
+});
+
+test("unit stop excludes episodes later in file order at the same timestamp", () => {
+  const input = cohort(151, 150, 0, 0);
+  const rows = input.rows.map((row) => {
+    if (row.anchorFailureId === "shown-150") return { ...row, ts: START + 299_000 };
+    if (row.anchorFailureId === "held-149") return { ...row, latencyMs: 50, bytes: 500 };
+    return row;
+  });
+  const report = buildAttemptStudy({ ...input, rows });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.stopReason, "units");
+  assert.equal(report.primaryUnits, 300);
+  assert.equal(report.primary.shown.n + report.primary.held.n, 300);
+  assert.equal(report.primary.shown.n, 151);
+  assert.equal(report.primary.held.n, 149);
+  assert.equal(report.excluded.afterStop, 1);
+  assert.deepEqual(report.latency.run, { n: 300, p95: 10 });
+  assert.equal(report.meanDeliveredBytes, 100);
+});
+
+test("an enrollment keeps its stop slot after its anchor leaves the memory tail", () => {
+  const input = cohort(151, 150, 1, 0);
+  const full = buildAttemptStudy(input);
+  const rolled = buildAttemptStudy({
+    ...input,
+    entries: input.entries.filter((entry) => entry.key !== "shown-0"),
+    records: input.records.filter((record) => record.id !== "shown-0" && record.id !== "fix-shown-0"),
+  });
+  assert.equal(full.phase, "stopped");
+  assert.equal(rolled.phase, "stopped");
+  for (const report of [full, rolled]) {
+    assert.equal(report.stopReason, "units");
+    assert.equal(report.primaryUnits, 300);
+    assert.equal(report.excluded.afterStop, 1);
+    assert.equal(report.arms.shown.primaryUnits, 150);
+  }
+  assert.equal(full.arms.shown.outOfTail, 0);
+  assert.deepEqual(full.primary.shown, { n: 150, passed: 1 });
+  assert.equal(rolled.arms.shown.outOfTail, 1);
+  assert.deepEqual(rolled.primary.shown, { n: 149, passed: 0 });
+  assert.deepEqual(rolled.secondary.clusters, { shown: 149, held: 150 });
+});
+
+test("the unit stop caps enrollment when two sessions arrive on the deadline", () => {
+  const input = cohort(151, 150, 0, 0);
+  const rows = input.rows.map((row) => row.anchorFailureId === "shown-150" || row.anchorFailureId === "held-149"
+    ? { ...row, ts: DEADLINE }
+    : row);
+  const report = buildAttemptStudy({ ...input, rows, now: DEADLINE });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.stopReason, "units");
+  assert.equal(report.primaryUnits, 300);
+  assert.equal(report.excluded.afterStop, 1);
+  assert.equal(report.primary.shown.n, 151);
+  assert.equal(report.primary.held.n, 149);
+});
+
+test("future exposures do not count toward a running report", () => {
+  const input = cohort(150, 150, 0, 0);
+  const rows = input.rows.map((row) => row.anchorFailureId === "held-149"
+    ? { ...row, ts: input.now + 1, bytes: 500 }
+    : row);
+  const report = buildAttemptStudy({ ...input, rows });
+  assert.equal(report.phase, "running");
+  assert.equal(report.primaryUnits, 299);
+  assert.deepEqual(report.arms.held, { primaryUnits: 149, episodes: 149, outOfTail: 0 });
+  assert.equal(report.excluded.afterStop, 0);
+  assert.deepEqual(report.latency.run, { n: 299, p95: 10 });
+  assert.equal(report.meanDeliveredBytes, 100);
+  assertNoOutcomes(report);
+});
+
+test("absent and invalid markers include every episode regardless of now", () => {
+  const input = cohort(150, 150, 0, 0);
+  const rows = input.rows.map((row) => row.anchorFailureId === "held-149"
+    ? { ...row, ts: input.now + 1, bytes: 500 }
+    : row);
+  for (const studyStart of [{ state: "absent" }, { state: "invalid" }] as const) {
+    const report = buildAttemptStudy({ ...input, rows, start: studyStart });
+    assert.equal(report.phase, "not-started");
+    assert.equal(report.primaryUnits, 300);
+    assert.deepEqual(report.arms.held, { primaryUnits: 150, episodes: 150, outOfTail: 0 });
+    assert.equal(report.excluded.afterStop, 0);
+    assert.deepEqual(report.latency.run, { n: 300, p95: 10 });
+    assert.equal(report.meanDeliveredBytes, 30_400 / 300);
+    assertNoOutcomes(report);
+  }
+});
+
+test("conflicting in-window arms exclude the entire session before counting primary units", () => {
+  const input = fixture();
+  const rows = input.rows.map((row) => row.anchorFailureId === "a3" ? { ...row, arm: "held" as const } : row);
+  const report = buildAttemptStudy({ ...input, start, rows });
+  assert.equal(report.excluded.armConflict, 2);
+  assert.equal(report.arms.shown.episodes, 0);
+  assert.equal(report.arms.held.episodes, 1);
+  assert.equal(report.primaryUnits, 1);
+});
+
+test("the primary Newcombe interval drives on, off and inconclusive verdicts", () => {
+  for (const [shown, held, verdict] of [[120, 60, "on"], [60, 120, "off"], [75, 75, "inconclusive"]] as const) {
+    const report = buildAttemptStudy(cohort(150, 150, shown, held));
+    assert.equal(report.phase, "stopped");
+    assert.equal(report.verdict, verdict);
+    const lines = render(report, CWD);
+    assert.equal(lines[0], "Attempt study stopped (300 primary units).");
+    assert.ok(lines.some((line) => line.startsWith("difference shown minus held: ") && line.includes("90% CI")));
+    assert.ok(lines.some((line) => line.startsWith("secondary, all episodes: ") && line.includes("2000 resamples")));
+    if (verdict === "inconclusive") {
+      assert.ok(lines.includes("Verdict: inconclusive. The note stays off; CLI and MCP stay."));
+    }
+    assert.ok(lines.includes("A friction entry from the owner in the journal sets the note off whatever this verdict says."));
+  }
+});
+
+test("empty arm gives an inconclusive verdict and no fabricated interval in text", () => {
+  const report = buildAttemptStudy({ ...cohort(1, 0, 1, 0), now: DEADLINE });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.verdict, "inconclusive");
+  assert.equal(report.primary.diff, undefined);
+  assert.equal(report.primary.lower, undefined);
+  assert.equal(report.primary.upper, undefined);
+  assert.equal(report.primary.mde, undefined);
+  assert.equal(report.secondary.diff, undefined);
+  assert.equal(report.secondary.lower, undefined);
+  assert.equal(report.secondary.upper, undefined);
+  const lines = render(report, CWD);
+  assert.equal(lines[0], "Attempt study stopped (day 120).");
+  assert.doesNotMatch(lines.join("\n"), /NaN|undefined|90% CI/u);
+});
+
+test("same-failure mean is available only for arms with observed episodes", () => {
+  for (const [shown, held, emptyArm, observedArm, meanLine] of [
+    [1, 0, "held", "shown", "same failure after the note: shown 0.0 per episode, no held episodes."],
+    [0, 1, "shown", "held", "same failure after the note: no shown episodes, held 0.0 per episode."],
+  ] as const) {
+    const report = buildAttemptStudy({ ...cohort(shown, held, 0, 0), now: DEADLINE });
+    assert.equal(report.phase, "stopped");
+    assert.equal(report.sameFailure[emptyArm], undefined);
+    assert.equal(report.sameFailure[observedArm], 0);
+    assert.equal(JSON.stringify(report.sameFailure), JSON.stringify({ [observedArm]: 0 }));
+    assert.ok(render(report, CWD).includes(meanLine));
+  }
+});
+
+test("text groups unrecognized skip reasons while JSON preserves their raw tallies", () => {
+  const input = fixture();
+  const rows = [
+    note({ kind: "skip", reason: "wrapped" }),
+    note({ kind: "skip", reason: "fixed" }),
+    note({ kind: "skip", reason: "line\nwith a question?" }),
+  ];
+  const report = buildAttemptStudy({ ...input, rows });
+  assert.deepEqual(report.skips, { wrapped: 1, fixed: 1, "line\nwith a question?": 1 });
+  assert.ok(render(report, CWD).includes("skips: wrapped 1, other 2."));
+});
+
+test("pre-stop text distinguishes absent and invalid markers and hides outcome numbers", () => {
+  const input = fixture();
+  const absent = buildAttemptStudy(input);
+  const invalid = buildAttemptStudy({ ...input, start: { state: "invalid" } });
+  const running = buildAttemptStudy({ ...input, start });
+  const path = join(CWD, "attempt-study-start");
+  const heads = [
+    "Attempt study not started. No start marker at " + path + ".",
+    "Attempt study not started. Start marker at " + path + " is invalid.",
+    "Attempt study running. Day 5 of 120. 2 of 300 primary units.",
+  ];
+  for (const [i, report] of [absent, invalid, running].entries()) {
+    const lines = render(report, CWD);
+    assert.equal(lines[0], heads[i]);
+    assert.equal(lines[1], "shown: 2 episodes, 1 primary units. held: 1 episodes, 1 primary units.");
+    assert.equal(lines[2], "Outcome numbers stay hidden until the study stops.");
+    assert.doesNotMatch(lines.join("\n"), /%|points|CI/u);
+    assert.ok(lines.includes("malformed rows: 1."));
+    assert.ok(lines.includes("Exposure log is full. New rows are not written."));
+  }
+});
+
+test("before-start and key-mismatched anchors do not suppress a later valid episode for the same session and key", () => {
+  const keyA = "output:aaaaaaaaaaaaaaaa:fedcba0987654321";
+  const keyB = "output:bbbbbbbbbbbbbbbb:fedcba0987654321";
+  const pA = makeProblem(keyA, [
+    { id: "a-valid", ts: START + 2000, session: "s1", outcome: "passed" },
+  ]);
+  const pB = makeProblem(keyB, [
+    { id: "b-mismatch", ts: START + 1000, session: "s1", outcome: "same_failure" },
+  ]);
+  const hashA = exposureKeyHash(keyA);
+  const rows = [
+    note({ ts: START - 1000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "a-before" }),
+    note({ ts: START + 1000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "b-mismatch" }),
+    note({ ts: START + 2000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "a-valid" }),
+  ];
+  const report = buildAttemptStudy({
+    rows,
+    malformed: 0,
+    logFull: false,
+    records: [...pA.records, ...pB.records],
+    entries: [pA.entry, pB.entry],
+    start,
+    now: DEADLINE + DAY,
+  });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.primaryUnits, 1);
+  assert.equal(report.arms.shown.primaryUnits, 1);
+  assert.equal(report.arms.shown.episodes, 1);
+  assert.equal(report.excluded.beforeStart, 1);
+  assert.equal(report.excluded.keyMismatch, 1);
+  assert.equal(report.excluded.duplicateAnchor, 0);
+});
+
+test("same-key retry with a conflicting arm triggers armConflict rather than silent dedup", () => {
+  const keyA = "output:aaaaaaaaaaaaaaaa:fedcba0987654321";
+  const pA = makeProblem(keyA, [
+    { id: "a1", ts: START + 1000, session: "s1", outcome: "same_failure" },
+    { id: "a2", ts: START + 2000, session: "s1", outcome: "passed" },
+  ]);
+  const hashA = exposureKeyHash(keyA);
+  const rows = [
+    note({ ts: START + 1000, session: "s1", arm: "shown", key: hashA, anchorFailureId: "a1" }),
+    note({ ts: START + 2000, session: "s1", arm: "held", key: hashA, anchorFailureId: "a2" }),
+  ];
+  const report = buildAttemptStudy({
+    rows,
+    malformed: 0,
+    logFull: false,
+    records: pA.records,
+    entries: [pA.entry],
+    start,
+    now: DEADLINE + DAY,
+  });
+  assert.equal(report.phase, "stopped");
+  assert.equal(report.primaryUnits, 0);
+  assert.equal(report.arms.shown.primaryUnits, 0);
+  assert.equal(report.arms.held.primaryUnits, 0);
+  assert.equal(report.excluded.armConflict, 2);
+  assert.equal(report.excluded.duplicateAnchor, 0);
+});

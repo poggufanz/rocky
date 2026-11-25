@@ -4,6 +4,8 @@ Notable changes per release. Dates are the release date.
 
 ## Unreleased
 
+- `rocky stats --attempts [--json]` adds a read-only report on the prior-attempts note study, with outcome numbers hidden until the study stops.
+
 Opt-in fix-touch note in the edit gate (`fixtouch-on`), read from a derived cache rebuilt after confirmed fixes.
 
 `rocky mcp` adds `note_expectation`, an opt-out write tool that records an agent's stated expectation before rerunning a command. Rocky redacts the note and optional expected command before storing them locally and links the note to a recent failure in the same directory when one is available. `rocky attempts` and MCP `attempt_history` show linked expectations alongside any later matching run Rocky recorded. Disable writes with `ROCKY_MCP_WRITE=off` or `<ROCKY_HOME>/mcp-write-off`.

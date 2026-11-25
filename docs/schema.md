@@ -102,6 +102,8 @@ written to `memory.jsonl`:
 
 The edit gate's `<ROCKY_HOME>/derived/attempts-hot.json` is a rebuildable, non-evidence cache and is safe to delete.
 
+`<ROCKY_HOME>/attempt-study-start` is an owner-written marker for `rocky stats --attempts`, which uses the exposure log `advisories.jsonl` as read-only input.
+
 ### Exposure log row (`advisories.jsonl`)
 
 One JSON object per line. Eligible moments write `kind: "note"`:

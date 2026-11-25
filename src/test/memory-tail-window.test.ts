@@ -1532,7 +1532,7 @@ test("singular wording when tail window holds 1 record", async (t) => {
   );
   assert.doesNotMatch(passErr, /1 records/);
 
-  const statsErr = await captureStderr(() => stats());
+  const statsErr = await captureStderr(stats);
   assert.match(statsErr, /rocky: memory: reading the newest record \(from /u);
   assert.doesNotMatch(statsErr, /1 records/);
 });
@@ -1554,7 +1554,7 @@ test("rocky stats shows fix links and the tail window", async (t) => {
     fixLine(0, fixTs),
   ];
   writeFileSync(memoryFile, `${linesWithFix.join("\n")}\n`, "utf8");
-  const withFixStderr = await captureStderr(() => stats());
+  const withFixStderr = await captureStderr(stats);
   const withFixLines = withFixStderr.split(/\r?\n/u);
   const fileIndex = withFixLines.findIndex((line) => line.startsWith("rocky: memory file: "));
   assert.ok(fileIndex >= 0, withFixStderr);
@@ -1566,7 +1566,7 @@ test("rocky stats shows fix links and the tail window", async (t) => {
     ...fillerFailureLines(10_000, otherCwd, tailOldestTs),
   ];
   writeFileSync(memoryFile, `${linesWithoutFix.join("\n")}\n`, "utf8");
-  const noFixStderr = await captureStderr(() => stats());
+  const noFixStderr = await captureStderr(stats);
   const noFixLines = noFixStderr.split(/\r?\n/u);
   const noFixFileIndex = noFixLines.findIndex((line) => line.startsWith("rocky: memory file: "));
   assert.ok(noFixFileIndex >= 0, noFixStderr);
@@ -1574,7 +1574,7 @@ test("rocky stats shows fix links and the tail window", async (t) => {
   assert.equal(noFixLines[noFixFileIndex + 2], "rocky: memory: reading the newest 10000 records (from 2026-01-15)", noFixStderr);
 
   writeFileSync(memoryFile, `${fillerFailureLines(2, otherCwd, tailOldestTs).join("\n")}\n`, "utf8");
-  const fullStderr = await captureStderr(() => stats());
+  const fullStderr = await captureStderr(stats);
   assert.ok(fullStderr.includes("rocky: fix links: none in the records read"), fullStderr);
   assert.doesNotMatch(fullStderr, /memory: reading the newest/u);
 });
@@ -1594,7 +1594,7 @@ test("rocky stats reports span in tail mode and age in full mode", async (t) => 
     ...Array.from({ length: 4 }, (_, index) => failureLine(index + 6, "check failed", now - 1_000)),
   ];
   writeFileSync(memoryFile, `${tailLines.join("\n")}\n`, "utf8");
-  const tailStderr = await captureStderr(() => stats());
+  const tailStderr = await captureStderr(stats);
   assert.match(tailStderr, /rocky: The records read span 3 days\. 0 brief runs\. 0 journal notes\./u);
   assert.doesNotMatch(tailStderr, /Memory is \d+ day/u);
 
@@ -1605,12 +1605,12 @@ test("rocky stats reports span in tail mode and age in full mode", async (t) => 
     ...Array.from({ length: 4 }, (_, index) => failureLine(index + 6, "check failed", now - 1_000)),
   ];
   writeFileSync(memoryFile, `${oneDayTail.join("\n")}\n`, "utf8");
-  const oneDayTailStderr = await captureStderr(() => stats());
+  const oneDayTailStderr = await captureStderr(stats);
   assert.match(oneDayTailStderr, /rocky: The records read span 1 day\. 0 brief runs\. 0 journal notes\./u);
 
   // Full mode: unchanged byte-for-byte ("Memory is N days old.").
   writeFileSync(memoryFile, `${Array.from({ length: 2 }, (_, index) => failureLine(index, "check failed", now - 4 * DAY_MS - 1_000)).join("\n")}\n`, "utf8");
-  const fullStderr = await captureStderr(() => stats());
+  const fullStderr = await captureStderr(stats);
   assert.match(fullStderr, /rocky: Memory is 4 days old\. 0 brief runs\. 0 journal notes\./u);
   assert.doesNotMatch(fullStderr, /The records read span/u);
 });

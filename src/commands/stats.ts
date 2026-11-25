@@ -3,13 +3,22 @@ import { readJournal } from "../core/journal.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import { countReclaimTombstones, drainGuardPending, memoryPath, type MemoryRecord } from "../core/memory.js";
 import { isOperationalMemoryRecord, loadMemoryChecked, type MemoryCoverage } from "../core/memory-read.js";
-import { queryStats } from "../core/memory-query.js";
+import { createMemoryQueries, loadDurableMemorySnapshot, queryStats, type MemoryQueries } from "../core/memory-query.js";
 import { CYCLES_TOP, FAILURE_CYCLE_COUNT } from "../core/failure-cycle.js";
+import { resolveRockyPaths } from "../core/state-paths.js";
 import { formatUtcDate, formatUtcDateTime } from "../core/utc-format.js";
 import { CliUsageError, reportCliUsage } from "./cli-args.js";
 import { detail, isVerbose, say } from "../ui/rocky.js";
 
-const STATS_USAGE = "rocky stats [--cycles]";
+const STATS_USAGE = "rocky stats [--cycles | --attempts [--json]]";
+
+type StatsMode = { mode: "summary" } | { mode: "cycles" } | { mode: "attempts"; json: boolean };
+
+interface StatsDeps {
+  now?: number;
+  memory?: MemoryQueries;
+  home?: string;
+}
 
 /**
  * Disclosure for the counts printed above it. Whenever the read was not whole,
@@ -26,11 +35,15 @@ function speakCoverage(coverage: MemoryCoverage, recordCount: number): void {
   }
 }
 
-/** `stats` takes no arguments except the advisory `--cycles` summary flag. */
-export function parseStatsArgs(argv: readonly string[]): boolean {
-  if (argv.length === 0) return false;
-  if (argv.length === 1 && argv[0] === "--cycles") return true;
-  throw new CliUsageError(`unexpected argument: ${argv[0]}`, STATS_USAGE);
+export function parseStatsArgs(argv: readonly string[]): StatsMode {
+  const [first, second] = argv;
+  if (argv.length === 0) return { mode: "summary" };
+  if (argv.length === 1 && first === "--cycles") return { mode: "cycles" };
+  if (argv.length === 1 && first === "--attempts") return { mode: "attempts", json: false };
+  if (argv.length === 2 && (
+    (first === "--attempts" && second === "--json") || (first === "--json" && second === "--attempts")
+  )) return { mode: "attempts", json: true };
+  throw new CliUsageError(`unexpected argument: ${first}`, STATS_USAGE);
 }
 
 /**
@@ -79,16 +92,61 @@ export function memoryAgeDays(timestamps: readonly number[], now: number): numbe
   return Math.max(0, Math.floor((now - oldest) / 86_400_000));
 }
 
-export function stats(argv: readonly string[] = []): number {
-  let cycles = false;
+async function statsAttempts(json: boolean, deps?: StatsDeps): Promise<number> {
+  const { anchorIds, buildAttemptStudy, readExposureLog, readStudyStart, renderAttemptStudyText } =
+    await import("../core/attempt-study.js");
+  const home = deps?.home ?? resolveRockyPaths(process.env).home;
+  const log = readExposureLog(home);
+  if (log.state === "unreadable") {
+    say("Exposure log cannot be read.");
+    return 1;
+  }
+  const { rows, malformed, logFull } = log.state === "ok" ? log : { rows: [], malformed: 0, logFull: false };
+
+  const now = deps?.now ?? Date.now();
+  const snapshot = loadDurableMemorySnapshot(deps?.memory ?? createMemoryQueries(), now);
+  if (snapshot === undefined || snapshot.coverage.reason === "read-race") {
+    say("Memory cannot be read.");
+    return 1;
+  }
+
+  const [{ buildProblems }, { joinAttemptCards }, { makeCardsFor, toolTextAllowed }] = await Promise.all([
+    import("../core/attempts.js"),
+    import("../core/attempt-cards.js"),
+    import("../desk/cards-read.js"),
+  ]);
+  const { records, coverage } = snapshot;
+  const problems = buildProblems(records, coverage, { now });
+  const anchors = anchorIds(rows);
+  const kept = problems.entries.filter((entry) => entry.attempts.some((attempt) => anchors.has(attempt.failureId)));
+  const cardsFor = makeCardsFor({ home, toolText: toolTextAllowed(home) });
+  const { entries } = joinAttemptCards(kept, records, cardsFor, { platform: process.platform });
+  const start = readStudyStart(home, now);
+  const report = buildAttemptStudy({ rows, malformed, logFull, records, entries, coverage, start, now });
+  if (json) {
+    const { writeStdoutQuietEpipe } = await import("./attempts.js");
+    await writeStdoutQuietEpipe(`${JSON.stringify(report)}\n`);
+    return 0;
+  }
+
+  const { head, details } = renderAttemptStudyText(report, home);
+  say(head);
+  for (const line of details) detail(line);
+  speakCoverage(coverage, records.length);
+  return 0;
+}
+
+export async function stats(argv: readonly string[] = [], deps?: StatsDeps): Promise<number> {
+  let parsed: StatsMode;
   try {
-    cycles = parseStatsArgs(argv);
+    parsed = parseStatsArgs(argv);
   } catch (error) {
     const code = reportCliUsage(error, say, detail);
     if (code !== undefined) return code;
     throw error;
   }
-  if (cycles) return statsCycles();
+  if (parsed.mode === "cycles") return statsCycles();
+  if (parsed.mode === "attempts") return statsAttempts(parsed.json, deps);
   let drainedGuard = 0;
   try {
     drainedGuard = drainGuardPending().drained;

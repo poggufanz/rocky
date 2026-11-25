@@ -117,8 +117,10 @@ usage:
                             only, with a fresh token each launch. --no-open
                             prints the URL instead, --port=<n> picks the
                             port, and ctrl-c stops the server.
-  rocky stats [--cycles]    show what rocky holds in memory. --cycles lists the
+  rocky stats [--cycles | --attempts [--json]]
+                            show what rocky holds in memory. --cycles lists the
                             top failure fingerprints with counts, local only.
+                            --attempts reports the shown-versus-held note study. Outcome numbers stay hidden until it stops.
   rocky journal "<note>"    write one dogfood note as a single line. Local file only.
   rocky invariants          list remembered invariant notes from .rocky/invariants.md
                             and report globs that guard nothing.
