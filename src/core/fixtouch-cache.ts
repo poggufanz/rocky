@@ -3,6 +3,7 @@ import {
   renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import type { FixRecord } from "./memory-read.js";
 import { sanitizeTestimony } from "./redact.js";
 
 export const FIXTOUCH_CACHE_MAX_BYTES = 256 * 1024;
@@ -23,6 +24,24 @@ export function fixTouchEnabled(home: string): boolean {
 
 export function fixTouchCachePath(home: string): string {
   return join(home, "derived", "attempts-hot.json");
+}
+
+/**
+ * Rebuild the fix-touch cache after a FixRecord write. A no-op unless a fix
+ * was written and `<home>/fixtouch-on` exists. Never throws.
+ */
+export async function refreshFixTouchAfterFix(
+  fix: FixRecord | undefined,
+  deps: { home: string; now: number },
+): Promise<void> {
+  if (fix === undefined) return;
+  try {
+    if (!fixTouchEnabled(deps.home)) return;
+    const { rebuildFixTouchCache } = await import("../commands/fixtouch-refresh.js");
+    rebuildFixTouchCache({ home: deps.home, now: deps.now });
+  } catch {
+    // Best-effort; a stale or missing cache only makes the gate silent.
+  }
 }
 
 export function boundCodePoints(text: string, max: number): string {
