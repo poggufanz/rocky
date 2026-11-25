@@ -2,7 +2,7 @@ import {
   closeSync, constants, existsSync, mkdirSync, openSync, readSync,
   renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { dirname, join, win32 } from "node:path";
+import { dirname, join } from "node:path";
 import { sanitizeTestimony } from "./redact.js";
 
 export const FIXTOUCH_CACHE_MAX_BYTES = 256 * 1024;
@@ -30,7 +30,7 @@ export function boundCodePoints(text: string, max: number): string {
 }
 
 export function sanitizeField(text: string, max: number): string {
-  return boundCodePoints(sanitizeTestimony(text), max);
+  return boundCodePoints(sanitizeTestimony(text).replace(/[\u2028\u2029]/g, " "), max);
 }
 
 export function rootKey(root: string, platform: NodeJS.Platform = process.platform): string {
@@ -44,33 +44,38 @@ function pathKey(path: string, platform: NodeJS.Platform): string {
 }
 
 function isRelativeCachePath(path: string): boolean {
-  return path.length > 0 && !win32.isAbsolute(path) && !path.startsWith("..");
+  return path.length > 0 && !path.startsWith("/") && !/^[a-z]:/i.test(path) &&
+    !path.startsWith("..") && !path.split("/").includes("..");
 }
 
-function sanitizeEntry(entry: FixTouchEntry): FixTouchEntry | undefined {
+function sanitizeEntry(entry: FixTouchEntry, oldestTs: number): FixTouchEntry | undefined {
   const { root, path, cmd, signature, ts } = entry;
   if (root.length === 0 || Array.from(root).length > ROOT_MAX ||
-      !isRelativeCachePath(path) || !Number.isFinite(ts)) return undefined;
+      !Number.isFinite(ts) || ts < oldestTs) return undefined;
 
-  const safePath = sanitizeField(path, FIXTOUCH_PATH_MAX);
+  const normalizedPath = path.replaceAll("\\", "/");
+  if (!isRelativeCachePath(normalizedPath)) return undefined;
+  const safePath = sanitizeField(normalizedPath, FIXTOUCH_PATH_MAX);
   if (!isRelativeCachePath(safePath)) return undefined;
+
+  const firstSignatureLine = signature.split(/\r\n|[\n\r\u2028\u2029]/, 1)[0];
   return {
     root,
     path: safePath,
     cmd: sanitizeField(cmd, FIXTOUCH_CMD_MAX),
-    signature: sanitizeField(signature, FIXTOUCH_SIGNATURE_MAX).replaceAll('"', "'"),
+    signature: boundCodePoints(sanitizeTestimony(firstSignatureLine).replaceAll('"', "'"), FIXTOUCH_SIGNATURE_MAX),
     ts,
   };
 }
 
-function readEntry(value: unknown): FixTouchEntry | undefined {
+function readEntry(value: unknown, oldestTs: number): FixTouchEntry | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const { root, path, cmd, signature, ts } = value as Partial<FixTouchEntry>;
   if (typeof root !== "string" || typeof path !== "string" || typeof cmd !== "string" ||
       typeof signature !== "string" || typeof ts !== "number") return undefined;
   if (Array.from(path).length > FIXTOUCH_PATH_MAX || Array.from(cmd).length > FIXTOUCH_CMD_MAX ||
       Array.from(signature).length > FIXTOUCH_SIGNATURE_MAX) return undefined;
-  return sanitizeEntry({ root, path, cmd, signature, ts });
+  return sanitizeEntry({ root, path, cmd, signature, ts }, oldestTs);
 }
 
 function readCacheText(file: string): string | undefined {
@@ -102,7 +107,8 @@ export function readFixTouchCache(file: string, now: number): FixTouchCache | un
         cache.builtAt < now - FIXTOUCH_CACHE_MAX_AGE_MS ||
         cache.builtAt > now + FIXTOUCH_FUTURE_SKEW_MS || !Array.isArray(cache.entries)) return undefined;
 
-    const entries = cache.entries.map(readEntry).filter((entry) => entry !== undefined);
+    const oldestTs = now - FIXTOUCH_WINDOW_MS;
+    const entries = cache.entries.map((entry) => readEntry(entry, oldestTs)).filter((entry) => entry !== undefined);
     return { v: 1, builtAt: cache.builtAt, entries };
   } catch {
     return undefined;
@@ -113,7 +119,8 @@ export function writeFixTouchCache(file: string, cache: FixTouchCache): boolean 
   let temp: string | undefined;
   try {
     if (cache.v !== 1 || !Number.isFinite(cache.builtAt)) return false;
-    const entries = cache.entries.map(sanitizeEntry).filter((entry) => entry !== undefined);
+    const oldestTs = cache.builtAt - FIXTOUCH_WINDOW_MS;
+    const entries = cache.entries.map((entry) => sanitizeEntry(entry, oldestTs)).filter((entry) => entry !== undefined);
     entries.sort((a, b) => b.ts - a.ts);
     const envelope = { v: 1, builtAt: cache.builtAt, entries };
     let text = JSON.stringify(envelope);

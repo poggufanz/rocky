@@ -17,6 +17,7 @@ import {
 } from "../core/fixtouch-cache.js";
 
 const now = 1_800_000_000_000;
+const contentWindow = 30 * 86_400_000;
 const entry: FixTouchEntry = {
   root: "/repo",
   path: "src/file.ts",
@@ -164,6 +165,29 @@ test("cache reads drop invalid entries and preserve valid neighbors", (t) => {
   assert.deepEqual(readFixTouchCache(file, now), { ...cache, entries: [entry, validAtBounds] });
 });
 
+test("cache writes keep the exact 30-day cutoff relative to the build time", (t) => {
+  const { file } = fixture(t);
+  const builtAt = now - 60_000;
+  const cutoff = { ...entry, path: "src/cutoff.ts", ts: builtAt - contentWindow };
+  const expired = { ...cutoff, path: "src/expired.ts", ts: cutoff.ts - 1 };
+
+  assert.equal(writeFixTouchCache(file, { ...cache, builtAt, entries: [expired, cutoff, entry] }), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...cache, builtAt, entries: [entry, cutoff] });
+});
+
+test("cache reads age entries against the read time even when the cache is fresh", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const builtAt = now - 60_000;
+  const cutoff = { ...entry, path: "src/cutoff.ts", ts: now - contentWindow };
+  const expired = { ...cutoff, path: "src/expired.ts", ts: cutoff.ts - 1 };
+  writeFileSync(file, JSON.stringify({ ...cache, builtAt, entries: [entry, expired, cutoff] }));
+
+  const read = readFixTouchCache(file, now);
+  assert.deepEqual(read, { ...cache, builtAt, entries: [entry, cutoff] });
+  assert.equal(findFixTouchEntry(read, expired.root, expired.path, "linux"), undefined);
+});
+
 test("path, command, and signature are sanitized on both read and write", (t) => {
   const { file } = fixture(t);
   mkdirSync(dirname(file));
@@ -172,20 +196,65 @@ test("path, command, and signature are sanitized on both read and write", (t) =>
     ...cache,
     entries: [{
       ...entry,
-      path: "src/\u202efile.ts",
-      cmd: `gh api\n${fabricatedToken}\u202e`,
+      path: "src/\u202efile\u2028one\u2029two.ts",
+      cmd: `gh api\n${fabricatedToken}\u202e\u2028--silent\u2029--verbose`,
       signature: 'TypeError: "token"\n\u202eundefined',
     }],
   };
   const sanitized = {
     ...cache,
-    entries: [{ ...entry, cmd: "gh api [redacted github token]", signature: "TypeError: 'token' undefined" }],
+    entries: [{
+      ...entry,
+      path: "src/file one two.ts",
+      cmd: "gh api [redacted github token] --silent --verbose",
+      signature: "TypeError: 'token'",
+    }],
   };
 
   writeFileSync(file, JSON.stringify(tainted));
   assert.deepEqual(readFixTouchCache(file, now), sanitized);
   assert.equal(writeFixTouchCache(file, tainted), true);
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), sanitized);
+});
+
+test("only the first signature line survives every supported separator", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const entries = ["\r\n", "\n", "\r", "\u2028", "\u2029"].map((separator) => ({
+    ...entry,
+    signature: `Error "first"${separator}later line`,
+  }));
+  const expected = { ...cache, entries: entries.map(() => ({ ...entry, signature: "Error 'first'" })) };
+
+  writeFileSync(file, JSON.stringify({ ...cache, entries }));
+  assert.deepEqual(readFixTouchCache(file, now), expected);
+  assert.equal(writeFixTouchCache(file, { ...cache, entries }), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), expected);
+});
+
+test("stored and loaded cache paths use forward slashes", (t) => {
+  const { file } = fixture(t);
+  const backslashCache = { ...cache, entries: [{ ...entry, path: "src\\file.ts" }] };
+
+  assert.equal(writeFixTouchCache(file, backslashCache), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), cache);
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+
+  writeFileSync(file, JSON.stringify(backslashCache));
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+});
+
+test("cache reads and writes drop paths outside the repository", (t) => {
+  const { file } = fixture(t);
+  mkdirSync(dirname(file));
+  const invalid = ["src/../../outside.ts", "src\\..\\..\\outside.ts", "C:outside.ts", "/outside.ts",
+    "\\outside.ts", "src/\u202e../outside.ts"].map((path) => ({ ...entry, path }));
+  const mixed = { ...cache, entries: [...invalid, entry] };
+
+  writeFileSync(file, JSON.stringify(mixed));
+  assert.deepEqual(readFixTouchCache(file, now), cache);
+  assert.equal(writeFixTouchCache(file, mixed), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), cache);
 });
 
 test("matching picks the newest entry and uses the platform's path comparison", (t) => {
