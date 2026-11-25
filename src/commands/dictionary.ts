@@ -3,7 +3,7 @@ import { dictionaryRankPortFromConfig, type DictionaryRankPort } from "../ai/dic
 import { loadConfig } from "../core/config.js";
 import { describeMemoryCoverage } from "../core/coverage.js";
 import { csConceptCounts, digestBuckets, queryDictionary, queryNotes, quizCandidates, rationalesForFile, type DictionaryHit, type NoteHit } from "../core/dictionary.js";
-import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked, sameCwd } from "../core/memory-read.js";
+import { isCompleteMemoryCoverage, isOperationalMemoryRecord, loadMemoryChecked, MAX_EXPECTED_COMMAND_CODE_POINTS, sameCwd } from "../core/memory-read.js";
 import { recordRationale } from "../core/memory.js";
 import { LINK_WINDOW_MS, MAX_WHY_RECORDS, whyFile, whyFileEvidence, whyFilePathRelation } from "../core/memory-query.js";
 import type { MemoryCoverage, MemoryRecord, RationaleLinks, RationaleRecord, RationaleSource } from "../core/memory-read.js";
@@ -178,11 +178,15 @@ export function exportCommand(argv: string[], deps: ExportCommandDeps = {}): num
   const stdout = deps.stdout ?? console.log;
   for (const record of selected) {
     if (record.kind === "rationale" && record.source === "mcp") {
-      const { excerpt, expectedCommand } = record;
+      const { excerpt, expectedCommand, ...rest } = record;
+      const sanitizedExcerpt = sanitizeTestimony(excerpt) || "[redacted]";
+      const sanitizedCommand = expectedCommand === undefined
+        ? undefined
+        : [...sanitizeTestimony(expectedCommand)].slice(0, MAX_EXPECTED_COMMAND_CODE_POINTS).join("");
       stdout(JSON.stringify({
-        ...record,
-        excerpt: sanitizeTestimony(excerpt),
-        ...(expectedCommand === undefined ? {} : { expectedCommand: sanitizeTestimony(expectedCommand) }),
+        ...rest,
+        excerpt: sanitizedExcerpt,
+        ...(sanitizedCommand ? { expectedCommand: sanitizedCommand } : {}),
       }));
     } else {
       stdout(JSON.stringify(record));

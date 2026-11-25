@@ -293,7 +293,13 @@ test("CLI export sanitizes imported MCP testimony fields", (t) => {
     kind: "rationale", v: 1, id: "rationale-no-command", ts: now, cwd,
     agent: "codex", source: "mcp", rationale_fidelity: "raw", excerpt: imported.excerpt,
   };
-  seed(imported, withoutCommand);
+  const expandedCommand: RationaleRecord = {
+    kind: "rationale", v: 1, id: "rationale-expanded-command", ts: now, cwd,
+    agent: "codex", source: "mcp", rationale_fidelity: "raw",
+    excerpt: "\u202e",
+    expectedCommand: `run ${token} ${"a".repeat(200 - (`run ${token} `.length))}`,
+  };
+  seed(imported, withoutCommand, expandedCommand);
   const original = readFileSync(memory, "utf8");
   const result = spawnSync(process.execPath, [entry, "export"], {
     cwd: home, env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000,
@@ -302,10 +308,24 @@ test("CLI export sanitizes imported MCP testimony fields", (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.includes(token), false);
   assert.doesNotMatch(result.stdout, /\u202e/u);
-  assert.deepEqual(result.stdout.trimEnd().split("\n").map((line) => JSON.parse(line)), [
+  const exportedLines = result.stdout.trimEnd().split("\n");
+  const parsed = exportedLines.map((line) => JSON.parse(line));
+  assert.deepEqual(parsed.slice(0, 2), [
     { ...imported, excerpt: "expect [redacted gitlab token] to work", expectedCommand: "check [redacted gitlab token]" },
     { ...withoutCommand, excerpt: "expect [redacted gitlab token] to work" },
   ]);
+  const exportedExpanded = parsed[2] as RationaleRecord;
+  assert.equal(exportedExpanded.excerpt, "[redacted]");
+  assert.ok(exportedExpanded.expectedCommand);
+  assert.equal([...exportedExpanded.expectedCommand].length, 200);
+  const reimportPath = join(home, "reimport.jsonl");
+  writeFileSync(reimportPath, result.stdout, "utf8");
+  const reloaded = loadMemoryChecked(reimportPath, now);
+  assert.equal(reloaded.coverage.complete, true);
+  assert.equal(reloaded.records.length, 3);
+  const reloadedExpanded = reloaded.records[2] as RationaleRecord;
+  assert.equal(reloadedExpanded.excerpt, "[redacted]");
+  assert.equal(reloadedExpanded.expectedCommand, exportedExpanded.expectedCommand);
   assert.equal(readFileSync(memory, "utf8"), original);
 });
 
