@@ -28,7 +28,7 @@ function context(stdout: string): string {
   return result.hookSpecificOutput.additionalContext;
 }
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, now = NOW) {
   const temp = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-gate-fixtouch-")));
   const home = join(temp, "home");
   const cwd = join(temp, "repo");
@@ -40,7 +40,7 @@ function fixture(t: TestContext) {
   const oldClarity = process.env.ROCKY_CLARITY_ADVISORY;
   process.env.ROCKY_HOME = home;
   delete process.env.ROCKY_CLARITY_ADVISORY;
-  t.mock.method(Date, "now", () => NOW);
+  t.mock.method(Date, "now", () => now);
   t.after(() => {
     if (oldHome === undefined) delete process.env.ROCKY_HOME;
     else process.env.ROCKY_HOME = oldHome;
@@ -62,7 +62,7 @@ function fixture(t: TestContext) {
     return result.stdout;
   }
 
-  function seed(entries = [entry], builtAt = NOW): void {
+  function seed(entries = [entry], builtAt = now): void {
     writeFileSync(cache, JSON.stringify({ v: 1, builtAt, entries }), "utf8");
   }
 
@@ -133,6 +133,71 @@ test("fix-touch shows once per session and path", (t) => {
   if (process.platform === "win32") assert.equal(f.edit(REL.toUpperCase()), "{}");
   assert.match(context(f.edit("src/other.ts")), /Earlier record for src\/other\.ts:/);
   assert.equal(context(f.edit(REL, "s2")), TOUCH_TEXT);
+});
+
+test("generic Read leaves fix-touch available for the next Edit in the same session", (t) => {
+  const f = fixture(t);
+  f.enable();
+  f.seed();
+  const call = (toolName: string) => gateEvent("generic", JSON.stringify({
+    tool_name: toolName, tool_input: { file_path: REL }, session_id: "s1", cwd: f.cwd,
+  }));
+  assert.deepEqual(call("Read"), { stdout: "{}", exitCode: 0 });
+  assert.equal(existsSync(f.stateDir), false);
+  assert.deepEqual(call("Edit"), { stdout: advice(TOUCH_TEXT), exitCode: 0 });
+});
+
+test("leftover temp files leave future fix-touch state writes available", (t) => {
+  const f = fixture(t);
+  f.enable();
+  f.seed();
+  mkdirSync(f.stateDir);
+  const stateFile = join(f.stateDir, "s1.fixtouch.json");
+  writeFileSync(`${stateFile}.tmp`, "interrupted write");
+  writeFileSync(`${stateFile}.${process.pid}.feedbeef.tmp`, "interrupted write");
+  assert.equal(f.edit(), advice(TOUCH_TEXT));
+  assert.deepEqual(JSON.parse(readFileSync(stateFile, "utf8")), [`${rootKey(f.cwd)}\n${REL}`]);
+  assert.equal(f.edit(), "{}");
+});
+
+test("fix-touch defers while a writer is live and recovers when that writer exits", (t) => {
+  const f = fixture(t);
+  f.enable();
+  f.seed();
+  const stateFile = join(f.stateDir, "s1.fixtouch.json");
+  const writers = `${stateFile}.writers`;
+  mkdirSync(writers, { recursive: true });
+  writeFileSync(join(writers, `${process.pid}.feedbeef`), "");
+  assert.equal(f.edit(), "{}");
+  assert.equal(existsSync(stateFile), false);
+
+  t.mock.method(process, "kill", () => {
+    throw Object.assign(new Error("writer exited"), { code: "ESRCH" });
+  });
+  assert.equal(f.edit(), advice(TOUCH_TEXT));
+  assert.equal(existsSync(writers), false);
+  assert.equal(f.edit(), "{}");
+});
+
+test("year-10000 cache entries stay silent without consuming the session key", (t) => {
+  const f = fixture(t);
+  f.enable();
+  f.seed([{ ...f.entry, ts: Date.UTC(10000, 0, 1) }]);
+  assert.equal(f.edit(), "{}");
+  assert.equal(existsSync(f.stateDir), false);
+  f.seed();
+  assert.equal(f.edit(), advice(TOUCH_TEXT));
+});
+
+test("the gate requires a four-digit year even when a cache timestamp is fresh", (t) => {
+  const now = Date.UTC(10000, 0, 1);
+  const f = fixture(t, now);
+  f.enable();
+  f.seed([{ ...f.entry, ts: now }]);
+  assert.equal(f.edit(), "{}");
+  assert.equal(existsSync(f.stateDir), false);
+  f.seed([{ ...f.entry, ts: now - 1 }]);
+  assert.equal(f.edit(), advice(TOUCH_TEXT.replace("2026-11-12", "9999-12-31")));
 });
 
 test("fix-touch evicts the oldest session key at the 256-key limit", (t) => {

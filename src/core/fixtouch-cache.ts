@@ -79,10 +79,10 @@ function isRelativeCachePath(path: string): boolean {
     !path.startsWith("..") && !path.split("/").includes("..");
 }
 
-function sanitizeEntry(entry: FixTouchEntry, oldestTs: number): FixTouchEntry | undefined {
+function sanitizeEntry(entry: FixTouchEntry, oldestTs: number, newestTs: number): FixTouchEntry | undefined {
   const { root, path, cmd, signature, ts } = entry;
   if (root.length === 0 || Array.from(root).length > ROOT_MAX ||
-      !Number.isFinite(ts) || ts < oldestTs) return undefined;
+      !Number.isFinite(ts) || ts < oldestTs || ts > newestTs) return undefined;
 
   const normalizedPath = path.replaceAll("\\", "/");
   if (!isRelativeCachePath(normalizedPath)) return undefined;
@@ -99,14 +99,14 @@ function sanitizeEntry(entry: FixTouchEntry, oldestTs: number): FixTouchEntry | 
   };
 }
 
-function readEntry(value: unknown, oldestTs: number): FixTouchEntry | undefined {
+function readEntry(value: unknown, oldestTs: number, newestTs: number): FixTouchEntry | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const { root, path, cmd, signature, ts } = value as Partial<FixTouchEntry>;
   if (typeof root !== "string" || typeof path !== "string" || typeof cmd !== "string" ||
       typeof signature !== "string" || typeof ts !== "number") return undefined;
   if (Array.from(path).length > FIXTOUCH_PATH_MAX || Array.from(cmd).length > FIXTOUCH_CMD_MAX ||
       Array.from(signature).length > FIXTOUCH_SIGNATURE_MAX) return undefined;
-  return sanitizeEntry({ root, path, cmd, signature, ts }, oldestTs);
+  return sanitizeEntry({ root, path, cmd, signature, ts }, oldestTs, newestTs);
 }
 
 function readCacheText(file: string): string | undefined {
@@ -138,8 +138,10 @@ export function readFixTouchCache(file: string, now: number): FixTouchCache | un
         cache.builtAt < now - FIXTOUCH_CACHE_MAX_AGE_MS ||
         cache.builtAt > now + FIXTOUCH_FUTURE_SKEW_MS || !Array.isArray(cache.entries)) return undefined;
 
-    const oldestTs = now - FIXTOUCH_WINDOW_MS;
-    const entries = cache.entries.map((entry) => readEntry(entry, oldestTs)).filter((entry) => entry !== undefined);
+    const oldestTs = Math.max(0, now - FIXTOUCH_WINDOW_MS);
+    const newestTs = now + FIXTOUCH_FUTURE_SKEW_MS;
+    const entries = cache.entries.map((entry) => readEntry(entry, oldestTs, newestTs))
+      .filter((entry) => entry !== undefined);
     return { v: 1, builtAt: cache.builtAt, entries };
   } catch {
     return undefined;
@@ -150,8 +152,10 @@ export function writeFixTouchCache(file: string, cache: FixTouchCache): boolean 
   let temp: string | undefined;
   try {
     if (cache.v !== 1 || !Number.isFinite(cache.builtAt)) return false;
-    const oldestTs = cache.builtAt - FIXTOUCH_WINDOW_MS;
-    const entries = cache.entries.map((entry) => sanitizeEntry(entry, oldestTs)).filter((entry) => entry !== undefined);
+    const oldestTs = Math.max(0, cache.builtAt - FIXTOUCH_WINDOW_MS);
+    const newestTs = cache.builtAt + FIXTOUCH_FUTURE_SKEW_MS;
+    const entries = cache.entries.map((entry) => sanitizeEntry(entry, oldestTs, newestTs))
+      .filter((entry) => entry !== undefined);
     entries.sort((a, b) => b.ts - a.ts);
     const envelope = { v: 1, builtAt: cache.builtAt, entries };
     let text = JSON.stringify(envelope);

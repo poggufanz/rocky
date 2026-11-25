@@ -188,6 +188,25 @@ test("cache reads age entries against the read time even when the cache is fresh
   assert.equal(findFixTouchEntry(read, expired.root, expired.path, "linux"), undefined);
 });
 
+test("cache reads and writes bound entry timestamps against their respective clocks", (t) => {
+  const { file } = fixture(t);
+  const builtAt = 1_000;
+  const readAt = 2_000;
+  const atWriterLimit = { ...entry, ts: builtAt + 60_000 };
+  const atReaderLimit = { ...entry, ts: readAt + 60_000 };
+  const tooFarAhead = { ...entry, ts: atReaderLimit.ts + 1 };
+  const negative = { ...entry, ts: -1 };
+  const epoch = { ...entry, ts: 0 };
+  const input = { ...cache, builtAt, entries: [tooFarAhead, atReaderLimit, atWriterLimit, negative, epoch] };
+
+  mkdirSync(dirname(file));
+  writeFileSync(file, JSON.stringify(input));
+  assert.deepEqual(readFixTouchCache(file, readAt), { ...input, entries: [atReaderLimit, atWriterLimit, epoch] });
+
+  assert.equal(writeFixTouchCache(file, input), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...input, entries: [atWriterLimit, epoch] });
+});
+
 test("path, command, and signature are sanitized on both read and write", (t) => {
   const { file } = fixture(t);
   mkdirSync(dirname(file));

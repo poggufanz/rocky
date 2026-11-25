@@ -16,7 +16,11 @@
  * note can still print.
  */
 
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  closeSync, mkdirSync, openSync, readdirSync, readFileSync,
+  renameSync, rmdirSync, statSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { sanitizeSessionId } from "../core/agent-session.js";
 import { clarityNudgeLine } from "../core/prompt-clarity.js";
@@ -47,6 +51,7 @@ const MAX_GATE_STDOUT_BYTES = 1024;
 const MAX_FIXTOUCH_SHOWN_KEYS = 256;
 // Allows all 256 keys even when cache roots and paths need JSON escapes.
 const MAX_FIXTOUCH_STATE_BYTES = 2 * 1024 * 1024;
+const FIXTOUCH_WRITER = /^([1-9]\d{0,9})\.[a-f0-9]{8}$/u;
 
 export interface GateInput {
   vendor: string;
@@ -140,30 +145,63 @@ function readShownFixTouches(stateFile: string): string[] | undefined {
     : undefined;
 }
 
-function markFixTouchShown(stateFile: string, key: string): boolean {
-  const temp = `${stateFile}.tmp`;
-  let ownsTemp = false;
-  try {
-    mkdirSync(dirname(stateFile), { recursive: true, mode: 0o700 });
-    // The exclusive temp file serializes same-session updates without waiting.
-    const fd = openSync(temp, "wx", 0o600);
-    ownsTemp = true;
+function hasOtherFixTouchWriter(directory: string, owner: string): boolean {
+  for (const name of readdirSync(directory)) {
+    if (name === owner) continue;
+    const match = FIXTOUCH_WRITER.exec(name);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    if (pid > 0x7fff_ffff) continue;
     try {
-      const shown = readShownFixTouches(stateFile);
-      if (shown === undefined || shown.includes(key)) return false;
-      const next = [...shown, key].slice(-MAX_FIXTOUCH_SHOWN_KEYS);
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+        try { unlinkSync(join(directory, name)); } catch { /* Best-effort cleanup. */ }
+        continue;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+function markFixTouchShown(stateFile: string, key: string): boolean {
+  const writers = `${stateFile}.writers`;
+  let claim: string | undefined;
+  let temp: string | undefined;
+  try {
+    mkdirSync(writers, { recursive: true, mode: 0o700 });
+    const owner = `${process.pid}.${randomBytes(4).toString("hex")}`;
+    const claimPath = join(writers, owner);
+    const claimFd = openSync(claimPath, "wx", 0o600);
+    claim = claimPath;
+    closeSync(claimFd);
+    // Publish our claim before looking for live peers. A concurrent writer can
+    // defer its advisory rather than racing this read and replacement.
+    if (hasOtherFixTouchWriter(writers, owner)) return false;
+    const shown = readShownFixTouches(stateFile);
+    if (shown === undefined || shown.includes(key)) return false;
+    const next = [...shown, key].slice(-MAX_FIXTOUCH_SHOWN_KEYS);
+    const tempPath = `${stateFile}.${owner}.tmp`;
+    const fd = openSync(tempPath, "wx", 0o600);
+    temp = tempPath;
+    try {
       writeFileSync(fd, JSON.stringify(next), "utf8");
     } finally {
       closeSync(fd);
     }
-    renameSync(temp, stateFile);
-    ownsTemp = false;
+    renameSync(tempPath, stateFile);
+    temp = undefined;
     return true;
   } catch {
     return false;
   } finally {
-    if (ownsTemp) {
+    if (temp !== undefined) {
       try { unlinkSync(temp); } catch { /* Best effort after an unsuccessful update. */ }
+    }
+    if (claim !== undefined) {
+      try { unlinkSync(claim); } catch { /* Best-effort cleanup. */ }
+      try { rmdirSync(writers); } catch { /* A peer can still own a claim. */ }
     }
   }
 }
@@ -174,6 +212,7 @@ function fixTouchNote(
   try {
     const { home } = resolveRockyPaths(env);
     if (!fixTouchEnabled(home)) return undefined;
+    if (!GATED_TOOLS.has(input.toolName)) return undefined;
     const { filePath, cwd, sessionKey } = input;
     if (filePath === undefined) return undefined;
     const abs = isAbsolute(filePath) ? filePath : resolve(cwd || process.cwd(), filePath);
@@ -185,6 +224,8 @@ function fixTouchNote(
     const cache = readFixTouchCache(fixTouchCachePath(home), now);
     const entry = findFixTouchEntry(cache, root, rel, process.platform);
     if (entry === undefined) return undefined;
+    const date = new Date(entry.ts).toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(date)) return undefined;
     const key = `${rootKey(root, process.platform)}\n${fixTouchPathKey(rel, process.platform)}`;
     const stateFile = join(home, "gate-state", `${sessionKey}.fixtouch.json`);
     const shown = readShownFixTouches(stateFile);
@@ -193,7 +234,6 @@ function fixTouchNote(
     const path = sanitizeField(rel, FIXTOUCH_PATH_MAX);
     const cmd = sanitizeField(entry.cmd, FIXTOUCH_CMD_MAX);
     const signature = sanitizeField(entry.signature, FIXTOUCH_SIGNATURE_MAX);
-    const date = new Date(entry.ts).toISOString().slice(0, 10);
     const text = `Earlier record for ${path}: edited between a failing and a passing run of ${cmd} (${date}, error "${signature}"). Rocky records order, not cause.`;
     return { text, markShown: () => markFixTouchShown(stateFile, key) };
   } catch {
