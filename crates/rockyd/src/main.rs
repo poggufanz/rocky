@@ -417,7 +417,7 @@ fn main() {
             &hub,
             &log,
         );
-        service_queries(&mut queries, &shared, &mut translator, &log);
+        service_queries(&mut queries, &shared, &mut translator, &hub, &log);
         service_translate(&mut translator, &shared, &hub, &log);
         thread::sleep(Duration::from_millis(25));
     }
@@ -673,12 +673,16 @@ fn service_queries(
     queries: &mut CardQueryLoop,
     shared: &Arc<Mutex<Shared>>,
     translator: &mut Translator,
+    hub: &Hub,
     log: &RotatingLog,
 ) {
     let translate_quotes = shared.lock().unwrap().settings.translate_quotes;
     queries.service_with(&mut |msg, to, cards_quotes| {
         attach_translations(msg, to, cards_quotes, translate_quotes, translator);
     });
+    for msg in queries.take_related() {
+        hub.broadcast(&msg);
+    }
     let panics = queries.take_worker_panics();
     if panics > 0 {
         log.line(&format!("cards: {panics} query worker panics"));
@@ -1446,7 +1450,7 @@ mod tests {
             let mut reply2 = None;
             let deadline = Instant::now() + Duration::from_secs(3);
             while Instant::now() < deadline && (reply1.is_none() || reply2.is_none()) {
-                service_queries(&mut queries, &shared, &mut translator, &log);
+                service_queries(&mut queries, &shared, &mut translator, &hub, &log);
                 if reply1.is_none()
                     && let Ok(msg) = rx1.try_recv()
                 {
@@ -1493,7 +1497,7 @@ mod tests {
             );
             let deadline = Instant::now() + Duration::from_secs(3);
             let reply3 = loop {
-                service_queries(&mut queries, &shared, &mut translator, &log);
+                service_queries(&mut queries, &shared, &mut translator, &hub, &log);
                 if let Ok(msg) = rx3.try_recv() {
                     break msg;
                 }
@@ -3164,7 +3168,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(20);
         let reply = loop {
-            service_queries(&mut queries, shared, &mut translator, &log);
+            service_queries(&mut queries, shared, &mut translator, &hub, &log);
             if let Ok(msg) = rx.try_recv() {
                 break msg;
             }
@@ -3633,7 +3637,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(20);
         let reply = loop {
-            service_queries(&mut queries, shared, &mut translator, &log);
+            service_queries(&mut queries, shared, &mut translator, &hub, &log);
             if let Ok(msg) = rx.try_recv() {
                 break msg;
             }

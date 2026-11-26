@@ -2,7 +2,9 @@ use rocky_proto::cards::{
     Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageReason,
     CoverageState, FlowKind, FlowStep, Importance, Label, Quote, Sequence, SymbolKind,
 };
-use rocky_proto::pipe::{BlockSnippet, ClientMsg, DiffLine, DiffLineKind, SnippetLine};
+use rocky_proto::pipe::{
+    AttemptOutcome, BlockSnippet, ClientMsg, DiffLine, DiffLineKind, RelatedAttempt, SnippetLine,
+};
 use rocky_proto::translate::{QuoteLang, QuoteTranslation, quote_key};
 
 use super::*;
@@ -40,6 +42,106 @@ pub(super) fn sample_card(id: &str, started_ms: u64, ended_ms: Option<u64>) -> C
             reasons: Vec::new(),
         },
     }
+}
+
+fn card_with_rev(id: &str, rev: u32) -> Card {
+    Card {
+        rev,
+        ..sample_card(id, 1_000, Some(2_000))
+    }
+}
+
+#[test]
+fn related_attempts_show_only_for_loaded_card_and_rev() {
+    let (mut detail, _) = DetailModel::open("c1".into(), 1, None);
+    let items = [RelatedAttempt {
+        date: "2026-11-12".into(),
+        outcome: AttemptOutcome::SameFailure,
+        files: vec!["src/a.ts".into()],
+        more: 2,
+    }];
+
+    assert!(!detail.on_related("c1", 2, &items));
+    assert!(detail.related_rows(UiLang::En).is_empty());
+    detail.on_detail(
+        1,
+        card_with_rev("c1", 2),
+        vec![],
+        vec![],
+        vec![],
+        UiLang::En,
+    );
+    let rows = detail.related_rows(UiLang::En);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].date, "2026-11-12");
+    assert_eq!(rows[0].outcome, "failed same way");
+    assert_eq!(rows[0].files.as_deref(), Some("src/a.ts +2 more"));
+
+    assert!(!detail.on_related("c2", 2, &[]));
+    assert!(!detail.on_related("c1", 1, &[]));
+    assert_eq!(detail.related_rows(UiLang::En), rows);
+}
+
+#[test]
+fn early_related_for_other_rev_is_dropped_and_new_rev_clears_rows() {
+    let (mut detail, _) = DetailModel::open("c1".into(), 1, None);
+    let items = [RelatedAttempt {
+        date: "2026-11-12".into(),
+        outcome: AttemptOutcome::Passed,
+        files: vec![],
+        more: 0,
+    }];
+
+    detail.on_related("c1", 1, &items);
+    detail.on_detail(
+        1,
+        card_with_rev("c1", 2),
+        vec![],
+        vec![],
+        vec![],
+        UiLang::En,
+    );
+    assert!(detail.related_rows(UiLang::En).is_empty());
+    assert!(detail.on_related("c1", 2, &items));
+    assert_eq!(detail.related_rows(UiLang::En)[0].files, None);
+
+    detail.retarget(2, Some(QuoteLang::En));
+    detail.on_detail(
+        2,
+        card_with_rev("c1", 3),
+        vec![],
+        vec![],
+        vec![],
+        UiLang::En,
+    );
+    assert!(detail.related_rows(UiLang::En).is_empty());
+}
+
+#[test]
+fn reconnect_clears_displayed_and_buffered_related_attempts_at_same_rev() {
+    let (mut detail, _) = DetailModel::open("c1".into(), 1, None);
+    let card = card_with_rev("c1", 2);
+    let items = [RelatedAttempt {
+        date: "2026-11-12".into(),
+        outcome: AttemptOutcome::Passed,
+        files: vec![],
+        more: 0,
+    }];
+
+    detail.on_detail(1, card.clone(), vec![], vec![], vec![], UiLang::En);
+    assert!(detail.on_related("c1", card.rev, &items));
+    assert_eq!(detail.related_rows(UiLang::En).len(), 1);
+    detail.reopen(2, None);
+    detail.on_detail(2, card.clone(), vec![], vec![], vec![], UiLang::En);
+    assert!(matches!(detail.state(), DetailState::Ready(_)));
+    assert!(detail.related_rows(UiLang::En).is_empty());
+
+    detail.reopen(3, None);
+    assert!(!detail.on_related("c1", card.rev, &items));
+    detail.reopen(4, None);
+    detail.on_detail(4, card, vec![], vec![], vec![], UiLang::En);
+    assert!(matches!(detail.state(), DetailState::Ready(_)));
+    assert!(detail.related_rows(UiLang::En).is_empty());
 }
 
 pub(super) fn sample_block(seq: u32, path: &str, labels: Vec<Label>) -> Block {

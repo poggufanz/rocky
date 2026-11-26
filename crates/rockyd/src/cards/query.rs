@@ -11,6 +11,7 @@ use std::thread;
 use rocky_proto::pipe::ServerMsg;
 use rocky_proto::translate::QuoteLang;
 
+use crate::cards::attempts::RelatedAttemptsLoop;
 use crate::cards::detail::{
     CardsQuote, build_block_diff, build_block_diff_with, build_card_detail,
     build_card_detail_unowned, build_card_detail_with, build_cards_reply_with_quotes,
@@ -74,6 +75,7 @@ struct PendingReply {
 /// block diffs, and frame sizing on one dedicated worker thread.
 pub struct CardQueryLoop {
     home: PathBuf,
+    related: RelatedAttemptsLoop,
     worker_index: usize,
     object_reader: Option<QueryObjectReader>,
     next_token: u64,
@@ -111,6 +113,7 @@ impl CardQueryLoop {
         let (job_tx, job_rx) = mpsc::channel();
         let (res_tx, res_rx) = mpsc::channel();
         Self {
+            related: RelatedAttemptsLoop::for_home(home.clone()),
             home,
             worker_index,
             object_reader,
@@ -123,6 +126,17 @@ impl CardQueryLoop {
             workers: BoundedWorkers::new(),
             panics: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Replaces the earlier-attempts runner, for tests.
+    #[doc(hidden)]
+    pub fn set_attempts_runner(&mut self, runner: crate::cards::attempts::AttemptsRunner) {
+        self.related.set_runner(runner);
+    }
+
+    /// Earlier-attempts messages ready to broadcast.
+    pub fn take_related(&mut self) -> Vec<ServerMsg> {
+        self.related.service()
     }
 
     /// Returns the number of currently uncollected query worker panics.
@@ -214,7 +228,15 @@ impl CardQueryLoop {
                 {
                     attach(&mut msg, to, &done.cards_quotes);
                 }
-                let _ = pending.reply.send(msg);
+                let related_key = match &msg {
+                    ServerMsg::CardDetail { card, .. } => Some((card.card_id.clone(), card.rev)),
+                    _ => None,
+                };
+                if pending.reply.send(msg).is_ok()
+                    && let Some((card_id, rev)) = related_key
+                {
+                    self.related.request(&card_id, rev);
+                }
             }
         }
     }
@@ -411,7 +433,7 @@ fn not_found_ack(id: u64) -> ServerMsg {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use rocky_proto::cards::{
         Block, BlockSymbol, BlockVia, CARD_VERSION, Card, CardStatus, Coverage, CoverageReason,
@@ -420,6 +442,8 @@ mod tests {
     use rocky_proto::paths::{canonical_path, listening_store_dir, repo_id};
 
     use super::*;
+
+    const ATTEMPTS_REPLY: &[u8] = br#"{"v":1,"entries":[{"attempts":[{"ts":86400000,"outcome":"passed","changes":{"state":"unknown"}}]}]}"#;
 
     fn wait_reply(rx: &mpsc::Receiver<ServerMsg>, queries: &mut CardQueryLoop) -> ServerMsg {
         for _ in 0..200 {
@@ -432,15 +456,27 @@ mod tests {
         panic!("timed out waiting for query reply");
     }
 
-    #[test]
-    fn query_worker_serves_cards_detail_and_diff_from_read_only_store() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().to_path_buf();
-        let repo = tmp.path().join("repo");
+    fn wait_related(queries: &mut CardQueryLoop) -> Vec<ServerMsg> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let messages = queries.take_related();
+            if !messages.is_empty() {
+                return messages;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for related attempts"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn seed_query_card(home: &Path, card_id: &str, rev: u32) -> Card {
+        let repo = home.join("repo");
         fs::create_dir_all(&repo).unwrap();
         let canon = canonical_path(&repo.to_string_lossy(), cfg!(windows));
         let rid = repo_id(&canon, cfg!(windows));
-        let objects = listening_store_dir(&home, &rid).join("objects");
+        let objects = listening_store_dir(home, &rid).join("objects");
         fs::create_dir_all(&objects).unwrap();
 
         let sha_a = "1".repeat(64);
@@ -450,8 +486,8 @@ mod tests {
 
         let card = Card {
             v: CARD_VERSION,
-            card_id: "card-q-1".to_string(),
-            rev: 1,
+            card_id: card_id.to_string(),
+            rev,
             repo_id: rid,
             root: canon,
             main_root: None,
@@ -502,9 +538,16 @@ mod tests {
             },
         };
 
-        let mut writer = CardStore::new(home.clone());
+        let mut writer = CardStore::new(home.to_path_buf());
         writer.append(&card).unwrap();
+        card
+    }
 
+    #[test]
+    fn query_worker_serves_cards_detail_and_diff_from_read_only_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let card = seed_query_card(&home, "card-q-1", 1);
         let mut queries = CardQueryLoop::new(home, 1);
         let owned = BTreeSet::from([card.root.clone()]);
 
@@ -562,6 +605,68 @@ mod tests {
                 cleanup_errors: 0,
             }
         );
+    }
+
+    #[test]
+    fn card_detail_reply_goes_out_before_related_attempts_and_triggers_one_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let card = seed_query_card(&home, "c1", 2);
+        let owned = BTreeSet::from([card.root]);
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let gate_rx = std::sync::Mutex::new(gate_rx);
+        let mut queries = CardQueryLoop::new(home, 1);
+        queries.set_attempts_runner(Arc::new(move |_id: &str| {
+            gate_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .ok()?;
+            Some(ATTEMPTS_REPLY.to_vec())
+        }));
+        let (reply_tx, reply_rx) = mpsc::sync_channel(4);
+        queries.card_detail(1, "c1".into(), owned, None, reply_tx);
+
+        let detail = wait_reply(&reply_rx, &mut queries);
+        assert!(matches!(detail, ServerMsg::CardDetail { id: 1, .. }));
+        assert!(queries.take_related().is_empty());
+        gate_tx.send(()).unwrap();
+
+        assert!(matches!(
+            wait_related(&mut queries).as_slice(),
+            [ServerMsg::RelatedAttempts { card_id, rev: 2, .. }] if card_id == "c1"
+        ));
+    }
+
+    #[test]
+    fn dropped_card_detail_receiver_does_not_broadcast_cached_attempts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let card = seed_query_card(&home, "c1", 2);
+        let owned = BTreeSet::from([card.root]);
+        let mut queries = CardQueryLoop::new(home, 1);
+        queries.set_attempts_runner(Arc::new(|_| Some(ATTEMPTS_REPLY.to_vec())));
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        queries.card_detail(1, "c1".into(), owned.clone(), None, reply_tx);
+        assert!(matches!(
+            wait_reply(&reply_rx, &mut queries),
+            ServerMsg::CardDetail { id: 1, .. }
+        ));
+        assert_eq!(wait_related(&mut queries).len(), 1);
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        drop(reply_rx);
+        queries.card_detail(2, "c1".into(), owned, None, reply_tx);
+
+        // The later query's reply confirms the worker and service loop processed the dropped reply.
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        queries.cards(3, None, None, 20, None, reply_tx);
+        assert!(matches!(
+            wait_reply(&reply_rx, &mut queries),
+            ServerMsg::Cards { id: 3, .. }
+        ));
+        assert!(queries.take_related().is_empty());
     }
 
     #[test]

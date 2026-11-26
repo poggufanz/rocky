@@ -1,10 +1,11 @@
-//! Render tree for change card detail, quote groups, snippets, and execution timeline.
+//! Render tree for change card detail, including execution timeline and earlier attempts.
 
 use gpui::prelude::*;
 use gpui::{Context, Div, FontWeight, SharedString, div, px, relative, rgb};
 
 use crate::card_detail_model::{
-    BlockView, CodeLine, DetailModel, DetailState, DetailView, QuoteDisplay, QuoteGroup, Step,
+    BlockView, CodeLine, DetailModel, DetailState, DetailView, QuoteDisplay, QuoteGroup,
+    RelatedRow, Step,
 };
 use crate::i18n::{CardMsg, UiLang, card_text};
 use crate::ui::cards_view::{CardAction, OnCardAction};
@@ -99,6 +100,11 @@ fn ready_card<T: 'static>(
             &view.timeline,
             view.timeline_more.as_deref(),
         ));
+    }
+
+    let related = detail.related_rows(lang);
+    if !related.is_empty() {
+        card = card.child(related_section(lang, card_id, &related));
     }
 
     let mut foot = div()
@@ -395,6 +401,67 @@ fn timeline_section(
     }
 
     section
+}
+
+fn related_section(lang: UiLang, card_id: &str, rows: &[RelatedRow]) -> Div {
+    let mut section = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .border_t_1()
+        .border_color(rgb(BORDER_SUBTLE))
+        .pt(px(8.0))
+        .px(px(12.0))
+        .pb(px(10.0))
+        .child(
+            div()
+                .mb(px(4.0))
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(TEXT_DIM))
+                .child(card_text(lang, &CardMsg::RelatedHeading).to_uppercase()),
+        );
+    for (idx, row) in rows.iter().enumerate() {
+        let mut line = div()
+            .flex()
+            .gap_2()
+            .min_w_0()
+            .text_size(px(12.0))
+            .font_family(mono_font())
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(row.date.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(rgb(TEXT_DARK))
+                    .child(row.outcome.clone()),
+            );
+        if let Some(files) = &row.files {
+            line = line.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(files.clone()),
+            );
+        }
+        section = section.child(motion::timeline_enter(
+            line,
+            SharedString::from(format!("related-row:{card_id}:{idx}")),
+            idx,
+        ));
+    }
+    section.child(
+        div()
+            .mt(px(4.0))
+            .text_size(px(11.0))
+            .text_color(rgb(TEXT_DIM))
+            .child(card_text(lang, &CardMsg::RelatedFooter)),
+    )
 }
 
 fn timeline_step_row(step: &Step, has_line_below: bool) -> Div {
