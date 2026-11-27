@@ -24,7 +24,7 @@ export const codexDriver = Object.freeze({
   defaultFlags: CODEX_FLAGS,
 
   buildCommand(prompt, model = CODEX_MODEL, { taskDir = ".", platform = process.platform } = {}) {
-    return { file: "codex", args: ["exec", ...codexFlags(taskDir, model, platform), prompt] };
+    return { file: "codex", args: ["exec", ...codexFlags(taskDir, model, platform), "--", prompt] };
   },
 
   setupSandbox({ env, sandboxEnv, auth, installRocky }) {

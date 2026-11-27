@@ -51,13 +51,21 @@ test("Codex builds the frozen exec command with Windows settings only on Windows
     file: "codex",
     args: [
       "exec", "--json", "-C", taskDir, "-s", "workspace-write", "--ephemeral",
-      "-c", "windows.sandbox=unelevated", "-m", "gpt-6.2-sol", prompt,
+      "-c", "windows.sandbox=unelevated", "-m", "gpt-6.2-sol", "--", prompt,
     ],
   });
   assert.deepEqual(codex.buildCommand(prompt, "override", { taskDir, platform: "linux" }), {
     file: "codex",
-    args: ["exec", "--json", "-C", taskDir, "-s", "workspace-write", "--ephemeral", "-m", "override", prompt],
+    args: [
+      "exec", "--json", "-C", taskDir, "-s", "workspace-write", "--ephemeral",
+      "-m", "override", "--", prompt,
+    ],
   });
+});
+
+test("Codex treats a flag-like prompt as a positional argument", () => {
+  const { args } = getEvalDriver("codex").buildCommand("--help");
+  assert.deepEqual(args.slice(-2), ["--", "--help"]);
 });
 
 test("Codex sandbox uses only eval keys and materializes AGENTS.md from the shared fixtures", async () => {
