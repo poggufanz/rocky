@@ -48,7 +48,7 @@ test("platform manifests pin os, cpu, files, and carry no scripts or dependencie
 });
 
 test("withPlatformPins adds exactly both platform packages at the root version", () => {
-  const out = withPlatformPins({ name: "@poggufanz/rocky-cli", version: "9.1.0" });
+  const out = withPlatformPins({ ...root, version: "9.1.0" });
   assert.deepEqual(out.optionalDependencies, {
     "@poggufanz/rocky-cli-linux-x64": "9.1.0",
     "@poggufanz/rocky-cli-win32-x64": "9.1.0",
@@ -69,13 +69,19 @@ test("platform pin injection and validation preserve only the approved runtime p
     { "jsonc-parser": "3.3.0" },
   ]) {
     assert.throws(() => withPlatformPins({ ...manifest, dependencies }), /unapproved runtime dependency or version/);
-    assert.match(validatePublishedManifest({ ...injected, dependencies }).join("\n"), /unapproved runtime dependency or version/);
+    assert.match(validatePublishedManifest({ ...injected, dependencies }).join("\n"), /approved runtime dependencies at their exact versions/);
   }
   assert.throws(() => withPlatformPins({ version: "1.0.0", optionalDependencies: {} }));
 });
 
+test("validatePublishedManifest rejects a missing runtime dependencies field", () => {
+  const published = withPlatformPins(root);
+  delete published.dependencies;
+  assert.match(validatePublishedManifest(published).join("\n"), /runtime dependenc/);
+});
+
 test("validatePublishedManifest rejects a missing, extra, ranged, or mismatched pin", () => {
-  const good = withPlatformPins({ name: "@poggufanz/rocky-cli", version: "9.1.0" });
+  const good = withPlatformPins({ ...root, version: "9.1.0" });
   const pins = good.optionalDependencies as JsonObject;
   for (const bad of [
     { ...pins, "@poggufanz/rocky-cli-linux-x64": undefined },
@@ -109,7 +115,7 @@ test("platform package CLI injects sorted pins and fails check on drift", (t) =>
   t.after(() => rmSync(tempRoot, { recursive: true, force: true }));
   const manifestPath = join(tempRoot, "package.json");
   const script = join(packageRoot, "scripts", "platform-packages.mjs");
-  writeFileSync(manifestPath, JSON.stringify({ name: "@poggufanz/rocky-cli", version: "3.2.1" }));
+  writeFileSync(manifestPath, JSON.stringify({ name: root.name, version: "3.2.1", dependencies: root.dependencies }));
 
   const injected = spawnSync(process.execPath, [script, "inject", manifestPath], { encoding: "utf8" });
   assert.equal(injected.status, 0, injected.stderr);

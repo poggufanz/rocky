@@ -6,11 +6,11 @@ import { basename, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { editJsoncPathAtomic } from "../../setup/json-config.js";
 
-function fixture(t: TestContext, original: string): string {
+function fixture(t: TestContext, original?: string): string {
   const dir = mkdtempSync(join(tmpdir(), "rocky-jsonc-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const target = join(dir, "opencode.jsonc");
-  writeFileSync(target, original, "utf8");
+  if (original !== undefined) writeFileSync(target, original, "utf8");
   return target;
 }
 
@@ -57,6 +57,31 @@ test("deleting the last item from a compact array removes the entire value", asy
   const target = fixture(t, '{"values":[1,23]}\n');
   assert.equal((await editJsoncPathAtomic(target, ["values", 1], undefined)).status, "written");
   assert.equal(readFileSync(target, "utf8"), '{"values":[1]}\n');
+});
+
+test("deleting the last array item preserves the preceding item's comment and whitespace", async (t) => {
+  const target = fixture(t, '{"values":[1 /* keep this note */, 23]}\n');
+  assert.equal((await editJsoncPathAtomic(target, ["values", 1], undefined)).status, "written");
+  assert.equal(readFileSync(target, "utf8"), '{"values":[1 /* keep this note */ ]}\n');
+});
+
+test("inserting into a compact object preserves an existing sibling byte-for-byte", async (t) => {
+  const target = fixture(t, '{"keep"  :  1}\n');
+  assert.equal((await editJsoncPathAtomic(target, ["added"], 2)).status, "written");
+  assert.equal(readFileSync(target, "utf8"), '{"keep"  :  1,"added": 2}\n');
+});
+
+test("inserting into a multiline object formats the new property without changing its sibling", async (t) => {
+  const target = fixture(t, '{\n  "keep"  :  1\n}\n');
+  assert.equal((await editJsoncPathAtomic(target, ["added"], 2)).status, "written");
+  assert.equal(readFileSync(target, "utf8"), '{\n  "keep"  :  1,\n  "added": 2\n}\n');
+});
+
+test("setting an empty root object creates a missing config file", async (t) => {
+  const target = fixture(t);
+  assert.equal(fs.existsSync(target), false);
+  assert.equal((await editJsoncPathAtomic(target, [], {})).status, "written");
+  assert.equal(readFileSync(target, "utf8"), "{}\n");
 });
 
 test("editing malformed JSONC refuses to replace the original bytes", async (t) => {

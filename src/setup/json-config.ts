@@ -343,7 +343,9 @@ export async function editJsoncPathAtomic(
   value: unknown,
   { mutationGuard }: { mutationGuard?: JsonMutationGuard } = {},
 ): Promise<ConditionalBytesWriteResult> {
-  const { modify, applyEdits, parse, parseTree, findNodeAtLocation, createScanner, SyntaxKind } = await import("jsonc-parser");
+  const {
+    modify, applyEdits, format, parse, parseTree, findNodeAtLocation, findNodeAtOffset, createScanner, SyntaxKind,
+  } = await import("jsonc-parser");
   const snapshot = readConfigBytes(path);
   if (snapshot.status === "invalid") throw new Error(snapshot.error);
 
@@ -372,31 +374,48 @@ export async function editJsoncPathAtomic(
     if (node === undefined) return { status: "written" };
     const parent = findNodeAtLocation(root, segments.slice(0, -1));
     const siblings = parent?.children ?? [];
+    const scanner = createScanner(text, true);
     if (parent?.type === "object" && siblings.length === 1) {
       // jsonc-parser leaves a dangling comma when removing the sole property.
-      const scanner = createScanner(text, true);
       scanner.setPosition(node.offset + node.length);
       if (scanner.scan() === SyntaxKind.CommaToken) {
         text = applyEdits(text, [{ offset: scanner.getTokenOffset(), length: 1, content: "" }]);
       }
     } else if (parent?.type === "array" && siblings.length > 1 && siblings.at(-1) === node) {
-      // jsonc-parser's last-element removal can leave part of a compact value.
+      // The separator and value can straddle a comment on the previous item.
       const previous = siblings[siblings.length - 2];
-      const offset = previous.offset + previous.length;
-      edits = [{ offset, length: node.offset + node.length - offset, content: "" }];
+      scanner.setPosition(previous.offset + previous.length);
+      if (scanner.scan() !== SyntaxKind.CommaToken) throw new Error("Unable to write JSON config");
+      edits = [
+        { offset: scanner.getTokenOffset(), length: scanner.getTokenLength(), content: "" },
+        { offset: node.offset, length: node.length, content: "" },
+      ];
     }
   }
 
   let edited: string;
   try {
-    edited = applyEdits(text, edits ?? modify(text, segments, value, { formattingOptions }));
+    const pathEdits = edits ?? modify(text, segments, value, {});
+    edited = applyEdits(text, pathEdits);
+    const [edit] = pathEdits;
+    if (value !== undefined && edit !== undefined) {
+      const container = edit.length === 0 ? findNodeAtOffset(root, edit.offset) : undefined;
+      const multiline = container !== undefined
+        && text.slice(container.offset, container.offset + container.length).includes("\n");
+      if (edit.length > 0 || multiline) {
+        const end = edit.offset + edit.content.length;
+        const formatting = format(edited, { offset: edit.offset, length: edit.content.length }, formattingOptions);
+        // The formatter can expand its range to the surrounding line.
+        edited = applyEdits(edited, formatting.filter(({ offset, length }) => offset >= edit.offset && offset + length <= end));
+      }
+    }
     if (!isObject(parse(edited, errors, parseOptions)) || errors.length > 0) {
       throw new Error("Invalid edit");
     }
   } catch {
     throw new Error("Unable to write JSON config");
   }
-  if (bom + edited === original) return { status: "written" };
+  if (snapshot.status === "valid" && bom + edited === original) return { status: "written" };
   return writeConfigBytesIfUnchanged(path, Buffer.from(bom + edited, "utf8"), snapshot, mutationGuard);
 }
 

@@ -102,7 +102,7 @@ export function withPlatformPins(manifest) {
   if (Object.hasOwn(manifest, "optionalDependencies")) {
     throw new Error("package manifest already declares optionalDependencies; pins replace the whole field");
   }
-  if (!validRuntimeDependencies(manifest)) {
+  if (Object.hasOwn(manifest, "dependencies") && !hasApprovedRuntimeDependencies(manifest)) {
     throw new Error("package manifest declares an unapproved runtime dependency or version");
   }
   if (typeof manifest.version !== "string" || manifest.version === "") {
@@ -113,17 +113,17 @@ export function withPlatformPins(manifest) {
   return { ...manifest, optionalDependencies };
 }
 
-function validRuntimeDependencies(manifest) {
-  return !Object.hasOwn(manifest, "dependencies")
-    || isDeepStrictEqual(manifest.dependencies, RUNTIME_DEPENDENCY_PINS);
+function hasApprovedRuntimeDependencies(manifest) {
+  return Object.hasOwn(manifest, "dependencies")
+    && isDeepStrictEqual(manifest.dependencies, RUNTIME_DEPENDENCY_PINS);
 }
 
 export function validatePublishedManifest(manifest) {
   const value = objectRecord(manifest);
   if (value === undefined) return ["package manifest is not a JSON object"];
   const problems = [];
-  if (!validRuntimeDependencies(value)) {
-    problems.push("package manifest declares an unapproved runtime dependency or version");
+  if (!hasApprovedRuntimeDependencies(value)) {
+    problems.push("package manifest must declare the approved runtime dependencies at their exact versions");
   }
   const pins = objectRecord(value.optionalDependencies);
   if (pins === undefined) {
