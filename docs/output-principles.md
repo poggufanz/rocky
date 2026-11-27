@@ -1,39 +1,29 @@
-# Output principles
+# Output conventions
 
-These rules govern what rocky is allowed to say and do. They exist because a memory tool that starts guessing stops being evidence, and a tool that talks constantly stops being read.
+This page documents user-facing output: source labels, coverage disclosures, notifications, and CLI formatting. It does not prescribe the project's architecture or limit which features can be proposed.
 
-Every new command, surface, or output line passes these tests before it ships.
+## Sources and coverage
 
-## 1. Witness, not judge
+Keep recorded events, quoted rationale, deterministic analysis, and model-generated responses distinguishable. A quote records what an agent said, not proof that its explanation is correct. Generated analysis must not be presented as a recorded event or attributed quote.
 
-rocky learns a thing by recording it as it happens and checking the record later. It never infers, predicts, or diagnoses.
+Link claims about recorded history to their evidence. A linked fix is `confirmed` only when the recorded evidence supports that label; otherwise it stays `possible`. Disclose bounded reads and incomplete memory coverage. When a reason was not recorded, say so instead of filling the gap with invented testimony.
 
-A surface passes if every claim it makes traces back to a recorded event. It fails if it produces a conclusion no record supports: a likely cause, a probable culprit, an inferred intent. When the record is silent, the honest output says that nothing was recorded.
+Scope lines name what was checked: `checked net change: 4 new text lines, 2 files. no secret hit.` is a bounded result, not a claim that everything is safe.
 
-rocky is not the one who diagnoses a failure, proposes a fix, or decides whether a change is correct. An AI agent does that. rocky supplies the memory that makes the agent's judgment better informed, and keeps the human able to answer for what the agent built. It may surface what it recorded when a fingerprint matches. It may not suggest anything it did not record, because a suggestion beyond the record is a guess presented as evidence.
+## Notifications and quiet mode
 
-## 2. Evidence, never assertion
+Document when a command or background feature produces output and how users control it. Keep existing quiet flags and notification settings working when changing a surface. Do not mix Rocky-owned messages into the stdout of a wrapped command.
 
-Confidence is earned by producing the record, not by sounding certain. This is why a linked fix is `confirmed` only when the evidence justifies that word and stays `possible` otherwise, why a bounded read discloses that it was bounded, and why memory coverage is reported rather than assumed complete.
+## CLI formatting
 
-A surface passes if a user can ask "how do you know" and get the underlying record. It fails if it asks to be believed. Scope lines stay honest and specific: `checked net change: 4 new text lines, 2 files. no secret hit.` says what was checked, not that everything is fine.
-
-## 3. Quiet by default
-
-rocky stays quiet through ordinary work and speaks when something it recorded bears on what is happening now. Every message competes with the user's attention.
-
-A surface passes if it stays quiet by default and has a specific trigger worth interrupting for. It fails if it fires on a schedule, greets, or reminds the user it exists. `rocky watch --quiet` stays quieter still.
-
-## 4. Plain words
-
-Output is plain, neutral English, the way other command-line tools write.
+Output uses plain, neutral English.
 
 - rocky-owned lines on stderr start with `rocky: ` (lowercase, one prefix everywhere). Detail lines below them are indented or dimmed without a prefix.
 - Full sentences in sentence case, ending with a period: `rocky: New error recorded (exit code 1).`
 - Questions end with a question mark. Prompts that take an answer show the choices: `Allow registry lookup? [y/N]`.
-- No first person. rocky reports what was recorded, checked, or linked: `Same error as before. No fix recorded yet.`
-- No emphasis by repetition and no verdict tags such as a trailing `good.` or `bad.`. State the fact; the exit code carries success or failure.
+- No first person. Report what was recorded, checked, or linked: `Same error as before. No fix recorded yet.`
+- No emphasis by repetition and no verdict tags such as a trailing `good.` or `bad.`. State the result; the exit code carries success or failure.
 - Name exact commands, paths, counts, and flags. A blocked action names the command that unblocks it.
-- No emoji, no mascot, no drawings made of characters.
+- No emoji, mascot, or drawings made of characters.
 
-The phrase catalog in `src/ui/phrases.ts` and its validator (`validateOutputLine`) enforce the mechanical part of these rules in tests.
+The phrase catalog in `src/ui/phrases.ts` and its validator (`validateOutputLine`) check the mechanical formatting in tests.
