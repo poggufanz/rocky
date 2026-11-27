@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+  lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,8 +29,25 @@ test("a Rocky header does not authorize removal or overwrite after content chang
   assert.equal(removeManagedPluginFile(path, installed.digest).status, "missing");
 });
 
+test("a plugin installed through a linked parent can be removed through the same path", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-plugin-parent-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const realParent = join(dir, "plugins");
+  const linkedParent = join(dir, "linked");
+  mkdirSync(realParent);
+  symlinkSync(realParent, linkedParent, process.platform === "win32" ? "junction" : "dir");
+  const path = join(linkedParent, "hook.js");
+  const content = "// rocky-managed\nexport default 1;\n";
+  const installed = writeManagedPluginFile(path, content);
+  assert.equal(installed.status, "written");
+  assert.equal(readFileSync(join(realParent, "hook.js"), "utf8"), content);
+  assert.equal(removeManagedPluginFile(path, installed.digest).status, "removed");
+  assert.equal(lstatSync(linkedParent).isSymbolicLink(), true);
+  assert.deepEqual(readdirSync(realParent), []);
+});
+
 test("plugin removal preserves a replacement saved immediately before the file is moved", (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "rocky-plugin-race-"));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-plugin-race-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "hook.js");
   const staged = join(dir, "editor-save");
@@ -69,7 +88,7 @@ test("plugin removal preserves a replacement saved immediately before the file i
 });
 
 test("a second plugin save keeps the first replacement recoverable without clobbering the live file", (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "rocky-plugin-restore-"));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-plugin-restore-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "hook.js");
   const installed = writeManagedPluginFile(path, "// rocky-managed\nexport default 1;\n");

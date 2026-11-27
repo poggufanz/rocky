@@ -76,7 +76,8 @@ test("Codex rollout accepts the vendor exec envelope and keeps its command outpu
   for (const exitCode of [0, 7]) {
     assert.deepEqual(reducer.consume(JSON.stringify({
       type: "response_item", payload: {
-        type: "function_call", name: "exec_command", call_id: "call-a", arguments: '{"cmd":"npm test"}',
+        type: "function_call", name: "exec_command", namespace: exitCode === 0 ? "" : undefined,
+        call_id: "call-a", arguments: '{"cmd":"npm test"}',
       },
     })), []);
     const [event] = reducer.consume(JSON.stringify({
@@ -88,6 +89,29 @@ test("Codex rollout accepts the vendor exec envelope and keeps its command outpu
     assert.equal(event.outcome.exitCodeSource, "header");
     assert.equal(event.outcome.exitCode, exitCode);
     assert.equal(event.outcome.output, "Exit code 14\n");
+  }
+});
+
+test("Codex namespaced exec_command output cannot supply built-in exit evidence", async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  const reducer = decoder.createTranscriptReducer();
+  const output = "Wall time: 0.1250 seconds\nProcess exited with code 7\nOutput:\nordinary text";
+  for (const [namespace, outputNamespace] of [
+    ["third_party", undefined], [" ", undefined], ["x".repeat(512), undefined], [undefined, "third_party"],
+  ]) {
+    assert.deepEqual(reducer.consume(JSON.stringify({
+      type: "response_item", payload: {
+        type: "function_call", name: "exec_command", namespace, call_id: "call-a", arguments: '{"cmd":"npm test"}',
+      },
+    })), []);
+    const [event] = reducer.consume(JSON.stringify({
+      type: "response_item", payload: { type: "function_call_output", namespace: outputNamespace, call_id: "call-a", output },
+    }));
+    assert.equal(event?.kind, "tool-outcome");
+    assert.equal(event.outcome.exitCodeSource, "unknown");
+    assert.equal(event.outcome.exitCode, undefined);
+    assert.equal(event.outcome.output, output);
   }
 });
 
@@ -129,27 +153,42 @@ test("Codex apply_patch rollout keeps move coverage only for a successful comple
   const reducer = decoder.createTranscriptReducer({ sessionId: "session-a" });
   const patch = "*** Begin Patch\n*** Update File: old.ts\n*** Move to: new.ts\n*** End Patch";
   assert.deepEqual(reducer.consume(JSON.stringify({ type: "session_meta", payload: { id: "session-a", cwd } })), []);
-  const complete = (callId: string, output: string) => {
+  const complete = (callId: string, output: string, namespace?: string) => {
     assert.deepEqual(reducer.consume(JSON.stringify({
-      type: "response_item", payload: { type: "custom_tool_call", name: "apply_patch", call_id: callId, input: patch },
+      type: "response_item", payload: { type: "custom_tool_call", name: "apply_patch", namespace, call_id: callId, input: patch },
     })), []);
     return reducer.consume(JSON.stringify({
       type: "response_item", payload: { type: "custom_tool_call_output", call_id: callId, output },
     }))[0];
   };
-  const succeeded = complete("call-a", "Success. Updated the following files:\nM new.ts\n");
-  assert.equal(succeeded?.kind, "tool-outcome");
-  assert.deepEqual(succeeded.outcome.coveragePaths, ["old.ts", "new.ts"]);
-  assert.deepEqual(succeeded.outcome.edits.map(({ path }) => path), ["old.ts", "new.ts"]);
-  assert.equal(succeeded.outcome.coveragePathsComplete, true);
   const hook = decoder.decodeHook({
     hook_event_name: "PostToolUse", session_id: "session-a", turn_id: "turn-a", cwd,
     tool_name: "apply_patch", tool_input: { command: patch },
   });
-  assert.match(succeeded.outcome.coverageDigest ?? "", /^[a-f0-9]{64}$/u);
-  assert.equal(succeeded.outcome.coverageDigest, hook?.outcome?.coverageDigest);
-  const failed = complete("call-b", "apply_patch verification failed: no matching hunk");
-  assert.equal(failed?.kind, "tool-outcome");
-  assert.deepEqual(failed.outcome.edits, []);
-  assert.equal(failed.outcome.coverageDigest, undefined);
+  const success = "Success. Updated the following files:\nM new.ts\n";
+  for (const output of [
+    "Exit code: 0\nWall time: 0.1 seconds\nOutput:\n" + success,
+    "Exit code: 0\nWall time: 0 seconds\nTotal output lines: 2\nOutput:\n" + success,
+    success,
+  ]) {
+    const succeeded = complete("call-a", output);
+    assert.equal(succeeded?.kind, "tool-outcome");
+    assert.deepEqual(succeeded.outcome.coveragePaths, ["old.ts", "new.ts"]);
+    assert.deepEqual(succeeded.outcome.edits.map(({ path }) => path), ["old.ts", "new.ts"]);
+    assert.equal(succeeded.outcome.coveragePathsComplete, true);
+    assert.match(succeeded.outcome.coverageDigest ?? "", /^[a-f0-9]{64}$/u);
+    assert.equal(succeeded.outcome.coverageDigest, hook?.outcome?.coverageDigest);
+  }
+  for (const output of [
+    "apply_patch verification failed: no matching hunk",
+    "Exit code: 1\nWall time: 0.1 seconds\nOutput:\n" + success,
+  ]) {
+    const failed = complete("call-b", output);
+    assert.equal(failed?.kind, "tool-outcome");
+    assert.deepEqual(failed.outcome.edits, []);
+    assert.equal(failed.outcome.coverageDigest, undefined);
+  }
+  const namespaced = complete("call-c", success, "third_party");
+  assert.equal(namespaced?.kind, "tool-outcome");
+  assert.deepEqual(namespaced.outcome.edits, []);
 });

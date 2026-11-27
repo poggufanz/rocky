@@ -88,6 +88,25 @@ test("Codex hook output that resembles an exit header stays ordinary output", as
   }
 });
 
+test("Codex resolves relative tool workdirs from the input or session cwd", async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  const sessionCwd = join(process.cwd(), "session");
+  const inputCwd = join(process.cwd(), "input");
+  for (const cwd of [undefined, inputCwd]) {
+    const decoded = decoder.decodeHook({
+      hook_event_name: "PostToolUse", session_id: "session-a", cwd: sessionCwd,
+      tool_name: "exec_command", tool_input: { command: "npm test", cwd, workdir: "packages/one" },
+      tool_response: { exit_code: 7, output: "build failed" },
+    });
+    assert.ok(decoded);
+    const outcome = projectToToolResult(decoded);
+    assert.equal(outcome?.kind, "failure");
+    assert.equal(outcome.exitCode, 7);
+    assert.equal(outcome.cwd, join(cwd ?? sessionCwd, "packages", "one"));
+  }
+});
+
 test("Claude sync response caps the serialized UTF-8 envelope at under 2 KiB", async () => {
   const decoder = await loadHarnessDecoder("claude-code");
   assert.ok(decoder);

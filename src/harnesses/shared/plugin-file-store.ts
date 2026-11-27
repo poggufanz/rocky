@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import {
   closeSync, constants, fstatSync, linkSync, lstatSync, mkdtempSync, openSync, readFileSync,
-  renameSync, rmdirSync, unlinkSync, type BigIntStats,
+  realpathSync, renameSync, rmdirSync, statSync, unlinkSync, type BigIntStats,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, sameFilesystemIdentity } from "../../core/fs-safety.js";
 import { atomicWriteBytesIfUnchanged, type ConditionalBytesWriteResult } from "../../setup/file-transaction.js";
 
@@ -103,11 +103,16 @@ export function removeManagedPluginFile(
   let quarantine: string | undefined;
   let restore: (() => ChangedRemoval) | undefined;
   try {
-    const parent = dirname(path);
-    const directory = lstatSync(parent, { bigint: true, throwIfNoEntry: false });
+    const suppliedParent = dirname(path);
+    const directory = statSync(suppliedParent, { bigint: true, throwIfNoEntry: false });
     if (!directory) return { status: "missing" };
     if (!directory.isDirectory()) return { status: "changed" };
-    const prior = snapshot(path);
+    // Pin the directory reached through the supplied path. The leaf still
+    // goes through the regular-file, non-following snapshot checks.
+    const parent = realpathSync.native(suppliedParent);
+    if (!sameDirectory(parent, directory)) return { status: "changed" };
+    const target = join(parent, basename(path));
+    const prior = snapshot(target);
     if (prior.status === "missing") return { status: "missing" };
     if (prior.status !== "valid" || digestOf(prior.bytes) !== managedDigest) return { status: "changed" };
 
@@ -116,14 +121,14 @@ export function removeManagedPluginFile(
     const privateDir = lstatSync(location, { bigint: true });
     const tombstone = join(location, "plugin");
     const stillQuarantined = () => sameDirectory(parent, directory) && sameDirectory(location, privateDir);
-    if (!stillQuarantined() || !isSameFile(prior.metadata, lstatSync(path, { bigint: true }))) {
+    if (!stillQuarantined() || !isSameFile(prior.metadata, lstatSync(target, { bigint: true }))) {
       return { status: "changed" };
     }
 
     // Move first, then prove ownership of the exact entry to be unlinked.
     // A save that wins the race into rename will be verified in quarantine.
-    renameSync(path, tombstone);
-    restore = () => restorePlugin(path, tombstone, stillQuarantined);
+    renameSync(target, tombstone);
+    restore = () => restorePlugin(target, tombstone, stillQuarantined);
     const moved = snapshot(tombstone);
     if (moved.status !== "valid" || !sameFilesystemIdentity(prior.metadata, moved.metadata)
       || digestOf(moved.bytes) !== managedDigest || !stillQuarantined()
@@ -132,7 +137,7 @@ export function removeManagedPluginFile(
     }
     unlinkSync(tombstone);
     restore = undefined;
-    return { status: lstatSync(path, { throwIfNoEntry: false }) ? "changed" : "removed" };
+    return { status: lstatSync(target, { throwIfNoEntry: false }) ? "changed" : "removed" };
   } catch {
     return restore?.() ?? { status: "changed" };
   } finally {
