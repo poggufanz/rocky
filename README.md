@@ -10,7 +10,7 @@
 
 Your AI writes code. Rocky helps you understand what you own. It remembers failed commands and later fixes, then brings that history back through the CLI, desktop app, and MCP. Supported agent hooks also keep a bounded record of what you asked for, which files changed, and why the agent said it changed them.
 
-The current Node CLI has no JavaScript runtime dependencies. On Windows x64 and Linux x64, npm also installs an optional platform package with the desktop app, its background process, and the hook binary. See [Privacy and local state](#privacy-and-local-state) for the current storage and network behavior.
+The Node CLI loads its single JavaScript runtime dependency, `jsonc-parser`, when editing JSONC config files. On Windows x64 and Linux x64, npm also installs an optional platform package with the desktop app, its background process, and the hook binary. See [Privacy and local state](#privacy-and-local-state) for the current storage and network behavior.
 
 ## See it work
 

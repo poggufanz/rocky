@@ -1,7 +1,7 @@
 // Manifest-only platform packages carry the desktop app, its background
 // process, and the hook as optional dependencies of @poggufanz/rocky-cli.
-// npm installs a package whose os/cpu match; the root manifest stays free of
-// dependencies, and the publish step injects the pins at the root version.
+// npm installs a package whose os/cpu match. The publish step injects the
+// optional pins at the root version and preserves approved runtime pins.
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,7 @@ export const PLATFORM_PACKAGES = Object.freeze([
 ]);
 
 const PIN_NAMES = Object.freeze(PLATFORM_PACKAGES.map((platform) => platform.name).sort());
+export const RUNTIME_DEPENDENCY_PINS = Object.freeze({ "jsonc-parser": "3.3.1" });
 const CARRIED_ABSENT = ["scripts", "bin", "dependencies", "optionalDependencies", "main"];
 const INHERITED = ["license", "repository", "homepage", "bugs", "author"];
 
@@ -98,10 +99,11 @@ export function withPlatformPins(manifest) {
   if (objectRecord(manifest) === undefined) {
     throw new TypeError("package manifest must be a JSON object");
   }
-  for (const key of ["dependencies", "optionalDependencies"]) {
-    if (Object.hasOwn(manifest, key)) {
-      throw new Error(`package manifest already declares ${key}; pins replace the whole field`);
-    }
+  if (Object.hasOwn(manifest, "optionalDependencies")) {
+    throw new Error("package manifest already declares optionalDependencies; pins replace the whole field");
+  }
+  if (!validRuntimeDependencies(manifest)) {
+    throw new Error("package manifest declares an unapproved runtime dependency or version");
   }
   if (typeof manifest.version !== "string" || manifest.version === "") {
     throw new Error("package manifest has no version to pin");
@@ -111,12 +113,17 @@ export function withPlatformPins(manifest) {
   return { ...manifest, optionalDependencies };
 }
 
+function validRuntimeDependencies(manifest) {
+  return !Object.hasOwn(manifest, "dependencies")
+    || isDeepStrictEqual(manifest.dependencies, RUNTIME_DEPENDENCY_PINS);
+}
+
 export function validatePublishedManifest(manifest) {
   const value = objectRecord(manifest);
   if (value === undefined) return ["package manifest is not a JSON object"];
   const problems = [];
-  if (Object.hasOwn(value, "dependencies")) {
-    problems.push("package manifest must not declare dependencies");
+  if (!validRuntimeDependencies(value)) {
+    problems.push("package manifest declares an unapproved runtime dependency or version");
   }
   const pins = objectRecord(value.optionalDependencies);
   if (pins === undefined) {

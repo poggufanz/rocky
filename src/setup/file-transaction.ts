@@ -179,6 +179,57 @@ function fileIdentityMatches(path: string, identity: FileIdentity): boolean {
   }
 }
 
+const MAX_RENAME_ATTEMPTS = 5;
+const INITIAL_RENAME_DELAY_MS = 25;
+
+function renameWithRetry(
+  from: string,
+  to: string,
+  guard: FileMutationGuard | undefined,
+  expectedSource?: FileIdentity,
+): boolean {
+  requireMutationGuard(guard);
+  if (expectedSource !== undefined && !fileIdentityMatches(from, expectedSource)) return false;
+  if (process.platform !== "win32") {
+    renameSync(from, to);
+    return true;
+  }
+
+  const source = lstatSync(from);
+  if (expectedSource !== undefined && !sameIdentity(source, expectedSource)) return false;
+  const destination = lstatSync(to, { throwIfNoEntry: false });
+  const directoryPath = dirname(to);
+  const directory = lstatSync(directoryPath);
+  if (!source.isFile() || !directory.isDirectory() || (destination !== undefined && !destination.isFile())) {
+    throw new FileMutationGuardChangedError();
+  }
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(from, to);
+      return true;
+    } catch (error) {
+      const code = errorCode(error);
+      if (attempt + 1 === MAX_RENAME_ATTEMPTS || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw error;
+    }
+
+    // The writer is synchronous. Four retries wait at most 375ms in total.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, INITIAL_RENAME_DELAY_MS * 2 ** attempt);
+    requireMutationGuard(guard);
+    const currentDirectory = lstatSync(directoryPath, { throwIfNoEntry: false });
+    const destinationUnchanged = destination === undefined
+      ? lstatSync(to, { throwIfNoEntry: false }) === undefined
+      : fileIdentityMatches(to, destination);
+    if (!currentDirectory?.isDirectory() || !sameIdentity(currentDirectory, directory) || !destinationUnchanged) {
+      throw new FileMutationGuardChangedError();
+    }
+    const currentSource = lstatSync(from, { throwIfNoEntry: false });
+    if (!currentSource?.isFile() || !sameIdentity(currentSource, source) || currentSource.nlink !== source.nlink) {
+      return false;
+    }
+  }
+}
+
 export function pathExists(path: string): boolean {
   try {
     lstatSync(path);
@@ -637,6 +688,7 @@ function writeManifest(
   const temporaryPath = join(transactionDirectory, "manifest.tmp");
   const manifest: TransactionManifest = { version: 1, state, target };
   let descriptor: number | undefined;
+  let cleanupAllowed = true;
   try {
     requireMutationGuard(guard);
     descriptor = openSync(temporaryPath, "wx", 0o600);
@@ -644,9 +696,11 @@ function writeManifest(
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    requireMutationGuard(guard);
-    renameSync(temporaryPath, manifestPath);
+    if (!renameWithRetry(temporaryPath, manifestPath, guard)) throw new FileMutationGuardChangedError();
     syncDirectory(transactionDirectory);
+  } catch (error) {
+    cleanupAllowed = !(error instanceof FileMutationGuardChangedError);
+    throw error;
   } finally {
     if (descriptor !== undefined) {
       try {
@@ -655,7 +709,7 @@ function writeManifest(
         // Caller reports a secret-free transaction recovery path.
       }
     }
-    if (mutationGuardUnchanged(guard) && pathExists(temporaryPath)) {
+    if (cleanupAllowed && mutationGuardUnchanged(guard) && pathExists(temporaryPath)) {
       try {
         requireMutationGuard(guard);
         rmSync(temporaryPath, { force: true });
@@ -1436,8 +1490,7 @@ export function atomicWriteBytesIfUnchanged(
 
     recoveryPath = join(transactionDirectory, "displaced");
     try {
-      requireMutationGuard(guard);
-      if (priorIdentity !== undefined && !fileIdentityMatches(path, priorIdentity)) {
+      if (!renameWithRetry(path, recoveryPath, guard, priorIdentity)) {
         if (removeTransaction(transactionDirectory)) {
           transactionExists = false;
           temporaryExists = false;
@@ -1449,7 +1502,6 @@ export function atomicWriteBytesIfUnchanged(
           outcome: ambiguousOutcome(transactionDirectory, path, undefined, destinationPublished),
         };
       }
-      renameSync(path, recoveryPath);
       recoveryExists = true;
     } catch (error) {
       if (errorCode(error) === "ENOENT") {

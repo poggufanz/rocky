@@ -56,8 +56,21 @@ test("withPlatformPins adds exactly both platform packages at the root version",
   assert.deepEqual(validatePublishedManifest(out), []);
 });
 
-test("withPlatformPins refuses a manifest that already declares dependencies", () => {
-  assert.throws(() => withPlatformPins({ version: "1.0.0", dependencies: { a: "1" } }));
+test("platform pin injection and validation preserve only the approved runtime pin", () => {
+  const pinned = { "jsonc-parser": "3.3.1" };
+  const manifest = { version: "1.0.0", dependencies: pinned };
+  const injected = withPlatformPins(manifest);
+  assert.deepEqual(injected.dependencies, pinned);
+  assert.deepEqual(validatePublishedManifest(injected), []);
+  for (const dependencies of [
+    { ...pinned, other: "1.0.0" },
+    { "jsonc-parser": "^3.3.1" },
+    { "jsonc-parser": "~3.3.1" },
+    { "jsonc-parser": "3.3.0" },
+  ]) {
+    assert.throws(() => withPlatformPins({ ...manifest, dependencies }), /unapproved runtime dependency or version/);
+    assert.match(validatePublishedManifest({ ...injected, dependencies }).join("\n"), /unapproved runtime dependency or version/);
+  }
   assert.throws(() => withPlatformPins({ version: "1.0.0", optionalDependencies: {} }));
 });
 

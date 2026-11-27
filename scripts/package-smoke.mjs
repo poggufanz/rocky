@@ -26,6 +26,7 @@ import {
   shouldRunInstalledSetup,
 } from "./package-smoke-support.mjs";
 import { isForbiddenPackArtifact, packManifestEntries } from "./release-check.mjs";
+import { RUNTIME_DEPENDENCY_PINS } from "./platform-packages.mjs";
 
 const PACKAGE_NAME = "@poggufanz/rocky-cli";
 const PACKAGE_BINARY = "rocky";
@@ -509,12 +510,25 @@ async function main() {
   const tarball = join(packDirectory, packed.filename);
   assert.equal(existsSync(tarball), true, "packed tarball is missing");
 
+  // The cache starts empty. Pack the dependency already installed by npm ci
+  // so the smoke can install both tarballs without contacting a registry.
+  const dependencyTarballs = Object.entries(RUNTIME_DEPENDENCY_PINS).map(([name, version]) => {
+    const result = childResult(npm, [
+      "pack", join(packageRoot, "node_modules", name), "--json", "--ignore-scripts", "--pack-destination", packDirectory,
+    ], { env, timeout: 120_000 });
+    assertSuccess(result, `npm pack ${name}`);
+    const dependency = parseSinglePackResult(result.stdout);
+    assert.equal(dependency.name, name);
+    assert.equal(dependency.version, version);
+    return join(packDirectory, dependency.filename);
+  });
   const install = childResult(npm, [
     "install",
     "--global",
     "--prefix",
     prefixDirectory,
     tarball,
+    ...dependencyTarballs,
     "--ignore-scripts",
     "--offline",
     "--no-audit",
@@ -541,8 +555,15 @@ async function main() {
   assert.equal(installedMetadata.name, PACKAGE_NAME);
   assert.equal(installedMetadata.version, PACKAGE_VERSION);
   assert.deepEqual(installedMetadata.bin, { [PACKAGE_BINARY]: "dist/index.js" });
-  assert.deepEqual(installedMetadata.dependencies ?? {}, {});
+  assert.deepEqual(installedMetadata.dependencies, RUNTIME_DEPENDENCY_PINS);
   assert.deepEqual(installedMetadata.optionalDependencies ?? {}, {});
+
+  const configModule = await import(pathToFileURL(join(installedRoot, "dist", "setup", "json-config.js")).href);
+  const jsoncPath = join(isolatedHome, "opencode.jsonc");
+  writeFileSync(jsoncPath, '{\n  // user comment\n  "theme": "dark",\n}\n', "utf8");
+  const edit = await configModule.editJsoncPathAtomic(jsoncPath, ["theme"], "light");
+  assert.equal(edit.status, "written");
+  assert.equal(readFileSync(jsoncPath, "utf8"), '{\n  // user comment\n  "theme": "light",\n}\n');
 
   const quoteModule = await import(pathToFileURL(installedQuoteModule).href);
   const quoteShellPath = quoteModule.quoteShellPath;

@@ -111,7 +111,7 @@ export function readJsoncObject(path: string): JsonReadResult {
   return readObject(path, "strip");
 }
 
-function readObject(path: string, comments: "reject" | "strip"): JsonReadResult {
+function readConfigBytes(path: string): BytesReadResult | Extract<JsonReadResult, { status: "invalid" }> {
   let bytes: Buffer;
   let metadata: ReturnType<typeof lstatSync>;
   try {
@@ -129,13 +129,20 @@ function readObject(path: string, comments: "reject" | "strip"): JsonReadResult 
     metadata = after;
   } catch (error) {
     return errorCode(error) === "ENOENT"
-      ? { status: "missing", value: {} }
+      ? { status: "missing" }
       : { status: "invalid", error: "Unable to read JSON config" };
   }
+  return { status: "valid", bytes, mode: metadata.mode & 0o777, identity: { dev: metadata.dev, ino: metadata.ino } };
+}
+
+function readObject(path: string, comments: "reject" | "strip"): JsonReadResult {
+  const snapshot = readConfigBytes(path);
+  if (snapshot.status === "missing") return { status: "missing", value: {} };
+  if (snapshot.status === "invalid") return snapshot;
 
   let value: unknown;
   try {
-    const text = bytes.toString("utf8");
+    const text = snapshot.bytes.toString("utf8");
     value = JSON.parse(comments === "strip" ? stripJsonComments(text) : text);
   } catch {
     return { status: "invalid", error: "JSON config is invalid" };
@@ -147,15 +154,15 @@ function readObject(path: string, comments: "reject" | "strip"): JsonReadResult 
   const result: Extract<JsonReadResult, { status: "valid" }> = {
     status: "valid",
     value,
-    bytes,
-    mode: metadata.mode & 0o777,
+    bytes: snapshot.bytes,
+    mode: snapshot.mode,
   };
   // Keep the public read shape stable for existing callers/tests while
   // carrying inode authority into the conditional writer.
   Object.defineProperty(result, "identity", {
     configurable: false,
     enumerable: false,
-    value: { dev: metadata.dev, ino: metadata.ino },
+    value: snapshot.identity,
     writable: false,
   });
   return result;
@@ -329,6 +336,70 @@ export function atomicWriteJson(
 
 export type ConditionalJsonWriteResult = ConditionalBytesWriteResult;
 
+/** Apply a JSONC path edit against its original snapshot. No-op edits also succeed as `written`. */
+export async function editJsoncPathAtomic(
+  path: string,
+  jsonPath: readonly (string | number)[],
+  value: unknown,
+  { mutationGuard }: { mutationGuard?: JsonMutationGuard } = {},
+): Promise<ConditionalBytesWriteResult> {
+  const { modify, applyEdits, parse, parseTree, findNodeAtLocation, createScanner, SyntaxKind } = await import("jsonc-parser");
+  const snapshot = readConfigBytes(path);
+  if (snapshot.status === "invalid") throw new Error(snapshot.error);
+
+  const original = snapshot.status === "valid" ? snapshot.bytes.toString("utf8") : "{}\n";
+  if (snapshot.status === "valid" && !snapshot.bytes.equals(Buffer.from(original, "utf8"))) {
+    throw new Error("JSON config is not valid UTF-8");
+  }
+  const bom = original.startsWith("\uFEFF") ? "\uFEFF" : "";
+  let text = original.slice(bom.length);
+  const errors: NonNullable<Parameters<typeof parse>[1]> = [];
+  const parseOptions = { allowTrailingComma: true };
+  const root = parseTree(text, errors, parseOptions);
+  if (errors.length > 0 || root?.type !== "object") throw new Error("JSON config is invalid");
+
+  const segments = [...jsonPath];
+  const indentation = /^[\t ]+(?="[^\r\n]*"\s*:)/m.exec(text)?.[0] ?? "  ";
+  const formattingOptions = {
+    eol: /\r\n|\n/.exec(text)?.[0] ?? "\n",
+    insertSpaces: !indentation.includes("\t"),
+    tabSize: indentation.includes("\t") ? 1 : indentation.length,
+  };
+
+  let edits: ReturnType<typeof modify> | undefined;
+  if (value === undefined && segments.length > 0) {
+    const node = findNodeAtLocation(root, segments);
+    if (node === undefined) return { status: "written" };
+    const parent = findNodeAtLocation(root, segments.slice(0, -1));
+    const siblings = parent?.children ?? [];
+    if (parent?.type === "object" && siblings.length === 1) {
+      // jsonc-parser leaves a dangling comma when removing the sole property.
+      const scanner = createScanner(text, true);
+      scanner.setPosition(node.offset + node.length);
+      if (scanner.scan() === SyntaxKind.CommaToken) {
+        text = applyEdits(text, [{ offset: scanner.getTokenOffset(), length: 1, content: "" }]);
+      }
+    } else if (parent?.type === "array" && siblings.length > 1 && siblings.at(-1) === node) {
+      // jsonc-parser's last-element removal can leave part of a compact value.
+      const previous = siblings[siblings.length - 2];
+      const offset = previous.offset + previous.length;
+      edits = [{ offset, length: node.offset + node.length - offset, content: "" }];
+    }
+  }
+
+  let edited: string;
+  try {
+    edited = applyEdits(text, edits ?? modify(text, segments, value, { formattingOptions }));
+    if (!isObject(parse(edited, errors, parseOptions)) || errors.length > 0) {
+      throw new Error("Invalid edit");
+    }
+  } catch {
+    throw new Error("Unable to write JSON config");
+  }
+  if (bom + edited === original) return { status: "written" };
+  return writeConfigBytesIfUnchanged(path, Buffer.from(bom + edited, "utf8"), snapshot, mutationGuard);
+}
+
 export type JsonTransactionRecoveryResult = FileTransactionRecoveryResult;
 
 export type JsonTransactionInspectionResult = FileTransactionInspectionResult;
@@ -387,6 +458,15 @@ export function atomicWriteJsonIfUnchanged(
   const snapshot: BytesReadResult = prior.status === "valid"
     ? { status: "valid", bytes: prior.bytes, mode: prior.mode, identity: prior.identity }
     : { status: "missing" };
+  return writeConfigBytesIfUnchanged(path, encoded, snapshot, guard);
+}
+
+function writeConfigBytesIfUnchanged(
+  path: string,
+  encoded: Buffer,
+  snapshot: BytesReadResult,
+  guard: JsonMutationGuard | undefined,
+): ConditionalJsonWriteResult {
   let result: ConditionalJsonWriteResult;
   try {
     result = atomicWriteBytesIfUnchanged(path, encoded, snapshot, guard);

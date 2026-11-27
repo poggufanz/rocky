@@ -8,7 +8,7 @@ Use a public issue for reproducible bugs and feature proposals. Send exploitable
 
 ## Getting set up
 
-You need Node 18 or newer. The current Node CLI package has no JavaScript runtime dependencies and two dev dependencies. Platform binaries are published as optional packages from `platform/`.
+You need Node 18 or newer. The Node CLI package has one exact-pinned runtime dependency, `jsonc-parser`, and two dev dependencies. Platform binaries are published as optional packages from `platform/`.
 
 ```bash
 git clone https://github.com/poggufanz/rocky.git

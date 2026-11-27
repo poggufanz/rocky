@@ -50,7 +50,8 @@ function staticClosure(entryPath: string): ImportedBy {
   while (pending.length > 0) {
     const path = pending.shift()!;
     for (const specifier of staticSpecifiers(path)) {
-      if (!specifier.startsWith(".")) continue; // node: builtins; the package has no runtime dependencies
+      if (specifier.startsWith("node:")) continue;
+      assert.ok(specifier.startsWith("."), `external static import ${specifier} from ${moduleKey(path)}`);
       const target = resolve(dirname(path), specifier);
       assert.ok(existsSync(target), `unresolved import ${specifier} from ${moduleKey(path)}`);
       const key = moduleKey(target);
@@ -92,6 +93,10 @@ test("startup never loads the memory reader", () => {
     false,
     `startup statically imports the memory reader: ${importChain(closure, MEMORY_READER)}`,
   );
+});
+
+test("JSON config helpers load without statically importing jsonc-parser", () => {
+  staticClosure(join(compiledRoot, "setup", "json-config.js"));
 });
 
 test("startup stays within its file budget", () => {
