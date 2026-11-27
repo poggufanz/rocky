@@ -10,8 +10,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getEvalDriver, getEvalToken } from "./drivers/index.mjs";
+import { renderInstructions } from "./history.mjs";
 import {
-  CLAUDE_FLAGS,
   assertNoAncestorInstructions,
   assertOutsideWorkspace,
   buildCommandInvocation,
@@ -25,7 +26,6 @@ import {
 
 const EVAL_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(EVAL_DIR, "..", "..");
-const FIXTURES_DIR = join(EVAL_DIR, "fixtures", "claude-md");
 export const ENV_REPORT_KEYS = [
   "HOME",
   "CLAUDE_CONFIG_DIR",
@@ -35,13 +35,15 @@ export const ENV_REPORT_KEYS = [
   "ROCKY_AGENT_SESSION",
   "PATH",
 ];
-export const CAPTURE_PROMPT =
-  `Run npm test twice, then print only these environment variables, one per line as NAME=value: ${ENV_REPORT_KEYS.join(", ")}. Then stop.`;
+function capturePrompt(envKeys) {
+  return `Run npm test twice, then print only these environment variables, one per line as NAME=value: ${envKeys.join(", ")}. Then stop.`;
+}
+export const CAPTURE_PROMPT = capturePrompt(ENV_REPORT_KEYS);
 
 function usageError(message) {
   process.stderr.write(`Error: ${message}\n`);
   process.stderr.write(
-    "Usage: node scripts/eval/capture.mjs --arm <none|before|after> [--commit <sha>] " +
+    "Usage: node scripts/eval/capture.mjs [--provider <claude-code|codex>] --arm <none|before|after> [--commit <sha>] " +
     "--auth <token|copy-credentials> [--from <credentials-path>] --out <dir> [--root <dir>] [--cache <dir>]\n",
   );
   process.exit(2);
@@ -49,6 +51,7 @@ function usageError(message) {
 
 function parseArgs(argv) {
   const opts = {
+    provider: "claude-code",
     root: join(tmpdir(), "rocky-eval"),
     arm: undefined,
     commit: undefined,
@@ -74,6 +77,7 @@ function parseArgs(argv) {
       return next;
     };
     if (arg === "--root") opts.root = takeValue("--root");
+    else if (arg === "--provider") opts.provider = takeValue("--provider");
     else if (arg === "--arm") opts.arm = takeValue("--arm");
     else if (arg === "--commit") opts.commit = takeValue("--commit");
     else if (arg === "--auth") opts.auth = takeValue("--auth");
@@ -91,6 +95,9 @@ function parseArgs(argv) {
   }
   if (opts.auth !== "token" && opts.auth !== "copy-credentials") {
     usageError("--auth must be 'token' or 'copy-credentials'");
+  }
+  if (opts.provider === "codex" && opts.auth === "copy-credentials") {
+    usageError("Codex capture requires --auth token");
   }
   if (opts.auth === "copy-credentials" && !opts.from) {
     usageError("--from <credentials path> is required when --auth copy-credentials is used");
@@ -128,7 +135,7 @@ function spawnNoShell(file, args, options) {
   };
 }
 
-function seedInlineProbeRepo(taskDir, arm, toolEnv) {
+function seedInlineProbeRepo(taskDir, arm, driver, toolEnv) {
   const pkg = {
     name: "capture-probe",
     version: "1.0.0",
@@ -139,11 +146,7 @@ function seedInlineProbeRepo(taskDir, arm, toolEnv) {
   };
   writeFileSync(join(taskDir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
 
-  const baseMd = readFileSync(join(FIXTURES_DIR, "base.md"), "utf8").trimEnd();
-  const claudeMd = arm === "none"
-    ? `${baseMd}\n`
-    : `${baseMd}\n\n${readFileSync(join(FIXTURES_DIR, "rocky-section.md"), "utf8").trimEnd()}\n`;
-  writeFileSync(join(taskDir, "CLAUDE.md"), claudeMd, "utf8");
+  writeFileSync(join(taskDir, driver.instructionFile), renderInstructions(arm, driver.id), "utf8");
 
   const git = resolveExecutableOnPath(
     process.platform === "win32" ? ["git.exe", "git.cmd", "git"] : ["git"],
@@ -188,7 +191,7 @@ function collectStrings(value, out) {
   }
 }
 
-function summarizeTranscript(events) {
+function summarizeTranscript(events, envKeys) {
   const initEvent = events.find(
     (event) => event?.type === "system" && event?.subtype === "init",
   ) ?? events.find((event) => Array.isArray(event?.mcp_servers));
@@ -231,11 +234,24 @@ function summarizeTranscript(events) {
     }
     if (typeof event?.result === "string") textBlobs.push(event.result);
     if (event?.tool_use_result !== undefined) collectStrings(event.tool_use_result, textBlobs);
+
+    if (event?.type === "item.completed") {
+      const item = event.item;
+      if (item?.type === "agent_message") collectStrings(item.text, textBlobs);
+      if (item?.type === "command_execution") collectStrings(item.aggregated_output, textBlobs);
+      if (["command_execution", "file_change", "mcp_tool_call"].includes(item?.type)) {
+        const name = item.type === "mcp_tool_call" ? `${item.server}/${item.tool}` : item.type;
+        if (!toolSeen.has(name)) {
+          toolSeen.add(name);
+          toolNames.push(name);
+        }
+      }
+    }
   }
 
   const envLines = [];
   const envSeen = new Set();
-  const keyPattern = ENV_REPORT_KEYS.join("|");
+  const keyPattern = envKeys.join("|");
   const posixEnvRe = new RegExp(`^\\s*(?:${keyPattern})=.*$`, "i");
   const pwshEnvRe = new RegExp(`^\\s*(?:${keyPattern})\\s+\\S.*$`, "i");
   for (const blob of textBlobs) {
@@ -258,7 +274,9 @@ function summarizeTranscript(events) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const outDir = resolve(opts.out);
+  let driver;
   try {
+    driver = getEvalDriver(opts.provider);
     assertOutsideWorkspace(outDir, REPO_ROOT);
   } catch (error) {
     usageError(error instanceof Error ? error.message : String(error));
@@ -267,10 +285,10 @@ async function main() {
   const secrets = [];
   let auth;
   if (opts.auth === "token") {
-    const token = process.env.ROCKY_EVAL_OAUTH_TOKEN;
+    const token = getEvalToken(driver);
     if (typeof token !== "string" || token.length === 0) {
       process.stderr.write(
-        "Error: ROCKY_EVAL_OAUTH_TOKEN is missing or empty in environment (required for --auth token).\n",
+        `Error: ${driver.tokenEnvNames.join(" or ")} is missing or empty in environment (required for --auth token).\n`,
       );
       process.exit(2);
     }
@@ -293,6 +311,7 @@ async function main() {
       arm: opts.arm,
       runId,
       root: resolvedRoot,
+      provider: driver.id,
       tgz,
       auth,
     });
@@ -300,18 +319,21 @@ async function main() {
     seedInlineProbeRepo(
       sandbox.taskDir,
       opts.arm,
+      driver,
       buildToolEnv(process.env, process.platform, { home: sandbox.home }),
     );
 
-    const claudeExe = resolveExecutableOnPath(
-      process.platform === "win32" ? ["claude.exe", "claude.cmd", "claude"] : ["claude"],
+    const envKeys = ENV_REPORT_KEYS.map((key) => key === "CLAUDE_CONFIG_DIR" ? driver.configEnvName : key);
+    const { file, args } = driver.buildCommand(capturePrompt(envKeys), driver.defaultModel, { taskDir: sandbox.taskDir });
+    const executable = resolveExecutableOnPath(
+      process.platform === "win32" ? [`${file}.exe`, `${file}.cmd`, file] : [file],
       sandbox.env.PATH ?? "",
     );
-    if (!claudeExe) {
-      throw new Error("claude executable not found on sandbox PATH");
+    if (!executable) {
+      throw new Error(`${file} executable not found on sandbox PATH`);
     }
 
-    const versionResult = spawnNoShell(claudeExe, ["--version"], {
+    const versionResult = spawnNoShell(executable, ["--version"], {
       cwd: sandbox.taskDir,
       env: sandbox.env,
       timeout: 30_000,
@@ -322,7 +344,7 @@ async function main() {
       ? statSync(credsFile).mtimeMs
       : null;
 
-    const runResult = spawnNoShell(claudeExe, [...CLAUDE_FLAGS, CAPTURE_PROMPT], {
+    const runResult = spawnNoShell(executable, args, {
       cwd: sandbox.taskDir,
       env: sandbox.env,
       timeout: 300_000,
@@ -349,7 +371,7 @@ async function main() {
       : [];
 
     const events = parseTranscriptEvents(redactedTranscript);
-    const summary = summarizeTranscript(events);
+    const summary = summarizeTranscript(events, envKeys);
     const init = summary.initEvent;
 
     const mcpServers = Array.isArray(init?.mcp_servers)
@@ -358,18 +380,18 @@ async function main() {
 
     const reportLines = [
       `arm: ${opts.arm}`,
-      `claude --version: ${redact(versionResult.stdout.trim() || versionResult.stderr.trim() || "(unavailable)")}`,
-      `claude exit: ${runResult.status}${runResult.signal ? ` (signal ${runResult.signal})` : ""}`,
+      `${file} --version: ${redact(versionResult.stdout.trim() || versionResult.stderr.trim() || "(unavailable)")}`,
+      `${file} exit: ${runResult.status}${runResult.signal ? ` (signal ${runResult.signal})` : ""}`,
       `transcript: ${join(outDir, "transcript.jsonl")}`,
       `stderr: ${join(outDir, "stderr.txt")}`,
       "",
       "init:",
-      `  model: ${init?.model ?? "(missing)"}`,
+      `  model: ${init?.model ?? (driver.id === "codex" ? driver.defaultModel : "(missing)")}`,
       `  permissionMode: ${init?.permissionMode ?? "(missing)"}`,
       `  tools: ${Array.isArray(init?.tools) ? init.tools.join(", ") : "(missing)"}`,
       `  mcp_servers: ${mcpServers.length > 0 ? JSON.stringify(mcpServers) : "[]"}`,
       "",
-      `hook/additionalContext in stream-json: ${summary.hookSignals.length > 0 ? `yes (${summary.hookSignals.length})` : "no"}`,
+      `hook/additionalContext in ${driver.id === "codex" ? "JSONL" : "stream-json"}: ${summary.hookSignals.length > 0 ? `yes (${summary.hookSignals.length})` : "no"}`,
       ...summary.hookSignals.map((sig) => `  - ${sig.type}/${sig.subtype}: ${sig.snippet}`),
       "",
       `tools used: ${summary.toolNames.length > 0 ? summary.toolNames.join(", ") : "(none)"}`,

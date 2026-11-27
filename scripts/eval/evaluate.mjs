@@ -13,13 +13,13 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeLine, unwrapRockyRun } from "../../dist/core/fingerprint.js";
+import { getEvalDriver } from "./drivers/index.mjs";
 
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const TASKS_DIR = join(EVAL_DIR, "tasks");
 const MANIFEST_PATH = join(TASKS_DIR, "manifest.json");
 
-const SHELL_TOOLS = new Set(["Bash", "PowerShell"]);
-const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
+
 const ROCKY_LINE_RE = /^\s*rocky:/;
 const ROCKY_INDENT_RE = /^ {4}/;
 const NOTE_DELIVERED_RE = /rocky: Same error recorded \d+ times? before/;
@@ -37,21 +37,7 @@ const USAGE = [
   "  -h, --help    Show this help message and exit",
 ].join("\n");
 
-function extractToolResultText(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const parts = [];
-    for (const item of content) {
-      if (typeof item === "string") {
-        parts.push(item);
-      } else if (item && typeof item === "object" && item.type === "text" && typeof item.text === "string") {
-        parts.push(item.text);
-      }
-    }
-    return parts.join("\n");
-  }
-  return "";
-}
+
 
 /**
  * Parse a JSONL string into event objects, skipping blank or malformed lines.
@@ -84,67 +70,15 @@ export function parseJsonl(text) {
  * @returns {Array<{ turn: number, name: string, command: string, output: string, isError: boolean }>}
  */
 export function toolCalls(events) {
-  if (!Array.isArray(events)) return [];
+  return reduceTranscript(events, "claude-code").toolCalls;
+}
 
-  /** @type {Array<{ id: string, turn: number, name: string, command: string }>} */
-  const uses = [];
-  /** @type {Map<string, { output: string, isError: boolean }>} */
-  const resultsById = new Map();
-  /** @type {Set<string>} */
-  const seenMessageIds = new Set();
-  let assistantTurn = 0;
-
-  for (const event of events) {
-    if (!event || typeof event !== "object") continue;
-
-    if (event.type === "assistant") {
-      const msgId = typeof event.message?.id === "string" && event.message.id.length > 0
-        ? event.message.id
-        : null;
-      if (msgId === null) {
-        assistantTurn += 1;
-      } else if (!seenMessageIds.has(msgId)) {
-        seenMessageIds.add(msgId);
-        assistantTurn += 1;
-      }
-      const content = event.message?.content;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (!block || typeof block !== "object" || block.type !== "tool_use") continue;
-        if (!SHELL_TOOLS.has(block.name) || typeof block.id !== "string" || block.id.length === 0) continue;
-        const command = typeof block.input?.command === "string" ? block.input.command : "";
-        uses.push({ id: block.id, turn: assistantTurn, name: block.name, command });
-      }
-    } else if (event.type === "user") {
-      const content = event.message?.content;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (!block || typeof block !== "object" || block.type !== "tool_result") continue;
-        if (typeof block.tool_use_id !== "string" || block.tool_use_id.length === 0) continue;
-        if (!resultsById.has(block.tool_use_id)) {
-          resultsById.set(block.tool_use_id, {
-            output: extractToolResultText(block.content),
-            isError: Boolean(block.is_error),
-          });
-        }
-      }
-    }
+function reduceTranscript(events, provider) {
+  const reducer = getEvalDriver(provider).createReducer();
+  if (Array.isArray(events)) {
+    for (const event of events) reducer.consume(event);
   }
-
-  /** @type {Array<{ turn: number, name: string, command: string, output: string, isError: boolean }>} */
-  const paired = [];
-  for (const use of uses) {
-    const result = resultsById.get(use.id);
-    if (!result) continue;
-    paired.push({
-      turn: use.turn,
-      name: use.name,
-      command: use.command,
-      output: result.output,
-      isError: result.isError,
-    });
-  }
-  return paired;
+  return reducer.finish();
 }
 
 /**
@@ -1087,22 +1021,7 @@ function commandTouchesOverlay(command, toolName, taskDir, overlayMatcher) {
   return false;
 }
 
-function extractEditFilePaths(toolUseBlock) {
-  const paths = [];
-  const input = toolUseBlock?.input;
-  if (!input || typeof input !== "object") return paths;
-  if (typeof input.file_path === "string") {
-    paths.push(input.file_path);
-  }
-  if (Array.isArray(input.edits)) {
-    for (const edit of input.edits) {
-      if (edit && typeof edit === "object" && typeof edit.file_path === "string") {
-        paths.push(edit.file_path);
-      }
-    }
-  }
-  return paths;
-}
+
 
 /**
  * Compute offline evaluation metrics for one run from its stream-json events,
@@ -1110,6 +1029,7 @@ function extractEditFilePaths(toolUseBlock) {
  * @param {readonly any[]} events
  * @param {any} task
  * @param {string | null | undefined} runDir
+ * @param {import("./drivers/index.mjs").EvalProvider} [batchProvider]
  * @returns {{
  *   repeatFailures: number | "no_attempt",
  *   turnsToPass: number | null,
@@ -1121,9 +1041,11 @@ function extractEditFilePaths(toolUseBlock) {
  *   leak: string[],
  * }}
  */
-export function runMetrics(events, task, runDir) {
-  const list = Array.isArray(events) ? events : [];
-  const calls = toolCalls(list);
+export function runMetrics(events, task, runDir, batchProvider) {
+  const runMeta = runDir ? readJsonOrNull(join(runDir, "run.json")) : null;
+  const provider = runMeta?.provider ?? batchProvider ?? "claude-code";
+  const { toolCalls: calls, fileEdits, mcpCalls, numTurns, wallMs, shellUses, toolOutputs } =
+    reduceTranscript(events, provider);
   const classified = classifyTargetCalls(calls, task);
   const hasAttempt = classified.some((run) => run.attempted);
 
@@ -1150,73 +1072,33 @@ export function runMetrics(events, task, runDir) {
   const firstPass = classified.find((run) => run.kind === "pass");
   const turnsToPass = firstPass ? firstPass.turn : null;
 
-  let lastResult = null;
-  let hasMcpRockyUse = false;
+  const hasMcpRockyUse = mcpCalls.some(
+    ({ server, name }) => server === "rocky" || name?.startsWith("mcp__rocky__"),
+  );
   let hasRockyOutputLine = false;
   let hasTranscriptNote = false;
   let noteBytes = 0;
 
   const isStaleTask = task?.kind === "stale";
-  const taskDir = isStaleTask ? extractTaskDir(list) : null;
+  const savedTaskDir = typeof runMeta?.taskDir === "string" ? runMeta.taskDir.trim() : "";
+  const taskDir = isStaleTask ? extractTaskDir(Array.isArray(events) ? events : []) ?? (savedTaskDir || null) : null;
   const overlayPaths = isStaleTask ? listFixOverlayPaths(task) : [];
-  const overlayMatcher = isStaleTask && overlayPaths.length > 0
-    ? buildOverlayMatcher(taskDir, overlayPaths)
-    : null;
-  let touchedStaleOverlay = false;
+  const overlayMatcher = overlayPaths.length > 0 ? buildOverlayMatcher(taskDir, overlayPaths) : null;
+  const touchedStaleOverlay = overlayMatcher !== null && (
+    fileEdits.some((path) => overlayMatcher.matches(path, taskDir))
+    || shellUses.some(({ command, name }) => commandTouchesOverlay(command, name, taskDir, overlayMatcher))
+  );
 
-  for (const event of list) {
-    if (!event || typeof event !== "object") continue;
-
-    if (event.type === "result") {
-      lastResult = event;
-    } else if (event.type === "assistant") {
-      const content = event.message?.content;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (!block || typeof block !== "object" || block.type !== "tool_use") continue;
-        if (typeof block.name === "string" && block.name.startsWith("mcp__rocky__")) {
-          hasMcpRockyUse = true;
-        }
-        if (overlayMatcher && !touchedStaleOverlay) {
-          if (EDIT_TOOLS.has(block.name)) {
-            for (const filePath of extractEditFilePaths(block)) {
-              if (overlayMatcher.matches(filePath, taskDir)) {
-                touchedStaleOverlay = true;
-                break;
-              }
-            }
-          } else if (SHELL_TOOLS.has(block.name)) {
-            const cmd = typeof block.input?.command === "string" ? block.input.command : "";
-            if (commandTouchesOverlay(cmd, block.name, taskDir, overlayMatcher)) {
-              touchedStaleOverlay = true;
-            }
-          }
-        }
-      }
-    } else if (event.type === "user") {
-      const content = event.message?.content;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (!block || typeof block !== "object" || block.type !== "tool_result") continue;
-        const text = extractToolResultText(block.content);
-        if (text.length === 0) continue;
-        if (NOTE_DELIVERED_RE.test(text)) {
-          hasTranscriptNote = true;
-        }
-        for (const line of text.split(/\r?\n/)) {
-          if (ROCKY_LINE_RE.test(line)) {
-            hasRockyOutputLine = true;
-            noteBytes += Buffer.byteLength(line, "utf8");
-          }
-        }
+  for (const text of toolOutputs) {
+    if (NOTE_DELIVERED_RE.test(text)) hasTranscriptNote = true;
+    for (const line of text.split(/\r?\n/)) {
+      if (ROCKY_LINE_RE.test(line)) {
+        hasRockyOutputLine = true;
+        noteBytes += Buffer.byteLength(line, "utf8");
       }
     }
   }
 
-  const numTurns = typeof lastResult?.num_turns === "number" ? lastResult.num_turns : 0;
-  const wallMs = typeof lastResult?.duration_ms === "number" ? lastResult.duration_ms : 0;
-
-  const runMeta = runDir ? readJsonOrNull(join(runDir, "run.json")) : null;
   const arm = typeof runMeta?.arm === "string" ? runMeta.arm : null;
   const advisories = readAdvisories(runDir);
 
@@ -1254,7 +1136,7 @@ export function runMetrics(events, task, runDir) {
     repeatFailures,
     turnsToPass,
     numTurns,
-    wallMs,
+    wallMs: wallMs ?? (typeof runMeta?.wallMs === "number" ? runMeta.wallMs : 0),
     noteBytes,
     noteDelivered,
     staleRepeat,
@@ -1328,6 +1210,7 @@ export function formatArmSummary(metricsByRunId) {
  */
 export function evaluateBatch(outDir, options = {}) {
   const resolvedOut = resolve(outDir);
+  const batchProvider = readJsonOrNull(join(resolvedOut, "batch.json"))?.provider;
   const runsDir = join(resolvedOut, "runs");
   if (!existsSync(runsDir) || !lstatSync(runsDir).isDirectory()) {
     throw new Error(`Runs directory not found: ${runsDir}`);
@@ -1363,7 +1246,7 @@ export function evaluateBatch(outDir, options = {}) {
       ? parseJsonl(readFileSync(transcriptPath, "utf8"))
       : [];
 
-    const scored = runMetrics(events, task, runDir);
+    const scored = runMetrics(events, task, runDir, batchProvider);
     metrics[runId] = {
       taskId: runMeta.taskId ?? null,
       arm: runMeta.arm ?? null,

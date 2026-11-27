@@ -20,12 +20,45 @@ export const CLAUDE_FLAGS = Object.freeze([
   "--",
 ]);
 
+const SHELL_TOOLS = new Set(["Bash", "PowerShell"]);
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
+
+function extractToolResultText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const item of content) {
+    if (typeof item === "string") {
+      parts.push(item);
+    } else if (item?.type === "text" && typeof item.text === "string") {
+      parts.push(item.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+function extractEditFilePaths(toolUseBlock) {
+  const paths = [];
+  const input = toolUseBlock?.input;
+  if (!input || typeof input !== "object") return paths;
+  if (typeof input.file_path === "string") paths.push(input.file_path);
+  if (Array.isArray(input.edits)) {
+    for (const edit of input.edits) {
+      if (edit && typeof edit === "object" && typeof edit.file_path === "string") {
+        paths.push(edit.file_path);
+      }
+    }
+  }
+  return paths;
+}
+
 /** @type {import("./index.mjs").EvalDriver} */
 export const claudeCodeDriver = Object.freeze({
   id: "claude-code",
   instructionFile: "CLAUDE.md",
   configDirName: ".claude",
   configEnvName: "CLAUDE_CONFIG_DIR",
+  tokenEnvNames: Object.freeze(["ROCKY_EVAL_OAUTH_TOKEN"]),
   lanes: Object.freeze(["lane1", "lane2", "mcp"]),
   defaultModel: MODEL,
   defaultFlags: CLAUDE_FLAGS,
@@ -90,7 +123,77 @@ export const claudeCodeDriver = Object.freeze({
     return paths;
   },
 
+  summarizeResult(event) {
+    return event?.type === "result" ? { subtype: event.subtype, is_error: event.is_error } : null;
+  },
+
   createReducer() {
-    throw new Error("Claude Code eval reducer is not implemented");
+    const uses = [];
+    const resultsById = new Map();
+    const seenMessageIds = new Set();
+    const shellUses = [];
+    const fileEdits = [];
+    const mcpCalls = [];
+    const toolOutputs = [];
+    let assistantTurn = 0;
+    let resultEvent = null;
+
+    return {
+      consume(event) {
+        if (!event || typeof event !== "object") return;
+        if (event.type === "result") resultEvent = event;
+        if (event.type === "assistant") {
+          const msgId = typeof event.message?.id === "string" && event.message.id.length > 0
+            ? event.message.id
+            : null;
+          if (msgId === null) {
+            assistantTurn += 1;
+          } else if (!seenMessageIds.has(msgId)) {
+            seenMessageIds.add(msgId);
+            assistantTurn += 1;
+          }
+          const content = event.message?.content;
+          if (!Array.isArray(content)) return;
+          for (const block of content) {
+            if (!block || typeof block !== "object" || block.type !== "tool_use") continue;
+            if (SHELL_TOOLS.has(block.name)) {
+              const command = typeof block.input?.command === "string" ? block.input.command : "";
+              const shell = { name: block.name, command };
+              shellUses.push(shell);
+              if (typeof block.id === "string" && block.id.length > 0) {
+                uses.push({ id: block.id, turn: assistantTurn, ...shell });
+              }
+            } else if (EDIT_TOOLS.has(block.name)) {
+              for (const path of extractEditFilePaths(block)) fileEdits.push(path);
+            } else if (typeof block.name === "string" && block.name.startsWith("mcp__")) {
+              mcpCalls.push({ name: block.name });
+            }
+          }
+        } else if (event.type === "user") {
+          const content = event.message?.content;
+          if (!Array.isArray(content)) return;
+          for (const block of content) {
+            if (!block || typeof block !== "object" || block.type !== "tool_result") continue;
+            const output = extractToolResultText(block.content);
+            toolOutputs.push(output);
+            if (typeof block.tool_use_id !== "string" || block.tool_use_id.length === 0) continue;
+            if (!resultsById.has(block.tool_use_id)) {
+              resultsById.set(block.tool_use_id, { output, isError: Boolean(block.is_error) });
+            }
+          }
+        }
+      },
+
+      finish() {
+        const toolCalls = [];
+        for (const { id, ...use } of uses) {
+          const result = resultsById.get(id);
+          if (result) toolCalls.push({ ...use, ...result });
+        }
+        const numTurns = typeof resultEvent?.num_turns === "number" ? resultEvent.num_turns : 0;
+        const wallMs = typeof resultEvent?.duration_ms === "number" ? resultEvent.duration_ms : 0;
+        return { toolCalls, fileEdits, mcpCalls, numTurns, wallMs, resultEvent, shellUses, toolOutputs };
+      },
+    };
   },
 });
