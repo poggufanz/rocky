@@ -8,7 +8,7 @@ Use a public issue for reproducible bugs and feature proposals. Send exploitable
 
 ## Getting set up
 
-You need Node 18 or newer. Rocky ships with no JavaScript runtime dependencies and only two dev dependencies, so install is quick. Platform binaries are published as optional packages from `platform/`.
+You need Node 18 or newer. The current Node CLI package has no JavaScript runtime dependencies and two dev dependencies. Platform binaries are published as optional packages from `platform/`.
 
 ```bash
 git clone https://github.com/poggufanz/rocky.git
@@ -71,11 +71,15 @@ On macOS, `os.tmpdir()` sits under a symlink, because `/var` links to `/private/
 
 On Windows there are no POSIX mode bits and no stable inode, so scenarios built on those cannot be expressed. Some tests skip there with a stated reason. Skipping with a reason is fine. Loosening a shared assertion so Windows passes is not, because it removes the protection on Linux too, where it works.
 
-## House rules
+## Architecture changes
 
-No JavaScript runtime dependencies. Node 18 built-ins only. Platform binaries ship as optional packages from `platform/`. TypeScript stays strict, and ESM relative imports end in `.js`.
+Evaluate changes by the workflow they improve, integration coverage, lifecycle cost, security, and measured behavior. A daemon, a local HTTP hook server, or an additional runtime dependency is an option when it solves a concrete problem. Describe startup and shutdown, authentication, data handling, compatibility, and failure behavior in the proposal. Current implementation details are not permanent architectural restrictions.
 
-Everything rocky prints follows [docs/output-principles.md](docs/output-principles.md): plain sentences behind one `rocky:` prefix, questions with a question mark, no first person, no emphasis by repetition, no emoji. rocky-owned output goes to stderr so it never pollutes the stdout of a command it wraps. Findings stay observations with evidence: never print a cause or a fix rocky did not record. `validateOutputLine` in `src/ui/phrases.ts` checks the mechanical part in tests.
+## Implementation notes
+
+The current Node CLI targets Node 18 or newer. Platform binaries ship as optional packages from `platform/`. TypeScript stays strict, and ESM relative imports end in `.js`.
+
+CLI output conventions are documented in [docs/output-principles.md](docs/output-principles.md): plain sentences behind one `rocky:` prefix, questions with a question mark, no first person, no emphasis by repetition, no emoji. rocky-owned output goes to stderr so it never pollutes the stdout of a command it wraps. Keep recorded evidence, quoted rationale, and generated analysis distinguishable, and disclose incomplete coverage. `validateOutputLine` in `src/ui/phrases.ts` checks the mechanical part in tests.
 
 README, CLI output, and package documentation under `docs/` are written in English. Internal design documents in the outer workspace are in Indonesian and stay that way.
 
