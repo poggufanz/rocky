@@ -93,7 +93,11 @@ test("Codex resolves relative tool workdirs from the input or session cwd", asyn
   assert.ok(decoder);
   const sessionCwd = join(process.cwd(), "session");
   const inputCwd = join(process.cwd(), "input");
-  for (const cwd of [undefined, inputCwd]) {
+  for (const [cwd, base] of [
+    [undefined, sessionCwd],
+    [inputCwd, inputCwd],
+    ["tools", join(sessionCwd, "tools")],
+  ] as const) {
     const decoded = decoder.decodeHook({
       hook_event_name: "PostToolUse", session_id: "session-a", cwd: sessionCwd,
       tool_name: "exec_command", tool_input: { command: "npm test", cwd, workdir: "packages/one" },
@@ -103,7 +107,27 @@ test("Codex resolves relative tool workdirs from the input or session cwd", asyn
     const outcome = projectToToolResult(decoded);
     assert.equal(outcome?.kind, "failure");
     assert.equal(outcome.exitCode, 7);
-    assert.equal(outcome.cwd, join(cwd ?? sessionCwd, "packages", "one"));
+    assert.equal(outcome.cwd, join(base, "packages", "one"));
+  }
+});
+
+test("Codex resolves Windows input cwd before a relative workdir", { skip: process.platform !== "win32" }, async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  for (const [cwd, expectedCwd] of [
+    ["\\tools", "C:\\tools\\sub"],
+    ["C:tools", "C:\\repo\\tools\\sub"],
+    ["D:tools", "C:\\repo\\sub"],
+  ]) {
+    const decoded = decoder.decodeHook({
+      hook_event_name: "PostToolUse", session_id: "session-a", cwd: "C:\\repo",
+      tool_name: "exec_command", tool_input: { command: "npm test", cwd, workdir: "sub" },
+      tool_response: { exit_code: 7, output: "build failed" },
+    });
+    assert.ok(decoded);
+    const outcome = projectToToolResult(decoded);
+    assert.equal(outcome?.kind, "failure");
+    assert.equal(outcome.cwd, expectedCwd);
   }
 });
 
@@ -124,6 +148,8 @@ test("Codex anchors Windows drive-relative and root-relative workdirs", { skip: 
     ["C:\\repo", "c:packages", "C:\\repo\\packages"],
     ["C:\\repo", "\\packages", "C:\\packages"],
     ["\\\\server\\share\\repo", "\\packages", "\\\\server\\share\\packages"],
+    ["\\\\?\\UNC\\server\\share\\repo", "\\packages", "\\\\?\\UNC\\server\\share\\packages"],
+    ["\\\\?\\UNC\\server\\share\\repo", "\\..\\packages", "\\\\?\\UNC\\server\\share\\packages"],
   ]) {
     const outcome = project(cwd, workdir);
     assert.equal(outcome?.kind, "failure");

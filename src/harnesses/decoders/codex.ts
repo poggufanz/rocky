@@ -1,6 +1,5 @@
-import { isAbsolute, resolve, win32 } from "node:path";
 import { parseCodexHookPayload } from "../../agent/adapters/codex.js";
-import { codexRolloutExit, hasNoCodexNamespace, isSuccessfulCodexPatch } from "../shared/codex-rollout.js";
+import { codexRolloutExit, hasNoCodexNamespace, isSuccessfulCodexPatch, resolveCodexPath } from "../shared/codex-rollout.js";
 import {
   asFields, field, parseFields, readListeningFields, rememberPending, textField, transcriptTimestamp, type Fields,
 } from "../shared/field-extract.js";
@@ -22,20 +21,8 @@ function readToolCwd(input: Fields | undefined, sessionCwd: string | undefined):
   const workdir = textField(input, 4096, "workdir");
   const inputCwd = textField(input, 4096, "cwd", "working_directory", "workingDirectory");
   if (workdir === undefined) return inputCwd ?? sessionCwd;
-  if (/\p{Cc}/u.test(workdir)) return undefined;
-  const windows = process.platform === "win32";
-  const root = windows ? win32.parse(workdir).root : "";
-  if (isAbsolute(workdir) && root.length !== 1) return workdir;
-  const base = [inputCwd, sessionCwd].find((cwd) => cwd && isAbsolute(cwd)
-    && !/\p{Cc}/u.test(cwd) && (!windows || win32.parse(cwd).root.length > 1));
-  if (!base) return undefined;
-  if (root.length === 1) return win32.join(win32.parse(base).root, workdir.slice(1));
-  if (root) {
-    // The recorded cwd anchors same-drive paths. Other drives belong to the executor.
-    if (root.toLowerCase() !== base.slice(0, 2).toLowerCase()) return undefined;
-    return win32.join(base, workdir.slice(root.length));
-  }
-  return resolve(base, workdir);
+  const base = inputCwd === undefined ? sessionCwd : resolveCodexPath(inputCwd, sessionCwd) ?? sessionCwd;
+  return resolveCodexPath(workdir, base);
 }
 
 function readOutput(raw: Fields | undefined): string | undefined {
