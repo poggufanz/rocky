@@ -100,6 +100,7 @@ function restorePlugin(path: string, tombstone: string, stillQuarantined: () => 
 export function removeManagedPluginFile(
   path: string, managedDigest: string,
 ): ManagedPluginRemovalResult {
+  if (/[\\/]$/u.test(path)) return { status: "changed" };
   let quarantine: string | undefined;
   let restore: (() => ChangedRemoval) | undefined;
   try {
@@ -110,6 +111,7 @@ export function removeManagedPluginFile(
     // Pin the directory reached through the supplied path. The leaf still
     // goes through the regular-file, non-following snapshot checks.
     const parent = realpathSync.native(suppliedParent);
+    const sameSuppliedParent = () => realpathSync.native(suppliedParent) === parent;
     if (!sameDirectory(parent, directory)) return { status: "changed" };
     const target = join(parent, basename(path));
     const prior = snapshot(target);
@@ -121,7 +123,8 @@ export function removeManagedPluginFile(
     const privateDir = lstatSync(location, { bigint: true });
     const tombstone = join(location, "plugin");
     const stillQuarantined = () => sameDirectory(parent, directory) && sameDirectory(location, privateDir);
-    if (!stillQuarantined() || !isSameFile(prior.metadata, lstatSync(target, { bigint: true }))) {
+    if (!stillQuarantined() || !isSameFile(prior.metadata, lstatSync(target, { bigint: true }))
+      || !sameSuppliedParent()) {
       return { status: "changed" };
     }
 
@@ -132,12 +135,13 @@ export function removeManagedPluginFile(
     const moved = snapshot(tombstone);
     if (moved.status !== "valid" || !sameFilesystemIdentity(prior.metadata, moved.metadata)
       || digestOf(moved.bytes) !== managedDigest || !stillQuarantined()
-      || !isSameFile(moved.metadata, lstatSync(tombstone, { bigint: true }))) {
+      || !isSameFile(moved.metadata, lstatSync(tombstone, { bigint: true })) || !sameSuppliedParent()) {
       return restore();
     }
     unlinkSync(tombstone);
     restore = undefined;
-    return { status: lstatSync(target, { throwIfNoEntry: false }) ? "changed" : "removed" };
+    const present = lstatSync(path, { throwIfNoEntry: false });
+    return { status: present || !sameSuppliedParent() ? "changed" : "removed" };
   } catch {
     return restore?.() ?? { status: "changed" };
   } finally {

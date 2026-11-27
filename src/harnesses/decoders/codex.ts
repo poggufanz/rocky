@@ -1,4 +1,4 @@
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, win32 } from "node:path";
 import { parseCodexHookPayload } from "../../agent/adapters/codex.js";
 import { codexRolloutExit, hasNoCodexNamespace, isSuccessfulCodexPatch } from "../shared/codex-rollout.js";
 import {
@@ -7,7 +7,8 @@ import {
 import { editOutcome, exitCodeField, resultText, withExitEvidence, withShellSkip } from "../shared/tool-outcome.js";
 import type { DecodedHookInput, HarnessDecoder, NormalizedToolOutcome, TranscriptContext, TranscriptEvent, TranscriptReducer } from "../types.js";
 
-const SHELL_TOOLS = new Set(["Bash", "PowerShell", "exec_command", "functions.exec_command", "shell_command"]);
+const EXEC_TOOLS = new Set(["exec_command", "functions.exec_command"]);
+const SHELL_TOOLS = new Set(["Bash", "PowerShell", "shell_command", ...EXEC_TOOLS]);
 
 function readCwd(raw: Fields | undefined): string | undefined {
   return textField(raw, 4096, "cwd", "working_directory", "workingDirectory", "workdir");
@@ -21,11 +22,19 @@ function readToolCwd(input: Fields | undefined, sessionCwd: string | undefined):
   const workdir = textField(input, 4096, "workdir");
   const inputCwd = textField(input, 4096, "cwd", "working_directory", "workingDirectory");
   if (workdir === undefined) return inputCwd ?? sessionCwd;
-  if (isAbsolute(workdir)) return workdir;
-  const base = inputCwd && isAbsolute(inputCwd) ? inputCwd : sessionCwd;
-  // A drive-relative Windows path can use the process's per-drive cwd.
-  if (!base || !isAbsolute(base) || /\p{Cc}/u.test(base)
-    || (process.platform === "win32" && /^[a-z]:/iu.test(workdir))) return workdir;
+  if (/\p{Cc}/u.test(workdir)) return undefined;
+  const windows = process.platform === "win32";
+  const root = windows ? win32.parse(workdir).root : "";
+  if (isAbsolute(workdir) && root.length !== 1) return workdir;
+  const base = [inputCwd, sessionCwd].find((cwd) => cwd && isAbsolute(cwd)
+    && !/\p{Cc}/u.test(cwd) && (!windows || win32.parse(cwd).root.length > 1));
+  if (!base) return undefined;
+  if (root.length === 1) return win32.join(win32.parse(base).root, workdir.slice(1));
+  if (root) {
+    // The recorded cwd anchors same-drive paths. Other drives belong to the executor.
+    if (root.toLowerCase() !== base.slice(0, 2).toLowerCase()) return undefined;
+    return win32.join(base, workdir.slice(root.length));
+  }
   return resolve(base, workdir);
 }
 
@@ -149,7 +158,7 @@ function createTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer
         hook_event_name: "PostToolUse", session_id: sessionId, turn_id: id, cwd: toolCwd,
         tool_name: call.toolName, tool_input: call.input,
       }, transcriptTimestamp(row.timestamp))) : undefined;
-    const builtinExec = unnamespaced && call.toolName === "exec_command" && payload.type === "function_call_output";
+    const builtinExec = unnamespaced && EXEC_TOOLS.has(call.toolName) && payload.type === "function_call_output";
     return toolEvent(row, call.toolName, codexRolloutExit({
       ...edit, command: SHELL_TOOLS.has(call.toolName) ? readCommand(call.input) : undefined,
       cwd: toolCwd, exitCodeSource: "unknown", output, toolUseId: id, edits: edit?.edits ?? [],

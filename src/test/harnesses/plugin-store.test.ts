@@ -46,6 +46,56 @@ test("a plugin installed through a linked parent can be removed through the same
   assert.deepEqual(readdirSync(realParent), []);
 });
 
+test("plugin removal restores the quarantined file if its supplied parent is retargeted", (t) => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-plugin-retarget-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = join(dir, "original");
+  const replacement = join(dir, "replacement");
+  const linked = join(dir, "linked");
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  const name = "hook.js";
+  mkdirSync(original);
+  mkdirSync(replacement);
+  symlinkSync(original, linked, linkType);
+  const content = "// rocky-managed\nexport default 1;\n";
+  const installed = writeManagedPluginFile(join(linked, name), content);
+  assert.equal(installed.status, "written");
+  const otherContent = "// rocky-managed\nexport default 2;\n";
+  writeFileSync(join(replacement, name), otherContent);
+
+  const rename = fs.renameSync;
+  fs.renameSync = (source, destination) => {
+    rename(source, destination);
+    if (source === join(original, name)) {
+      rename(linked, join(dir, "old-link"));
+      symlinkSync(replacement, linked, linkType);
+    }
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.equal(removeManagedPluginFile(join(linked, name), installed.digest).status, "changed");
+    assert.equal(readFileSync(join(linked, name), "utf8"), otherContent);
+    assert.equal(readFileSync(join(original, name), "utf8"), content);
+    assert.deepEqual(readdirSync(original), [name]);
+  } finally {
+    fs.renameSync = rename;
+    syncBuiltinESMExports();
+  }
+});
+
+test("plugin removal refuses a file path with a trailing separator", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-plugin-separator-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "hook.js");
+  const content = "// rocky-managed\nexport default 1;\n";
+  const installed = writeManagedPluginFile(path, content);
+  assert.equal(installed.status, "written");
+  for (const separator of ["/", "\\"]) {
+    assert.equal(removeManagedPluginFile(path + separator, installed.digest).status, "changed");
+    assert.equal(readFileSync(path, "utf8"), content);
+  }
+});
+
 test("plugin removal preserves a replacement saved immediately before the file is moved", (t) => {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-plugin-race-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

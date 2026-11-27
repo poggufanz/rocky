@@ -107,6 +107,31 @@ test("Codex resolves relative tool workdirs from the input or session cwd", asyn
   }
 });
 
+test("Codex anchors Windows drive-relative and root-relative workdirs", { skip: process.platform !== "win32" }, async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  const project = (cwd: string, workdir: string) => {
+    const decoded = decoder.decodeHook({
+      hook_event_name: "PostToolUse", session_id: "session-a", cwd,
+      tool_name: "exec_command", tool_input: { command: "npm test", workdir },
+      tool_response: { exit_code: 7, output: "build failed" },
+    });
+    assert.ok(decoded);
+    return projectToToolResult(decoded);
+  };
+  for (const [cwd, workdir, expectedCwd] of [
+    ["C:\\repo", "C:packages", "C:\\repo\\packages"],
+    ["C:\\repo", "c:packages", "C:\\repo\\packages"],
+    ["C:\\repo", "\\packages", "C:\\packages"],
+    ["\\\\server\\share\\repo", "\\packages", "\\\\server\\share\\packages"],
+  ]) {
+    const outcome = project(cwd, workdir);
+    assert.equal(outcome?.kind, "failure");
+    assert.equal(outcome.cwd, expectedCwd);
+  }
+  assert.equal(project("C:\\repo", "D:packages"), undefined);
+});
+
 test("Claude sync response caps the serialized UTF-8 envelope at under 2 KiB", async () => {
   const decoder = await loadHarnessDecoder("claude-code");
   assert.ok(decoder);

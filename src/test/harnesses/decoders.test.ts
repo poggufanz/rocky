@@ -115,6 +115,27 @@ test("Codex namespaced exec_command output cannot supply built-in exit evidence"
   }
 });
 
+test("Codex accepts an unnamespaced functions.exec_command rollout envelope", async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  const reducer = decoder.createTranscriptReducer();
+  assert.deepEqual(reducer.consume(JSON.stringify({
+    type: "response_item", payload: {
+      type: "function_call", name: "functions.exec_command", namespace: "", call_id: "call-a",
+      arguments: '{"cmd":"npm test"}',
+    },
+  })), []);
+  const [event] = reducer.consume(JSON.stringify({
+    type: "response_item", payload: { type: "function_call_output", call_id: "call-a",
+      output: "Wall time: 0.1250 seconds\nProcess exited with code 7\nOutput:\nbuild failed",
+    },
+  }));
+  assert.equal(event?.kind, "tool-outcome");
+  assert.equal(event.outcome.exitCodeSource, "header");
+  assert.equal(event.outcome.exitCode, 7);
+  assert.equal(event.outcome.output, "build failed");
+});
+
 test("DSH transcript preserves the scan's raw thinking fidelity and source", async () => {
   const decoder = await loadHarnessDecoder("dsh");
   assert.ok(decoder);
