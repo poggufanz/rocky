@@ -6,6 +6,10 @@ import { editOutcome, exitCodeField, resultText, withExitEvidence, withShellSkip
 import type { DecodedHookInput, HarnessDecoder, NormalizedToolOutcome, TranscriptContext, TranscriptEvent, TranscriptReducer } from "../types.js";
 
 const SHELL_TOOLS = new Set(["Bash", "PowerShell", "exec_command", "functions.exec_command", "shell_command"]);
+// Codex writes this envelope to the built-in exec rollout result. PostToolUse
+// receives raw stdout/stderr, which can contain any of these strings.
+const EXEC_ROLLOUT_HEADER = /^(?:Chunk ID: [\w-]{1,64}\r?\n)?Wall time: \d+\.\d{4} seconds\r?\nProcess exited with code (-?\d{1,10})\r?\n(?:Original token count: \d+\r?\n)?Output:(?:\r?\n|$)/u;
+const PATCH_SUCCESS = /^Success\. Updated the following files:\r?\n[AMD] [^\r\n]+/u;
 
 function readCwd(raw: Fields | undefined): string | undefined {
   return textField(raw, 4096, "cwd", "working_directory", "workingDirectory", "workdir");
@@ -13,6 +17,10 @@ function readCwd(raw: Fields | undefined): string | undefined {
 
 function readCommand(raw: Fields | undefined): string | undefined {
   return textField(raw, 1024 * 1024, "command", "cmd");
+}
+
+function readToolCwd(input: Fields | undefined): string | undefined {
+  return textField(input, 4096, "workdir") ?? readCwd(input);
 }
 
 function readOutput(raw: Fields | undefined): string | undefined {
@@ -30,7 +38,7 @@ function readShellOutcome(raw: Fields): NormalizedToolOutcome {
   const output = readOutput(response) ?? resultText(result) ?? error;
   return withShellSkip(withExitEvidence({
     command: readCommand(input),
-    cwd: readCwd(raw) ?? readCwd(input),
+    cwd: readToolCwd(input) ?? readCwd(raw),
     exitCodeSource: "unknown",
     output,
     toolUseId: textField(raw, 256, "tool_use_id", "toolUseId", "call_id", "callId"),
@@ -38,7 +46,23 @@ function readShellOutcome(raw: Fields): NormalizedToolOutcome {
     interrupted: field(raw, "is_interrupt") === true || field(response, "interrupted") === true,
     background: field(input, "run_in_background") === true || field(input, "runInBackground") === true,
     edits: [],
-  }, exitCodeField(response) ?? exitCodeField(raw), error ?? resultText(result)));
+  }, exitCodeField(response) ?? exitCodeField(raw)));
+}
+
+function rolloutExit(outcome: NormalizedToolOutcome, payload: Fields, toolName: string): NormalizedToolOutcome {
+  const structured = exitCodeField(payload);
+  const normalized = withExitEvidence(outcome, structured);
+  if (structured !== undefined || payload.type !== "function_call_output"
+    || (toolName !== "exec_command" && toolName !== "functions.exec_command") || outcome.output === undefined) {
+    return normalized;
+  }
+  const header = EXEC_ROLLOUT_HEADER.exec(outcome.output);
+  const exitCode = header && exitCodeField({ exit_code: Number(header[1]) });
+  if (!header || exitCode == null) return normalized;
+  return {
+    ...outcome, exitCode, exitCodeSource: "header", isError: exitCode !== 0,
+    output: outcome.output.slice(header[0].length),
+  };
 }
 
 function decodeHook(raw: unknown, now = Date.now()): DecodedHookInput | undefined {
@@ -117,7 +141,8 @@ function createTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer
     if (payload.type === "function_call" || payload.type === "custom_tool_call") {
       const toolName = textField(payload, 256, "name");
       const args = payload.arguments;
-      const input = typeof args === "string" ? parseFields(args) : asFields(args);
+      const patch = payload.type === "custom_tool_call" ? resultText(payload.input) : undefined;
+      const input = patch !== undefined ? { command: patch } : typeof args === "string" ? parseFields(args) : asFields(args);
       if (toolName) rememberPending(calls, id, { toolName, input });
       return [];
     }
@@ -126,10 +151,17 @@ function createTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer
     if (!call) return [];
     calls.delete(id);
     const output = resultText(payload.output);
-    return toolEvent(row, call.toolName, withExitEvidence({
-      command: readCommand(call.input), cwd: readCwd(call.input) ?? cwd,
-      exitCodeSource: "unknown", output, toolUseId: id, edits: [],
-    }, exitCodeField(payload), output));
+    const toolCwd = readToolCwd(call.input) ?? cwd;
+    const edit = call.toolName === "apply_patch" && payload.type === "custom_tool_call_output"
+      && (exitCodeField(payload) ?? 0) === 0 && payload.success !== false && payload.is_error !== true
+      && output !== undefined && PATCH_SUCCESS.test(output) ? editOutcome(parseCodexHookPayload({
+        hook_event_name: "PostToolUse", session_id: sessionId, turn_id: id, cwd: toolCwd,
+        tool_name: call.toolName, tool_input: call.input,
+      }, transcriptTimestamp(row.timestamp))) : undefined;
+    return toolEvent(row, call.toolName, rolloutExit({
+      ...edit, command: SHELL_TOOLS.has(call.toolName) ? readCommand(call.input) : undefined,
+      cwd: toolCwd, exitCodeSource: "unknown", output, toolUseId: id, edits: edit?.edits ?? [],
+    }, payload, call.toolName));
   }
 
   return {

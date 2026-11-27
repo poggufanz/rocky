@@ -267,6 +267,7 @@ export function parseToolResultPayload(stdin: Uint8Array): ToolResultEvent | und
     return { kind: "pass", cmd, cwd, agent };
   }
 
+  if (parsed.error === undefined) return { kind: "skip", reason: "no-exit-header" };
   if (typeof parsed.error !== "string") return undefined;
   const header = parseExitCodeHeader(parsed.error);
   if (!header) return { kind: "skip", reason: "no-exit-header" };

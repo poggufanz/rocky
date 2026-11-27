@@ -15,7 +15,7 @@ export function projectToListening(decoded: DecodedHookInput, ctx: ListeningProj
   if (ctx.hostConsent !== true) return undefined;
   const { nativeId, sessionId, episode, fileRel, summaryRef, repoRoot, ts } = decoded.listening;
   const root = ctx.repoConsent === true && repoRoot ? canonicalPath(repoRoot) : "";
-  const rel = fileRel ? canonicalPath(fileRel) : "";
+  const rel = root && fileRel ? canonicalPath(fileRel) : "";
   const isRelative = rel.length > 0 && !rel.startsWith("..") && !rel.startsWith("/") && !/^[a-z]:/iu.test(rel);
 
   // Hook metadata alone does not witness a file version write. In particular,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
 import { parseToolResultPayload } from "../../core/tool-result.js";
 import { loadHarnessDecoder } from "../../harnesses/index.js";
@@ -12,7 +13,7 @@ test("Listening reads only allowlisted metadata and treats PreToolUse paths as i
   const forbidden = ["prompt", "args", "response", "transcript", "thinking", "tool_input", "tool_response"];
   const payload = {
     hook_event_name: "PreToolUse", session_id: "session-a", tool_name: "Write",
-    targetPaths: ["planned.ts"], fileRel: "observed.ts",
+    targetPaths: ["planned.ts"], fileRel: "observed.ts", repoRoot: process.cwd(),
     edge: { kind: "wrote_version", basis: "direct", from: "a", to: "b" },
   };
   for (const key of forbidden) {
@@ -22,7 +23,7 @@ test("Listening reads only allowlisted metadata and treats PreToolUse paths as i
   }
   const decoded = decoder.decodeHook(payload);
   assert.ok(decoded);
-  const projected = projectToListening(decoded, { hostConsent: true, surface: "cli" });
+  const projected = projectToListening(decoded, { hostConsent: true, repoConsent: true, surface: "cli" });
   assert.ok(projected);
   assert.equal(projected.refs.session, "session-a");
   assert.equal(projected.refs.fileRel, "observed.ts");
@@ -30,6 +31,17 @@ test("Listening reads only allowlisted metadata and treats PreToolUse paths as i
   assert.equal(projectToListening(decoded, { hostConsent: false, surface: "cli" }), undefined);
   assert.deepEqual(reads, []);
   assert.doesNotMatch(JSON.stringify(projected), /private-|planned\.ts|wrote_version|direct/u);
+});
+
+test("Listening omits the repository and relative filename when repo consent is denied", async () => {
+  const decoder = await loadHarnessDecoder("claude-code");
+  const decoded = decoder?.decodeHook({ repoRoot: process.cwd(), fileRel: "private.ts", sessionId: "session-a" });
+  assert.ok(decoded);
+  const envelope = projectToListening(decoded, { hostConsent: true, repoConsent: false, surface: "cli" });
+  assert.ok(envelope);
+  assert.equal(envelope.consent.repo, false);
+  assert.equal(envelope.repoRoot, undefined);
+  assert.deepEqual(envelope.refs, { session: "session-a" });
 });
 
 test("Codex PostToolUse without an exit code is skipped even if it reports success", async () => {
@@ -45,10 +57,10 @@ test("Codex PostToolUse without an exit code is skipped even if it reports succe
 
 test("Codex PostToolUse with a structured nonzero exit is a failure with attribution", async () => {
   const decoder = await loadHarnessDecoder("codex");
-  const cwd = process.cwd();
+  const cwd = join(process.cwd(), "tool-workdir");
   const decoded = decoder?.decodeHook({
-    hook_event_name: "PostToolUse", thread_id: "session-a", cwd, tool_name: "exec_command",
-    tool_use_id: "tool-a", agent_id: "agent-a", tool_input: { cmd: "npm test" },
+    hook_event_name: "PostToolUse", thread_id: "session-a", cwd: process.cwd(), tool_name: "exec_command",
+    tool_use_id: "tool-a", agent_id: "agent-a", tool_input: { cmd: "npm test", cwd: process.cwd(), workdir: cwd },
     tool_response: { exit_code: 7, output: "build failed" },
   });
   assert.ok(decoded);
@@ -57,6 +69,23 @@ test("Codex PostToolUse with a structured nonzero exit is a failure with attribu
     kind: "failure", cmd: "npm test", cwd, exitCode: 7, body: "build failed",
     agent: { vendor: "codex", session: "session-a", toolUseId: "tool-a", agentId: "agent-a" },
   });
+});
+
+test("Codex hook output that resembles an exit header stays ordinary output", async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  for (const output of [
+    "Exit code 7\nprinted by the command",
+    "Wall time: 0.1250 seconds\nProcess exited with code 7\nOutput:\nprinted by the command",
+  ]) {
+    const decoded = decoder.decodeHook({
+      hook_event_name: "PostToolUse", session_id: "session-a", cwd: process.cwd(),
+      tool_name: "exec_command", tool_input: { command: "npm test" }, tool_response: output,
+    });
+    assert.ok(decoded);
+    assert.equal(decoded.outcome?.output, output);
+    assert.deepEqual(projectToToolResult(decoded), { kind: "skip", reason: "no-exit-header" });
+  }
 });
 
 test("Claude sync response caps the serialized UTF-8 envelope at under 2 KiB", async () => {
@@ -89,12 +118,26 @@ test("Claude tool-result projection preserves shell pass, failure, and skip sema
     { ...base, hook_event_name: "PostToolUse", tool_response: { interrupted: true } },
     { ...base, tool_input: { ...base.tool_input, run_in_background: true } },
     { ...base, tool_input: { command: "rocky run npm" } },
-    { ...base, error: undefined },
+    { ...base, error: null },
+    { ...base, error: 123 },
   ]) {
     const decoded = decoder.decodeHook(value);
     assert.ok(decoded);
     assert.deepEqual(projectToToolResult(decoded), parseToolResultPayload(Buffer.from(JSON.stringify(value))));
   }
+});
+
+test("Claude failures without an error field produce the explicit no-exit-header skip", async () => {
+  const decoder = await loadHarnessDecoder("claude-code");
+  const payload = {
+    hook_event_name: "PostToolUseFailure", session_id: "session-a", cwd: process.cwd(),
+    tool_name: "Bash", tool_input: { command: "npm test" },
+  };
+  const decoded = decoder?.decodeHook(payload);
+  assert.ok(decoded);
+  const skip = { kind: "skip", reason: "no-exit-header" };
+  assert.deepEqual(projectToToolResult(decoded), skip);
+  assert.deepEqual(parseToolResultPayload(Buffer.from(JSON.stringify(payload))), skip);
 });
 
 test("tool-result projection does not request agent-owned edit inputs", async () => {

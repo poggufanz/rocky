@@ -11,7 +11,8 @@ function readShellOutcome(raw: Fields, eventName: "PostToolUse" | "PostToolUseFa
   const input = asFields(field(raw, "tool_input"));
   const response = asFields(field(raw, "tool_response"));
   const failure = eventName === "PostToolUseFailure";
-  const error = resultText(field(raw, "error"));
+  const rawError = field(raw, "error");
+  const error = resultText(rawError);
   const outcome = withExitEvidence({
     command: textField(input, 1024 * 1024, "command"),
     cwd: textField(raw, 4096, "cwd"),
@@ -26,7 +27,9 @@ function readShellOutcome(raw: Fields, eventName: "PostToolUse" | "PostToolUseFa
     // Claude's own Bash/PowerShell success hook is an explicit success signal.
   }, exitCodeField(response) ?? (failure ? undefined : 0), failure ? error : undefined);
   const classified = withShellSkip(outcome);
-  if (failure && error === undefined && classified.skipReason === "no-exit-header") return undefined;
+  if (failure && rawError !== undefined && error === undefined && classified.skipReason === "no-exit-header") {
+    return undefined;
+  }
   return classified;
 }
 

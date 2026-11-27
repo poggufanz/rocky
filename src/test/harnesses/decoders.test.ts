@@ -61,12 +61,34 @@ test("Codex rollout pairs function calls by call ID", async () => {
     } },
   ]) assert.deepEqual(reducer.consume(JSON.stringify(record)), []);
   const [event] = reducer.consume(JSON.stringify({
-    type: "response_item", payload: { type: "function_call_output", call_id: "call-a", output: "build failed" },
+    type: "response_item", payload: { type: "function_call_output", call_id: "call-a", output: "Exit code 7\nbuild failed" },
   }));
   assert.equal(event?.kind, "tool-outcome");
   assert.equal(event.sessionId, "session-a");
   assert.equal(event.outcome.command, "npm test");
   assert.equal(event.outcome.exitCodeSource, "unknown");
+});
+
+test("Codex rollout accepts the vendor exec envelope and keeps its command output separate", async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  const reducer = decoder.createTranscriptReducer();
+  for (const exitCode of [0, 7]) {
+    assert.deepEqual(reducer.consume(JSON.stringify({
+      type: "response_item", payload: {
+        type: "function_call", name: "exec_command", call_id: "call-a", arguments: '{"cmd":"npm test"}',
+      },
+    })), []);
+    const [event] = reducer.consume(JSON.stringify({
+      type: "response_item", payload: { type: "function_call_output", call_id: "call-a",
+        output: `Chunk ID: a87e2b\nWall time: 0.1250 seconds\nProcess exited with code ${exitCode}\nOriginal token count: 3\nOutput:\nExit code 14\n`,
+      },
+    }));
+    assert.equal(event?.kind, "tool-outcome");
+    assert.equal(event.outcome.exitCodeSource, "header");
+    assert.equal(event.outcome.exitCode, exitCode);
+    assert.equal(event.outcome.output, "Exit code 14\n");
+  }
 });
 
 test("DSH transcript preserves the scan's raw thinking fidelity and source", async () => {
@@ -98,4 +120,36 @@ test("Codex agent projection carries apply_patch move coverage and its digest", 
   assert.match(result.coverageDigest ?? "", /^[a-f0-9]{64}$/u);
   assert.deepEqual(decoded.outcome?.edits.map((edit) => edit.path), result.coveragePaths);
   assert.equal(decoded.outcome?.coverageDigest, result.coverageDigest);
+});
+
+test("Codex apply_patch rollout keeps move coverage only for a successful completion", async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  const cwd = process.cwd();
+  const reducer = decoder.createTranscriptReducer({ sessionId: "session-a" });
+  const patch = "*** Begin Patch\n*** Update File: old.ts\n*** Move to: new.ts\n*** End Patch";
+  assert.deepEqual(reducer.consume(JSON.stringify({ type: "session_meta", payload: { id: "session-a", cwd } })), []);
+  const complete = (callId: string, output: string) => {
+    assert.deepEqual(reducer.consume(JSON.stringify({
+      type: "response_item", payload: { type: "custom_tool_call", name: "apply_patch", call_id: callId, input: patch },
+    })), []);
+    return reducer.consume(JSON.stringify({
+      type: "response_item", payload: { type: "custom_tool_call_output", call_id: callId, output },
+    }))[0];
+  };
+  const succeeded = complete("call-a", "Success. Updated the following files:\nM new.ts\n");
+  assert.equal(succeeded?.kind, "tool-outcome");
+  assert.deepEqual(succeeded.outcome.coveragePaths, ["old.ts", "new.ts"]);
+  assert.deepEqual(succeeded.outcome.edits.map(({ path }) => path), ["old.ts", "new.ts"]);
+  assert.equal(succeeded.outcome.coveragePathsComplete, true);
+  const hook = decoder.decodeHook({
+    hook_event_name: "PostToolUse", session_id: "session-a", turn_id: "turn-a", cwd,
+    tool_name: "apply_patch", tool_input: { command: patch },
+  });
+  assert.match(succeeded.outcome.coverageDigest ?? "", /^[a-f0-9]{64}$/u);
+  assert.equal(succeeded.outcome.coverageDigest, hook?.outcome?.coverageDigest);
+  const failed = complete("call-b", "apply_patch verification failed: no matching hunk");
+  assert.equal(failed?.kind, "tool-outcome");
+  assert.deepEqual(failed.outcome.edits, []);
+  assert.equal(failed.outcome.coverageDigest, undefined);
 });

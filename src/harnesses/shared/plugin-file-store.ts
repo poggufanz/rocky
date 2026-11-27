@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, unlinkSync, type BigIntStats } from "node:fs";
-import { dirname } from "node:path";
+import {
+  closeSync, constants, fstatSync, linkSync, lstatSync, mkdtempSync, openSync, readFileSync,
+  renameSync, rmdirSync, unlinkSync, type BigIntStats,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { NO_BLOCK_FLAG, NO_FOLLOW_FLAG, sameFilesystemIdentity } from "../../core/fs-safety.js";
 import { atomicWriteBytesIfUnchanged, type ConditionalBytesWriteResult } from "../../setup/file-transaction.js";
 
@@ -11,6 +14,9 @@ type Snapshot =
 export type ManagedPluginWriteResult =
   | (Extract<ConditionalBytesWriteResult, { status: "written" }> & { digest: string })
   | Exclude<ConditionalBytesWriteResult, { status: "written" }>;
+
+type ChangedRemoval = { status: "changed"; recoveryPath?: string };
+type ManagedPluginRemovalResult = { status: "removed" | "missing" } | ChangedRemoval;
 
 function digestOf(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -65,10 +71,37 @@ export function writeManagedPluginFile(
   return result.status === "written" ? { ...result, digest } : result;
 }
 
+function sameDirectory(path: string, expected: BigIntStats): boolean {
+  const current = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+  return current?.isDirectory() === true && sameFilesystemIdentity(expected, current);
+}
+
+function restorePlugin(path: string, tombstone: string, stillQuarantined: () => boolean): ChangedRemoval {
+  try {
+    if (stillQuarantined()) {
+      const saved = lstatSync(tombstone, { bigint: true });
+      if (saved.isFile()) {
+        // A hard link restores into a vacant name and fails if an editor
+        // has already saved another file at the original destination.
+        linkSync(tombstone, path);
+        if (stillQuarantined() && sameFilesystemIdentity(saved, lstatSync(path, { bigint: true }))) {
+          unlinkSync(tombstone);
+          return { status: "changed" };
+        }
+      }
+    }
+  } catch {
+    // Preserve the quarantined entry when automatic restoration is unsafe.
+  }
+  return { status: "changed", recoveryPath: tombstone };
+}
+
 /** A header is descriptive. Only the recorded digest authorizes deletion. */
 export function removeManagedPluginFile(
   path: string, managedDigest: string,
-): { status: "removed" | "missing" | "changed" } {
+): ManagedPluginRemovalResult {
+  let quarantine: string | undefined;
+  let restore: (() => ChangedRemoval) | undefined;
   try {
     const parent = dirname(path);
     const directory = lstatSync(parent, { bigint: true, throwIfNoEntry: false });
@@ -78,15 +111,37 @@ export function removeManagedPluginFile(
     if (prior.status === "missing") return { status: "missing" };
     if (prior.status !== "valid" || digestOf(prior.bytes) !== managedDigest) return { status: "changed" };
 
-    // Node offers no portable compare-and-unlink. Revalidate both identities
-    // and the file metadata immediately before the pathname mutation.
-    if (!sameFilesystemIdentity(directory, lstatSync(parent, { bigint: true }))
-      || !isSameFile(prior.metadata, lstatSync(path, { bigint: true }))) {
+    const location = mkdtempSync(join(parent, ".rocky-plugin-remove-"));
+    quarantine = location;
+    const privateDir = lstatSync(location, { bigint: true });
+    const tombstone = join(location, "plugin");
+    const stillQuarantined = () => sameDirectory(parent, directory) && sameDirectory(location, privateDir);
+    if (!stillQuarantined() || !isSameFile(prior.metadata, lstatSync(path, { bigint: true }))) {
       return { status: "changed" };
     }
-    unlinkSync(path);
-    return { status: "removed" };
+
+    // Move first, then prove ownership of the exact entry to be unlinked.
+    // A save that wins the race into rename will be verified in quarantine.
+    renameSync(path, tombstone);
+    restore = () => restorePlugin(path, tombstone, stillQuarantined);
+    const moved = snapshot(tombstone);
+    if (moved.status !== "valid" || !sameFilesystemIdentity(prior.metadata, moved.metadata)
+      || digestOf(moved.bytes) !== managedDigest || !stillQuarantined()
+      || !isSameFile(moved.metadata, lstatSync(tombstone, { bigint: true }))) {
+      return restore();
+    }
+    unlinkSync(tombstone);
+    restore = undefined;
+    return { status: lstatSync(path, { throwIfNoEntry: false }) ? "changed" : "removed" };
   } catch {
-    return { status: "changed" };
+    return restore?.() ?? { status: "changed" };
+  } finally {
+    if (quarantine) {
+      try {
+        rmdirSync(quarantine);
+      } catch {
+        // A nonempty quarantine preserves a file for recovery.
+      }
+    }
   }
 }
