@@ -9,7 +9,7 @@ import { getEvalDriver } from "../drivers/index.mjs";
 import { evaluateBatch, parseJsonl, runMetrics } from "../evaluate.mjs";
 import { buildHistoryRockyEnv, materializeTask, renderClaudeMd, renderInstructions } from "../history.mjs";
 import { classifyOutcome, createRedactingFileWriter, diffBatchProvenance } from "../runner.mjs";
-import { assertNoAncestorInstructions, createSandbox, scrubEnv } from "../sandbox.mjs";
+import { assertNoAncestorInstructions, buildCommandInvocation, createSandbox, resolveExecutableOnPath, scrubEnv } from "../sandbox.mjs";
 import { ownerBaseline, ownerCheck } from "../owner-guard.mjs";
 
 const fixtures = new URL("./fixtures/", import.meta.url);
@@ -116,6 +116,147 @@ test("pre-redaction scanning catches a token split across stream chunks even wit
   assert.equal(readFileSync(target, "utf8"), "before <redacted> after");
 });
 
+test("the stream scanner detects a single split secret before the writer ends", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rocky-codex-overlap-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = join(dir, "stderr.txt");
+  const secret = Buffer.from("probe-é-secret");
+  const split = secret.indexOf(0xc3) + 1;
+  const writer = createRedactingFileWriter(target, [secret.toString()]);
+  try {
+    writer.write(secret.subarray(0, split));
+    assert.equal(writer.getLeaked(), false);
+    writer.write(secret.subarray(split));
+    assert.equal(writer.getLeaked(), true);
+  } finally {
+    await writer.end();
+  }
+  assert.equal(readFileSync(target, "utf8"), "<redacted>");
+});
+
+test("a raw stream hit halts resume after interruption before publication", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rocky-eval-interrupted-leak-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runId = "SMOKE-none-b1";
+  const out = join(root, "out");
+  const script = `
+    import { runBatch, createRedactingFileWriter } from ${JSON.stringify(new URL("../runner.mjs", import.meta.url).href)};
+    import assert from "node:assert/strict";
+    import { mkdirSync, readFileSync } from "node:fs";
+    import { join } from "node:path";
+    const root = ${JSON.stringify(root)};
+    const token = "fixture-interrupted-secret";
+    try {
+      await runBatch({
+        outDir: join(root, "out"), rootDir: root, cacheDir: join(root, "cache"),
+        beforeRef: "HEAD", afterRef: "HEAD", set: "v1", only: ["SMOKE"],
+        k: 1, arms: ["none"], auth: { kind: "token" }, secrets: [token],
+      }, {
+        resolveCommit: () => "fixture-sha",
+        getHeadCommit: () => "fixture-sha",
+        getClaudeVersion: () => "fixture-version",
+        assertRootClean: () => {},
+        ownerBaseline: () => ({}),
+        ownerCheck: () => ({ leak: false }),
+        createSandbox: async ({ runId }) => {
+          const dir = join(root, runId);
+          mkdirSync(dir);
+          return { dir, taskDir: dir };
+        },
+        materializeTask: async () => {},
+        runClaude: async ({ stderrPath, secrets, onLeak }) => {
+          let persistedAtHit;
+          const writer = createRedactingFileWriter(stderrPath, secrets, {
+            onLeak() {
+              onLeak();
+              persistedAtHit = JSON.parse(readFileSync(join(root, "out", "batch.json"), "utf8")).halted;
+            },
+          });
+          writer.write(Buffer.from(token.slice(0, 8)));
+          writer.write(Buffer.from(token.slice(8)));
+          await writer.end();
+          assert.equal(persistedAtHit?.reason, "token_leak");
+          process.exit(77);
+        },
+      });
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = error.exitCode ?? 1;
+    }
+  `;
+  const launch = () => spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+  const interrupted = launch();
+  assert.equal(interrupted.status, 77, interrupted.stderr);
+  const runDir = join(out, "runs", runId);
+  assert.equal(existsSync(join(runDir, "run.json")), false);
+  assert.equal(readFileSync(join(runDir, "stderr.txt"), "utf8"), "<redacted>");
+  const batchPath = join(out, "batch.json");
+  const halted = readFileSync(batchPath, "utf8");
+  const batch = JSON.parse(halted);
+  assert.equal(batch.halted.reason, "token_leak");
+  assert.equal(batch.halted.runId, runId);
+  const resume = launch();
+  assert.equal(resume.status, 3, resume.stderr);
+  assert.match(resume.stderr, /Batch is halted \(reason=token_leak/);
+  assert.equal(readFileSync(batchPath, "utf8"), halted);
+  assert.equal(existsSync(join(runDir, "run.json")), false);
+});
+
+test("the runner reports the saved provider mismatch without Codex credentials", (t) => {
+  const out = mkdtempSync(join(tmpdir(), "rocky-eval-provider-resume-"));
+  t.after(() => rmSync(out, { recursive: true, force: true }));
+  const batchPath = join(out, "batch.json");
+  const noCodexKeys = Object.fromEntries(Object.entries(process.env).filter(([key]) => (
+    !["ROCKY_EVAL_CODEX_API_KEY", "ROCKY_EVAL_OPENAI_API_KEY"].includes(key.toUpperCase())
+  )));
+  for (const provider of [undefined, "claude-code"]) {
+    const saved = JSON.stringify({ provider, claudeVersion: "2.1.330 (Claude Code)" });
+    writeFileSync(batchPath, saved);
+    const resume = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../runner.mjs", import.meta.url)),
+      "--provider", "codex", "--set", "v1", "--before", "HEAD", "--after", "HEAD",
+      "--only", "SMOKE", "--out", out, "--auth", "token",
+    ], { encoding: "utf8", env: noCodexKeys });
+    assert.equal(resume.status, 2, resume.stderr);
+    assert.match(resume.stderr, /Batch provenance mismatch .* differing fields: provider/);
+    assert.equal(readFileSync(batchPath, "utf8"), saved);
+  }
+});
+
+function cacheFixtureRocky(root, env) {
+  const fixturePackage = join(root, "fixture-rocky");
+  const cache = join(root, "pack-cache");
+  mkdirSync(fixturePackage);
+  mkdirSync(cache);
+  writeFileSync(join(fixturePackage, "package.json"), JSON.stringify({
+    name: "offline-rocky-fixture", version: "1.0.0", bin: { rocky: "rocky.cjs" },
+  }));
+  writeFileSync(join(fixturePackage, "rocky.cjs"), `#!/usr/bin/env node
+    const assert = require("node:assert/strict");
+    const fs = require("node:fs");
+    const path = require("node:path");
+    assert.deepEqual(process.argv.slice(2), ["setup", "--harness", "codex", "--yes"]);
+    assert.equal(process.env.CODEX_API_KEY, undefined);
+    fs.writeFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "# fixture Rocky registered\\n");
+    fs.writeFileSync(path.join(process.env.ROCKY_HOME, "memory.jsonl"), '{}\\n');
+    if (process.env.ROCKY_ATTEMPT_ARM === "shown") {
+      fs.writeFileSync(path.join(process.env.ROCKY_HOME, "advisories.jsonl"),
+        JSON.stringify({ kind: "note", arm: "shown", delivered: true, lane: "run" }) + "\\n");
+    }
+  `, { mode: 0o755 });
+  const npm = resolveExecutableOnPath(process.platform === "win32" ? ["npm.cmd", "npm.exe"] : ["npm"], env.PATH);
+  assert.ok(npm, "npm must be available for the offline sandbox install");
+  const command = buildCommandInvocation(npm, ["pack", "--offline", "--ignore-scripts", "--pack-destination", cache]);
+  const packed = spawnSync(command.file, command.args, {
+    cwd: fixturePackage, env, encoding: "utf8", windowsVerbatimArguments: command.windowsVerbatimArguments,
+  });
+  assert.equal(packed.status, 0, packed.stderr);
+  const rev = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" });
+  assert.equal(rev.status, 0, rev.stderr);
+  writeFileSync(join(cache, `rocky-${rev.stdout.trim()}.tgz`), readFileSync(join(cache, "offline-rocky-fixture-1.0.0.tgz")));
+  return cache;
+}
+
 test("offline Codex SMOKE runs through the runner and evaluator with isolated owner state", (t) => {
   // Windows user temp can inherit instructions from the owner's profile.
   const roots = process.platform === "win32"
@@ -154,12 +295,19 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
       assert.ok(fs.existsSync("AGENTS.md"));
       assert.equal(process.env.CODEX_HOME, path.join(process.env.HOME, ".codex"));
       assert.ok(process.env.CODEX_API_KEY);
+      const arm = path.basename(path.dirname(process.env.ROCKY_HOME)).split("-")[1];
+      const config = path.join(process.env.CODEX_HOME, "config.toml");
+      if (arm === "none") {
+        assert.equal(fs.existsSync(config), false);
+      } else {
+        assert.equal(fs.readFileSync(config, "utf8"), "# fixture Rocky registered\\n");
+        assert.equal(fs.readFileSync(path.join(process.env.ROCKY_HOME, "memory.jsonl"), "utf8"), "{}\\n");
+      }
       if (fs.existsSync("src")) fs.writeFileSync("src/probe.js", 'export function runProbe() { return "ok"; }\\n');
-      process.stdout.write(fs.readFileSync(process.env.EVAL_FIXTURE));
+      const fixture = arm === "after" || process.env.EVAL_LEAK === "1" ? "codex-after.jsonl" : "codex-none.jsonl";
+      process.stdout.write(fs.readFileSync(path.join(process.env.EVAL_FIXTURES, fixture)));
       if (process.env.EVAL_LEAK === "1") {
         const token = process.env.CODEX_API_KEY;
-        fs.mkdirSync("logs");
-        fs.writeFileSync("logs/output.txt", token);
         process.stderr.write(token.slice(0, 8));
         setTimeout(() => process.stderr.write(token.slice(8) + "\\n"), 75);
       }
@@ -186,21 +334,24 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
     CODEX_HOME: ownerConfig,
     ROCKY_HOME: join(owner, ".rocky"),
     ROCKY_EVAL_CODEX_API_KEY: token,
+    EVAL_FIXTURES: fileURLToPath(fixtures),
+    NPM_CONFIG_OFFLINE: "true",
   });
+  const cache = cacheFixtureRocky(root, env);
   for (const leak of [false, true]) {
     const out = join(root, leak ? "leaky" : "clean");
+    const arms = leak ? ["none"] : ["none", "before", "after"];
     const runnerArgs = [
       fileURLToPath(new URL("../runner.mjs", import.meta.url)),
-      "--provider", "codex", "--set", "v1", "--only", "SMOKE", "--arms", "none",
+      "--provider", "codex", "--set", "v1", "--only", "SMOKE", "--arms", arms.join(","),
       "--k", "1", "--concurrency", "1", "--out", out, "--root", join(root, "sbx"),
-      "--before", "HEAD", "--after", "HEAD", "--auth", "token",
+      "--before", "HEAD", "--after", "HEAD", "--cache", cache, "--auth", "token",
     ];
     const result = spawnSync(process.execPath, runnerArgs, {
       encoding: "utf8",
       env: {
         ...env,
         EVAL_LEAK: leak ? "1" : "0",
-        EVAL_FIXTURE: fileURLToPath(new URL(leak ? "codex-after.jsonl" : "codex-none.jsonl", fixtures)),
       },
     });
     assert.equal(result.status, leak ? 3 : 0, result.stderr);
@@ -213,39 +364,40 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
     assert.match(batch.instructionsSha256.none, /^[a-f0-9]{64}$/);
     assert.equal(batch.ownerCheck.leak, false);
     assert.ok(batch.ownerBaseline.settings.some(({ path }) => path === codexOwnerFile));
+    assert.deepEqual(batch.arms, arms);
 
-    const runDir = join(out, "runs", "SMOKE-none-b1");
-    const run = readJson(join(runDir, "run.json"));
-    assert.equal(run.provider, "codex");
-    assert.ok(run.wallMs > 0);
-    assert.equal(run.invalid, leak ? "token_leak" : null);
-    assert.deepEqual(run.quarantined ?? [], leak ? ["final/logs/output.txt"] : []);
-    assert.equal(existsSync(join(runDir, "final", "logs", "output.txt")), false);
-    assert.equal(readFileSync(join(runDir, "stderr.txt"), "utf8"), leak ? "<redacted>\n" : "");
     const scored = spawnSync(process.execPath, [
       fileURLToPath(new URL("../evaluate.mjs", import.meta.url)), "--out", out,
     ], { encoding: "utf8", env });
     assert.equal(scored.status, 0, scored.stderr);
-    const metrics = readJson(join(out, "metrics.json"))["SMOKE-none-b1"];
-    assert.equal(metrics.numTurns, 1);
-    assert.equal(metrics.wallMs, run.wallMs);
-    assert.deepEqual(metrics.leak, leak ? ["none-arm-rocky", "token-in-transcript"] : []);
-    if (!leak) {
-      const { provider, ...legacy } = batch;
-      const legacyJson = JSON.stringify(legacy);
-      writeFileSync(join(out, "batch.json"), legacyJson);
-      const resume = spawnSync(process.execPath, runnerArgs, { encoding: "utf8", env });
-      assert.equal(resume.status, 2, resume.stderr);
-      assert.match(resume.stderr, /differing fields: provider/);
-      assert.equal(readFileSync(join(out, "batch.json"), "utf8"), legacyJson);
+    const metrics = readJson(join(out, "metrics.json"));
+    assert.equal(Object.keys(metrics).length, arms.length);
+    for (const arm of arms) {
+      const runId = `SMOKE-${arm}-b1`;
+      const runDir = join(out, "runs", runId);
+      const run = readJson(join(runDir, "run.json"));
+      assert.equal(run.provider, "codex");
+      assert.ok(run.wallMs > 0);
+      assert.equal(run.invalid, leak ? "token_leak" : null, JSON.stringify(run));
+      if (!leak) assert.equal(run.accept.solved, true);
+      assert.deepEqual(run.quarantined ?? [], []);
+      assert.equal(readFileSync(join(runDir, "stderr.txt"), "utf8"), leak ? "<redacted>\n" : "");
+      assert.equal(readFileSync(join(runDir, "final", "AGENTS.md"), "utf8"), renderInstructions(arm, "codex"));
+      const memoryPath = join(runDir, "rocky-home", "memory.jsonl");
+      if (arm === "none") assert.equal(existsSync(memoryPath), false);
+      else assert.equal(readFileSync(memoryPath, "utf8"), "{}\n");
+      assert.equal(existsSync(join(runDir, "rocky-home", "advisories.jsonl")), arm === "after");
+      assert.equal(metrics[runId].numTurns, 1);
+      assert.equal(metrics[runId].wallMs, run.wallMs);
+      assert.equal(metrics[runId].noteDelivered, arm === "after" ? true : null);
+      assert.deepEqual(metrics[runId].leak, leak ? ["none-arm-rocky", "token-in-transcript"] : []);
     }
   }
   const captureOut = join(root, "capture");
-  const captureFixture = fileURLToPath(new URL("codex-none.jsonl", fixtures));
   const captured = spawnSync(process.execPath, [
     fileURLToPath(new URL("../capture.mjs", import.meta.url)),
     "--provider", "codex", "--arm", "none", "--auth", "token", "--out", captureOut, "--root", join(root, "sbx"),
-  ], { encoding: "utf8", env: { ...env, EVAL_FIXTURE: captureFixture, EVAL_LEAK: "0" } });
+  ], { encoding: "utf8", env: { ...env, EVAL_LEAK: "0" } });
   assert.equal(captured.status, 0, captured.stderr);
   assert.match(captured.stdout, /tools used: command_execution/);
   assert.equal(readFileSync(join(captureOut, "transcript.jsonl"), "utf8"), transcript("codex-none"));

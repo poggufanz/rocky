@@ -666,9 +666,7 @@ export function diffBatchProvenance(existing, current) {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
     return ["batch.json"];
   }
-  const existingProvider = existing.provider === undefined ? "claude-code" : existing.provider;
-  const currentProvider = current.provider === undefined ? "claude-code" : current.provider;
-  if (existingProvider !== currentProvider) return ["provider"];
+  if (savedBatchProvider(existing) !== savedBatchProvider(current)) return ["provider"];
 
   const normalize = (data) => data.provider === undefined ? {
     ...data,
@@ -718,6 +716,39 @@ export function diffBatchProvenance(existing, current) {
     diffs.push("instructionsSha256");
   }
   return diffs;
+}
+
+function savedBatchProvider(batch) {
+  return batch.provider === undefined ? "claude-code" : batch.provider;
+}
+
+function readBatchProvenance(batchPath) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(batchPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new ProvenanceMismatchError(
+      `Unable to read or parse existing batch provenance at ${batchPath}`,
+      ["batch.json"],
+    );
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new ProvenanceMismatchError(
+      `Batch provenance mismatch (${batchPath}); differing fields: batch.json`,
+      ["batch.json"],
+    );
+  }
+  return data;
+}
+
+function assertSavedProvider(existing, provider, batchPath) {
+  if (existing && savedBatchProvider(existing) !== provider) {
+    throw new ProvenanceMismatchError(
+      `Batch provenance mismatch (${batchPath}); differing fields: provider`,
+      ["provider"],
+    );
+  }
 }
 
 function getPathValue(env) {
@@ -2063,23 +2094,8 @@ export async function runBatch(options, overrides = {}) {
   let batchData;
   /** @type {any} */
   let baseline;
-  if (existsSync(batchPath)) {
-    let existingBatch;
-    try {
-      existingBatch = JSON.parse(readFileSync(batchPath, "utf8"));
-    } catch {
-      throw new ProvenanceMismatchError(
-        `Unable to read or parse existing batch provenance at ${batchPath}`,
-        ["batch.json"],
-      );
-    }
-    if (!existingBatch || typeof existingBatch !== "object" || Array.isArray(existingBatch)) {
-      throw new ProvenanceMismatchError(
-        `Batch provenance mismatch (${batchPath}); differing fields: batch.json`,
-        ["batch.json"],
-      );
-    }
-
+  const existingBatch = readBatchProvenance(batchPath);
+  if (existingBatch) {
     // Check saved halt BEFORE provenance comparison and before any swap recovery.
     const existingHalt =
       existingBatch.halted
@@ -2129,9 +2145,8 @@ export async function runBatch(options, overrides = {}) {
       throwHaltedResume(haltInfo, existingBatch, publishedTokenLeaks);
     }
 
-    if ((existingBatch.provider === undefined ? "claude-code" : existingBatch.provider) === driver.id) {
-      recordCliVersion();
-    }
+    assertSavedProvider(existingBatch, driver.id, batchPath);
+    recordCliVersion();
     const diffs = diffBatchProvenance(existingBatch, currentProvenance);
     if (diffs.length > 0) {
       throw new ProvenanceMismatchError(
@@ -2190,6 +2205,7 @@ export async function runBatch(options, overrides = {}) {
   }
 
   let stopBatch = false;
+  let tokenLeakHaltPersisted = false;
   let ownerLeakLatched = false;
   let ownerCheckFailed = false;
   /** @type {string[]} */
@@ -2213,6 +2229,17 @@ export async function runBatch(options, overrides = {}) {
         nextHalt.runId = runId;
       }
       batchData.halted = nextHalt;
+    }
+  }
+
+  function persistTokenLeakHalt() {
+    if (tokenLeakHaltPersisted) return;
+    try {
+      persistBatchJson(batchData);
+      tokenLeakHaltPersisted = true;
+    } catch (error) {
+      const msg = redact(error instanceof Error ? error.message : String(error));
+      deps.log(`[eval] warning: failed to persist halted state in batch.json: ${msg}`);
     }
   }
 
@@ -2393,6 +2420,8 @@ export async function runBatch(options, overrides = {}) {
         if (tokenLeaked) return;
         tokenLeaked = true;
         setBatchHalt("token_leak", item.runId);
+        // A stream hit can be redacted before this worker publishes run.json.
+        persistTokenLeakHalt();
       };
 
       let retryCountCommitted = !isRetry;
@@ -2695,12 +2724,7 @@ export async function runBatch(options, overrides = {}) {
         deps.log(
           redact(`[eval] abort: token_leak in ${item.runId}; stopping batch (no new runs will start)`),
         );
-        try {
-          persistBatchJson(batchData);
-        } catch (persistError) {
-          const msg = redact(persistError instanceof Error ? persistError.message : String(persistError));
-          deps.log(`[eval] warning: failed to persist halted state in batch.json: ${msg}`);
-        }
+        persistTokenLeakHalt();
       }
 
       runAndRecordOwnerCheck(`after ${item.runId}`, item.runId);
@@ -2926,31 +2950,36 @@ async function main() {
 
   const driver = getEvalDriver(opts.provider);
   const token = getEvalToken(driver);
-  if (typeof token !== "string" || token.length === 0) {
-    process.stderr.write(
-      `Error: ${driver.tokenEnvNames.join(" or ")} is missing or empty in environment (required for --auth token).\n`,
-    );
-    process.exit(2);
-  }
-  const secrets = [token];
+  const secrets = token ? [token] : [];
   /** @type {{ kind: "token" }} */
   const auth = { kind: "token" };
 
-  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
   try {
-    selectTasks(manifest.tasks, opts.only, opts.set);
-  } catch (error) {
-    usageError(error instanceof Error ? error.message : String(error));
-  }
+    if (!token) {
+      // Validate resumability even on hosts without the requested provider's key.
+      const batchPath = join(outDir, "batch.json");
+      assertSavedProvider(readBatchProvenance(batchPath), driver.id, batchPath);
+      process.stderr.write(
+        `Error: ${driver.tokenEnvNames.join(" or ")} is missing or empty in environment (required for --auth token).\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
 
-  const rootDir = resolve(opts.root);
-  try {
-    assertNoAncestorInstructions(rootDir);
-  } catch (error) {
-    usageError(error instanceof Error ? error.message : String(error));
-  }
+    const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+    try {
+      selectTasks(manifest.tasks, opts.only, opts.set);
+    } catch (error) {
+      usageError(error instanceof Error ? error.message : String(error));
+    }
 
-  try {
+    const rootDir = resolve(opts.root);
+    try {
+      assertNoAncestorInstructions(rootDir);
+    } catch (error) {
+      usageError(error instanceof Error ? error.message : String(error));
+    }
+
     await runBatch(
       {
         provider: driver.id,
