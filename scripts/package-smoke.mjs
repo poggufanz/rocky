@@ -132,6 +132,7 @@ function allowedPackPath(path) {
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
+    || path.startsWith("dist/harnesses/")
     || path.startsWith("dist/shell/")
     || path.startsWith("dist/gui/")
     || path.startsWith("dist/listening/")
@@ -166,6 +167,7 @@ function assertPackResult(packed) {
     "package.json",
     "dist/index.js",
     "dist/agent/schema.js",
+    "dist/harnesses/index.js",
   ]) {
     assert.ok(paths.includes(required), `missing packed path: ${required}`);
   }

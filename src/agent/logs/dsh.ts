@@ -41,9 +41,32 @@ function isRecord(obj: unknown): obj is Record<string, unknown> {
  * `session`/`header`/`version` fields, or neither `type` nor `seq`. Anything
  * else is a real event and must not be swallowed by header handling.
  */
-function looksLikeHeader(obj: Record<string, unknown>): boolean {
+export function looksLikeDshHeader(obj: Record<string, unknown>): boolean {
   if ("session" in obj || "header" in obj || "version" in obj) return true;
   return obj.type === undefined && obj.seq === undefined;
+}
+
+export function dshRationaleEvent(
+  obj: Record<string, unknown>, sessionId: string, logPath: string,
+): CanonicalRationaleEvent | undefined {
+  const seq = obj.seq;
+  if (typeof seq !== "number" || !Number.isFinite(seq)) return undefined;
+  const data = isRecord(obj.data) ? obj.data : undefined;
+  const text = data && typeof data.text === "string" && data.text.length > 0 ? data.text
+    : data && typeof data.reasoning === "string" ? data.reasoning
+    : undefined;
+  const isReasoning = obj.type === "reasoning" || (data !== undefined && typeof data.reasoning === "string");
+  if (!isReasoning || text === undefined || text.length === 0) return undefined;
+  return {
+    agent: "dsh",
+    sessionId,
+    turnRef: String(seq),
+    ts: typeof obj.time === "number" && Number.isFinite(obj.time) ? obj.time : 0,
+    text,
+    fidelity: "raw",
+    source: "log-thinking",
+    logPath,
+  };
 }
 
 function isFileWithSize(path: string): number | undefined {
@@ -156,7 +179,7 @@ function scan(_repoCwd: string, logPath: string, fromOffset: number, maxBytes: n
       }
       if (firstLine) {
         firstLine = false;
-        if (isRecord(obj) && looksLikeHeader(obj)) {
+        if (isRecord(obj) && looksLikeDshHeader(obj)) {
           // SessionHeader: tolerant; only the session id is taken from it.
           if (typeof obj.session === "string" && obj.session.length > 0) {
             sessionId = obj.session;
@@ -177,22 +200,8 @@ function scan(_repoCwd: string, logPath: string, fromOffset: number, maxBytes: n
         process.stderr.write(`rocky: dsh log ${logPath}: seq gap ${previousNewSeq} -> ${seq}\n`);
       }
       previousNewSeq = seq;
-      const data = isRecord(obj.data) ? obj.data : undefined;
-      const text2 = data && typeof data.text === "string" && data.text.length > 0 ? data.text
-        : data && typeof data.reasoning === "string" ? data.reasoning
-        : undefined;
-      const isReasoning = obj.type === "reasoning" || (data !== undefined && typeof data.reasoning === "string");
-      if (!isReasoning || text2 === undefined || text2.length === 0) continue;
-      events.push({
-        agent: "dsh",
-        sessionId,
-        turnRef: String(seq),
-        ts: typeof obj.time === "number" && Number.isFinite(obj.time) ? obj.time : 0,
-        text: text2,
-        fidelity: "raw",
-        source: "log-thinking",
-        logPath,
-      });
+      const event = dshRationaleEvent(obj, sessionId, logPath);
+      if (event) events.push(event);
     }
     return { events, nextOffset: highestSeq };
   } catch {

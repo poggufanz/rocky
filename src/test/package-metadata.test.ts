@@ -32,6 +32,7 @@ const expectedFiles = [
   "dist/setup",
   "dist/ai",
   "dist/agent",
+  "dist/harnesses",
   "dist/shell",
   "dist/gui",
   "dist/listening",
@@ -106,6 +107,7 @@ function allowedPackPath(path: string): boolean {
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
+    || path.startsWith("dist/harnesses/")
     || path.startsWith("dist/shell/")
     || path.startsWith("dist/gui/")
     || path.startsWith("dist/listening/")
@@ -370,6 +372,7 @@ test("npm pack dry-run exposes only the bounded production payload", async (t) =
     "package.json",
     "dist/index.js",
     "dist/agent/schema.js",
+    "dist/harnesses/index.js",
   ]) {
     assert.ok(paths.includes(required), `missing packed path: ${required}`);
   }

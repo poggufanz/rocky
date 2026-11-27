@@ -16,6 +16,7 @@
     "dist/setup",
     "dist/ai",
     "dist/agent",
+    "dist/harnesses",
     "dist/shell",
     "dist/gui",
     "dist/listening",

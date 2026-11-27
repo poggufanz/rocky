@@ -759,6 +759,7 @@ export function allowedPackPath(path) {
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
+    || path.startsWith("dist/harnesses/")
     || path.startsWith("dist/shell/")
     || path.startsWith("dist/gui/")
     || path.startsWith("dist/listening/")
@@ -818,6 +819,7 @@ function parseManifest(stdout) {
   }
   for (const required of [
     "LICENSE", "README.md", "CHANGELOG.md", "package.json", "dist/index.js", "dist/agent/schema.js",
+    "dist/harnesses/index.js",
   ]) {
     if (!paths.includes(required)) throw new StepError(`required packed path is missing: ${required}`);
   }

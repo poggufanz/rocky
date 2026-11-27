@@ -152,6 +152,37 @@ function touchedFilesIn(content: readonly Record<string, unknown>[]): string[] |
   return files.length > 0 ? files : undefined;
 }
 
+export function claudeTranscriptRationales(
+  obj: Record<string, unknown>, logPath: string, cwd?: string,
+): CanonicalRationaleEvent[] {
+  if (obj.type !== "assistant") return [];
+  const message = obj.message;
+  if (!isRecord(message) || !Array.isArray(message.content)) return [];
+  const content = message.content.filter(isRecord);
+  const hasThinking = content.some((entry) =>
+    entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0);
+  const parsedTs = typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : Number.NaN;
+  const touchedFiles = touchedFilesIn(content);
+  const common = {
+    agent: "claude-code" as const,
+    sessionId: typeof obj.sessionId === "string" ? obj.sessionId : "",
+    turnRef: typeof obj.uuid === "string" ? obj.uuid : "",
+    ts: Number.isNaN(parsedTs) ? 0 : parsedTs,
+    cwd,
+    logPath,
+    ...(touchedFiles === undefined ? {} : { touchedFiles }),
+  };
+  const events: CanonicalRationaleEvent[] = [];
+  for (const entry of content) {
+    if (entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0) {
+      events.push({ ...common, text: entry.thinking, fidelity: "raw", source: "log-thinking" });
+    } else if (!hasThinking && entry.type === "text" && typeof entry.text === "string" && entry.text.length > 0) {
+      events.push({ ...common, text: entry.text, fidelity: "summary", source: "log-response" });
+    }
+  }
+  return events;
+}
+
 /**
  * Scan a transcript, emitting one event per `thinking` entry (raw fidelity)
  * and — only for turns with no thinking entry — one per `text` reply entry
@@ -161,47 +192,8 @@ function touchedFilesIn(content: readonly Record<string, unknown>[]): string[] |
 function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: number): { events: CanonicalRationaleEvent[]; nextOffset: number } {
   const events: CanonicalRationaleEvent[] = [];
   const nextOffset = scanJsonlLines(logPath, fromOffset, maxBytes, (obj) => {
-    if (!isRecord(obj)) return;
-    if (!recordedInRepo(obj.cwd, repoCwd)) return;
-    if (obj.type !== "assistant") return;
-    const message = obj.message;
-    if (!isRecord(message) || !Array.isArray(message.content)) return;
-    const content = message.content.filter(isRecord);
-    const hasThinking = content.some((entry) => entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0);
-    const sessionId = typeof obj.sessionId === "string" ? obj.sessionId : "";
-    const turnRef = typeof obj.uuid === "string" ? obj.uuid : "";
-    const ts = typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : Number.NaN;
-    const touchedFiles = touchedFilesIn(content);
-    for (const entry of content) {
-      if (entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0) {
-        events.push({
-          agent: "claude-code",
-          sessionId,
-          turnRef,
-          ts: Number.isNaN(ts) ? 0 : ts,
-          cwd: repoCwd,
-          text: entry.thinking,
-          fidelity: "raw",
-          source: "log-thinking",
-          logPath,
-          ...(touchedFiles === undefined ? {} : { touchedFiles }),
-        });
-      } else if (!hasThinking && entry.type === "text" && typeof entry.text === "string" && entry.text.length > 0) {
-        events.push({
-          agent: "claude-code",
-          sessionId,
-          turnRef,
-          ts: Number.isNaN(ts) ? 0 : ts,
-          cwd: repoCwd,
-          text: entry.text,
-          fidelity: "summary",
-          source: "log-response",
-          logPath,
-          ...(touchedFiles === undefined ? {} : { touchedFiles }),
-        });
-      }
-      // tool_use and other entry types carry no rationale text; skipped.
-    }
+    if (!isRecord(obj) || !recordedInRepo(obj.cwd, repoCwd)) return;
+    for (const event of claudeTranscriptRationales(obj, logPath, repoCwd)) events.push(event);
   });
   if (nextOffset === fromOffset && fromOffset > 0 && events.length > 0) {
     // scanJsonlLines hit its outer-catch error path: the offset did not
