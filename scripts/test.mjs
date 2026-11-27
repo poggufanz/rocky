@@ -6,7 +6,7 @@ import { copyShellAssets } from "./copy-assets.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const testDist = join(packageRoot, ".test-dist");
-const filters = process.argv.slice(2);
+const filters = process.argv.slice(2).map((filter) => filter.replaceAll("\\", "/"));
 
 class CommandFailed extends Error {
   constructor(status) {
@@ -38,6 +38,14 @@ function run(file, args) {
   if (result.status !== 0) throw new CommandFailed(result.status ?? 1);
 }
 
+function findTests(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return findTests(path);
+    return entry.isFile() && entry.name.endsWith(".test.js") ? [path] : [];
+  });
+}
+
 try {
   run(process.execPath, [join(packageRoot, "scripts", "build.mjs")]);
   rmSync(testDist, { recursive: true, force: true });
@@ -51,13 +59,13 @@ try {
   // path itself. See src/test/shell-assets-fixture.ts for the read-only
   // verification every consumer does instead of writing.
   copyShellAssets(join(packageRoot, "src", "shell"), join(testDist, "shell"));
-  const allTests = readdirSync(join(testDist, "test"))
-    .filter((name) => name.endsWith(".test.js"))
-    .sort()
-    .map((name) => join(testDist, "test", name));
+  const allTests = findTests(join(testDist, "test")).sort();
   const selected = filters.length === 0
     ? allTests
-    : allTests.filter((file) => filters.some((filter) => file.includes(filter)));
+    : allTests.filter((file) => {
+      const path = file.replaceAll("\\", "/");
+      return filters.some((filter) => path.includes(filter));
+    });
   if (selected.length === 0) throw new Error(`no tests match: ${filters.join(", ")}`);
   run(process.execPath, ["--test", ...selected]);
 
