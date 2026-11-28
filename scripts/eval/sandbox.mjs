@@ -7,7 +7,6 @@ import {
   copyFileSync,
   existsSync,
   linkSync,
-  lstatSync,
   mkdirSync,
   readdirSync,
   realpathSync,
@@ -18,11 +17,15 @@ import {
 } from "node:fs";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getEvalDriver } from "./drivers/index.mjs";
+
+export { CLAUDE_FLAGS, MODEL } from "./drivers/claude-code.mjs";
 
 /** @typedef {"none"|"before"|"after"} Arm */
 /** @typedef {{ kind: "token" } | { kind: "copy-credentials", from: string }} SandboxAuth */
 /**
  * @typedef {{
+ *   provider: import("./drivers/index.mjs").EvalProvider,
  *   dir: string,
  *   home: string,
  *   configDir: string,
@@ -33,29 +36,10 @@ import { fileURLToPath } from "node:url";
  * }} Sandbox
  */
 
-// Frozen from the harness capture recorded in README.md; the trailing `--`
-// keeps the prompt from being read as an `--allowedTools` value.
-export const MODEL = "claude-sonnet-5-5";
-export const CLAUDE_FLAGS = [
-  "-p",
-  "--output-format",
-  "stream-json",
-  "--verbose",
-  "--max-turns",
-  "30",
-  "--model",
-  MODEL,
-  "--effort",
-  "high",
-  "--allowedTools",
-  "Bash,PowerShell,Edit,Write,Read,Glob,Grep,mcp__rocky__*",
-  "--",
-];
-
 const VALID_ARMS = new Set(["none", "before", "after"]);
-const SCRUB_ENV_RE = /^(?:CLAUDE|CLAUDECODE|ROCKY_|ANTHROPIC_|CLAUDE_ENV_FILE$|NODE_OPTIONS$)/i;
+const SCRUB_ENV_RE = /^(?:CLAUDE|CLAUDECODE|ROCKY_|ANTHROPIC_|CODEX|OPENAI_|CLAUDE_ENV_FILE$|NODE_OPTIONS$)/i;
 const GIT_CONFIG_ENV_RE = /^GIT_CONFIG_(?:PARAMETERS|COUNT|GLOBAL|SYSTEM|(?:KEY|VALUE)_\d+)$/i;
-const ANCESTOR_SENTINELS = ["CLAUDE.md", "AGENTS.md", ".claude"];
+const ANCESTOR_SENTINELS = ["CLAUDE.md", "AGENTS.md", ".claude", ".codex"];
 const UNSAFE_WIN_TOKEN_RE = /["\r\n\0%!]/u;
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -76,7 +60,7 @@ export function redactText(text, secrets) {
 }
 
 /**
- * Drop agent, Rocky, Anthropic, and Node preload variables without mutating the input.
+ * Drop agent, Rocky, provider credential, and Node preload variables without mutating the input.
  * @param {Record<string, string | undefined>} env
  * @param {NodeJS.Platform} [platform]
  * @returns {Record<string, string>}
@@ -240,7 +224,7 @@ function walkAncestorsForSentinels(startDir, pathApi, exists, visited) {
 }
 
 /**
- * Refuse a sandbox root if CLAUDE.md, AGENTS.md, or .claude exists in it or any lexical/canonical ancestor.
+ * Refuse a sandbox root if provider instructions or config exist in it or any lexical/canonical ancestor.
  * @param {string} dir
  * @param {(candidate: string) => boolean} [exists]
  * @param {(candidate: string) => string} [realpath]
@@ -339,7 +323,7 @@ function setSinglePath(env, value) {
 }
 
 /**
- * Resolve an executable on PATH without spawning a shell.
+ * Resolve an executable from absolute PATH entries without spawning a shell.
  * @param {readonly string[]} names
  * @param {string} pathValue
  * @param {NodeJS.Platform} [platform]
@@ -359,7 +343,7 @@ export function resolveExecutableOnPath(
     ...(pathValue ?? "").split(sep).map((dir) => (
       platform === "win32" ? dir.replace(/^"|"$/g, "") : dir
     )),
-  ].filter(Boolean);
+  ].filter((dir) => isAbsolutePathEntry(dir, platform));
   const mode = platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK;
   for (const dir of dirs) {
     for (const name of names) {
@@ -373,6 +357,32 @@ export function resolveExecutableOnPath(
     }
   }
   return null;
+}
+
+export function resolveProviderExecutable(file, env, platform = process.platform) {
+  const names = platform === "win32" ? [`${file}.exe`, `${file}.cmd`, file] : [file];
+  const found = resolveExecutableOnPath(names, getPathValue(env), platform);
+  if (!found) throw new Error(`${file} executable not found on PATH`);
+  return found;
+}
+
+export function exposeProviderLauncher(dir, file, executable, platform) {
+  const bin = join(dir, "provider-bin");
+  mkdirSync(bin);
+  if (platform === "win32") {
+    if (win32.extname(executable).toLowerCase() === ".exe") {
+      const launcher = join(bin, `${file}.exe`);
+      // The sandbox can modify its launcher. Give it independent file bytes.
+      copyFileSync(executable, launcher, fsConstants.COPYFILE_EXCL);
+    } else {
+      const target = executable.replaceAll("%", "%%");
+      writeFileSync(join(bin, `${file}.cmd`), `@setlocal DisableDelayedExpansion\r\n@"${target}" %*\r\n`);
+    }
+  } else {
+    const target = executable.replaceAll("'", "'\\''");
+    writeFileSync(join(bin, file), `#!/bin/sh\nexec '${target}' "$@"\n`, { mode: 0o700 });
+  }
+  return bin;
 }
 
 function quoteWinCmdToken(value) {
@@ -605,6 +615,8 @@ export async function packArm(commit, cacheDir) {
  *   arm: Arm,
  *   runId: string,
  *   root: string,
+ *   provider?: import("./drivers/index.mjs").EvalProvider,
+ *   providerExecutable?: string,
  *   tgz?: string,
  *   auth?: SandboxAuth,
  *   platform?: NodeJS.Platform,
@@ -618,6 +630,8 @@ export async function createSandbox({
   arm,
   runId,
   root,
+  provider = "claude-code",
+  providerExecutable,
   tgz,
   auth,
   platform = process.platform,
@@ -635,12 +649,13 @@ export async function createSandbox({
     throw new Error("createSandbox requires a non-empty root directory");
   }
 
+  const driver = getEvalDriver(provider);
   const resolvedRoot = resolve(root);
   assertNoAncestorInstructions(resolvedRoot, exists, realpath, platform);
 
   const dir = join(resolvedRoot, runId);
   const home = join(dir, "home");
-  const configDir = join(home, ".claude");
+  const configDir = join(home, driver.configDirName);
   const rockyHome = join(dir, "rocky-home");
   const taskDir = join(dir, "task");
   const prefixDir = join(dir, "prefix");
@@ -668,14 +683,17 @@ export async function createSandbox({
     const sandboxEnv = scrubEnv(env, platform);
     const cleanedPath = stripRockyFromPath(getPathValue(env), platform);
     const sep = platform === "win32" ? ";" : ":";
-    const nextPath = prefixBin === null
-      ? cleanedPath
-      : [prefixBin, cleanedPath].filter(Boolean).join(sep);
+    // Rocky setup discovers the provider on PATH. Forward only the selected
+    // launcher, including when its original bin was removed for containing Rocky.
+    const providerBin = prefixBin && providerExecutable
+      ? exposeProviderLauncher(dir, driver.buildCommand("").file, providerExecutable, platform)
+      : null;
+    const nextPath = [prefixBin, providerBin, cleanedPath].filter(Boolean).join(sep);
     setSinglePath(sandboxEnv, nextPath);
 
     sandboxEnv.HOME = home;
     sandboxEnv.USERPROFILE = home;
-    sandboxEnv.CLAUDE_CONFIG_DIR = configDir;
+    sandboxEnv[driver.configEnvName] = configDir;
     sandboxEnv.ROCKY_HOME = rockyHome;
 
     if (arm === "after") {
@@ -683,31 +701,9 @@ export async function createSandbox({
       sandboxEnv.ROCKY_ATTEMPT_ARM = "shown";
     }
 
-    const secrets = [];
-    if (auth !== undefined) {
-      if (auth.kind === "token") {
-        const token = env.ROCKY_EVAL_OAUTH_TOKEN;
-        if (typeof token !== "string" || token.length === 0) {
-          throw new Error("Missing ROCKY_EVAL_OAUTH_TOKEN in harness environment");
-        }
-        sandboxEnv.CLAUDE_CODE_OAUTH_TOKEN = token;
-        secrets.push(token);
-      } else if (auth.kind === "copy-credentials") {
-        if (typeof auth.from !== "string" || auth.from.length === 0) {
-          throw new Error("copy-credentials auth requires a 'from' file path");
-        }
-        if (!existsSync(auth.from) || !lstatSync(auth.from).isFile()) {
-          throw new Error(`Credentials file does not exist or is not a file: ${auth.from}`);
-        }
-        const dest = join(configDir, ".credentials.json");
-        copyFileSync(auth.from, dest);
-        if (platform !== "win32") chmodSync(dest, 0o600);
-      } else {
-        throw new Error(`Unsupported auth kind: ${String(auth.kind)}`);
-      }
-    }
-
-    if (arm === "before" || arm === "after") {
+    /** @type {import("./drivers/index.mjs").SandboxContext["installRocky"]} */
+    const installRocky = (secrets = []) => {
+      if (prefixBin === null) return undefined;
       if (typeof tgz !== "string" || tgz.length === 0 || !existsSync(tgz)) {
         throw new Error(`Arm '${arm}' requires an existing tarball path`);
       }
@@ -739,60 +735,32 @@ export async function createSandbox({
         throw new Error(`Installed rocky shim is missing: ${rockyShim}`);
       }
 
-      const runSetupMcp = () => runCommand(
-        rockyShim,
-        ["setup", "--harness", "claude-code", "--yes"],
-        { cwd: taskDir, env: sandboxEnv, platform, timeout: 60_000 },
-      );
-      // The first `claude mcp list` health probe after a fresh install can miss
-      // the cold start of the new package and exit 1 although the registration
-      // was written. Setup is idempotent, so one rerun verifies the same entry.
-      let setupMcp = runSetupMcp();
-      if (setupMcp.status !== 0) setupMcp = runSetupMcp();
-      if (setupMcp.status !== 0) {
-        throw new Error(
-          redactText(
-            `rocky setup --harness claude-code --yes failed (exit ${setupMcp.status}): ${setupMcp.stderr || setupMcp.stdout}`,
-            secrets,
-          ),
-        );
-      }
-
-      // `rocky setup --agent-hooks` intentionally requires a TTY for consent.
-      // Pass a one-shot preload solely to this setup child so the absolute shim
-      // accepts "y\n" without polluting sandboxEnv.
-      const ttyPreload = join(dir, ".tty-confirm-preload.cjs");
-      writeFileSync(
-        ttyPreload,
-        'Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });\n',
-        "utf8",
-      );
-      try {
-        const hookEnv = {
-          ...sandboxEnv,
-          NODE_OPTIONS: `--require ${JSON.stringify(
-            platform === "win32" ? ttyPreload.replaceAll("\\", "/") : ttyPreload,
-          )}`,
-        };
-        const setupHooks = runCommand(
-          rockyShim,
-          ["setup", "--agent-hooks"],
-          { cwd: taskDir, env: hookEnv, input: "y\n", platform, timeout: 60_000 },
-        );
-        if (setupHooks.status !== 0) {
+      const setupRocky = (args, { env: setupEnv = sandboxEnv, input, retry = false } = {}) => {
+        const runSetup = () => runCommand(rockyShim, args, {
+          cwd: taskDir, env: setupEnv, input, platform, timeout: 60_000,
+        });
+        let result = runSetup();
+        if (retry && result.status !== 0) result = runSetup();
+        if (result.status !== 0) {
           throw new Error(
             redactText(
-              `rocky setup --agent-hooks failed (exit ${setupHooks.status}): ${setupHooks.stderr || setupHooks.stdout}`,
+              `rocky ${args.join(" ")} failed (exit ${result.status}): ${result.stderr || result.stdout}`,
               secrets,
             ),
           );
         }
-      } finally {
-        rmSync(ttyPreload, { force: true });
-      }
-    }
+      };
+
+      // The first MCP health probe can time out on a cold start. Registration
+      // is idempotent, so retry it once.
+      setupRocky(["setup", "--harness", provider, "--yes"], { retry: true });
+      return setupRocky;
+    };
+
+    driver.setupSandbox({ dir, configDir, env, sandboxEnv, auth, platform, installRocky });
 
     return {
+      provider,
       dir,
       home,
       configDir,

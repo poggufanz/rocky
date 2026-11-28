@@ -14,7 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validatePlatformManifests } from "./platform-packages.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { RUNTIME_DEPENDENCY_PINS, validatePlatformManifests } from "./platform-packages.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
@@ -447,10 +448,20 @@ function hasVisibleStaleReleaseStatus(text) {
 function validLockPackageEntries(value) {
   const packages = objectRecord(value);
   if (packages === undefined) return false;
+  const runtimePackages = new Map(Object.entries(RUNTIME_DEPENDENCY_PINS)
+    .map(([name, version]) => [`node_modules/${name}`, version]));
+  if (![...runtimePackages.keys()].every((path) => Object.hasOwn(packages, path))) return false;
   return Object.entries(packages).every(([path, entry]) => {
     if (path === "") return true;
     const packageRecord = objectRecord(entry);
-    return packageRecord !== undefined && packageRecord.dev === true;
+    if (packageRecord === undefined) return false;
+    const pin = runtimePackages.get(path);
+    if (pin === undefined) return packageRecord.dev === true;
+    return packageRecord.version === pin
+      && packageRecord.dev !== true
+      && isEmptyDependencyRecord(packageRecord.dependencies)
+      && isEmptyDependencyRecord(packageRecord.optionalDependencies)
+      && isEmptyDependencyRecord(packageRecord.peerDependencies);
   });
 }
 
@@ -567,7 +578,7 @@ export function validateReleaseTruth(snapshot) {
       || !isEmptyBundleMetadata(lock.bundleDependencies)
       || !validLockPackageEntries(lockPackages)
       || lockRoot === undefined || lockRoot.name !== PACKAGE_NAME || lockRoot.version !== expectedVersion
-      || !isEmptyDependencyRecord(lockRoot.dependencies) || !isEmptyDependencyRecord(lockRoot.optionalDependencies)
+      || !isDeepStrictEqual(lockRoot.dependencies, RUNTIME_DEPENDENCY_PINS) || !isEmptyDependencyRecord(lockRoot.optionalDependencies)
       || !isEmptyDependencyRecord(lockRoot.peerDependencies) || !isEmptyDependencyRecord(lockRoot.peerDependenciesMeta)
       || !isEmptyBundleMetadata(lockRoot.bundledDependencies) || !isEmptyBundleMetadata(lockRoot.bundleDependencies)
       || !isCanonicalBinary(lockRoot.bin, "dist/index.js")) {
@@ -695,7 +706,7 @@ export function validateGitReleaseState(state) {
 export function validateReleaseMetadata(value) {
   try {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-    return isEmptyDependencyRecord(value.dependencies)
+    return isDeepStrictEqual(value.dependencies, RUNTIME_DEPENDENCY_PINS)
       && isEmptyDependencyRecord(value.optionalDependencies)
       && isEmptyDependencyRecord(value.peerDependencies)
       && isEmptyDependencyRecord(value.peerDependenciesMeta)
@@ -748,6 +759,7 @@ export function allowedPackPath(path) {
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
+    || path.startsWith("dist/harnesses/")
     || path.startsWith("dist/shell/")
     || path.startsWith("dist/gui/")
     || path.startsWith("dist/listening/")
@@ -807,6 +819,7 @@ function parseManifest(stdout) {
   }
   for (const required of [
     "LICENSE", "README.md", "CHANGELOG.md", "package.json", "dist/index.js", "dist/agent/schema.js",
+    "dist/harnesses/index.js",
   ]) {
     if (!paths.includes(required)) throw new StepError(`required packed path is missing: ${required}`);
   }

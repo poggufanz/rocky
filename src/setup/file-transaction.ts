@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import type { Stats } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { directorySyncCapability } from "./directory-sync.js";
 
 /**
@@ -176,6 +176,57 @@ function fileIdentityMatches(path: string, identity: FileIdentity): boolean {
       && sameIdentity(metadata, identity);
   } catch {
     return false;
+  }
+}
+
+const MAX_RENAME_ATTEMPTS = 5;
+const INITIAL_RENAME_DELAY_MS = 25;
+
+function renameWithRetry(
+  from: string,
+  to: string,
+  guard: FileMutationGuard | undefined,
+  expectedSource?: FileIdentity,
+): boolean {
+  requireMutationGuard(guard);
+  if (expectedSource !== undefined && !fileIdentityMatches(from, expectedSource)) return false;
+  if (process.platform !== "win32") {
+    renameSync(from, to);
+    return true;
+  }
+
+  const source = lstatSync(from);
+  if (expectedSource !== undefined && !sameIdentity(source, expectedSource)) return false;
+  const destination = lstatSync(to, { throwIfNoEntry: false });
+  const directoryPath = dirname(to);
+  const directory = lstatSync(directoryPath);
+  if (!source.isFile() || !directory.isDirectory() || (destination !== undefined && !destination.isFile())) {
+    throw new FileMutationGuardChangedError();
+  }
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(from, to);
+      return true;
+    } catch (error) {
+      const code = errorCode(error);
+      if (attempt + 1 === MAX_RENAME_ATTEMPTS || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw error;
+    }
+
+    // The writer is synchronous. Four retries wait at most 375ms in total.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, INITIAL_RENAME_DELAY_MS * 2 ** attempt);
+    requireMutationGuard(guard);
+    const currentDirectory = lstatSync(directoryPath, { throwIfNoEntry: false });
+    const destinationUnchanged = destination === undefined
+      ? lstatSync(to, { throwIfNoEntry: false }) === undefined
+      : fileIdentityMatches(to, destination);
+    if (!currentDirectory?.isDirectory() || !sameIdentity(currentDirectory, directory) || !destinationUnchanged) {
+      throw new FileMutationGuardChangedError();
+    }
+    const currentSource = lstatSync(from, { throwIfNoEntry: false });
+    if (!currentSource?.isFile() || !sameIdentity(currentSource, source) || currentSource.nlink !== source.nlink) {
+      return false;
+    }
   }
 }
 
@@ -637,6 +688,7 @@ function writeManifest(
   const temporaryPath = join(transactionDirectory, "manifest.tmp");
   const manifest: TransactionManifest = { version: 1, state, target };
   let descriptor: number | undefined;
+  let cleanupAllowed = true;
   try {
     requireMutationGuard(guard);
     descriptor = openSync(temporaryPath, "wx", 0o600);
@@ -644,9 +696,11 @@ function writeManifest(
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    requireMutationGuard(guard);
-    renameSync(temporaryPath, manifestPath);
+    if (!renameWithRetry(temporaryPath, manifestPath, guard)) throw new FileMutationGuardChangedError();
     syncDirectory(transactionDirectory);
+  } catch (error) {
+    cleanupAllowed = !(error instanceof FileMutationGuardChangedError);
+    throw error;
   } finally {
     if (descriptor !== undefined) {
       try {
@@ -655,7 +709,7 @@ function writeManifest(
         // Caller reports a secret-free transaction recovery path.
       }
     }
-    if (mutationGuardUnchanged(guard) && pathExists(temporaryPath)) {
+    if (cleanupAllowed && mutationGuardUnchanged(guard) && pathExists(temporaryPath)) {
       try {
         requireMutationGuard(guard);
         rmSync(temporaryPath, { force: true });
@@ -673,7 +727,9 @@ function readManifest(transactionDirectory: string, target: string): Transaction
     );
     if (!isObject(parsed)
       || parsed.version !== 1
-      || parsed.target !== target
+      || typeof parsed.target !== "string"
+      || parsed.target.length === 0
+      || resolve(parsed.target) !== resolve(target)
       || (parsed.state !== "prepared"
         && parsed.state !== "displaced"
         && parsed.state !== "published"
@@ -797,6 +853,8 @@ function ambiguousOutcome(
  * `path`). When neither holds, the directory — and the artifact inside it
  * that cannot be vouched for — is left in place and named, so the caller has
  * something concrete to inspect rather than a dead end with no remedy.
+ * A pre-read caller can also protect staged artifacts that a writer may
+ * still own, even when a live target appears during recovery.
  *
  * This decision's own `isLiveRegularFile(path)` check is inlined into the
  * condition below, not bound to a named local: a local in function scope
@@ -843,10 +901,11 @@ function resolveUndisplacedTransaction(
   transactionDirectory: string,
   path: string,
   guard: FileMutationGuard | undefined,
+  preservePrepared: boolean,
 ): FileTransactionRecoveryResult {
   const preparedArtifactPath = join(transactionDirectory, "prepared");
   const linkProbePath = join(transactionDirectory, "link-probe");
-  if (!isLiveRegularFile(path)
+  if ((preservePrepared || !isLiveRegularFile(path))
     && (pathExists(preparedArtifactPath) || pathExists(linkProbePath))) {
     return {
       status: "manual",
@@ -870,7 +929,7 @@ function resolveUndisplacedTransaction(
     };
   }
   if ((pathExists(preparedArtifactPath) || pathExists(linkProbePath))
-    && (!mutationGuardUnchanged(guard)
+    && (preservePrepared || !mutationGuardUnchanged(guard)
       || !discardPrepared(transactionDirectory, preparedArtifactPath, linkProbePath))) {
     return {
       status: "manual",
@@ -917,6 +976,7 @@ function resolveUndisplacedTransaction(
 export function recoverFileTransaction(
   path: string,
   guard?: FileMutationGuard,
+  { preserveUndisplacedPrepare = false }: { preserveUndisplacedPrepare?: boolean } = {},
 ): FileTransactionRecoveryResult {
   for (const transactionDirectory of transactionDirectories(path)) {
     const manifest = readManifest(transactionDirectory, path);
@@ -942,7 +1002,10 @@ export function recoverFileTransaction(
     // artifact itself, whether discarding is safe (see its own doc comment).
     if ((manifest.state === "prepared" || manifest.state === "published")
       && !pathExists(displacedPath)) {
-      return resolveUndisplacedTransaction(transactionDirectory, path, guard);
+      const preservePrepared = preserveUndisplacedPrepare && manifest.state === "prepared";
+      // The writer may still be between staging and displacement.
+      if (preservePrepared && isLiveRegularFile(path)) continue;
+      return resolveUndisplacedTransaction(transactionDirectory, path, guard, preservePrepared);
     }
 
     if (manifest.state === "prepared"
@@ -1189,13 +1252,13 @@ export function recoverFileTransaction(
         },
       };
     } else {
-      // Both target and displaced backup are absent: `resolveUndisplacedTransaction`
-      // applies the same artifact-driven proof used above — safe to discard
-      // only when `path` is live (it is not, here) or the staged artifact
-      // does not exist; otherwise the directory is retained and named
-      // rather than guessed away (the same reasoning extended to this
-      // fallback, not just the state-gated fast path above it).
-      return resolveUndisplacedTransaction(transactionDirectory, path, guard);
+      // The displaced phase proves a prior target existed. Keep the journal
+      // when neither its original pathname nor its backup survives.
+      return {
+        status: "manual",
+        recoveryPath: transactionDirectory,
+        outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+      };
     }
   }
   return { status: "clear" };
@@ -1436,8 +1499,7 @@ export function atomicWriteBytesIfUnchanged(
 
     recoveryPath = join(transactionDirectory, "displaced");
     try {
-      requireMutationGuard(guard);
-      if (priorIdentity !== undefined && !fileIdentityMatches(path, priorIdentity)) {
+      if (!renameWithRetry(path, recoveryPath, guard, priorIdentity)) {
         if (removeTransaction(transactionDirectory)) {
           transactionExists = false;
           temporaryExists = false;
@@ -1449,7 +1511,6 @@ export function atomicWriteBytesIfUnchanged(
           outcome: ambiguousOutcome(transactionDirectory, path, undefined, destinationPublished),
         };
       }
-      renameSync(path, recoveryPath);
       recoveryExists = true;
     } catch (error) {
       if (errorCode(error) === "ENOENT") {

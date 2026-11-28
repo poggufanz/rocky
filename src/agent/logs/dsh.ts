@@ -1,8 +1,10 @@
 import { closeSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
-import { join, basename, dirname } from "node:path";
+import { join } from "node:path";
 import * as zlib from "node:zlib";
+import { createDshTranscriptReducer } from "../../harnesses/decoders/dsh.js";
+import { appendTranscriptRationales } from "./scan.js";
 import type { CanonicalRationaleEvent, LogAdapter } from "./types.js";
 
 /**
@@ -30,20 +32,6 @@ const MAX_DISCOVERED_FILES = 5;
 /** True when the runtime Node build ships zstd (>= 22.15). Never throws. */
 export function zstdAvailable(): boolean {
   return typeof zlibMaybeZstd.zstdDecompressSync === "function";
-}
-
-function isRecord(obj: unknown): obj is Record<string, unknown> {
-  return typeof obj === "object" && obj !== null && !Array.isArray(obj);
-}
-
-/**
- * A first line is a SessionHeader only when it looks like one: it carries
- * `session`/`header`/`version` fields, or neither `type` nor `seq`. Anything
- * else is a real event and must not be swallowed by header handling.
- */
-function looksLikeHeader(obj: Record<string, unknown>): boolean {
-  if ("session" in obj || "header" in obj || "version" in obj) return true;
-  return obj.type === undefined && obj.seq === undefined;
 }
 
 function isFileWithSize(path: string): number | undefined {
@@ -141,10 +129,11 @@ function scan(_repoCwd: string, logPath: string, fromOffset: number, maxBytes: n
       return none;
     }
     const events: CanonicalRationaleEvent[] = [];
-    let sessionId = basename(dirname(logPath)); // <session> path segment fallback
+    // Legacy scans accept any nonempty session string from the header.
+    const reducer = createDshTranscriptReducer({ logPath }, ({ session }) =>
+      typeof session === "string" && session.length > 0 ? session : undefined);
     let highestSeq = fromOffset;
     let previousNewSeq: number | undefined;
-    let firstLine = true;
     for (const rawLine of text.split("\n")) {
       const trimmed = rawLine.trim();
       if (trimmed.length === 0) continue;
@@ -154,20 +143,8 @@ function scan(_repoCwd: string, logPath: string, fromOffset: number, maxBytes: n
       } catch {
         continue; // corrupt line skipped, never fatal
       }
-      if (firstLine) {
-        firstLine = false;
-        if (isRecord(obj) && looksLikeHeader(obj)) {
-          // SessionHeader: tolerant; only the session id is taken from it.
-          if (typeof obj.session === "string" && obj.session.length > 0) {
-            sessionId = obj.session;
-          }
-          continue;
-        }
-        // Header-less log: fall through and parse the first line as an event.
-      }
-      if (!isRecord(obj)) continue;
-      const seq = obj.seq;
-      if (typeof seq !== "number" || !Number.isFinite(seq)) continue;
+      const { seq, events: batch } = reducer.consumeRecord(obj, fromOffset);
+      if (seq === undefined) continue;
       if (seq > highestSeq) highestSeq = seq;
       if (seq <= fromOffset) continue; // already captured in an earlier scan
       if (previousNewSeq !== undefined && seq > previousNewSeq + 1) {
@@ -177,23 +154,9 @@ function scan(_repoCwd: string, logPath: string, fromOffset: number, maxBytes: n
         process.stderr.write(`rocky: dsh log ${logPath}: seq gap ${previousNewSeq} -> ${seq}\n`);
       }
       previousNewSeq = seq;
-      const data = isRecord(obj.data) ? obj.data : undefined;
-      const text2 = data && typeof data.text === "string" && data.text.length > 0 ? data.text
-        : data && typeof data.reasoning === "string" ? data.reasoning
-        : undefined;
-      const isReasoning = obj.type === "reasoning" || (data !== undefined && typeof data.reasoning === "string");
-      if (!isReasoning || text2 === undefined || text2.length === 0) continue;
-      events.push({
-        agent: "dsh",
-        sessionId,
-        turnRef: String(seq),
-        ts: typeof obj.time === "number" && Number.isFinite(obj.time) ? obj.time : 0,
-        text: text2,
-        fidelity: "raw",
-        source: "log-thinking",
-        logPath,
-      });
+      appendTranscriptRationales(events, batch);
     }
+    appendTranscriptRationales(events, reducer.finish());
     return { events, nextOffset: highestSeq };
   } catch {
     return none;

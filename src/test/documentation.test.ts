@@ -802,8 +802,9 @@ test("README and CLI help avoid forbidden universal-support and evidence overcla
   }
 });
 
-test("README states zero runtime/optional dependencies, reusing package metadata as source of truth", () => {
-  assert.match(readmePage, /no JavaScript runtime dependencies/i, "README must state there are no JavaScript runtime dependencies");
+test("README states the runtime dependency and current setup comment behavior", () => {
+  assert.match(readmePage, /single JavaScript runtime dependency, `jsonc-parser`/i);
+  assert.match(readmePage, /MCP setup paths that accept comments rewrite the config as plain JSON/);
 });
 
 test("documentation names one canonical source and package root", () => {

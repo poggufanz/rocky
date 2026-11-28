@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -14,8 +15,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ACCEPT_MAX_BUFFER_BYTES, accept, runTargetCommand } from "../accept.mjs";
@@ -127,6 +129,130 @@ function makeFakeDeps(overrides = {}) {
     ...overrides,
   };
 }
+
+function singleRunOptions(base, overrides = {}) {
+  return {
+    set: "v1",
+    outDir: join(base, "out"),
+    rootDir: join(base, "sbx"),
+    cacheDir: join(base, "cache"),
+    beforeRef: "31128bc",
+    afterRef: "origin/main",
+    auth: { kind: "token" },
+    arms: ["before"],
+    k: 1,
+    only: ["SMOKE"],
+    ...overrides,
+  };
+}
+
+test("resume rejects a run restored from another provider and accepts legacy Claude records", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "rocky-restored-provider-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const opts = singleRunOptions(base);
+  const deps = makeFakeDeps();
+  await runBatch(opts, deps);
+  const runPath = join(opts.outDir, "runs", "SMOKE-before-b1", "run.json");
+  const saved = JSON.parse(readFileSync(runPath, "utf8"));
+  writeFileSync(runPath, JSON.stringify({ ...saved, provider: "codex" }));
+  await assert.rejects(runBatch(opts, deps), (error) => {
+    assert.ok(error instanceof BatchIncompleteError);
+    assert.deepEqual(error.incomplete, { malformed: 1, publishFailed: 0, missing: 1 });
+    return true;
+  });
+  assert.equal(JSON.parse(readFileSync(runPath, "utf8")).provider, "codex");
+
+  delete saved.provider;
+  writeFileSync(runPath, JSON.stringify(saved));
+  const resumed = await runBatch(opts, deps);
+  assert.equal(resumed.ran, 0);
+  assert.equal(resumed.skipped, 1);
+});
+
+test("artifact copies only receive scanned bytes and token-bearing names never reach the output", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "rocky-artifact-prepublish-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const nameToken = "fixture-secret-in-name-123";
+  const contentToken = "fixture-secret-in-body-456";
+  const cleanBytes = Buffer.alloc(70 * 1024, 0xff);
+  const opts = singleRunOptions(base, { secrets: [nameToken, contentToken] });
+  const copies = [];
+  let taskDir;
+  await assert.rejects(runBatch(opts, makeFakeDeps({
+    materializeTask: async (_task, sandbox) => {
+      taskDir = sandbox.taskDir;
+      mkdirSync(join(taskDir, `a-${nameToken}`));
+      writeFileSync(join(taskDir, `a-${nameToken}`, "file"), "irrelevant");
+      writeFileSync(join(taskDir, `b-${nameToken}.txt`), "irrelevant");
+      writeFileSync(join(taskDir, "c-secret.txt"), "x".repeat(64 * 1024 - 5) + contentToken);
+      writeFileSync(join(taskDir, "d-clean.txt"), cleanBytes);
+      writeFileSync(join(sandbox.rockyHome, "memory.jsonl"), contentToken);
+    },
+    copyFileSync: (from, to) => {
+      copies.push(basename(to));
+      assert.equal(JSON.parse(readFileSync(join(opts.outDir, "batch.json"), "utf8")).halted?.reason, "token_leak");
+      writeFileSync(join(taskDir, "d-clean.txt"), contentToken);
+      copyFileSync(from, to);
+    },
+  })), (error) => error instanceof BatchLeakError);
+  assert.deepEqual(copies, ["d-clean.txt"]);
+  const dir = join(opts.outDir, "runs", "SMOKE-before-b1");
+  assert.deepEqual(readdirSync(join(dir, "final")), ["d-clean.txt"]);
+  assert.deepEqual(readFileSync(join(dir, "final", "d-clean.txt")), cleanBytes);
+  assert.deepEqual(readdirSync(join(dir, "rocky-home")), []);
+  const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
+  assert.equal(run.invalid, "token_leak");
+  assert.deepEqual(run.quarantined, [
+    "final/a-<redacted>", "final/b-<redacted>.txt", "final/c-secret.txt", "rocky-home/memory.jsonl",
+  ]);
+});
+
+test("artifact names created during acceptance halt the batch and are quarantined", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "rocky-artifact-acceptance-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const token = "fixture-acceptance-name-secret-123";
+  const opts = singleRunOptions(base, { secrets: [token] });
+  await assert.rejects(runBatch(opts, makeFakeDeps({
+    accept: async (_task, finalDir) => {
+      const nested = join(finalDir, "results");
+      mkdirSync(nested);
+      writeFileSync(join(nested, `file-${token}.txt`), "fixture bytes");
+      mkdirSync(join(finalDir, `dir-${token}`));
+      writeFileSync(join(finalDir, `dir-${token}`, "result.txt"), "fixture bytes");
+      return { solved: true, reason: "fixture" };
+    },
+  })), (error) => error instanceof BatchLeakError);
+
+  const batch = JSON.parse(readFileSync(join(opts.outDir, "batch.json"), "utf8"));
+  assert.equal(batch.halted?.reason, "token_leak");
+  const dir = join(opts.outDir, "runs", "SMOKE-before-b1");
+  const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
+  assert.equal(run.invalid, "token_leak");
+  assert.deepEqual(run.quarantined, ["final/dir-<redacted>", "final/results/file-<redacted>.txt"]);
+  assert.deepEqual(readdirSync(join(dir, "final")).sort(), ["results", "solution.txt"]);
+  assert.deepEqual(readdirSync(join(dir, "final", "results")), []);
+});
+
+test("an unreadable source artifact invalidates the run and cannot reach grading or output", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "rocky-artifact-unreadable-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const opts = singleRunOptions(base, { secrets: ["fixture-unreadable-artifact-secret"] });
+  let graded = false;
+  await runBatch(opts, makeFakeDeps({
+    openFile: async (path, flags) => {
+      if (basename(path) === "solution.txt") throw new Error("simulated unreadable artifact");
+      return openFile(path, flags);
+    },
+    accept: async () => { graded = true; return { solved: true, reason: "fixture" }; },
+  }));
+  assert.equal(graded, false);
+  const dir = join(opts.outDir, "runs", "SMOKE-before-b1");
+  assert.deepEqual(readdirSync(join(dir, "final")), []);
+  const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
+  assert.equal(run.invalid, "harness_crash");
+  assert.equal(run.accept, null);
+  assert.deepEqual(run.scanErrors, ["final/solution.txt"]);
+});
 
 describe("schedule and mulberry32", () => {
   test("mulberry32 produces deterministic numbers in [0, 1)", () => {

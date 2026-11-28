@@ -1,11 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  constants as fsConstants,
   copyFileSync,
   createWriteStream,
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -16,18 +18,17 @@ import {
 } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { accept as defaultAccept } from "./accept.mjs";
-import { materializeTask as defaultMaterializeTask, renderClaudeMd } from "./history.mjs";
+import { getEvalDriver, getEvalToken, savedEvalProvider } from "./drivers/index.mjs";
+import { materializeTask as defaultMaterializeTask, renderInstructions } from "./history.mjs";
 import {
   ownerBaseline as defaultOwnerBaseline,
   ownerCheck as defaultOwnerCheck,
 } from "./owner-guard.mjs";
 import {
-  CLAUDE_FLAGS,
-  MODEL,
   assertNoAncestorInstructions,
   assertOutsideWorkspace,
   buildCommandInvocation,
@@ -37,6 +38,7 @@ import {
   packArm as defaultPackArm,
   redactText,
   resolveExecutableOnPath,
+  resolveProviderExecutable,
 } from "./sandbox.mjs";
 
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
@@ -73,12 +75,13 @@ const USAGE = [
   "         [--k <n>] [--seed <n>] [--only <id1,id2,...>] [--retry-invalid]",
   "",
   "Options:",
+  "  --provider <name>      claude-code (default) or codex",
   "  --set <v1|v2>          Task set to run: 'v1' or 'v2' (required)",
   "  --arms <list>          Comma-separated arms to schedule (subset of none,before,after; default: none,before,after)",
   "  --out <dir>            Output directory (must lie outside repo and enclosing workspace)",
   "  --before <sha>         Git commit/ref for the 'before' Rocky arm",
   "  --after <sha>          Git commit/ref for the 'after' Rocky arm",
-  "  --auth token           Authentication mode: 'token' only (reads ROCKY_EVAL_OAUTH_TOKEN; copy-credentials is disabled for batches)",
+  "  --auth token           Claude uses ROCKY_EVAL_OAUTH_TOKEN. Codex uses ROCKY_EVAL_CODEX_API_KEY or ROCKY_EVAL_OPENAI_API_KEY.",
   `  --concurrency <n>      Concurrent runs (default: ${DEFAULT_CONCURRENCY})`,
   "  --root <dir>           Sandbox root directory (default: <os.tmpdir>/rocky-eval)",
   "  --cache <dir>          Tarball pack cache directory (default: <out>/../pack-cache; must be outside workspace)",
@@ -304,23 +307,48 @@ function containsAnySecret(text, secrets) {
   return false;
 }
 
+function createStreamSecretScanner(secrets, onLeak) {
+  const needles = secrets.map((secret) => Buffer.from(secret, "utf8"));
+  const holdback = Math.max(1, ...needles.map((needle) => needle.length)) - 1;
+  let tail = Buffer.alloc(0);
+  let leaked = false;
+  return {
+    consume(chunk) {
+      if (leaked || needles.length === 0) return;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      const combined = tail.length > 0 ? Buffer.concat([tail, bytes]) : bytes;
+      leaked = containsAnySecretBuffer(combined, needles);
+      if (leaked) {
+        tail = Buffer.alloc(0);
+        onLeak?.();
+      } else if (holdback > 0) {
+        tail = Buffer.from(combined.subarray(Math.max(0, combined.length - holdback)));
+      }
+    },
+    getLeaked: () => leaked,
+  };
+}
+
 /**
  * Incremental streaming file writer that redacts secrets split across chunk boundaries
  * by holding back `maxSecretLength - 1` characters between writes, preserving UTF-16
  * surrogate pairs and propagating writable backpressure.
  * @param {string} filePath
  * @param {readonly string[]} [secrets]
- * @param {{ stream?: import("node:stream").Writable }} [options]
+ * @param {{ stream?: import("node:stream").Writable, onLeak?: () => void }} [options]
  */
 export function createRedactingFileWriter(filePath, secrets = [], options = {}) {
   const normalizedSecrets = normalizeSecrets(secrets);
   const maxSecretLen = normalizedSecrets.reduce((max, s) => Math.max(max, s.length), 0);
   const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
+  const scanner = createStreamSecretScanner(normalizedSecrets, options.onLeak);
+  const secretPattern = normalizedSecrets.length > 0
+    ? new RegExp(normalizedSecrets.map((secret) => secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g")
+    : null;
   const decoder = new StringDecoder("utf8");
   const stream = options.stream ?? createWriteStream(filePath, { encoding: "utf8" });
 
   let pending = "";
-  let leaked = false;
   let ended = false;
   /** @type {Error | null} */
   let streamError = null;
@@ -341,36 +369,45 @@ export function createRedactingFileWriter(filePath, secrets = [], options = {}) 
     });
   });
 
+  function takeRedactedPrefix(text, end) {
+    if (!secretPattern) return { output: text.slice(0, end), end };
+    let from = 0;
+    let output = "";
+    secretPattern.lastIndex = 0;
+    for (let match = secretPattern.exec(text); match && match.index < end; match = secretPattern.exec(text)) {
+      output += text.slice(from, match.index) + "<redacted>";
+      from = secretPattern.lastIndex;
+      end = Math.max(end, from);
+    }
+    return { output: output + text.slice(from, end), end };
+  }
+
   /**
    * @param {Buffer | string} chunk
    * @returns {boolean}
    */
   function write(chunk) {
     if (ended) return true;
+    scanner.consume(chunk);
     const text = typeof chunk === "string" ? chunk : decoder.write(chunk);
     if (text.length === 0) return true;
     const combined = pending + text;
-    let processed = combined;
-    if (normalizedSecrets.length > 0 && containsAnySecret(combined, normalizedSecrets)) {
-      leaked = true;
-      processed = redactText(combined, normalizedSecrets);
-    }
-    let splitAt = holdback === 0 ? processed.length : processed.length - holdback;
+    let splitAt = combined.length - holdback;
     if (splitAt <= 0) {
-      pending = processed;
+      pending = combined;
       return true;
     }
     // Never split a UTF-16 surrogate pair at the holdback boundary.
-    const boundaryCodeUnit = processed.charCodeAt(splitAt - 1);
+    const boundaryCodeUnit = combined.charCodeAt(splitAt - 1);
     if (boundaryCodeUnit >= 0xd800 && boundaryCodeUnit <= 0xdbff) {
       splitAt -= 1;
     }
     if (splitAt <= 0) {
-      pending = processed;
+      pending = combined;
       return true;
     }
-    const flush = processed.slice(0, splitAt);
-    pending = processed.slice(splitAt);
+    const { output: flush, end } = takeRedactedPrefix(combined, splitAt);
+    pending = combined.slice(end);
     if (!streamError && !streamClosed && flush.length > 0) {
       return stream.write(flush);
     }
@@ -402,11 +439,7 @@ export function createRedactingFileWriter(filePath, secrets = [], options = {}) 
       ended = true;
       const tail = pending + decoder.end();
       pending = "";
-      let finalChunk = tail;
-      if (tail.length > 0 && normalizedSecrets.length > 0 && containsAnySecret(tail, normalizedSecrets)) {
-        leaked = true;
-        finalChunk = redactText(tail, normalizedSecrets);
-      }
+      const { output: finalChunk } = takeRedactedPrefix(tail, tail.length);
       if (!streamError && !streamClosed) {
         if (finalChunk.length > 0) {
           stream.write(finalChunk);
@@ -418,14 +451,14 @@ export function createRedactingFileWriter(filePath, secrets = [], options = {}) 
     if (streamError) {
       throw streamError;
     }
-    return { leaked };
+    return { leaked: scanner.getLeaked() };
   }
 
   return {
     write,
     end,
     onceDrain,
-    getLeaked: () => leaked,
+    getLeaked: scanner.getLeaked,
     getError: () => streamError,
   };
 }
@@ -467,7 +500,8 @@ export function pipeReadableToRedactingWriter(readable, writer, onChunk) {
  * Lines exceeding `maxLineBytes` are skipped for JSON parsing (still written to disk by the writer).
  * @param {number} [maxLineBytes]
  */
-export function createTranscriptParser(maxLineBytes = MAX_TRANSCRIPT_LINE_BYTES) {
+export function createTranscriptParser(maxLineBytes = MAX_TRANSCRIPT_LINE_BYTES, provider) {
+  const { summarizeResult } = getEvalDriver(provider);
   const decoder = new StringDecoder("utf8");
   let lineBuf = "";
   let lineBytes = 0;
@@ -493,12 +527,7 @@ export function createTranscriptParser(maxLineBytes = MAX_TRANSCRIPT_LINE_BYTES)
       malformedLineCount += 1;
       return;
     }
-    if (parsed.type === "result") {
-      lastResult = {
-        subtype: parsed.subtype,
-        is_error: parsed.is_error,
-      };
-    }
+    lastResult = summarizeResult(parsed) ?? lastResult;
   }
 
   function appendSegment(segment) {
@@ -575,7 +604,7 @@ export function createTranscriptParser(maxLineBytes = MAX_TRANSCRIPT_LINE_BYTES)
 }
 
 /**
- * Classify a completed Claude subprocess run into `invalid` status or `null`.
+ * Classify a completed provider subprocess run into `invalid` status or `null`.
  * Accepts either streaming summary `{ transcript, tokenLeaked, timedOut }` or raw strings.
  * @param {{
  *   transcript?: { nonEmptyLines: number, malformedLineCount: number, oversizedLineCount: number, lastResult: { subtype: unknown, is_error: unknown } | null },
@@ -583,6 +612,7 @@ export function createTranscriptParser(maxLineBytes = MAX_TRANSCRIPT_LINE_BYTES)
  *   rawStdout?: string,
  *   rawStderr?: string,
  *   exitCode?: number | null,
+ *   provider?: import("./drivers/index.mjs").EvalProvider,
  *   timedOut: boolean,
  *   secrets?: readonly string[],
  * }} params
@@ -593,6 +623,7 @@ export function classifyOutcome({
   tokenLeaked,
   rawStdout,
   rawStderr,
+  provider,
   timedOut,
   secrets = [],
 }) {
@@ -608,7 +639,7 @@ export function classifyOutcome({
 
   let summary = transcript;
   if (!summary) {
-    const parser = createTranscriptParser();
+    const parser = createTranscriptParser(undefined, provider);
     parser.write(String(rawStdout ?? ""));
     summary = parser.end();
   }
@@ -629,18 +660,7 @@ export function classifyOutcome({
  * Compare saved batch provenance against current invocation values.
  * Concurrency and `--retry-invalid` are allowed to differ.
  * @param {any} existing
- * @param {{
- *   beforeSha: string,
- *   afterSha: string,
- *   model: string,
- *   claudeFlags: readonly string[],
- *   claudeVersion: string,
- *   evaluatorCommit: string,
- *   taskSetSha256: string,
- *   seed: number,
- *   k: number,
- *   taskIds: readonly string[],
- * }} current
+ * @param {any} current
  * @returns {string[]}
  */
 export function diffBatchProvenance(existing, current) {
@@ -649,6 +669,17 @@ export function diffBatchProvenance(existing, current) {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
     return ["batch.json"];
   }
+  if (savedEvalProvider(existing) !== savedEvalProvider(current)) return ["provider"];
+
+  const normalize = (data) => data.provider === undefined ? {
+    ...data,
+    cliVersion: data.cliVersion ?? data.claudeVersion,
+    flags: data.flags ?? data.claudeFlags,
+    lanes: data.lanes ?? getEvalDriver("claude-code").lanes,
+    instructionsSha256: data.instructionsSha256 ?? data.claudeMdSha256,
+  } : data;
+  const saved = normalize(existing);
+  const requested = normalize(current);
   const existingSet = existing.set === undefined ? "v1" : existing.set;
   const currentSet = current.set === undefined ? "v1" : current.set;
   if (existingSet !== currentSet) {
@@ -658,21 +689,21 @@ export function diffBatchProvenance(existing, current) {
     "beforeSha",
     "afterSha",
     "model",
-    "claudeVersion",
+    "cliVersion",
     "evaluatorCommit",
     "taskSetSha256",
     "seed",
     "k",
   ];
   for (const field of scalarFields) {
-    if (existing[field] !== current[field]) {
+    if (saved[field] !== requested[field]) {
       diffs.push(field);
     }
   }
-  const arrayFields = ["claudeFlags", "arms", "taskIds"];
+  const arrayFields = ["flags", "lanes", "arms", "taskIds"];
   for (const field of arrayFields) {
-    const a = existing[field];
-    const b = current[field];
+    const a = saved[field];
+    const b = requested[field];
     const same = Array.isArray(a)
       && Array.isArray(b)
       && a.length === b.length
@@ -681,7 +712,42 @@ export function diffBatchProvenance(existing, current) {
       diffs.push(field);
     }
   }
+  const savedHashes = saved.instructionsSha256 ?? {};
+  const requestedHashes = requested.instructionsSha256 ?? {};
+  const hashKeys = new Set([...Object.keys(savedHashes), ...Object.keys(requestedHashes)]);
+  if ([...hashKeys].some((key) => savedHashes[key] !== requestedHashes[key])) {
+    diffs.push("instructionsSha256");
+  }
   return diffs;
+}
+
+function readBatchProvenance(batchPath) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(batchPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new ProvenanceMismatchError(
+      `Unable to read or parse existing batch provenance at ${batchPath}`,
+      ["batch.json"],
+    );
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new ProvenanceMismatchError(
+      `Batch provenance mismatch (${batchPath}); differing fields: batch.json`,
+      ["batch.json"],
+    );
+  }
+  return data;
+}
+
+function assertSavedProvider(existing, provider, batchPath) {
+  if (existing && savedEvalProvider(existing) !== provider) {
+    throw new ProvenanceMismatchError(
+      `Batch provenance mismatch (${batchPath}); differing fields: provider`,
+      ["provider"],
+    );
+  }
 }
 
 function getPathValue(env) {
@@ -695,13 +761,6 @@ function resolveGitExecutable(env, platform = process.platform) {
   const names = platform === "win32" ? ["git.exe", "git.cmd", "git"] : ["git"];
   const found = resolveExecutableOnPath(names, getPathValue(env), platform);
   if (!found) throw new Error("git executable is unavailable");
-  return found;
-}
-
-function resolveClaudeExecutable(env, platform = process.platform) {
-  const names = platform === "win32" ? ["claude.exe", "claude.cmd", "claude"] : ["claude"];
-  const found = resolveExecutableOnPath(names, getPathValue(env), platform);
-  if (!found) throw new Error("claude executable not found on PATH");
   return found;
 }
 
@@ -831,6 +890,8 @@ export function spawnProcess({
   stdoutPath,
   stderrPath,
   secrets = [],
+  provider,
+  onLeak,
   maxTranscriptLineBytes = MAX_TRANSCRIPT_LINE_BYTES,
 }) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -849,9 +910,9 @@ export function spawnProcess({
     let transcriptParser = null;
     if (streaming) {
       try {
-        stdoutWriter = createRedactingFileWriter(stdoutPath, secrets);
-        stderrWriter = createRedactingFileWriter(stderrPath, secrets);
-        transcriptParser = createTranscriptParser(maxTranscriptLineBytes);
+        stdoutWriter = createRedactingFileWriter(stdoutPath, secrets, { onLeak });
+        stderrWriter = createRedactingFileWriter(stderrPath, secrets, { onLeak });
+        transcriptParser = createTranscriptParser(maxTranscriptLineBytes, provider);
       } catch (error) {
         rejectPromise(error);
         return;
@@ -1165,7 +1226,7 @@ function pickUniqueQuarantineTarget(filePath, relPath, lstatFn = lstatSync) {
   throw new Error(`unable to allocate unique quarantine target for ${relPath}`);
 }
 
-async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile, onMatch = null) {
+async function fileContainsAnySecret(filePath, secretBuffers, openFn, onMatch, stage) {
   if (secretBuffers.length === 0) return false;
   const maxSecretLen = secretBuffers.reduce((max, buf) => Math.max(max, buf.length), 0);
   const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
@@ -1173,11 +1234,24 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile,
   const readBuf = Buffer.allocUnsafe(chunkSize);
   let tail = Buffer.alloc(0);
 
-  const fh = await openFn(filePath, "r");
+  const flags = stage
+    ? fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)
+    : "r";
+  const fh = await openFn(filePath, flags);
   try {
-    while (true) {
-      const { bytesRead } = await fh.read(readBuf, 0, chunkSize, null);
+    let opened;
+    if (stage) {
+      opened = await fh.stat();
+      if (!opened.isFile() || opened.dev !== stage.stat.dev || opened.ino !== stage.stat.ino) {
+        throw new Error("artifact source changed before it could be read");
+      }
+    }
+    let scannedBytes = 0;
+    while (!opened || scannedBytes < opened.size) {
+      const limit = opened ? Math.min(chunkSize, opened.size - scannedBytes) : chunkSize;
+      const { bytesRead } = await fh.read(readBuf, 0, limit, null);
       if (bytesRead === 0) break;
+      scannedBytes += bytesRead;
       const chunk = readBuf.subarray(0, bytesRead);
       const combined = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
       if (containsAnySecretBuffer(combined, secretBuffers)) {
@@ -1186,9 +1260,17 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile,
         }
         return true;
       }
+      if (stage) await stage.file.writeFile(chunk);
       if (holdback > 0) {
         const keep = Math.min(holdback, combined.length);
         tail = Buffer.from(combined.subarray(combined.length - keep));
+      }
+    }
+    if (opened) {
+      const after = await fh.stat();
+      if (scannedBytes !== opened.size || after.size !== opened.size
+        || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+        throw new Error("artifact source changed during the scan");
       }
     }
     return false;
@@ -1356,6 +1438,22 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
     for (const name of entries) {
       const fullPath = join(dirPath, name);
       const relPath = `${relPrefix}/${name}`;
+      if (containsAnySecret(relPath, normalizedSecrets)) {
+        const redactedPath = redactText(relPath, normalizedSecrets);
+        notifyHit(redactedPath);
+        try {
+          rmFn(fullPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 75 });
+          quarantined.push(redactedPath);
+        } catch (error) {
+          scanErrors.push(redactedPath);
+          quarantined.push({
+            path: redactedPath,
+            removed: false,
+            error: redactText(errorMessage(error), normalizedSecrets),
+          });
+        }
+        continue;
+      }
       let stat;
       try {
         stat = lstatFn(fullPath);
@@ -1388,7 +1486,8 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
       }
     }
   } catch {
-    // Still scan canonical top-level stream files even if listing workRunDir fails.
+    scanErrors.push(".");
+    // Still scan canonical top-level stream files if listing workRunDir fails.
   }
   for (const name of [
     ...Array.from(topLevelTranscripts).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
@@ -1403,105 +1502,82 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
 }
 
 /**
- * Copy `srcDir` into `destDir` excluding `.git`, using `lstat` only.
- * Checks `srcDir` itself before descending; never follows symlinks or junctions.
- * Copies regular files plainly with `copyFileSync` (preserving source mode).
- * @param {string} srcDir
- * @param {string} destDir
- * @param {typeof copyFileSync} [copyFile]
- * @returns {string[]}
+ * Publish only checked artifacts. Stage the bytes being scanned outside the
+ * output tree so a source edit between the scan and copy cannot leak.
  */
-function copyFinalWithoutGit(srcDir, destDir, copyFile = copyFileSync) {
-  mkdirSync(destDir, { recursive: true });
-  /** @type {string[]} */
-  const skippedLinks = [];
-  let rootStat;
-  try {
-    rootStat = lstatSync(srcDir);
-  } catch (error) {
-    const code = error && typeof error === "object" ? error.code : undefined;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      skippedLinks.push("final");
-      return skippedLinks;
-    }
-    throw error;
-  }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    skippedLinks.push("final");
-    return skippedLinks;
-  }
-  function walk(currentSrc, currentDest, relPrefix) {
-    const entries = readdirSync(currentSrc).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    for (const name of entries) {
-      if (name === ".git") continue;
-      const srcPath = join(currentSrc, name);
-      const destPath = join(currentDest, name);
-      const rel = relPrefix ? `${relPrefix}/${name}` : name;
-      const lstat = lstatSync(srcPath);
-      if (lstat.isSymbolicLink()) {
-        skippedLinks.push(`final/${rel}`);
-        continue;
-      }
-      if (lstat.isDirectory()) {
-        mkdirSync(destPath, { recursive: true });
-        walk(srcPath, destPath, rel);
-      } else if (lstat.isFile()) {
-        copyFile(srcPath, destPath);
-      }
-    }
-  }
-  walk(srcDir, destDir, "");
-  return skippedLinks;
-}
+async function publishSandboxArtifacts(sandbox, workRunDir, arm, secrets, deps, handlers) {
+  const needles = secrets.map((secret) => Buffer.from(secret, "utf8"));
+  let scratch;
 
-/**
- * Copy allowlisted files from `srcRockyHome` into `destRockyHome` using `lstat` only.
- * Checks `srcRockyHome` itself before reading children; never follows symlinks or junctions.
- * Copies regular files plainly with `copyFileSync` (preserving source mode).
- * @param {string} srcRockyHome
- * @param {string} destRockyHome
- * @param {string} arm
- * @param {typeof copyFileSync} [copyFile]
- * @returns {string[]}
- */
-function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, copyFile = copyFileSync) {
-  if (arm === "none") return [];
-  mkdirSync(destRockyHome, { recursive: true });
-  /** @type {string[]} */
-  const skippedLinks = [];
-  let rootStat;
-  try {
-    rootStat = lstatSync(srcRockyHome);
-  } catch (error) {
-    const code = error && typeof error === "object" ? error.code : undefined;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      skippedLinks.push("rocky-home");
-      return skippedLinks;
+  async function publishFile(source, target, relPath, stat) {
+    if (needles.length === 0) {
+      deps.copyFileSync(source, target);
+      return;
     }
-    throw error;
-  }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    skippedLinks.push("rocky-home");
-    return skippedLinks;
-  }
-  for (const name of ROCKY_HOME_ALLOWED_FILES) {
-    const srcPath = join(srcRockyHome, name);
-    let lstat;
+    scratch ??= mkdtempSync(join(tmpdir(), "rocky-eval-artifact-"));
+    const staged = join(scratch, basename(target));
     try {
-      lstat = lstatSync(srcPath);
-    } catch (error) {
-      const code = error && typeof error === "object" ? error.code : undefined;
-      if (code === "ENOENT" || code === "ENOTDIR") continue;
-      throw error;
+      const file = await openFile(staged, "wx", 0o600);
+      try {
+        if (await fileContainsAnySecret(source, needles, deps.openFile, () => handlers.onLeak(relPath), { file, stat })) {
+          return;
+        }
+        if (process.platform !== "win32") await file.chmod(stat.mode & 0o777);
+      } finally {
+        await file.close();
+      }
+      deps.copyFileSync(staged, target);
+    } finally {
+      rmSync(staged, { force: true });
     }
-    if (lstat.isSymbolicLink()) {
-      skippedLinks.push(`rocky-home/${name}`);
-      continue;
-    }
-    if (!lstat.isFile()) continue;
-    copyFile(srcPath, join(destRockyHome, name));
   }
-  return skippedLinks;
+
+  async function walk(source, relPath, allowedFiles) {
+    try {
+      const target = join(workRunDir, relPath);
+      mkdirSync(target, { recursive: true });
+      const rootStat = lstatOrNull(source, deps.lstatSync);
+      if (!rootStat?.isDirectory()) {
+        handlers.skippedLinks.push(relPath);
+        handlers.onError(relPath);
+        return;
+      }
+      const names = allowedFiles ?? deps.readdirSync(source).sort();
+      for (const name of names) {
+        if (name === ".git") continue;
+        const child = `${relPath}/${name}`;
+        if (!allowedFiles && containsAnySecret(child, secrets)) {
+          handlers.onLeak(child);
+          continue;
+        }
+        const src = join(source, name);
+        try {
+          const stat = allowedFiles ? lstatOrNull(src, deps.lstatSync) : deps.lstatSync(src);
+          if (!stat) continue;
+          if (containsAnySecret(child, secrets)) {
+            handlers.onLeak(child);
+          } else if (stat.isSymbolicLink()) {
+            handlers.skippedLinks.push(child);
+          } else if (stat.isDirectory() && !allowedFiles) {
+            await walk(src, child);
+          } else if (stat.isFile()) {
+            await publishFile(src, join(target, name), child, stat);
+          }
+        } catch (error) {
+          handlers.onError(child, error);
+        }
+      }
+    } catch (error) {
+      handlers.onError(relPath, error);
+    }
+  }
+
+  try {
+    await walk(sandbox.taskDir, "final");
+    if (arm !== "none") await walk(sandbox.rockyHome, "rocky-home", ROCKY_HOME_ALLOWED_FILES);
+  } finally {
+    if (scratch) removeTreeWithRetry(scratch);
+  }
 }
 
 function listNoneRockyHomeEntries(srcRockyHome, lstatFn = lstatSync) {
@@ -1584,7 +1660,7 @@ export function isValidRunJson(parsed) {
   return true;
 }
 
-function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
+function decideRunAction(runDir, provider, retryInvalid, lstatFn = lstatSync) {
   try {
     recoverInterruptedSwap(runDir, lstatFn);
 
@@ -1614,6 +1690,9 @@ function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
     }
     if (!isValidRunJson(existing)) {
       return { action: "malformed", reason: "malformed run.json structure" };
+    }
+    if (savedEvalProvider(existing) !== provider) {
+      return { action: "malformed", reason: `run.json provider mismatch (expected ${provider})` };
     }
 
     if (!retryInvalid) {
@@ -1647,7 +1726,7 @@ function hasRunArtifacts(workRunDir, arm, lstatFn = lstatSync, quarantinedSet = 
   return transcriptOk && stderrOk && finalOk && rockyOk;
 }
 
-function countMissingPublishedRuns(runsDir, planned, lstatFn = lstatSync) {
+function countMissingPublishedRuns(runsDir, planned, provider, lstatFn = lstatSync) {
   let missing = 0;
   for (const item of planned) {
     const runDir = join(runsDir, item.runId);
@@ -1678,6 +1757,7 @@ function countMissingPublishedRuns(runsDir, planned, lstatFn = lstatSync) {
       const parsed = JSON.parse(readFileSync(runJsonPath, "utf8"));
       if (
         !isValidRunJson(parsed)
+        || savedEvalProvider(parsed) !== provider
         || parsed.runId !== item.runId
         || parsed.taskId !== item.taskId
         || parsed.arm !== item.arm
@@ -1767,31 +1847,34 @@ function defaultGetHeadCommit() {
   return res.stdout.trim();
 }
 
-function defaultGetClaudeVersion() {
-  const toolEnv = buildToolEnv(process.env, process.platform);
-  const claudeExe = resolveClaudeExecutable(toolEnv, process.platform);
-  const res = runSyncNoShell(claudeExe, ["--version"], {
+function defaultGetCliVersion(executable, platform) {
+  const toolEnv = buildToolEnv(process.env, platform);
+  const res = runSyncNoShell(executable, ["--version"], {
     cwd: REPO_ROOT,
     env: toolEnv,
+    platform,
     timeout: 30_000,
   });
   if (res.status !== 0) {
-    throw new Error(`claude --version failed (exit ${res.status}): ${res.stderr.trim() || res.stdout.trim()}`);
+    throw new Error(`${executable} --version failed (exit ${res.status}): ${res.stderr.trim() || res.stdout.trim()}`);
   }
   return (res.stdout.trim() || res.stderr.trim() || "(unavailable)");
 }
 
-async function defaultRunClaude({ task, sandbox, timeoutMs, stdoutPath, stderrPath, secrets }) {
-  const claudeExe = resolveClaudeExecutable(sandbox.env, process.platform);
+async function defaultRunProvider({ driver, executable, platform, task, sandbox, timeoutMs, stdoutPath, stderrPath, secrets, onLeak }) {
+  const { args } = driver.buildCommand(task.prompt, driver.defaultModel, { taskDir: sandbox.taskDir, platform });
   return spawnProcess({
-    file: claudeExe,
-    args: [...CLAUDE_FLAGS, task.prompt],
+    file: executable,
+    args,
     cwd: sandbox.taskDir,
     env: sandbox.env,
+    provider: driver.id,
+    platform,
     timeoutMs,
     stdoutPath,
     stderrPath,
     secrets,
+    onLeak,
   });
 }
 
@@ -1819,6 +1902,7 @@ async function runWithConcurrency(items, concurrency, worker, shouldStop = () =>
  *   beforeRef: string,
  *   afterRef: string,
  *   auth: { kind: "token" },
+ *   provider?: import("./drivers/index.mjs").EvalProvider,
  *   secrets?: readonly string[],
  *   concurrency?: number,
  *   k?: number,
@@ -1867,15 +1951,17 @@ async function runWithConcurrency(items, concurrency, worker, shouldStop = () =>
  * }>} [overrides]
  */
 export async function runBatch(options, overrides = {}) {
+  const driver = getEvalDriver(options.provider);
+  const platform = options.platform ?? process.platform;
+  const getVersionOverride = driver.id === "claude-code" ? overrides.getClaudeVersion : undefined;
   const deps = {
     manifest: overrides.manifest ?? JSON.parse(readFileSync(MANIFEST_PATH, "utf8")),
     resolveCommit: overrides.resolveCommit ?? defaultResolveCommit,
     getHeadCommit: overrides.getHeadCommit ?? defaultGetHeadCommit,
-    getClaudeVersion: overrides.getClaudeVersion ?? defaultGetClaudeVersion,
     packArm: overrides.packArm ?? defaultPackArm,
     createSandbox: overrides.createSandbox ?? defaultCreateSandbox,
     materializeTask: overrides.materializeTask ?? defaultMaterializeTask,
-    runClaude: overrides.runClaude ?? defaultRunClaude,
+    runProvider: (driver.id === "claude-code" ? overrides.runClaude : undefined) ?? defaultRunProvider,
     accept: overrides.accept ?? defaultAccept,
     destroySandbox: overrides.destroySandbox ?? defaultDestroySandbox,
     sweepStrays: overrides.sweepStrays ?? ((dir) => sweepWin32Strays(dir)),
@@ -1891,7 +1977,7 @@ export async function runBatch(options, overrides = {}) {
     ownerHome: overrides.ownerHome ?? homedir(),
     ownerConfigDir: overrides.ownerConfigDir !== undefined
       ? overrides.ownerConfigDir
-      : (process.env.CLAUDE_CONFIG_DIR || undefined),
+      : (process.env[driver.configEnvName] || undefined),
     ownerRockyHome: overrides.ownerRockyHome !== undefined
       ? overrides.ownerRockyHome
       : (process.env.ROCKY_HOME || undefined),
@@ -1913,7 +1999,10 @@ export async function runBatch(options, overrides = {}) {
   const setName = validateTaskSet(options.set);
   const arms = parseArms(options.arms);
 
-  const secrets = normalizeSecrets(Array.isArray(options.secrets) ? options.secrets : []);
+  const secrets = normalizeSecrets([
+    ...(Array.isArray(options.secrets) ? options.secrets : []),
+    getEvalToken(driver),
+  ]);
   const redact = (value) => redactText(value, secrets);
 
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
@@ -1928,7 +2017,6 @@ export async function runBatch(options, overrides = {}) {
   const seed = options.seed ?? DEFAULT_SEED;
   const timeoutMs = options.timeoutMs ?? RUN_TIMEOUT_MS;
   const retryInvalid = Boolean(options.retryInvalid);
-  const platform = options.platform ?? process.platform;
 
   const outDir = resolve(options.outDir);
   const rootDir = resolve(options.rootDir);
@@ -1944,24 +2032,23 @@ export async function runBatch(options, overrides = {}) {
   const beforeSha = deps.resolveCommit(options.beforeRef);
   const afterSha = deps.resolveCommit(options.afterRef);
   const evaluatorCommit = deps.getHeadCommit();
-  const claudeVersion = redact(deps.getClaudeVersion());
   const taskSetSha256 =
     deps.manifest.taskSets?.[setName]
     ?? (setName === "v1" ? deps.manifest.taskSetSha256 : undefined);
 
-  const claudeMdSha256 = {
-    none: sha256Text(renderClaudeMd("none")),
-    before: sha256Text(renderClaudeMd("before")),
-    after: sha256Text(renderClaudeMd("after")),
-  };
+  const instructionsSha256 = Object.fromEntries(
+    ARMS.map((arm) => [arm, sha256Text(renderInstructions(arm, driver.id))]),
+  );
 
   const currentProvenance = {
+    provider: driver.id,
+    lanes: [...driver.lanes],
+    flags: [...driver.defaultFlags],
+    instructionsSha256,
     set: setName,
     beforeSha,
     afterSha,
-    model: MODEL,
-    claudeFlags: [...CLAUDE_FLAGS],
-    claudeVersion,
+    model: driver.defaultModel,
     evaluatorCommit,
     taskSetSha256,
     seed,
@@ -1969,6 +2056,22 @@ export async function runBatch(options, overrides = {}) {
     arms: [...arms],
     taskIds,
   };
+
+  let providerExecutable;
+  function recordCliVersion() {
+    if (!getVersionOverride || deps.runProvider === defaultRunProvider) {
+      const { file } = driver.buildCommand("");
+      providerExecutable = resolveProviderExecutable(file, buildToolEnv(process.env, platform), platform);
+    }
+    const cliVersion = redact(getVersionOverride ? getVersionOverride() : defaultGetCliVersion(providerExecutable, platform));
+    currentProvenance.cliVersion = cliVersion;
+    if (driver.id === "claude-code") {
+      // Existing readers use these Claude-specific names.
+      currentProvenance.claudeVersion = cliVersion;
+      currentProvenance.claudeFlags = currentProvenance.flags;
+      currentProvenance.claudeMdSha256 = instructionsSha256;
+    }
+  }
 
   const batchPath = join(outDir, "batch.json");
   const runsDir = join(outDir, "runs");
@@ -2004,23 +2107,8 @@ export async function runBatch(options, overrides = {}) {
   let batchData;
   /** @type {any} */
   let baseline;
-  if (existsSync(batchPath)) {
-    let existingBatch;
-    try {
-      existingBatch = JSON.parse(readFileSync(batchPath, "utf8"));
-    } catch {
-      throw new ProvenanceMismatchError(
-        `Unable to read or parse existing batch provenance at ${batchPath}`,
-        ["batch.json"],
-      );
-    }
-    if (!existingBatch || typeof existingBatch !== "object" || Array.isArray(existingBatch)) {
-      throw new ProvenanceMismatchError(
-        `Batch provenance mismatch (${batchPath}); differing fields: batch.json`,
-        ["batch.json"],
-      );
-    }
-
+  const existingBatch = readBatchProvenance(batchPath);
+  if (existingBatch) {
     // Check saved halt BEFORE provenance comparison and before any swap recovery.
     const existingHalt =
       existingBatch.halted
@@ -2070,6 +2158,8 @@ export async function runBatch(options, overrides = {}) {
       throwHaltedResume(haltInfo, existingBatch, publishedTokenLeaks);
     }
 
+    assertSavedProvider(existingBatch, driver.id, batchPath);
+    recordCliVersion();
     const diffs = diffBatchProvenance(existingBatch, currentProvenance);
     if (diffs.length > 0) {
       throw new ProvenanceMismatchError(
@@ -2088,34 +2178,23 @@ export async function runBatch(options, overrides = {}) {
       );
     }
     baseline = existingBatch.ownerBaseline;
-    batchData = existingBatch;
-    batchData.scheduledRuns = planned.length;
+    batchData = { ...existingBatch, ...currentProvenance, scheduledRuns: planned.length };
   } else {
+    recordCliVersion();
     baseline = deps.ownerBaseline({
       ownerHome: deps.ownerHome,
       ownerConfigDir: deps.ownerConfigDir,
       ownerRockyHome: deps.ownerRockyHome,
+      provider: driver.id,
       platform,
     });
     batchData = {
       v: 1,
       startedAt: new Date().toISOString(),
-      claudeVersion,
-      model: MODEL,
-      claudeFlags: [...CLAUDE_FLAGS],
+      ...currentProvenance,
       beforeRef: options.beforeRef,
       afterRef: options.afterRef,
-      beforeSha,
-      afterSha,
-      evaluatorCommit,
-      set: setName,
-      taskSetSha256,
-      claudeMdSha256,
-      seed,
-      k,
       concurrency,
-      arms: [...arms],
-      taskIds,
       scheduledRuns: planned.length,
       auth: options.auth.kind,
       ownerBaseline: baseline,
@@ -2139,6 +2218,7 @@ export async function runBatch(options, overrides = {}) {
   }
 
   let stopBatch = false;
+  let tokenLeakHaltPersisted = false;
   let ownerLeakLatched = false;
   let ownerCheckFailed = false;
   /** @type {string[]} */
@@ -2162,6 +2242,17 @@ export async function runBatch(options, overrides = {}) {
         nextHalt.runId = runId;
       }
       batchData.halted = nextHalt;
+    }
+  }
+
+  function persistTokenLeakHalt() {
+    if (tokenLeakHaltPersisted) return;
+    try {
+      persistBatchJson(batchData);
+      tokenLeakHaltPersisted = true;
+    } catch (error) {
+      const msg = redact(error instanceof Error ? error.message : String(error));
+      deps.log(`[eval] warning: failed to persist halted state in batch.json: ${msg}`);
     }
   }
 
@@ -2224,7 +2315,7 @@ export async function runBatch(options, overrides = {}) {
     if (stopBatch || batchData.halted) {
       return summary;
     }
-    const missing = countMissingPublishedRuns(runsDir, planned, deps.lstatSync);
+    const missing = countMissingPublishedRuns(runsDir, planned, driver.id, deps.lstatSync);
     if (summary.malformed === 0 && summary.publishFailed === 0 && missing === 0) {
       delete batchData.incomplete;
       batchData.completedAt = new Date().toISOString();
@@ -2253,7 +2344,7 @@ export async function runBatch(options, overrides = {}) {
   let malformed = 0;
   for (const item of planned) {
     const runDir = join(runsDir, item.runId);
-    const decision = decideRunAction(runDir, retryInvalid, deps.lstatSync);
+    const decision = decideRunAction(runDir, driver.id, retryInvalid, deps.lstatSync);
     if (decision.action === "run") {
       pending.push({ item, retries: decision.retries, isRetry: decision.isRetry });
     } else if (decision.action === "malformed") {
@@ -2336,7 +2427,15 @@ export async function runBatch(options, overrides = {}) {
       const sandboxRunId = `${item.runId}-${randomBytes(3).toString("hex")}`;
 
       let sandbox = null;
+      let providerWallMs = null;
       let tokenLeaked = false;
+      const latchTokenLeak = () => {
+        if (tokenLeaked) return;
+        tokenLeaked = true;
+        setBatchHalt("token_leak", item.runId);
+        // A hit may be withheld or redacted before this worker publishes run.json.
+        persistTokenLeakHalt();
+      };
 
       let retryCountCommitted = !isRetry;
       /** @type {number | null} */
@@ -2370,6 +2469,7 @@ export async function runBatch(options, overrides = {}) {
 
       const recordQuarantined = (entry) => {
         if (typeof entry === "string") {
+          entry = redact(entry);
           const existingIdx = quarantined.findIndex(
             (itemEntry) => typeof itemEntry === "object" && itemEntry !== null && itemEntry.path === entry,
           );
@@ -2384,6 +2484,7 @@ export async function runBatch(options, overrides = {}) {
           return;
         }
         if (entry && typeof entry === "object" && typeof entry.path === "string") {
+          entry = { ...entry, path: redact(entry.path) };
           if (!quarantinedSet.has(entry.path)) {
             quarantinedSet.add(entry.path);
             const quarantineSuffixMatch = /^(.*)\.quarantined-\d+-[0-9a-f]+$/.exec(entry.path);
@@ -2404,6 +2505,7 @@ export async function runBatch(options, overrides = {}) {
         }
       };
       const recordScanError = (relPath) => {
+        relPath = redact(relPath);
         if (!scanErrorsSet.has(relPath)) {
           scanErrorsSet.add(relPath);
           scanErrors.push(relPath);
@@ -2418,10 +2520,7 @@ export async function runBatch(options, overrides = {}) {
             rmSync: deps.rmSync,
             truncateSync: deps.truncateSync,
             renameSync: deps.renameSync,
-            onHit: () => {
-              tokenLeaked = true;
-              setBatchHalt("token_leak", item.runId);
-            },
+            onHit: latchTokenLeak,
           });
           for (const entry of scanRes.quarantined) {
             recordQuarantined(entry);
@@ -2429,10 +2528,7 @@ export async function runBatch(options, overrides = {}) {
           for (const errPath of scanRes.scanErrors) {
             recordScanError(errPath);
           }
-          if (scanRes.leaked) {
-            tokenLeaked = true;
-            setBatchHalt("token_leak", item.runId);
-          }
+          if (scanRes.leaked) latchTokenLeak();
         } catch (scanErr) {
           const msg = redact(scanErr instanceof Error ? scanErr.message : String(scanErr));
           recordScanError(".");
@@ -2458,13 +2554,20 @@ export async function runBatch(options, overrides = {}) {
           arm: item.arm,
           runId: sandboxRunId,
           root: rootDir,
+          provider: driver.id,
+          providerExecutable,
           tgz: tarballs[item.arm],
           auth: options.auth,
+          platform,
         });
 
         await deps.materializeTask(task, sandbox, item.arm);
 
-        const claudeRes = await deps.runClaude({
+        const providerStartedAt = Date.now();
+        const result = await deps.runProvider({
+          driver,
+          executable: providerExecutable,
+          platform,
           runId: item.runId,
           task,
           sandbox,
@@ -2472,51 +2575,53 @@ export async function runBatch(options, overrides = {}) {
           stdoutPath,
           stderrPath,
           secrets,
+          onLeak: latchTokenLeak,
         });
-        exitCode = claudeRes.exitCode ?? null;
-        timedOut = Boolean(claudeRes.timedOut);
-        killFailed = Boolean(claudeRes.killFailed);
-        taskkillStatus = typeof claudeRes.taskkillStatus === "number" ? claudeRes.taskkillStatus : null;
-        if (claudeRes.streamed === true && claudeRes.tokenLeaked) {
-          tokenLeaked = true;
-          setBatchHalt("token_leak", item.runId);
-        }
+        providerWallMs = Math.max(0, Date.now() - providerStartedAt);
+        exitCode = result.exitCode ?? null;
+        timedOut = Boolean(result.timedOut);
+        killFailed = Boolean(result.killFailed);
+        taskkillStatus = typeof result.taskkillStatus === "number" ? result.taskkillStatus : null;
+        if (result.streamed === true && result.tokenLeaked) latchTokenLeak();
 
-        // Sweep stray descendants right after Claude finishes so locks are released before copy/cleanup.
+        // Release locks held by descendants before copying or cleaning up.
         swept = true;
         strayKilled = await deps.sweepStrays(sandbox.dir);
 
         let transcriptSummary;
-        if (claudeRes.streamed === true) {
-          transcriptSummary = claudeRes.transcript;
+        if (result.streamed === true) {
+          transcriptSummary = result.transcript;
         } else {
-          const outWriter = createRedactingFileWriter(stdoutPath, secrets);
-          const errWriter = createRedactingFileWriter(stderrPath, secrets);
-          const parser = createTranscriptParser();
-          const rawStdout = String(claudeRes.stdout ?? "");
-          const rawStderr = String(claudeRes.stderr ?? "");
+          const outWriter = createRedactingFileWriter(stdoutPath, secrets, { onLeak: latchTokenLeak });
+          const errWriter = createRedactingFileWriter(stderrPath, secrets, { onLeak: latchTokenLeak });
+          const parser = createTranscriptParser(undefined, driver.id);
+          const rawStdout = String(result.stdout ?? "");
+          const rawStderr = String(result.stderr ?? "");
           outWriter.write(rawStdout);
           parser.write(rawStdout);
           errWriter.write(rawStderr);
-          const [outRes, errRes] = await Promise.all([outWriter.end(), errWriter.end()]);
+          await Promise.all([outWriter.end(), errWriter.end()]);
           transcriptSummary = parser.end();
-          if (outRes.leaked || errRes.leaked) {
-            tokenLeaked = true;
-            setBatchHalt("token_leak", item.runId);
-          }
         }
 
-        const finalDir = join(workRunDir, "final");
-        skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir, deps.copyFileSync));
-        if (item.arm === "none") {
-          noneRockyHomeEntries = listNoneRockyHomeEntries(sandbox.rockyHome, deps.lstatSync);
-        }
-        skippedLinks.push(
-          ...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm, deps.copyFileSync),
-        );
-
-        // Scan and quarantine copied artifacts BEFORE grading can alter or delete them.
         await runArtifactScan();
+        await publishSandboxArtifacts(sandbox, workRunDir, item.arm, secrets, deps, {
+          skippedLinks,
+          onLeak(relPath) {
+            latchTokenLeak();
+            recordQuarantined(relPath);
+          },
+          onError(relPath, error) {
+            recordScanError(relPath);
+            if (error) runError ??= redact(error instanceof Error ? error.message : String(error));
+          },
+        });
+        if (item.arm === "none") {
+          noneRockyHomeEntries = listNoneRockyHomeEntries(sandbox.rockyHome, deps.lstatSync).map((name) => {
+            if (containsAnySecret(name, secrets)) latchTokenLeak();
+            return redact(name);
+          });
+        }
 
         invalid = classifyOutcome({
           transcript: transcriptSummary,
@@ -2524,7 +2629,9 @@ export async function runBatch(options, overrides = {}) {
           timedOut,
         });
 
-        acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
+        if (scanErrors.length === 0) {
+          acceptResult = await deps.accept(task, join(workRunDir, "final"), { manifest: deps.manifest });
+        }
       } catch (error) {
         if (sandbox && !swept) {
           swept = true;
@@ -2545,6 +2652,9 @@ export async function runBatch(options, overrides = {}) {
         await runArtifactScan();
         if (tokenLeaked) {
           invalid = "token_leak";
+        } else if (scanErrors.length > 0) {
+          invalid = "harness_crash";
+          runError ??= "artifact scan incomplete";
         }
 
         // Always clean up the sandbox BEFORE publishing run.json.
@@ -2577,11 +2687,13 @@ export async function runBatch(options, overrides = {}) {
         /** @type {Record<string, unknown>} */
         const record = {
           runId: item.runId,
+          provider: driver.id,
+          taskDir: sandbox?.taskDir ?? null,
           taskId: item.taskId,
           arm: item.arm,
           block: item.block,
           startedAt,
-          wallMs: Math.max(0, Date.now() - startMs),
+          wallMs: (driver.id === "codex" ? providerWallMs : null) ?? Math.max(0, Date.now() - startMs),
           exitCode,
           timedOut,
           invalid,
@@ -2642,12 +2754,7 @@ export async function runBatch(options, overrides = {}) {
         deps.log(
           redact(`[eval] abort: token_leak in ${item.runId}; stopping batch (no new runs will start)`),
         );
-        try {
-          persistBatchJson(batchData);
-        } catch (persistError) {
-          const msg = redact(persistError instanceof Error ? persistError.message : String(persistError));
-          deps.log(`[eval] warning: failed to persist halted state in batch.json: ${msg}`);
-        }
+        persistTokenLeakHalt();
       }
 
       runAndRecordOwnerCheck(`after ${item.runId}`, item.runId);
@@ -2742,6 +2849,7 @@ function parseIntStrict(raw, flagName) {
 function parseArgs(argv) {
   const opts = {
     help: false,
+    provider: "claude-code",
     set: undefined,
     arms: [...ARMS],
     out: undefined,
@@ -2778,7 +2886,13 @@ function parseArgs(argv) {
       return next;
     };
 
-    if (arg === "--set") {
+    if (arg === "--provider") {
+      try {
+        opts.provider = getEvalDriver(takeValue("--provider")).id;
+      } catch (error) {
+        usageError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (arg === "--set") {
       try {
         opts.set = validateTaskSet(takeValue("--set"));
       } catch (error) {
@@ -2864,34 +2978,41 @@ async function main() {
     usageError("--from is not supported: batches use --auth token only");
   }
 
-  const token = process.env.ROCKY_EVAL_OAUTH_TOKEN;
-  if (typeof token !== "string" || token.length === 0) {
-    process.stderr.write(
-      "Error: ROCKY_EVAL_OAUTH_TOKEN is missing or empty in environment (required for --auth token).\n",
-    );
-    process.exit(2);
-  }
-  const secrets = [token];
+  const driver = getEvalDriver(opts.provider);
+  const token = getEvalToken(driver);
+  const secrets = token ? [token] : [];
   /** @type {{ kind: "token" }} */
   const auth = { kind: "token" };
 
-  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
   try {
-    selectTasks(manifest.tasks, opts.only, opts.set);
-  } catch (error) {
-    usageError(error instanceof Error ? error.message : String(error));
-  }
+    if (!token) {
+      // Validate resumability even on hosts without the requested provider's key.
+      const batchPath = join(outDir, "batch.json");
+      assertSavedProvider(readBatchProvenance(batchPath), driver.id, batchPath);
+      process.stderr.write(
+        `Error: ${driver.tokenEnvNames.join(" or ")} is missing or empty in environment (required for --auth token).\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
 
-  const rootDir = resolve(opts.root);
-  try {
-    assertNoAncestorInstructions(rootDir);
-  } catch (error) {
-    usageError(error instanceof Error ? error.message : String(error));
-  }
+    const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+    try {
+      selectTasks(manifest.tasks, opts.only, opts.set);
+    } catch (error) {
+      usageError(error instanceof Error ? error.message : String(error));
+    }
 
-  try {
+    const rootDir = resolve(opts.root);
+    try {
+      assertNoAncestorInstructions(rootDir);
+    } catch (error) {
+      usageError(error instanceof Error ? error.message : String(error));
+    }
+
     await runBatch(
       {
+        provider: driver.id,
         set: opts.set,
         arms: opts.arms,
         outDir,

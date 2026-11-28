@@ -24,13 +24,18 @@ function freshPaths(): { home: string; paths: RockyPaths } {
 async function captureStdout(fn: () => Promise<number>): Promise<{ code: number; out: string }> {
   let out = "";
   const original = process.stdout.write;
-  (process.stdout as unknown as {
-    write: (chunk: string, callback?: (error?: Error) => void) => boolean;
-  }).write = (chunk: string, callback?: (error?: Error) => void) => {
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    // Node 18 `--test` children send v8-serialized report frames (binary) over stdout;
+    // `agentEvent` awaits lazy decoder imports, so frames can land inside this window.
+    // Rocky's own stdout writes are strings, so binary chunks go to the real stream.
+    if (typeof chunk !== "string") {
+      return (original as (...args: unknown[]) => boolean).call(process.stdout, chunk, ...rest);
+    }
     out += chunk;
+    const callback = rest.find((arg) => typeof arg === "function") as ((error?: Error) => void) | undefined;
     callback?.();
     return true;
-  };
+  }) as typeof process.stdout.write;
   try {
     return { code: await fn(), out };
   } finally {

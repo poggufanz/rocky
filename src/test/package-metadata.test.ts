@@ -32,6 +32,7 @@ const expectedFiles = [
   "dist/setup",
   "dist/ai",
   "dist/agent",
+  "dist/harnesses",
   "dist/shell",
   "dist/gui",
   "dist/listening",
@@ -106,6 +107,7 @@ function allowedPackPath(path: string): boolean {
     || path.startsWith("dist/setup/")
     || path.startsWith("dist/ai/")
     || path.startsWith("dist/agent/")
+    || path.startsWith("dist/harnesses/")
     || path.startsWith("dist/shell/")
     || path.startsWith("dist/gui/")
     || path.startsWith("dist/listening/")
@@ -256,7 +258,7 @@ test("release metadata assertion consumes valid metadata without a scope error",
     binary: "rocky",
     license: "MIT",
     author: "Muhammad Faiq",
-    runtimeDependencies: 0,
+    runtimeDependencies: 1,
     optionalDependencies: 0,
   });
 });
@@ -274,8 +276,8 @@ test("release metadata validation rejects malformed dependency fields without th
         `${field}=${String(value)} must fail validation`,
       );
     }
-    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: null }), true);
-    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: {} }), true);
+    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: null }), field !== "dependencies");
+    assert.equal(releaseCheck.validateReleaseMetadata({ ...metadata, [field]: {} }), field !== "dependencies");
   }
   for (const field of ["bundledDependencies", "bundleDependencies"]) {
     for (const value of [false, 0, 1, "", {}, ["package"], new Date()]) {
@@ -290,10 +292,11 @@ test("release metadata validation rejects malformed dependency fields without th
   }
 });
 
-test("package and lock contain no runtime or optional dependencies", () => {
+test("package and lock pin only jsonc-parser as a runtime dependency", () => {
   const metadata = readJson(join(packageRoot, "package.json"));
   const lock = readJson(join(packageRoot, "package-lock.json"));
-  assert.deepEqual(metadata.dependencies ?? {}, {});
+  const runtimePin = { "jsonc-parser": "3.3.1" };
+  assert.deepEqual(metadata.dependencies, runtimePin);
   assert.deepEqual(metadata.optionalDependencies ?? {}, {});
   assert.deepEqual(metadata.peerDependencies ?? {}, {});
   assert.deepEqual(metadata.peerDependenciesMeta ?? {}, {});
@@ -307,14 +310,21 @@ test("package and lock contain no runtime or optional dependencies", () => {
   assert.equal(root.name, "@poggufanz/rocky-cli");
   assert.equal(root.version, "2.0.0");
   assert.deepEqual(root.bin, { rocky: "dist/index.js" });
-  assert.deepEqual(root.dependencies ?? {}, {});
+  assert.deepEqual(root.dependencies, runtimePin);
   assert.deepEqual(root.optionalDependencies ?? {}, {});
   assert.deepEqual(root.peerDependencies ?? {}, {});
   assert.deepEqual(root.peerDependenciesMeta ?? {}, {});
   assert.deepEqual(root.bundledDependencies ?? [], []);
   assert.deepEqual(root.bundleDependencies ?? [], []);
+  const parserPath = "node_modules/jsonc-parser";
+  const parser = object(packages[parserPath], parserPath);
+  assert.equal(parser.version, runtimePin["jsonc-parser"]);
+  assert.equal(parser.license, "MIT");
+  assert.deepEqual(parser.dependencies ?? {}, {});
+  assert.deepEqual(parser.optionalDependencies ?? {}, {});
+  assert.deepEqual(parser.peerDependencies ?? {}, {});
   for (const [path, value] of Object.entries(packages)) {
-    if (path !== "") assert.equal(object(value, path).dev, true, `${path} is not dev-only`);
+    if (path !== "" && path !== parserPath) assert.equal(object(value, path).dev, true, `${path} is not dev-only`);
   }
 });
 
@@ -362,6 +372,7 @@ test("npm pack dry-run exposes only the bounded production payload", async (t) =
     "package.json",
     "dist/index.js",
     "dist/agent/schema.js",
+    "dist/harnesses/index.js",
   ]) {
     assert.ok(paths.includes(required), `missing packed path: ${required}`);
   }
@@ -857,6 +868,8 @@ test("canonical release truth rejects drift in every release marker", async () =
     ["lock top-level bundled dependencies", { ...snapshot, lock: { ...snapshot.lock, bundledDependencies: ["runtime"] } }],
     ["lock top-level bundle dependencies", { ...snapshot, lock: { ...snapshot.lock, bundleDependencies: ["runtime"] } }],
     ["lock root", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "": { ...lockRoot, version: "9.9.9" } } } }],
+    ["lock runtime pin", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/jsonc-parser": { version: "3.3.0" } } } }],
+    ["lock runtime transitive dependencies", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/jsonc-parser": { version: "3.3.1", dependencies: { extra: "1.0.0" } } } } }],
     ["lock nested runtime package", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/runtime": { version: "1.0.0", dev: false } } } }],
     ["lock nested malformed package", { ...snapshot, lock: { ...snapshot.lock, packages: { ...lock, "node_modules/runtime": null } } }],
     ["package-info", { ...snapshot, packageInfoSource: snapshot.packageInfoSource.replace('PACKAGE_VERSION = "2.0.0"', 'PACKAGE_VERSION = "9.9.9"') }],

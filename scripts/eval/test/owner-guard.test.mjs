@@ -1317,9 +1317,9 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
         () => runBatch(
           { ...commonOpts, outDir: outTrunc },
           makeFakeDeps(owner, {
-            materializeTask: async (_task, sandbox) => {
-              writeFileSync(join(sandbox.taskDir, "locked-leak.txt"), `secret=${token}\n`, "utf8");
-              return { runs: [], cards: 0 };
+            accept: async (_task, finalDir) => {
+              writeFileSync(join(finalDir, "locked-leak.txt"), `secret=${token}\n`, "utf8");
+              return { solved: true, reason: "fixture" };
             },
             runClaude: async ({ runId }) => {
               startedTrunc.push(runId);
@@ -1378,9 +1378,9 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
         () => runBatch(
           { ...commonOpts, outDir: outRename },
           makeFakeDeps(owner, {
-            materializeTask: async (_task, sandbox) => {
-              writeFileSync(join(sandbox.taskDir, "locked-leak.txt"), `secret=${token}\n`, "utf8");
-              return { runs: [], cards: 0 };
+            accept: async (_task, finalDir) => {
+              writeFileSync(join(finalDir, "locked-leak.txt"), `secret=${token}\n`, "utf8");
+              return { solved: true, reason: "fixture" };
             },
             runClaude: async ({ runId }) => {
               startedRename.push(runId);
@@ -1445,9 +1445,9 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
         () => runBatch(
           { ...commonOpts, outDir: outAlreadySuffixed },
           makeFakeDeps(owner, {
-            materializeTask: async (_task, sandbox) => {
-              writeFileSync(join(sandbox.taskDir, "x.quarantined"), `secret=${token}\n`, "utf8");
-              return { runs: [], cards: 0 };
+            accept: async (_task, finalDir) => {
+              writeFileSync(join(finalDir, "x.quarantined"), `secret=${token}\n`, "utf8");
+              return { solved: true, reason: "fixture" };
             },
             runClaude: async ({ runId }) => {
               startedSuffixed.push(runId);
@@ -1500,10 +1500,10 @@ describe("runner token-scan finally path, scanErrors, stop-on-leak, and owner-gu
         () => runBatch(
           { ...commonOpts, outDir: outSibling },
           makeFakeDeps(owner, {
-            materializeTask: async (_task, sandbox) => {
-              writeFileSync(join(sandbox.taskDir, "report.txt"), `secret=${token}\n`, "utf8");
-              writeFileSync(join(sandbox.taskDir, "report.txt.quarantined"), siblingContent, "utf8");
-              return { runs: [], cards: 0 };
+            accept: async (_task, finalDir) => {
+              writeFileSync(join(finalDir, "report.txt"), `secret=${token}\n`, "utf8");
+              writeFileSync(join(finalDir, "report.txt.quarantined"), siblingContent, "utf8");
+              return { solved: true, reason: "fixture" };
             },
             runClaude: async ({ runId }) => {
               startedSibling.push(runId);

@@ -141,3 +141,25 @@ Captured on Windows 11 with Claude Code `2.1.330 (Claude Code)`.
 - On `win32`, the agent's shell tool is `PowerShell` (`Bash` is also available). Failing tool results carry `Exit code 1` and `is_error: true`.
 - `rocky setup --agent-hooks` requires a TTY for consent (`--yes` does not bypass it); the harness passes a one-shot `--require` preload marking stdin as a TTY to that setup child only and pipes `y`.
 - The default sandbox root under `os.tmpdir()` is refused on this machine because `C:\Users\<owner>\.claude` is an ancestor; runs use `--root C:\rocky-eval\sbx`.
+
+## Codex harness facts
+
+Captured on Windows 11 on 2026-11-28 with `codex-cli 0.171.0`. The committed `codex-none.jsonl` and `codex-after.jsonl` fixtures each record one prompt and two executed tests that printed `AssertionError: probe` and returned exit code `1`. The `after` fixture also records an `apply_patch` edit and a successful Rocky `stats` MCP call.
+
+- **Model and flags.** `CODEX_MODEL` is `gpt-6.2-sol`. `CODEX_FLAGS` are `--json -C <taskDir> -s workspace-write --ephemeral -c windows.sandbox=unelevated -m gpt-6.2-sol` after `codex exec` and before the prompt. The `-c windows.sandbox=unelevated` pair is Windows-only. With a fresh `CODEX_HOME`, the CLI accepted `workspace-write` but blocked shell launches until the Windows sandbox was selected. The disposable Windows `AGENTS.md` selected `cmd.exe` for the test calls after the PowerShell launch failed with error 5.
+- **Auth.** Prefer `ROCKY_EVAL_CODEX_API_KEY` as the eval credential source, with `ROCKY_EVAL_OPENAI_API_KEY` as a fallback. The one-off probe can also select an explicitly supplied `CODEX_API_KEY` as its source. Select the credential before scrubbing inherited variables, then set `CODEX_API_KEY` only in the isolated Codex process environment. The key path was unavailable during this capture. Codex authenticated using a throwaway copy of the owner’s `auth.json` in `$CODEX_HOME`. The copies and owner files had identical pre/post hashes for the probe, and the copies were removed. Copied OAuth credentials are limited to this disposable spike while batch refresh-token behavior remains unverified.
+- **Rocky setup.** `rocky setup --harness codex --yes` registered a stdio MCP server with both the packed `31128bc` build and `d7ef3c5`. Codex listed `rocky` as enabled and executed its `stats` tool for each build. Both registrations emitted item-level warnings for ignored `mcp_servers.rocky.env_ROCKY_HOME` and `mcp_servers.rocky.env_ROCKY_MCP_EXPOSURE`. This verifies MCP registration and tool execution. The configured environment overrides remain unverified. Under the Windows sandbox used here, both builds returned `spawn EPERM` from `rocky run "npm test"` before npm started. The fixtures use bare tests, and lane-1 note delivery remains unverified on this host.
+- **Hooks.** A disposable `$CODEX_HOME/hooks.json` `PostToolUse` command hook fired for the failed shell call with `--dangerously-bypass-hook-trust`. The control without the flag recorded no invocation. The hook reported `tool_name: "Bash"` for the `cmd.exe` call, `tool_input: {"command":"npm test"}`, `tool_response` as a string with command output and no exit code, and `transcript_path: null` under `--ephemeral`. The model echoed a marker returned through `hookSpecificOutput.additionalContext`. An equivalent inline `config.toml` hook fired in a separate probe, where the final answer did not echo its marker. Wave 1 uses `["lane1", "mcp"]`.
+
+Each stdout line is a JSON object with a top-level `type`. Observed event fields are below.
+
+| Event | Fields and values observed |
+| --- | --- |
+| `thread.started` | `thread_id` |
+| `turn.started` | `type` only. One event per prompt across multiple shell, file, and MCP actions. |
+| `item.started` / `item.completed`, `item.type: "command_execution"` | `item.id`, `command`, `aggregated_output`, `exit_code`, `status`. Starts carry an empty output, `null` exit code and `in_progress` status. Completions carry combined output and a numeric exit code. A nonzero exit was `failed`. |
+| `item.started` / `item.completed`, `item.type: "file_change"` | `item.id`, `changes: [{path, kind}]`, `status`. The `apply_patch` add carried `kind: "add"` and transitioned from `in_progress` to `completed`. |
+| `item.started` / `item.completed`, `item.type: "mcp_tool_call"` | `item.id`, `server`, `tool`, `arguments`, `result`, `error`, `status`. The `rocky` / `stats` start carried `arguments: {}`, `result: null`, and `error: null`. Its completion carried `result.content` and `result.structured_content`. |
+| `item.completed`, `item.type: "agent_message"` or `"error"` | `item.id` plus `text` for an agent message or `message` for an item-level warning. A warning can precede a successful turn. |
+| `turn.completed` | `usage` with `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, and `reasoning_output_tokens`. The runner measures wall time outside the stream. |
+| `error` / `turn.failed` | `error` carries `message` directly. `turn.failed` carries `error: {message}`. The unsupported-model probe emitted both and exited `1`. |

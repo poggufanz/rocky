@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { sameCwd } from "../../core/memory-read.js";
 import type { CanonicalRationaleEvent, LogAdapter } from "./types.js";
-import { scanJsonlLines } from "./scan.js";
+import { createClaudeTranscriptReducer } from "../../harnesses/decoders/claude-code.js";
+import { scanJsonlRationales } from "./scan.js";
 
 /** Never discover more than this many transcript files per repo. */
 const MAX_DISCOVERED_FILES = 5;
@@ -131,86 +132,18 @@ function discover(repoCwd: string): string[] {
   }
 }
 
-/** Tool names whose `input.file_path` counts as a structural file touch. */
-const FILE_TOOL_NAMES: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
-
-/**
- * Files touched by Edit/Write/MultiEdit tool_use entries in one turn's
- * content array, for structural correlation downstream. Returns undefined
- * (not empty) when the turn touched no files, matching the canonical
- * event's optional field.
- */
-function touchedFilesIn(content: readonly Record<string, unknown>[]): string[] | undefined {
-  const files: string[] = [];
-  for (const entry of content) {
-    if (entry.type !== "tool_use") continue;
-    if (typeof entry.name !== "string" || !FILE_TOOL_NAMES.has(entry.name)) continue;
-    if (!isRecord(entry.input)) continue;
-    const filePath = entry.input.file_path;
-    if (typeof filePath === "string" && filePath.length > 0) files.push(filePath);
-  }
-  return files.length > 0 ? files : undefined;
-}
-
 /**
  * Scan a transcript, emitting one event per `thinking` entry (raw fidelity)
  * and — only for turns with no thinking entry — one per `text` reply entry
- * (summary fidelity). Only assistant records whose `cwd` matches the repo are
- * considered; malformed records are skipped silently. Never throws.
+ * (summary fidelity). Only rationales whose `cwd` matches the repo are
+ * emitted. Malformed records are skipped silently.
  */
 function scan(repoCwd: string, logPath: string, fromOffset: number, maxBytes: number): { events: CanonicalRationaleEvent[]; nextOffset: number } {
-  const events: CanonicalRationaleEvent[] = [];
-  const nextOffset = scanJsonlLines(logPath, fromOffset, maxBytes, (obj) => {
-    if (!isRecord(obj)) return;
-    if (!recordedInRepo(obj.cwd, repoCwd)) return;
-    if (obj.type !== "assistant") return;
-    const message = obj.message;
-    if (!isRecord(message) || !Array.isArray(message.content)) return;
-    const content = message.content.filter(isRecord);
-    const hasThinking = content.some((entry) => entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0);
-    const sessionId = typeof obj.sessionId === "string" ? obj.sessionId : "";
-    const turnRef = typeof obj.uuid === "string" ? obj.uuid : "";
-    const ts = typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : Number.NaN;
-    const touchedFiles = touchedFilesIn(content);
-    for (const entry of content) {
-      if (entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0) {
-        events.push({
-          agent: "claude-code",
-          sessionId,
-          turnRef,
-          ts: Number.isNaN(ts) ? 0 : ts,
-          cwd: repoCwd,
-          text: entry.thinking,
-          fidelity: "raw",
-          source: "log-thinking",
-          logPath,
-          ...(touchedFiles === undefined ? {} : { touchedFiles }),
-        });
-      } else if (!hasThinking && entry.type === "text" && typeof entry.text === "string" && entry.text.length > 0) {
-        events.push({
-          agent: "claude-code",
-          sessionId,
-          turnRef,
-          ts: Number.isNaN(ts) ? 0 : ts,
-          cwd: repoCwd,
-          text: entry.text,
-          fidelity: "summary",
-          source: "log-response",
-          logPath,
-          ...(touchedFiles === undefined ? {} : { touchedFiles }),
-        });
-      }
-      // tool_use and other entry types carry no rationale text; skipped.
-    }
-  });
-  if (nextOffset === fromOffset && fromOffset > 0 && events.length > 0) {
-    // scanJsonlLines hit its outer-catch error path: the offset did not
-    // advance, so these events would be re-emitted on the next scan from the
-    // same offset. Dedupe-by-offset is the caller's contract, so drop them.
-    // Normal EOF at fromOffset collects zero events and is unaffected.
-    return { events: [], nextOffset: fromOffset };
-  }
-  return { events, nextOffset };
+  const { events, nextOffset } = scanJsonlRationales(
+    logPath, fromOffset, maxBytes, createClaudeTranscriptReducer({ logPath }),
+    (row) => isRecord(row) && recordedInRepo(row.cwd, repoCwd),
+  );
+  return { events: events.map((event) => ({ ...event, cwd: repoCwd })), nextOffset };
 }
 
 export const claudeCodeLogAdapter: LogAdapter = {

@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
@@ -111,7 +111,7 @@ export function readJsoncObject(path: string): JsonReadResult {
   return readObject(path, "strip");
 }
 
-function readObject(path: string, comments: "reject" | "strip"): JsonReadResult {
+function readConfigBytes(path: string): BytesReadResult | Extract<JsonReadResult, { status: "invalid" }> {
   let bytes: Buffer;
   let metadata: ReturnType<typeof lstatSync>;
   try {
@@ -129,13 +129,20 @@ function readObject(path: string, comments: "reject" | "strip"): JsonReadResult 
     metadata = after;
   } catch (error) {
     return errorCode(error) === "ENOENT"
-      ? { status: "missing", value: {} }
+      ? { status: "missing" }
       : { status: "invalid", error: "Unable to read JSON config" };
   }
+  return { status: "valid", bytes, mode: metadata.mode & 0o777, identity: { dev: metadata.dev, ino: metadata.ino } };
+}
+
+function readObject(path: string, comments: "reject" | "strip"): JsonReadResult {
+  const snapshot = readConfigBytes(path);
+  if (snapshot.status === "missing") return { status: "missing", value: {} };
+  if (snapshot.status === "invalid") return snapshot;
 
   let value: unknown;
   try {
-    const text = bytes.toString("utf8");
+    const text = snapshot.bytes.toString("utf8");
     value = JSON.parse(comments === "strip" ? stripJsonComments(text) : text);
   } catch {
     return { status: "invalid", error: "JSON config is invalid" };
@@ -147,15 +154,15 @@ function readObject(path: string, comments: "reject" | "strip"): JsonReadResult 
   const result: Extract<JsonReadResult, { status: "valid" }> = {
     status: "valid",
     value,
-    bytes,
-    mode: metadata.mode & 0o777,
+    bytes: snapshot.bytes,
+    mode: snapshot.mode,
   };
   // Keep the public read shape stable for existing callers/tests while
   // carrying inode authority into the conditional writer.
   Object.defineProperty(result, "identity", {
     configurable: false,
     enumerable: false,
-    value: { dev: metadata.dev, ino: metadata.ino },
+    value: snapshot.identity,
     writable: false,
   });
   return result;
@@ -329,6 +336,103 @@ export function atomicWriteJson(
 
 export type ConditionalJsonWriteResult = ConditionalBytesWriteResult;
 
+/** Apply a JSONC path edit against its original snapshot. No-op edits also succeed as `written`. */
+export async function editJsoncPathAtomic(
+  filePath: string,
+  jsonPath: readonly (string | number)[],
+  value: unknown,
+  { mutationGuard }: { mutationGuard?: JsonMutationGuard } = {},
+): Promise<ConditionalBytesWriteResult> {
+  const path = resolve(filePath);
+  const {
+    modify, applyEdits, format, parse, parseTree, findNodeAtLocation, findNodeAtOffset, createScanner, SyntaxKind,
+  } = await import("jsonc-parser");
+  let snapshot: ReturnType<typeof readConfigBytes>;
+  for (;;) {
+    if (!mutationGuardUnchanged(mutationGuard)) return { status: "recovery-required" };
+    const recovery = recoverFileTransaction(path, mutationGuard, { preserveUndisplacedPrepare: true });
+    if (recovery.status === "manual") return { ...recovery, status: "recovery-required" };
+    if (recovery.status === "recovered") continue;
+    snapshot = readConfigBytes(path);
+    // Another writer can displace the file between recovery and the read.
+    if (snapshot.status !== "missing" || inspectJsonTransaction(path).status === "clear") break;
+  }
+  if (!mutationGuardUnchanged(mutationGuard)) return { status: "recovery-required" };
+  if (snapshot.status === "invalid") throw new Error(snapshot.error);
+
+  const original = snapshot.status === "valid" ? snapshot.bytes.toString("utf8") : "{}\n";
+  if (snapshot.status === "valid" && !snapshot.bytes.equals(Buffer.from(original, "utf8"))) {
+    throw new Error("JSON config is not valid UTF-8");
+  }
+  const bom = original.startsWith("\uFEFF") ? "\uFEFF" : "";
+  let text = original.slice(bom.length);
+  const errors: NonNullable<Parameters<typeof parse>[1]> = [];
+  const parseOptions = { allowTrailingComma: true };
+  const root = parseTree(text, errors, parseOptions);
+  if (errors.length > 0 || root?.type !== "object") throw new Error("JSON config is invalid");
+
+  const segments = [...jsonPath];
+  const indentation = /^[\t ]+(?="[^\r\n]*"\s*:)/m.exec(text)?.[0] ?? "  ";
+  const formattingOptions = {
+    eol: /\r\n|\n/.exec(text)?.[0] ?? "\n",
+    insertSpaces: !indentation.includes("\t"),
+    tabSize: indentation.includes("\t") ? 1 : indentation.length,
+  };
+
+  let edits: ReturnType<typeof modify> | undefined;
+  if (value === undefined && segments.length > 0) {
+    const node = findNodeAtLocation(root, segments);
+    if (node === undefined) return { status: "written" };
+    const parent = findNodeAtLocation(root, segments.slice(0, -1));
+    const siblings = parent?.children ?? [];
+    const scanner = createScanner(text, true);
+    const sibling = parent?.type === "object" ? node.parent : node;
+    if (parent?.type === "object" && siblings.length === 1) {
+      // jsonc-parser leaves a dangling comma when removing the sole property.
+      scanner.setPosition(node.offset + node.length);
+      if (scanner.scan() === SyntaxKind.CommaToken) {
+        text = applyEdits(text, [{ offset: scanner.getTokenOffset(), length: 1, content: "" }]);
+      }
+    } else if (sibling && siblings.length > 1
+      && (parent?.type === "object" || siblings.at(-1) === sibling)) {
+      // A comment can sit between the separator and the neighboring item.
+      const last = siblings.at(-1) === sibling;
+      const beforeComma = last ? siblings[siblings.length - 2] : sibling;
+      scanner.setPosition(beforeComma.offset + beforeComma.length);
+      if (scanner.scan() !== SyntaxKind.CommaToken) throw new Error("Unable to write JSON config");
+      edits = [
+        { offset: scanner.getTokenOffset(), length: scanner.getTokenLength(), content: "" },
+        { offset: sibling.offset, length: sibling.length, content: "" },
+      ];
+    }
+  }
+
+  let edited: string;
+  try {
+    const pathEdits = edits ?? modify(text, segments, value, {});
+    edited = applyEdits(text, pathEdits);
+    const [edit] = pathEdits;
+    if (value !== undefined && edit !== undefined) {
+      const container = edit.length === 0 ? findNodeAtOffset(root, edit.offset) : undefined;
+      const multiline = container !== undefined
+        && text.slice(container.offset, container.offset + container.length).includes("\n");
+      if (edit.length > 0 || multiline) {
+        const end = edit.offset + edit.content.length;
+        const formatting = format(edited, { offset: edit.offset, length: edit.content.length }, formattingOptions);
+        // The formatter can expand its range to the surrounding line.
+        edited = applyEdits(edited, formatting.filter(({ offset, length }) => offset >= edit.offset && offset + length <= end));
+      }
+    }
+    if (!isObject(parse(edited, errors, parseOptions)) || errors.length > 0) {
+      throw new Error("Invalid edit");
+    }
+  } catch {
+    throw new Error("Unable to write JSON config");
+  }
+  if (snapshot.status === "valid" && bom + edited === original) return { status: "written" };
+  return writeConfigBytesIfUnchanged(path, Buffer.from(bom + edited, "utf8"), snapshot, mutationGuard);
+}
+
 export type JsonTransactionRecoveryResult = FileTransactionRecoveryResult;
 
 export type JsonTransactionInspectionResult = FileTransactionInspectionResult;
@@ -387,6 +491,15 @@ export function atomicWriteJsonIfUnchanged(
   const snapshot: BytesReadResult = prior.status === "valid"
     ? { status: "valid", bytes: prior.bytes, mode: prior.mode, identity: prior.identity }
     : { status: "missing" };
+  return writeConfigBytesIfUnchanged(path, encoded, snapshot, guard);
+}
+
+function writeConfigBytesIfUnchanged(
+  path: string,
+  encoded: Buffer,
+  snapshot: BytesReadResult,
+  guard: JsonMutationGuard | undefined,
+): ConditionalJsonWriteResult {
   let result: ConditionalJsonWriteResult;
   try {
     result = atomicWriteBytesIfUnchanged(path, encoded, snapshot, guard);

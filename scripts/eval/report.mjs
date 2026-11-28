@@ -194,8 +194,12 @@ export function renderReport({
   lines.push("");
   const prov = provenance && typeof provenance === "object" ? provenance : {};
   const taskSet = typeof prov.set === "string" && prov.set.length > 0 ? prov.set : "v1";
-  const claudeMdHashes = prov.claudeMdSha256 && typeof prov.claudeMdSha256 === "object"
-    ? Object.entries(prov.claudeMdSha256)
+  const provider = prov.provider ?? "claude-code";
+  const legacyClaude = provider === "claude-code" ? prov : {};
+  const flags = prov.flags ?? legacyClaude.claudeFlags;
+  const hashes = prov.instructionsSha256 ?? legacyClaude.claudeMdSha256;
+  const instructionHashes = hashes && typeof hashes === "object"
+    ? Object.entries(hashes)
       .map(([arm, hash]) => `${arm}=\`${hash}\``)
       .join(", ")
     : "n/a";
@@ -203,15 +207,17 @@ export function renderReport({
     ["Label", label],
     ["Started at", prov.startedAt ?? "n/a"],
     ["Completed at", prov.completedAt ?? "n/a"],
+    ["Provider", provider],
+    ["Lanes", Array.isArray(prov.lanes) ? prov.lanes.join(", ") : "n/a"],
     ["Model", prov.model ?? "n/a"],
-    ["Claude version", prov.claudeVersion ?? "n/a"],
-    ["Claude flags", Array.isArray(prov.claudeFlags) ? `\`${prov.claudeFlags.join(" ")}\`` : "n/a"],
+    ["CLI version", prov.cliVersion ?? legacyClaude.claudeVersion ?? "n/a"],
+    ["CLI flags", Array.isArray(flags) ? `\`${flags.join(" ")}\`` : "n/a"],
     ["Before commit", prov.beforeSha ? `\`${prov.beforeSha}\` (${prov.beforeRef ?? "n/a"})` : "n/a"],
     ["After commit", prov.afterSha ? `\`${prov.afterSha}\` (${prov.afterRef ?? "n/a"})` : "n/a"],
     ["Evaluator commit", prov.evaluatorCommit ? `\`${prov.evaluatorCommit}\`` : "n/a"],
     ["Task set", taskSet],
     ["Task set sha256", prov.taskSetSha256 ? `\`${prov.taskSetSha256}\`` : "n/a"],
-    ["CLAUDE.md sha256", claudeMdHashes],
+    ["Instructions sha256", instructionHashes],
     ["Seed", prov.seed !== undefined ? String(prov.seed) : "n/a"],
     ["Blocks (k)", prov.k !== undefined ? String(prov.k) : "n/a"],
     ["Concurrency", prov.concurrency !== undefined ? String(prov.concurrency) : "n/a"],
@@ -432,9 +438,9 @@ export function renderReport({
   lines.push(
     `| solvedDrop (none - after) | ${fmtFloat(v.veto.solvedDrop, 3)} | >= 0.200 | ${v.veto.solvedVetoed ? "yes" : "no"} |`,
   );
-  lines.push(
-    `| medianTurnRise (after - none, numTurns) | ${fmtNumberOrHalf(v.veto.medianTurnRise)} | >= 3 | ${v.veto.turnVetoed ? "yes" : "no"} |`,
-  );
+  lines.push(v.veto.medianTurnRise === "unavailable"
+    ? "| medianTurnRise (after - none, numTurns) | unavailable | n/a | n/a |"
+    : `| medianTurnRise (after - none, numTurns) | ${fmtNumberOrHalf(v.veto.medianTurnRise)} | >= 3 | ${v.veto.turnVetoed ? "yes" : "no"} |`);
   lines.push("");
 
   let verdictSummary;
@@ -442,7 +448,7 @@ export function renderReport({
     verdictSummary = v.invalidReason === "batch incomplete"
       ? "Batch incomplete — no veto or claim decision recorded."
       : "Batch invalid — no veto or claim decision recorded.";
-  } else if (v.veto.solvedDrop === null && v.veto.medianTurnRise === null) {
+  } else if (v.veto.solvedDrop === null && typeof v.veto.medianTurnRise !== "number") {
     verdictSummary = "No control or stale runs present — veto not evaluated.";
   } else if (v.veto.vetoed) {
     verdictSummary = "Vetoed — harm threshold exceeded on pooled control and stale runs.";

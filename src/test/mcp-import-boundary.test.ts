@@ -140,6 +140,8 @@ function assertReadOnlyGraph(roots: readonly string[], graphSourceRoot: string, 
 test("MCP source graph reaches only explicitly allowlisted read-only modules; writable core modules stay forbidden", () => {
   assert.ok(existsSync(entry), "src/commands/mcp.ts must be the MCP process boundary");
   const roots = [entry, ...descendants(join(sourceRoot, "mcp"))];
+  const harnessRegistry = "setup/harness-registry.ts";
+  assert.deepEqual(sourceImports(join(sourceRoot, harnessRegistry)), [], "the harness registry must stay data-only");
   const allowed = new Set([
     "commands/mcp.ts",
     "commands/cli-args.ts",
@@ -213,6 +215,7 @@ test("MCP source graph reaches only explicitly allowlisted read-only modules; wr
     "listening/event-log-read.ts",
     "listening/repo-consent-read.ts",
     "listening/graph-store.ts",
+    harnessRegistry,
   ]);
   for (const writable of ["core/config.ts", "core/memory.ts", "core/watch-log.ts"] as const) {
     assert.equal(allowed.has(writable), false, `writable core module must remain outside MCP allowlist: ${writable}`);

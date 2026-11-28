@@ -3,14 +3,15 @@ import type { AttemptNote } from "../core/attempt-note.js";
 import { refreshFixTouchAfterFix } from "../core/fixtouch-cache.js";
 import type { MemoryCoverage, MemoryRecord } from "../core/memory-read.js";
 import { resolveRockyPaths } from "../core/state-paths.js";
-import { parseToolResultPayload, TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
+import { TOOL_RESULT_STDIN_CAP_BYTES } from "../core/tool-result.js";
+import { loadHarnessDecoder } from "../harnesses/index.js";
+import { projectToToolResult, renderSyncResponse } from "../harnesses/projections/to-tool-result.js";
 
 export { TOOL_RESULT_STDIN_CAP_BYTES };
 
 export const TOOL_RESULT_LOCK_WAIT_MS = 1_000;
 
 const EMPTY_RESPONSE = "{}";
-const MAX_HOOK_STDOUT_BYTES = 2 * 1024;
 const DECODER = new TextDecoder("utf-8");
 
 type AttemptNoteStateModule = typeof import("../core/attempt-note-state.js");
@@ -27,20 +28,6 @@ function elapsedMs(startedAt: number): number {
 
 function isLockBusyError(error: unknown): boolean {
   return error instanceof Error && /triple lock is busy/u.test(error.message);
-}
-
-function readSkipContext(stdin: Uint8Array): { isFailureEvent: boolean; session: string | null; cwd: string } | undefined {
-  try {
-    const parsed: unknown = JSON.parse(DECODER.decode(stdin));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-    const record = parsed as Record<string, unknown>;
-    const isFailureEvent = record.hook_event_name === "PostToolUseFailure";
-    const session = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : null;
-    const cwd = typeof record.cwd === "string" ? record.cwd : "";
-    return { isFailureEvent, session, cwd };
-  } catch {
-    return undefined;
-  }
 }
 
 function appendSkipRow(
@@ -65,16 +52,6 @@ function appendSkipRow(
   });
 }
 
-function buildContextStdout(noteText: string): string {
-  const candidate = JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: "PostToolUseFailure",
-      additionalContext: noteText,
-    },
-  });
-  return Buffer.byteLength(candidate, "utf8") < MAX_HOOK_STDOUT_BYTES ? candidate : EMPTY_RESPONSE;
-}
-
 /**
  * Private Claude Code PostToolUse / PostToolUseFailure hook handler.
  * Records unwrapped Bash/PowerShell failures as agent-origin failures, links
@@ -84,7 +61,12 @@ function buildContextStdout(noteText: string): string {
 export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Promise<string> {
   const started = startedAt ?? performance.now();
   try {
-    const event = parseToolResultPayload(stdin);
+    if (stdin.byteLength > TOOL_RESULT_STDIN_CAP_BYTES) return EMPTY_RESPONSE;
+    const payload: unknown = JSON.parse(DECODER.decode(stdin));
+    const decoder = await loadHarnessDecoder("claude-code");
+    const decoded = decoder?.decodeHook(payload);
+    if (decoder === undefined || decoded === undefined) return EMPTY_RESPONSE;
+    const event = projectToToolResult(decoded);
     if (event === undefined) return EMPTY_RESPONSE;
 
     if (event.kind === "pass") {
@@ -100,14 +82,14 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
 
     if (event.kind === "skip") {
       if (process.env.ROCKY_ATTEMPT_ADVISORY === "off") return EMPTY_RESPONSE;
-      const skipContext = readSkipContext(stdin);
-      if (skipContext === undefined || !skipContext.isFailureEvent) return EMPTY_RESPONSE;
+      if (decoded.eventName !== "PostToolUseFailure") return EMPTY_RESPONSE;
       const stateMod = await import("../core/attempt-note-state.js");
       if (stateMod.noteAdvisoryEnabled(process.env)) {
         appendSkipRow(stateMod, resolveRockyPaths().home, {
           ts: Date.now(),
-          session: skipContext.session,
-          cwd: skipContext.cwd,
+          session: decoded.sessionId ?? null,
+          // The shell projection validated this field before returning a skip.
+          cwd: (payload as { cwd: string }).cwd,
           latencyMs: elapsedMs(started),
           reason: event.reason,
         });
@@ -204,7 +186,7 @@ export async function toolResultHook(stdin: Uint8Array, startedAt?: number): Pro
     const arm = stateMod.attemptArm(session, process.env);
     const wouldShow = arm === "shown" || arm === "human";
     const claimed = wouldShow && stateMod.claimNoteSlot(home, session, note.key, now);
-    const stdout = claimed ? buildContextStdout(note.text) : EMPTY_RESPONSE;
+    const stdout = claimed ? renderSyncResponse(decoder, note.text) : EMPTY_RESPONSE;
     const delivered = stdout !== EMPTY_RESPONSE;
 
     stateMod.appendExposure(home, {

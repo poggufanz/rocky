@@ -18,6 +18,7 @@ import { normalizeLine } from "../../dist/core/fingerprint.js";
 import { canonicalPath } from "../../dist/core/memory-read.js";
 import { validateCard } from "../../dist/desk/cards-record.js";
 import { cardsFilePath } from "../../dist/listening/cards-path.js";
+import { getEvalDriver } from "./drivers/index.mjs";
 import {
   buildCommandInvocation,
   buildToolEnv,
@@ -163,18 +164,25 @@ export function stderrHasTrapLine(stderr, trapLine) {
 }
 
 /**
- * Render the CLAUDE.md text for an eval arm.
+ * Render the instruction file text for an eval arm.
  * @param {"none" | "before" | "after"} arm
+ * @param {import("./drivers/index.mjs").EvalProvider} [provider]
  * @returns {string}
  */
-export function renderClaudeMd(arm) {
+export function renderInstructions(arm, provider = "claude-code") {
+  const { instructionFile } = getEvalDriver(provider);
   const base = readFileSync(join(CLAUDE_MD_DIR, "base.md"), "utf8").trimEnd();
   if (arm === "none") return `${base}\n`;
   if (arm === "before" || arm === "after") {
     const rocky = readFileSync(join(CLAUDE_MD_DIR, "rocky-section.md"), "utf8").trimEnd();
     return `${base}\n\n${rocky}\n`;
   }
-  throw new Error(`Invalid arm for CLAUDE.md: ${String(arm)}`);
+  throw new Error(`Invalid arm for ${instructionFile}: ${String(arm)}`);
+}
+
+/** @param {"none" | "before" | "after"} arm */
+export function renderClaudeMd(arm) {
+  return renderInstructions(arm);
 }
 
 /**
@@ -188,7 +196,7 @@ export function buildHistoryRockyEnv(sandbox, platform = process.platform) {
   const env = buildToolEnv(sandbox.env, platform, { home: sandbox.home });
   env.HOME = sandbox.home;
   env.USERPROFILE = sandbox.home;
-  env.CLAUDE_CONFIG_DIR = sandbox.configDir;
+  env[getEvalDriver(sandbox.provider).configEnvName] = sandbox.configDir;
   env.ROCKY_HOME = sandbox.rockyHome;
   const sandboxPath = getPathValue(sandbox.env);
   for (const key of Object.keys(env)) {
@@ -296,9 +304,10 @@ function appendCard(logPath, card) {
   appendFileSync(logPath, `${JSON.stringify(card)}\n`, "utf8");
 }
 
-function initSeedRepo(taskDir, sandbox, claudeMd) {
-  if (typeof claudeMd === "string") {
-    writeFileSync(join(taskDir, "CLAUDE.md"), claudeMd, "utf8");
+function initSeedRepo(taskDir, sandbox, instructions) {
+  if (typeof instructions === "string") {
+    const { instructionFile } = getEvalDriver(sandbox.provider);
+    writeFileSync(join(taskDir, instructionFile), instructions, "utf8");
   }
   const gitEnv = {
     ...buildToolEnv(sandbox.env, process.platform, { home: sandbox.home }),
@@ -325,7 +334,7 @@ function initSeedRepo(taskDir, sandbox, claudeMd) {
  * then reset `sandbox.taskDir` to a fresh git repository copied from `repo/`.
  * @param {any} task
  * @param {any} sandbox
- * @param {{ claudeMd?: string }} [options]
+ * @param {{ instructions?: string, claudeMd?: string }} [options]
  * @returns {Promise<{ runs: Array<{ cmd: string, exit: number }>, cards: number }>}
  */
 export async function runHistory(task, sandbox, options = {}) {
@@ -490,7 +499,7 @@ export async function runHistory(task, sandbox, options = {}) {
   // Reset taskDir to repo/ and create the initial git commit.
   wipeDirContents(sandbox.taskDir);
   copyTree(repoDir, sandbox.taskDir);
-  initSeedRepo(sandbox.taskDir, sandbox, options.claudeMd);
+  initSeedRepo(sandbox.taskDir, sandbox, options.instructions ?? options.claudeMd);
 
   return { runs, cards };
 }
@@ -504,14 +513,14 @@ export async function runHistory(task, sandbox, options = {}) {
  * @returns {Promise<{ runs: Array<{ cmd: string, exit: number }>, cards: number }>}
  */
 export async function materializeTask(task, sandbox, arm) {
-  const claudeMd = renderClaudeMd(arm);
+  const instructions = renderInstructions(arm, sandbox.provider);
   if (task.history !== null && (arm === "before" || arm === "after")) {
-    return runHistory(task, sandbox, { claudeMd });
+    return runHistory(task, sandbox, { instructions });
   }
 
   const repoDir = join(TASKS_DIR, task.fixture, "repo");
   wipeDirContents(sandbox.taskDir);
   copyTree(repoDir, sandbox.taskDir);
-  initSeedRepo(sandbox.taskDir, sandbox, claudeMd);
+  initSeedRepo(sandbox.taskDir, sandbox, instructions);
   return { runs: [], cards: 0 };
 }

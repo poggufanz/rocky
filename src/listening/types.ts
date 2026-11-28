@@ -6,18 +6,8 @@
  * NEVER: runtime_observed, observer_hypothesis, phantom process nodes.
  * candidate_link is weak non-causal context and is never promoted.
  */
-export type HarnessId =
-  | "claude-code" | "codex" | "opencode" | "antigravity" | "cursor"
-  | "devin" | "omp" | "dsh" | "vscode" | "copilot-cli" | "gemini-cli";
-
-export const HARNESS_IDS: readonly HarnessId[] = Object.freeze([
-  "claude-code", "codex", "opencode", "antigravity", "cursor",
-  "devin", "omp", "dsh", "vscode", "copilot-cli", "gemini-cli",
-] as const);
-
-export function isHarnessId(value: unknown): value is HarnessId {
-  return typeof value === "string" && (HARNESS_IDS as readonly string[]).includes(value);
-}
+import type { HarnessId } from "../setup/harness-registry.js";
+export { HARNESS_IDS, isHarnessId, type HarnessId } from "../setup/harness-registry.js";
 
 export type ListeningSource = "watcher" | "adapter" | "git" | "hook";
 

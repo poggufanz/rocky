@@ -50,7 +50,8 @@ function staticClosure(entryPath: string): ImportedBy {
   while (pending.length > 0) {
     const path = pending.shift()!;
     for (const specifier of staticSpecifiers(path)) {
-      if (!specifier.startsWith(".")) continue; // node: builtins; the package has no runtime dependencies
+      if (specifier.startsWith("node:")) continue;
+      assert.ok(specifier.startsWith("."), `external static import ${specifier} from ${moduleKey(path)}`);
       const target = resolve(dirname(path), specifier);
       assert.ok(existsSync(target), `unresolved import ${specifier} from ${moduleKey(path)}`);
       const key = moduleKey(target);
@@ -92,6 +93,10 @@ test("startup never loads the memory reader", () => {
     false,
     `startup statically imports the memory reader: ${importChain(closure, MEMORY_READER)}`,
   );
+});
+
+test("JSON config helpers load without statically importing jsonc-parser", () => {
+  staticClosure(join(compiledRoot, "setup", "json-config.js"));
 });
 
 test("startup stays within its file budget", () => {
@@ -167,11 +172,22 @@ test("hook tool-result keeps memory out of its static import closure", () => {
   const hookModule = join(compiledRoot, "commands", "tool-result-hook.js");
   assert.ok(existsSync(hookModule), `compiled module is missing: ${hookModule}`);
   const hookImports = staticSpecifiers(hookModule).sort();
-  assert.deepEqual(hookImports, ["../core/fixtouch-cache.js", "../core/state-paths.js", "../core/tool-result.js", "node:fs"]);
+  assert.deepEqual(hookImports, [
+    "../core/fixtouch-cache.js", "../core/state-paths.js", "../core/tool-result.js",
+    "../harnesses/index.js", "../harnesses/projections/to-tool-result.js", "node:fs",
+  ]);
 
   const closure = staticClosure(hookModule);
   for (const lazyModule of [MEMORY_READER, "core/memory.js", "commands/fixtouch-refresh.js"]) {
     assert.equal(closure.has(lazyModule), false, `tool-result statically imports ${importChain(closure, lazyModule)}`);
+  }
+});
+
+test("CLI startup and the hook lanes load harness decoders lazily", () => {
+  for (const path of ["index.js", "commands/agent-hook.js", "commands/tool-result-hook.js", "listening/hook-ingress.js"]) {
+    const closure = staticClosure(join(compiledRoot, path));
+    const decoders = [...closure.keys()].filter((file) => file.startsWith("harnesses/decoders/"));
+    assert.deepEqual(decoders.map((file) => importChain(closure, file)), [], `${path} loads harness decoders eagerly`);
   }
 });
 

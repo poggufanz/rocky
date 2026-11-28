@@ -16,8 +16,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { appendPayload } from "../agent/spool.js";
-import { parseClaudeHookPayload, type ParsedHookPayload } from "../agent/adapters/claude-code.js";
-import { parseCodexHookPayload } from "../agent/adapters/codex.js";
+import type { ParsedHookPayload } from "../agent/adapters/claude-code.js";
 import { snippetFromToolInput } from "../agent/explain-extract.js";
 import { spoolPendingSnippet, takePendingSnippet } from "../agent/pending-explain.js";
 import { loadConfig } from "../core/config-read.js";
@@ -26,9 +25,11 @@ import { utf8Prefix } from "../core/utf8.js";
 import { resolveRockyPaths, type RockyPaths } from "../core/state-paths.js";
 import { canonicalPath, loadMemory, MAX_GIT_SNAPSHOT_CHARS, MAX_GIT_SNAPSHOT_PRE_REDACT_CHARS, MAX_RATIONALE_FILES, type GitAnchor, type MemoryRecord } from "../core/memory-read.js";
 import { recordExplain, recordRationale } from "../core/memory.js";
-import { weakLinkFor } from "../agent/logs/capture.js";
+import { weakLinkFor } from "../agent/weak-link.js";
 import { filesystemIdentity, NO_FOLLOW_FLAG, regularDescriptorSafe, sameFilesystemIdentity } from "../core/fs-safety.js";
 import { MAX_BASELINE_FILES, type AgentEvent, type IntentEvent, type TurnBaseline } from "../agent/schema.js";
+import { loadHarnessDecoder } from "../harnesses/index.js";
+import { projectToAgent } from "../harnesses/projections/to-agent.js";
 
 const STDIN_CAP_BYTES = 2 * 1024 * 1024;
 const MIN_RATIONALE_WORDS = 3;
@@ -697,10 +698,9 @@ export async function agentEvent(adapter: string, deps: AgentHookDeps = {}): Pro
         }
         const payload: unknown = JSON.parse(raw);
         if (adapter === "claude-code") spoolPostToolUseSnippet(payload);
-        const parsed = adapter === "codex"
-          ? parseCodexHookPayload(payload, effectiveDeps.now?.())
-          : parseClaudeHookPayload(payload, effectiveDeps.now?.());
-        applyParsedEvent(parsed, paths, effectiveDeps);
+        const decoder = await loadHarnessDecoder(adapter);
+        const decoded = decoder?.decodeHook(payload, effectiveDeps.now?.());
+        if (decoded !== undefined) applyParsedEvent(projectToAgent(decoded), paths, effectiveDeps);
       } catch {
         safeLogFailure(paths);
       }

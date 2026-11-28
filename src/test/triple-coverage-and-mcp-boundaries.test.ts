@@ -23,11 +23,16 @@ function freshPaths(): RockyPaths {
 async function captureStdout(fn: () => Promise<number>): Promise<{ code: number; out: string }> {
   let out = "";
   const original = process.stdout.write;
-  (process.stdout as unknown as { write: (chunk: string, callback?: (error?: Error) => void) => boolean }).write = (chunk, callback) => {
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    // Keep Node 18 node:test binary report frames on the real stdout channel.
+    if (typeof chunk !== "string") {
+      return (original as (...args: unknown[]) => boolean).call(process.stdout, chunk, ...rest);
+    }
     out += chunk;
+    const callback = rest.find((arg) => typeof arg === "function") as ((error?: Error) => void) | undefined;
     callback?.();
     return true;
-  };
+  }) as typeof process.stdout.write;
   try {
     return { code: await fn(), out };
   } finally {

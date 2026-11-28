@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, posix, resolve, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { getEvalDriver } from "./drivers/index.mjs";
 
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_MEMORY_LINE_BYTES = 2 * 1024 * 1024;
@@ -122,12 +123,14 @@ function readMemorySize(memoryPath) {
 }
 
 /**
- * Snapshot the owner's Rocky memory byte offset and Claude settings metadata
+ * Snapshot the owner's Rocky memory byte offset and provider config metadata
  * (paths, byte size, sha256, mtime — never file contents).
  * @param {{
  *   ownerHome: string,
  *   ownerConfigDir?: string | null,
  *   ownerRockyHome?: string | null,
+ *   provider?: import("./drivers/index.mjs").EvalProvider,
+ *   env?: Record<string, string | undefined>,
  *   platform?: NodeJS.Platform,
  * }} options
  * @returns {{
@@ -140,6 +143,8 @@ export function ownerBaseline({
   ownerHome,
   ownerConfigDir,
   ownerRockyHome,
+  provider = "claude-code",
+  env,
   platform = process.platform,
 }) {
   if (typeof ownerHome !== "string" || ownerHome.trim().length === 0) {
@@ -153,10 +158,13 @@ export function ownerBaseline({
   const memoryPath = join(memoryDir, "memory.jsonl");
   const memoryBytes = readMemorySize(memoryPath);
 
-  /** @type {string[]} */
-  const candidateSettings = [join(resolvedHome, ".claude", "settings.json")];
+  const driver = getEvalDriver(provider);
+  const configEnv = env ?? (provider === "codex" ? process.env : {});
+  const candidateSettings = driver.ownerConfigPaths(resolvedHome, configEnv);
   if (typeof ownerConfigDir === "string" && ownerConfigDir.trim().length > 0) {
-    candidateSettings.push(join(resolve(ownerConfigDir), "settings.json"));
+    candidateSettings.push(...driver.ownerConfigPaths(resolvedHome, {
+      [driver.configEnvName]: ownerConfigDir,
+    }));
   }
 
   const caseInsensitive = platform === "win32";
@@ -179,7 +187,7 @@ export function ownerBaseline({
 }
 
 /**
- * Check whether the owner's Rocky memory or Claude settings leaked eval activity
+ * Check whether the owner's Rocky memory or provider config leaked eval activity
  * since `baseline` was captured.
  * Reads only bytes appended after `baseline.memoryBytes` in bounded chunks;
  * if the file shrank (rotation/truncation), reads from offset 0 and reports
