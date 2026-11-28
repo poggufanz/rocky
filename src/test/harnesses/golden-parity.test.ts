@@ -249,9 +249,14 @@ test("golden Codex notify uses argv in preference to stdin and closes the turn",
   let stdout = "";
   const annotated: string[] = [];
   let readStdin = false;
-  process.stdout.write = ((chunk: string, callback: () => void) => {
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    // Keep Node 18 node:test binary report frames on the real stdout channel.
+    if (typeof chunk !== "string") {
+      return (original as (...args: unknown[]) => boolean).call(process.stdout, chunk, ...rest);
+    }
     stdout += chunk;
-    callback();
+    const callback = rest.find((arg) => typeof arg === "function") as ((error?: Error) => void) | undefined;
+    callback?.();
     return true;
   }) as typeof original;
   let code: number;
