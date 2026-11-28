@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import test, { type TestContext } from "node:test";
-import { editJsoncPathAtomic } from "../../setup/json-config.js";
+import { editJsoncPathAtomic, inspectJsonTransaction } from "../../setup/json-config.js";
 
 function fixture(t: TestContext, original?: string): string {
   const dir = mkdtempSync(join(tmpdir(), "rocky-jsonc-"));
@@ -63,6 +63,45 @@ test("deleting an object property preserves adjacent comments byte for byte", as
     assert.equal((await editJsoncPathAtomic(target, ["rocky"], undefined)).status, "written");
     assert.deepEqual(readFileSync(target), Buffer.from(after));
   }
+});
+
+test("a JSONC edit preserves another writer's prepared transaction while the target is live", async (t) => {
+  const target = fixture(t, '{"keep":1}\n');
+  const transaction = join(dirname(target), `.${basename(target)}.transaction-concurrent`);
+  fs.mkdirSync(transaction);
+  const manifest = JSON.stringify({ version: 1, target, state: "prepared" });
+  const staged = '{"unpublished":true}\n';
+  writeFileSync(join(transaction, "manifest.json"), manifest);
+  writeFileSync(join(transaction, "prepared"), staged);
+
+  assert.equal((await editJsoncPathAtomic(target, ["rocky"], true)).status, "written");
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { keep: 1, rocky: true });
+  assert.equal(readFileSync(join(transaction, "prepared"), "utf8"), staged);
+  assert.equal(readFileSync(join(transaction, "manifest.json"), "utf8"), manifest);
+});
+
+test("a missing JSONC config can be created after settling an empty prepared journal", async (t) => {
+  const target = fixture(t);
+  const transaction = join(dirname(target), `.${basename(target)}.transaction-empty`);
+  fs.mkdirSync(transaction);
+  writeFileSync(join(transaction, "manifest.json"), JSON.stringify({ version: 1, target, state: "prepared" }));
+
+  assert.equal((await editJsoncPathAtomic(target, ["rocky"], true)).status, "written");
+  assert.equal(inspectJsonTransaction(target).status, "clear");
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { rocky: true });
+});
+
+test("a JSONC config can be edited by relative path and then by absolute path", async (t) => {
+  const cwd = process.cwd();
+  const dir = mkdtempSync(join(cwd, ".rocky-jsonc-relative-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = join(dir, "opencode.jsonc");
+  writeFileSync(target, '{"keep":1}\n');
+
+  assert.equal((await editJsoncPathAtomic(relative(cwd, target), ["first"], true)).status, "written");
+  assert.equal((await editJsoncPathAtomic(target, ["second"], true)).status, "written");
+  assert.equal(inspectJsonTransaction(target).status, "clear");
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { keep: 1, first: true, second: true });
 });
 
 test("a retried JSONC edit recovers a displaced original and refuses recovery if it is gone", async (t) => {

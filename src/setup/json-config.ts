@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   atomicWriteBytesIfUnchanged,
   inspectFileTransaction,
@@ -338,18 +338,19 @@ export type ConditionalJsonWriteResult = ConditionalBytesWriteResult;
 
 /** Apply a JSONC path edit against its original snapshot. No-op edits also succeed as `written`. */
 export async function editJsoncPathAtomic(
-  path: string,
+  filePath: string,
   jsonPath: readonly (string | number)[],
   value: unknown,
   { mutationGuard }: { mutationGuard?: JsonMutationGuard } = {},
 ): Promise<ConditionalBytesWriteResult> {
+  const path = resolve(filePath);
   const {
     modify, applyEdits, format, parse, parseTree, findNodeAtLocation, findNodeAtOffset, createScanner, SyntaxKind,
   } = await import("jsonc-parser");
   let snapshot: ReturnType<typeof readConfigBytes>;
   for (;;) {
     if (!mutationGuardUnchanged(mutationGuard)) return { status: "recovery-required" };
-    const recovery = recoverJsonTransaction(path, mutationGuard);
+    const recovery = recoverFileTransaction(path, mutationGuard, { preserveUndisplacedPrepare: true });
     if (recovery.status === "manual") return { ...recovery, status: "recovery-required" };
     if (recovery.status === "recovered") continue;
     snapshot = readConfigBytes(path);

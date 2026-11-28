@@ -9,11 +9,12 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CAPTURE_PROMPT, ENV_REPORT_KEYS, isMainModule } from "../capture.mjs";
@@ -25,10 +26,12 @@ import {
   buildToolEnv,
   createSandbox,
   destroySandbox,
+  exposeProviderLauncher,
   packArm,
   publishTarball,
   redactText,
   resolveExecutableOnPath,
+  resolveProviderExecutable,
   scrubEnv,
   stripRockyFromPath,
 } from "../sandbox.mjs";
@@ -312,6 +315,41 @@ describe("sandbox", () => {
       }
     },
   );
+
+  test("provider resolution skips relative PATH entries", (t) => {
+    const local = mkdtempSync(join(process.cwd(), ".rocky-provider-path-"));
+    const trusted = mkdtempSync(join(tmpdir(), "rocky-provider-path-"));
+    t.after(() => {
+      rmSync(local, { recursive: true, force: true });
+      rmSync(trusted, { recursive: true, force: true });
+    });
+    const file = "fixture-provider";
+    const executable = process.platform === "win32" ? `${file}.exe` : file;
+    writeFileSync(join(local, executable), "local fixture", { mode: 0o700 });
+    const trustedExecutable = join(trusted, executable);
+    writeFileSync(trustedExecutable, "trusted fixture", { mode: 0o700 });
+
+    const relativePath = relative(process.cwd(), local);
+    assert.throws(() => resolveProviderExecutable(file, { PATH: relativePath }), /not found on PATH/);
+    const trustedPath = process.platform === "win32" ? `"${trusted}"` : trusted;
+    assert.equal(resolveProviderExecutable(file, { PATH: [relativePath, trustedPath].join(delimiter) }), trustedExecutable);
+  });
+
+  test("Windows provider launcher has independent file contents", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "rocky-eval-launcher-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const executable = join(root, "fixture.exe");
+    const sandbox = join(root, "sandbox");
+    mkdirSync(sandbox);
+    writeFileSync(executable, "host fixture");
+
+    const launcher = join(exposeProviderLauncher(sandbox, "fixture", executable, "win32"), "fixture.exe");
+    assert.equal(readFileSync(launcher, "utf8"), "host fixture");
+    assert.equal(statSync(executable).nlink, 1);
+    assert.equal(statSync(launcher).nlink, 1);
+    writeFileSync(launcher, "changed fixture");
+    assert.equal(readFileSync(executable, "utf8"), "host fixture");
+  });
 
   test("sandbox env points every home variable inside the sandbox", async () => {
     const root = mkdtempSync(join(tmpdir(), "rocky-eval-test-"));

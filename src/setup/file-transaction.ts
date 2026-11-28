@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import type { Stats } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { directorySyncCapability } from "./directory-sync.js";
 
 /**
@@ -727,7 +727,9 @@ function readManifest(transactionDirectory: string, target: string): Transaction
     );
     if (!isObject(parsed)
       || parsed.version !== 1
-      || parsed.target !== target
+      || typeof parsed.target !== "string"
+      || parsed.target.length === 0
+      || resolve(parsed.target) !== resolve(target)
       || (parsed.state !== "prepared"
         && parsed.state !== "displaced"
         && parsed.state !== "published"
@@ -851,6 +853,8 @@ function ambiguousOutcome(
  * `path`). When neither holds, the directory — and the artifact inside it
  * that cannot be vouched for — is left in place and named, so the caller has
  * something concrete to inspect rather than a dead end with no remedy.
+ * A pre-read caller can also protect staged artifacts that a writer may
+ * still own, even when a live target appears during recovery.
  *
  * This decision's own `isLiveRegularFile(path)` check is inlined into the
  * condition below, not bound to a named local: a local in function scope
@@ -897,10 +901,11 @@ function resolveUndisplacedTransaction(
   transactionDirectory: string,
   path: string,
   guard: FileMutationGuard | undefined,
+  preservePrepared: boolean,
 ): FileTransactionRecoveryResult {
   const preparedArtifactPath = join(transactionDirectory, "prepared");
   const linkProbePath = join(transactionDirectory, "link-probe");
-  if (!isLiveRegularFile(path)
+  if ((preservePrepared || !isLiveRegularFile(path))
     && (pathExists(preparedArtifactPath) || pathExists(linkProbePath))) {
     return {
       status: "manual",
@@ -924,7 +929,7 @@ function resolveUndisplacedTransaction(
     };
   }
   if ((pathExists(preparedArtifactPath) || pathExists(linkProbePath))
-    && (!mutationGuardUnchanged(guard)
+    && (preservePrepared || !mutationGuardUnchanged(guard)
       || !discardPrepared(transactionDirectory, preparedArtifactPath, linkProbePath))) {
     return {
       status: "manual",
@@ -971,6 +976,7 @@ function resolveUndisplacedTransaction(
 export function recoverFileTransaction(
   path: string,
   guard?: FileMutationGuard,
+  { preserveUndisplacedPrepare = false }: { preserveUndisplacedPrepare?: boolean } = {},
 ): FileTransactionRecoveryResult {
   for (const transactionDirectory of transactionDirectories(path)) {
     const manifest = readManifest(transactionDirectory, path);
@@ -996,7 +1002,10 @@ export function recoverFileTransaction(
     // artifact itself, whether discarding is safe (see its own doc comment).
     if ((manifest.state === "prepared" || manifest.state === "published")
       && !pathExists(displacedPath)) {
-      return resolveUndisplacedTransaction(transactionDirectory, path, guard);
+      const preservePrepared = preserveUndisplacedPrepare && manifest.state === "prepared";
+      // The writer may still be between staging and displacement.
+      if (preservePrepared && isLiveRegularFile(path)) continue;
+      return resolveUndisplacedTransaction(transactionDirectory, path, guard, preservePrepared);
     }
 
     if (manifest.state === "prepared"

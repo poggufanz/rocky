@@ -1438,6 +1438,22 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
     for (const name of entries) {
       const fullPath = join(dirPath, name);
       const relPath = `${relPrefix}/${name}`;
+      if (containsAnySecret(relPath, normalizedSecrets)) {
+        const redactedPath = redactText(relPath, normalizedSecrets);
+        notifyHit(redactedPath);
+        try {
+          rmFn(fullPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 75 });
+          quarantined.push(redactedPath);
+        } catch (error) {
+          scanErrors.push(redactedPath);
+          quarantined.push({
+            path: redactedPath,
+            removed: false,
+            error: redactText(errorMessage(error), normalizedSecrets),
+          });
+        }
+        continue;
+      }
       let stat;
       try {
         stat = lstatFn(fullPath);

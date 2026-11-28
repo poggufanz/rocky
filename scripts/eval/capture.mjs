@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -110,6 +111,27 @@ function parseArgs(argv) {
     usageError("--out <dir> is required");
   }
   return opts;
+}
+
+function readCopiedCredentialSecrets(filePath) {
+  let credentials;
+  try {
+    if (!lstatSync(filePath).isFile()) throw new Error("Expected a regular file");
+    credentials = JSON.parse(readFileSync(filePath, "utf8"));
+  } catch {
+    throw new Error("Unable to read copied credentials JSON");
+  }
+
+  // Use the batch runner's former copy-credentials rule for nested values.
+  const secrets = new Set();
+  function collect(value) {
+    if (typeof value === "string" && value.length >= 20) secrets.add(value);
+    if (value !== null && typeof value === "object") {
+      for (const child of Object.values(value)) collect(child);
+    }
+  }
+  collect(credentials);
+  return secrets;
 }
 
 function spawnNoShell(file, args, options) {
@@ -329,6 +351,11 @@ async function main() {
       auth,
     });
 
+    const credentialsFile = auth.kind === "copy-credentials"
+      ? join(sandbox.configDir, ".credentials.json")
+      : undefined;
+    if (credentialsFile) secrets.push(...readCopiedCredentialSecrets(credentialsFile));
+
     seedInlineProbeRepo(
       sandbox.taskDir,
       opts.arm,
@@ -346,9 +373,8 @@ async function main() {
       timeout: 30_000,
     });
 
-    const credsFile = join(sandbox.configDir, ".credentials.json");
-    const credsMtimeBefore = opts.auth === "copy-credentials" && existsSync(credsFile)
-      ? statSync(credsFile).mtimeMs
+    const credsMtimeBefore = credentialsFile && existsSync(credentialsFile)
+      ? statSync(credentialsFile).mtimeMs
       : null;
 
     const runResult = spawnNoShell(executable, args, {
@@ -358,8 +384,8 @@ async function main() {
       timeout: 300_000,
     });
 
-    const credsMtimeAfter = opts.auth === "copy-credentials" && existsSync(credsFile)
-      ? statSync(credsFile).mtimeMs
+    const credsMtimeAfter = credentialsFile && existsSync(credentialsFile)
+      ? statSync(credentialsFile).mtimeMs
       : null;
 
     const redactedTranscript = redact(runResult.stdout);

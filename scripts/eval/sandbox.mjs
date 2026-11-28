@@ -323,7 +323,7 @@ function setSinglePath(env, value) {
 }
 
 /**
- * Resolve an executable on PATH without spawning a shell.
+ * Resolve an executable from absolute PATH entries without spawning a shell.
  * @param {readonly string[]} names
  * @param {string} pathValue
  * @param {NodeJS.Platform} [platform]
@@ -343,7 +343,7 @@ export function resolveExecutableOnPath(
     ...(pathValue ?? "").split(sep).map((dir) => (
       platform === "win32" ? dir.replace(/^"|"$/g, "") : dir
     )),
-  ].filter(Boolean);
+  ].filter((dir) => isAbsolutePathEntry(dir, platform));
   const mode = platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK;
   for (const dir of dirs) {
     for (const name of names) {
@@ -366,17 +366,14 @@ export function resolveProviderExecutable(file, env, platform = process.platform
   return found;
 }
 
-function exposeProviderLauncher(dir, file, executable, platform) {
+export function exposeProviderLauncher(dir, file, executable, platform) {
   const bin = join(dir, "provider-bin");
   mkdirSync(bin);
   if (platform === "win32") {
     if (win32.extname(executable).toLowerCase() === ".exe") {
       const launcher = join(bin, `${file}.exe`);
-      try {
-        linkSync(executable, launcher);
-      } catch {
-        copyFileSync(executable, launcher, fsConstants.COPYFILE_EXCL);
-      }
+      // The sandbox can modify its launcher. Give it independent file bytes.
+      copyFileSync(executable, launcher, fsConstants.COPYFILE_EXCL);
     } else {
       const target = executable.replaceAll("%", "%%");
       writeFileSync(join(bin, `${file}.cmd`), `@setlocal DisableDelayedExpansion\r\n@"${target}" %*\r\n`);

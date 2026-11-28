@@ -207,6 +207,32 @@ test("artifact copies only receive scanned bytes and token-bearing names never r
   ]);
 });
 
+test("artifact names created during acceptance halt the batch and are quarantined", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "rocky-artifact-acceptance-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const token = "fixture-acceptance-name-secret-123";
+  const opts = singleRunOptions(base, { secrets: [token] });
+  await assert.rejects(runBatch(opts, makeFakeDeps({
+    accept: async (_task, finalDir) => {
+      const nested = join(finalDir, "results");
+      mkdirSync(nested);
+      writeFileSync(join(nested, `file-${token}.txt`), "fixture bytes");
+      mkdirSync(join(finalDir, `dir-${token}`));
+      writeFileSync(join(finalDir, `dir-${token}`, "result.txt"), "fixture bytes");
+      return { solved: true, reason: "fixture" };
+    },
+  })), (error) => error instanceof BatchLeakError);
+
+  const batch = JSON.parse(readFileSync(join(opts.outDir, "batch.json"), "utf8"));
+  assert.equal(batch.halted?.reason, "token_leak");
+  const dir = join(opts.outDir, "runs", "SMOKE-before-b1");
+  const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
+  assert.equal(run.invalid, "token_leak");
+  assert.deepEqual(run.quarantined, ["final/dir-<redacted>", "final/results/file-<redacted>.txt"]);
+  assert.deepEqual(readdirSync(join(dir, "final")).sort(), ["results", "solution.txt"]);
+  assert.deepEqual(readdirSync(join(dir, "final", "results")), []);
+});
+
 test("an unreadable source artifact invalidates the run and cannot reach grading or output", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "rocky-artifact-unreadable-"));
   t.after(() => rmSync(base, { recursive: true, force: true }));

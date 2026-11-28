@@ -296,7 +296,7 @@ function cacheFixtureRocky(root, env) {
   return cache;
 }
 
-test("offline Codex SMOKE runs through the runner and evaluator with isolated owner state", (t) => {
+function isolatedSmokeDirectory(t, prefix) {
   // Windows user temp can inherit instructions from the owner's profile.
   const roots = process.platform === "win32"
     ? [tmpdir(), process.env.PUBLIC, parse(tmpdir()).root].filter(Boolean)
@@ -306,7 +306,7 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
   for (const candidate of roots) {
     try {
       assertNoAncestorInstructions(candidate);
-      root = mkdtempSync(join(candidate, "rocky-codex-smoke-"));
+      root = mkdtempSync(join(candidate, prefix));
       break;
     } catch (error) {
       errors.push(error);
@@ -314,6 +314,11 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
   }
   if (!root) throw new AggregateError(errors, "Could not create an isolated smoke test directory");
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+test("offline Codex SMOKE runs through the runner and evaluator with isolated owner state", (t) => {
+  const root = isolatedSmokeDirectory(t, "rocky-codex-smoke-");
   const bin = join(root, "bin");
   const decoyBin = join(root, "decoy-bin");
   const owner = join(root, "owner");
@@ -463,6 +468,42 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
     assert.equal(existsSync(leakOut), false);
   }
   assert.equal(readFileSync(codexOwnerFile, "utf8"), "# untouched owner fixture\n");
+});
+
+test("standalone copy-credentials capture discards raw stdout and stderr containing fixture tokens", (t) => {
+  const root = isolatedSmokeDirectory(t, "rocky-capture-copy-creds-");
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const from = join(root, ".credentials.json");
+  const accessToken = "fixture-capture-access-token";
+  const refreshToken = "fixture-capture-refresh-token";
+  writeFileSync(from, JSON.stringify({ claudeAiOauth: { accessToken, refreshToken } }));
+  const provider = join(bin, "fixture.cjs");
+  writeFileSync(provider, `
+    if (process.argv[2] === "--version") console.log("Claude Code fixture");
+    else if (process.env.EVAL_CAPTURE_STREAM === "stdout") process.stdout.write(${JSON.stringify(accessToken)});
+    else process.stderr.write(${JSON.stringify(refreshToken)});
+  `);
+  if (process.platform === "win32") {
+    writeFileSync(join(bin, "claude.cmd"), `@"${process.execPath}" "${provider}" %*\r\n`);
+  } else {
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\nexec "${process.execPath}" "${provider}" "$@"\n`, { mode: 0o755 });
+  }
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"));
+  env.PATH = bin;
+
+  for (const stream of ["stdout", "stderr"]) {
+    const out = join(root, `capture-${stream}`);
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../capture.mjs", import.meta.url)),
+      "--arm", "none", "--auth", "copy-credentials", "--from", from, "--out", out, "--root", join(root, "sbx"),
+    ], { encoding: "utf8", env: { ...env, EVAL_CAPTURE_STREAM: stream } });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /provider output contained an evaluation credential/);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr.includes(accessToken) || result.stderr.includes(refreshToken), false);
+    assert.equal(existsSync(out), false);
+  }
 });
 
 test("scrubEnv drops CODEX* and OPENAI_* alongside CLAUDE*/ANTHROPIC_*", () => {
