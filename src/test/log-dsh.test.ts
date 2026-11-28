@@ -94,3 +94,17 @@ test("dsh empty data.text falls back to data.reasoning", { skip: !hasZstd }, asy
   assert.equal(events.length, 1);
   assert.equal(events[0].text, "real reason");
 });
+
+test("dsh log adapter preserves legacy nonempty header session IDs", { skip: !hasZstd }, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rocky-dsh-session-")));
+  const log = join(dir, "session.jsonl.zstd");
+  const { dshLogAdapter } = await import("../agent/logs/dsh.js");
+  for (const session of [" \t ", "s".repeat(257)]) {
+    writeZstdLog(log, [
+      { version: 1, session },
+      { type: "reasoning", seq: 1, data: { text: "check the build" } },
+    ]);
+    const { events } = dshLogAdapter.scan("/any", log, 0, 1024 * 1024);
+    assert.deepEqual(events.map((event) => event.sessionId), [session]);
+  }
+});

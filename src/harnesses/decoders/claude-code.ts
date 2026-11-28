@@ -1,7 +1,7 @@
 import { parseClaudeHookPayload } from "../../agent/adapters/claude-code.js";
 import type { CanonicalRationaleEvent } from "../../agent/logs/types.js";
 import { isSafeSessionId } from "../../core/agent-session.js";
-import { TOOL_RESULT_STDIN_CAP_BYTES } from "../../core/tool-result.js";
+import { parseExitCodeHeader, TOOL_RESULT_STDIN_CAP_BYTES } from "../../core/tool-result.js";
 import { capSyncResponse } from "../projections/to-tool-result.js";
 import {
   asFields, field, parseFields, readListeningFields, rememberPending, textField, transcriptTimestamp, type Fields,
@@ -15,10 +15,13 @@ function readShellOutcome(raw: Fields, eventName: "PostToolUse" | "PostToolUseFa
   const failure = eventName === "PostToolUseFailure";
   const rawError = field(raw, "error");
   const error = resultText(rawError);
+  const header = failure && error !== undefined ? parseExitCodeHeader(error) : undefined;
+  const malformedError = failure && rawError !== undefined && error === undefined;
   const outcome = withExitEvidence({
     command: textField(input, TOOL_RESULT_STDIN_CAP_BYTES, "command"),
     cwd: textField(raw, TOOL_RESULT_STDIN_CAP_BYTES, "cwd"),
     exitCodeSource: "unknown",
+    ...(header !== undefined || malformedError ? { errorExitHeader: header ?? null } : {}),
     output: error ?? resultText(field(response, "stderr")),
     isError: failure,
     toolUseId: textField(raw, 256, "tool_use_id"),
@@ -27,9 +30,9 @@ function readShellOutcome(raw: Fields, eventName: "PostToolUse" | "PostToolUseFa
     background: field(input, "run_in_background") === true,
     edits: [],
     // Claude's own Bash/PowerShell success hook is an explicit success signal.
-  }, failure ? undefined : 0, failure ? error : undefined);
+  }, exitCodeField(response) ?? (failure ? undefined : 0), header);
   const classified = withShellSkip(outcome);
-  if (failure && rawError !== undefined && error === undefined && classified.skipReason === "no-exit-header") {
+  if (malformedError && classified.skipReason === "no-exit-header") {
     return undefined;
   }
   return classified;
@@ -50,8 +53,7 @@ function decodeHook(raw: unknown, now = Date.now()): DecodedHookInput | undefine
     get outcome() {
       if (eventName !== "PostToolUse" && eventName !== "PostToolUseFailure") return undefined;
       if (shellTool) {
-        // The installed Claude shell hook uses the native field names and
-        // treats PostToolUse itself as success. Failures need an error header.
+        // The installed Claude shell hook uses the native event, tool, and session fields.
         const event = field(record, "hook_event_name");
         const tool = field(record, "tool_name");
         if ((event !== "PostToolUse" && event !== "PostToolUseFailure")
@@ -180,7 +182,7 @@ export function createClaudeTranscriptReducer(ctx: TranscriptContext = {}): Tran
           ...edit, edits: edit?.edits ?? [], cwd: resultCwd, toolUseId: id,
           command: textField(call.input, 1024 * 1024, "command"),
           exitCodeSource: "unknown", output, isError,
-        }, exitCodeField(part), isError === true ? output : undefined),
+        }, exitCodeField(part), isError === true && output !== undefined ? parseExitCodeHeader(output) : undefined),
       });
     }
     return events;

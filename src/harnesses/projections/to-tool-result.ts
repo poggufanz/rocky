@@ -20,11 +20,21 @@ export function projectToToolResult(decoded: DecodedHookInput): ToolResultEvent 
     ?? (outcome.interrupted ? "interrupt" : undefined)
     ?? (outcome.background ? "background" : undefined);
   if (reason) return { kind: "skip", reason };
-  if (exitCodeSource === "unknown" || exitCode === undefined) return { kind: "skip", reason: "no-exit-header" };
 
   const agent: AgentStamp = { vendor, session };
   if (isSafeSessionId(agentId)) agent.agentId = agentId;
   if (isSafeSessionId(toolUseId)) agent.toolUseId = toolUseId;
+  // The installed Claude hook uses the event for success and the error header for failure.
+  if (vendor === "claude-code") {
+    if (decoded.eventName === "PostToolUse") return { kind: "pass", cmd, cwd, agent };
+    const header = outcome.errorExitHeader;
+    if (header === null) return undefined;
+    return header === undefined
+      ? { kind: "skip", reason: "no-exit-header" }
+      : { kind: "failure", cmd, cwd, ...header, agent };
+  }
+
+  if (exitCodeSource === "unknown" || exitCode === undefined) return { kind: "skip", reason: "no-exit-header" };
   return exitCode === 0
     ? { kind: "pass", cmd, cwd, agent }
     : { kind: "failure", cmd, cwd, exitCode, body: outcome.output ?? "", agent };

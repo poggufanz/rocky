@@ -183,6 +183,9 @@ test("Claude tool-result projection preserves shell pass, failure, and skip sema
   for (const value of [
     base,
     { ...base, hook_event_name: "PostToolUse" },
+    { ...base, tool_response: { exit_code: 0 } },
+    { ...base, error: "no exit header", tool_response: { exit_code: 7 } },
+    { ...base, error: null, tool_response: { exit_code: 7 } },
     { ...base, error: "no exit header" },
     { ...base, is_interrupt: true },
     { ...base, hook_event_name: "PostToolUse", tool_response: { interrupted: true } },
@@ -195,6 +198,17 @@ test("Claude tool-result projection preserves shell pass, failure, and skip sema
     assert.ok(decoded);
     assert.deepEqual(projectToToolResult(decoded), parseToolResultPayload(Buffer.from(JSON.stringify(value))));
   }
+});
+
+test("Claude tool-result projects a completed PostToolUse as a pass despite a structured nonzero exit", () => {
+  const cwd = process.cwd();
+  assert.deepEqual(projectToToolResult({
+    harnessId: "claude-code", eventName: "PostToolUse", sessionId: "session-a", shellTool: true,
+    listening: {},
+    outcome: { command: "npm test", cwd, exitCode: 5, exitCodeSource: "structured", edits: [] },
+  }), {
+    kind: "pass", cmd: "npm test", cwd, agent: { vendor: "claude-code", session: "session-a" },
+  });
 });
 
 test("Claude failures without an error field produce the explicit no-exit-header skip", async () => {

@@ -1,5 +1,5 @@
 import type { ParsedHookPayload } from "../../agent/adapters/claude-code.js";
-import { classifyRockyWrap, parseExitCodeHeader } from "../../core/tool-result.js";
+import { classifyRockyWrap } from "../../core/tool-result.js";
 import type { NormalizedToolOutcome } from "../types.js";
 import { field, type Fields } from "./field-extract.js";
 
@@ -39,9 +39,8 @@ export function resultText(value: unknown): string | undefined {
 export function withExitEvidence(
   outcome: NormalizedToolOutcome,
   structured: number | undefined,
-  headerText?: string,
+  header?: NonNullable<NormalizedToolOutcome["errorExitHeader"]>,
 ): NormalizedToolOutcome {
-  const header = headerText === undefined ? undefined : parseExitCodeHeader(headerText);
   if (structured !== undefined) {
     return { ...outcome, exitCode: structured, exitCodeSource: "structured", isError: structured !== 0 };
   }

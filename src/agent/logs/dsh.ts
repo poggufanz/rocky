@@ -129,7 +129,9 @@ function scan(_repoCwd: string, logPath: string, fromOffset: number, maxBytes: n
       return none;
     }
     const events: CanonicalRationaleEvent[] = [];
-    const reducer = createDshTranscriptReducer({ logPath });
+    // Legacy scans accept any nonempty session string from the header.
+    const reducer = createDshTranscriptReducer({ logPath }, ({ session }) =>
+      typeof session === "string" && session.length > 0 ? session : undefined);
     let highestSeq = fromOffset;
     let previousNewSeq: number | undefined;
     for (const rawLine of text.split("\n")) {

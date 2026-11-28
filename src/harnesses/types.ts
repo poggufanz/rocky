@@ -13,6 +13,8 @@ export interface NormalizedToolOutcome {
   cwd?: string;
   exitCode?: number;
   exitCodeSource: "structured" | "header" | "unknown";
+  /** Header from the hook error field. Null marks a supplied, unusable error field. */
+  errorExitHeader?: { exitCode: number; body: string } | null;
   output?: string;
   isError?: boolean;
   toolUseId?: string;

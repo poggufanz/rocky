@@ -1,6 +1,6 @@
 import { basename, dirname } from "node:path";
 import type { CanonicalRationaleEvent } from "../../agent/logs/types.js";
-import { asFields, parseFields } from "../shared/field-extract.js";
+import { asFields, parseFields, textField, type Fields } from "../shared/field-extract.js";
 import type { HarnessDecoder, TranscriptContext, TranscriptEvent, TranscriptReducer } from "../types.js";
 
 /**
@@ -34,7 +34,10 @@ function dshRationaleEvent(
   };
 }
 
-export function createDshTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer & {
+export function createDshTranscriptReducer(
+  ctx: TranscriptContext = {},
+  readHeaderSession = (row: Fields) => textField(row, 256, "session"),
+): TranscriptReducer & {
   consumeRecord(value: unknown, afterSeq?: number): { events: TranscriptEvent[]; seq?: number };
 } {
   const logPath = ctx.logPath ?? "";
@@ -45,7 +48,7 @@ export function createDshTranscriptReducer(ctx: TranscriptContext = {}): Transcr
     const header = firstLine && row !== undefined && looksLikeDshHeader(row);
     firstLine = false;
     if (header) {
-      if (typeof row.session === "string" && row.session.length > 0) sessionId = row.session;
+      sessionId = readHeaderSession(row) ?? sessionId;
       return { events: [] };
     }
     const seq = row?.seq;

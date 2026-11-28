@@ -1,7 +1,28 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
 import { loadHarnessDecoder } from "../../harnesses/index.js";
 import { projectToAgent } from "../../harnesses/projections/to-agent.js";
+import type { NormalizedToolOutcome } from "../../harnesses/types.js";
+
+test("Claude hook decoder retains structured exit evidence", async () => {
+  const decoder = await loadHarnessDecoder("claude-code");
+  assert.ok(decoder);
+  const payload = {
+    session_id: "session-a", cwd: process.cwd(), tool_name: "Bash",
+    tool_input: { command: "npm test" }, tool_response: { exit_code: 5 },
+  };
+  for (const event of [
+    { ...payload, hook_event_name: "PostToolUse" },
+    { ...payload, hook_event_name: "PostToolUseFailure", error: "Exit code 7\nbuild failed" },
+  ]) {
+    const outcome: NormalizedToolOutcome | undefined = decoder.decodeHook(event)?.outcome;
+    assert.ok(outcome);
+    assert.equal(outcome.exitCode, 5, event.hook_event_name);
+    assert.equal(outcome.exitCodeSource, "structured");
+    assert.equal(outcome.isError, true);
+  }
+});
 
 test("Claude transcript pairs tool calls and results across lines within the same session", async () => {
   const decoder = await loadHarnessDecoder("claude-code");
@@ -147,6 +168,21 @@ test("DSH transcript preserves the scan's raw thinking fidelity and source", asy
     text: "investigate the build", fidelity: "raw", source: "log-thinking", logPath: "session.jsonl.zstd",
   }]);
   assert.deepEqual(reducer.finish(), []);
+});
+
+test("DSH transcript keeps its fallback for blank and oversized header session IDs", async () => {
+  const decoder = await loadHarnessDecoder("dsh");
+  assert.ok(decoder);
+  const logPath = join("directory-session", "session.jsonl.zstd");
+  for (const session of [" \t ", "s".repeat(257)]) {
+    for (const sessionId of [undefined, "context-session"]) {
+      const reducer = decoder.createTranscriptReducer({ logPath, sessionId });
+      assert.deepEqual(reducer.consume(JSON.stringify({ session, version: 1 })), []);
+      const [event] = reducer.consume('{"type":"reasoning","seq":1,"data":{"text":"investigate the build"}}');
+      assert.equal(event?.kind, "rationale");
+      assert.equal(event.sessionId, sessionId ?? "directory-session");
+    }
+  }
 });
 
 test("Codex agent projection carries apply_patch move coverage and its digest", async () => {
