@@ -206,7 +206,8 @@ impl Client {
 }
 
 const SEED_FIXTURE: &str = "session.jsonl";
-const SEED_SESSION: &str = "S1";
+// The fixture ends S1, which the startup tick expires. S2 stays in the snapshot.
+const LIVE_SEED_SESSION: &str = "S2";
 
 /// Copy every line of a hook fixture into its own spool file, oldest first.
 fn seed_spool(spool: &Path, fixture: &str) -> usize {
@@ -265,17 +266,26 @@ fn drains_existing_spool_on_start() {
     assert!(n > 0);
     let daemon = Daemon::spawn(home);
     let mut client = connect(&pipe_name(daemon.home()));
-    let snapshot = client.hello_subscribe();
-    let ServerMsg::Snapshot { agents, .. } = snapshot else {
-        panic!("expected snapshot, got {snapshot:?}");
-    };
-    assert!(
-        agents
-            .iter()
-            .any(|a| a.key.session_id == SEED_SESSION && a.key.agent_id.is_empty()),
-        "snapshot missing seed agent: {agents:?}"
+    // A desk can subscribe before the initial drain and receive the seed in the startup broadcast.
+    let first = client.hello_subscribe();
+    assert!(matches!(first, ServerMsg::Snapshot { .. }), "{first:?}");
+    let seed = main_key(LIVE_SEED_SESSION);
+    snapshot_until(
+        &mut client,
+        first,
+        "snapshot with seed agent",
+        |msg| matches!(msg, ServerMsg::Snapshot { agents, .. } if agents.iter().any(|a| a.key == seed)),
     );
-    assert!(spool_files(daemon.home()).is_empty());
+    // A delete refused by a transient lock is retried on the next rescan.
+    let start = Instant::now();
+    loop {
+        let left = spool_files(daemon.home());
+        if left.is_empty() {
+            break;
+        }
+        assert!(start.elapsed() < GUARD, "spool never drained: {left:?}");
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]

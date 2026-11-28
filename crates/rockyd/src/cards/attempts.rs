@@ -704,7 +704,9 @@ else process.stdout.write(card);
             entry,
             version: "test".into(),
         };
-        let run = |card| run_attempts_child(&cli, dir.path(), card, Duration::from_secs(2));
+        // Allow for Node startup under load. The separate timeout test exercises the deadline.
+        const GUARD: Duration = Duration::from_secs(30);
+        let run = |card| run_attempts_child(&cli, dir.path(), card, GUARD);
         assert_eq!(run("ok:a.b_C-1"), Some(b"ok:a.b_C-1".to_vec()));
         for card in ["large", "invalid", "failed", "bad id"] {
             assert_eq!(run(card), None, "{card}");
