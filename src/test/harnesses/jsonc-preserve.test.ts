@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { editJsoncPathAtomic } from "../../setup/json-config.js";
 
@@ -51,6 +51,47 @@ test("deleting an only property with a trailing comma leaves a valid empty objec
   const target = fixture(t, '{\n  "mcp": {\n    "rocky": true,\n  },\n  "other": [1,],\n}\n');
   assert.equal((await editJsoncPathAtomic(target, ["mcp", "rocky"], undefined)).status, "written");
   assert.equal(readFileSync(target, "utf8"), '{\n  "mcp": {\n  },\n  "other": [1,],\n}\n');
+});
+
+test("deleting an object property preserves adjacent comments byte for byte", async (t) => {
+  for (const [before, after] of [
+    ['{"keep": 1 /* keep comment */, "rocky": true}', '{"keep": 1 /* keep comment */ }'],
+    ['{"rocky": true, /* keep comment */ "keep": 1}', '{ /* keep comment */ "keep": 1}'],
+    ['{"keep":1, "rocky": true, // next comment\r\n "next":2}', '{"keep":1,  // next comment\r\n "next":2}'],
+  ]) {
+    const target = fixture(t, before);
+    assert.equal((await editJsoncPathAtomic(target, ["rocky"], undefined)).status, "written");
+    assert.deepEqual(readFileSync(target), Buffer.from(after));
+  }
+});
+
+test("a retried JSONC edit recovers a displaced original and refuses recovery if it is gone", async (t) => {
+  const original = '{/* untouched */"keep":1}\n';
+  for (const state of ["prepared", "displaced", "original-gone"] as const) {
+    const target = fixture(t, original);
+    const transaction = join(dirname(target), `.${basename(target)}.transaction-interrupted`);
+    fs.mkdirSync(transaction);
+    writeFileSync(join(transaction, "manifest.json"), JSON.stringify({
+      version: 1, target, state: state === "original-gone" ? "displaced" : state,
+    }));
+    fs.renameSync(target, join(transaction, "displaced"));
+    if (state === "original-gone") {
+      fs.unlinkSync(join(transaction, "displaced"));
+      const result = await editJsoncPathAtomic(target, ["rocky"], true);
+      assert.equal(result.status, "recovery-required");
+      assert.equal(result.recoveryPath, transaction);
+      assert.equal(fs.existsSync(target), false);
+    } else {
+      writeFileSync(join(transaction, "prepared"), '{"unpublished":true}\n');
+      assert.equal((await editJsoncPathAtomic(target, ["rocky"], true, {
+        mutationGuard: { unchanged: () => false },
+      })).status, "recovery-required");
+      assert.equal(fs.existsSync(target), false);
+      assert.equal(readFileSync(join(transaction, "displaced"), "utf8"), original);
+      assert.equal((await editJsoncPathAtomic(target, ["rocky"], true)).status, "written");
+      assert.equal(readFileSync(target, "utf8"), '{/* untouched */"keep":1,"rocky": true}\n');
+    }
+  }
 });
 
 test("deleting the last item from a compact array removes the entire value", async (t) => {

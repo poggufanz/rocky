@@ -20,9 +20,8 @@ function readCommand(raw: Fields | undefined): string | undefined {
 function readToolCwd(input: Fields | undefined, sessionCwd: string | undefined): string | undefined {
   const workdir = textField(input, 4096, "workdir");
   const inputCwd = textField(input, 4096, "cwd", "working_directory", "workingDirectory");
-  if (workdir === undefined) return inputCwd ?? sessionCwd;
-  const base = inputCwd === undefined ? sessionCwd : resolveCodexPath(inputCwd, sessionCwd) ?? sessionCwd;
-  return resolveCodexPath(workdir, base);
+  const base = inputCwd === undefined ? sessionCwd : resolveCodexPath(inputCwd, sessionCwd);
+  return workdir === undefined ? base : resolveCodexPath(workdir, base ?? sessionCwd);
 }
 
 function readOutput(raw: Fields | undefined): string | undefined {

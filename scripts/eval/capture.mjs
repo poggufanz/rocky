@@ -22,6 +22,7 @@ import {
   packArm,
   redactText,
   resolveExecutableOnPath,
+  resolveProviderExecutable,
 } from "./sandbox.mjs";
 
 const EVAL_DIR = dirname(fileURLToPath(import.meta.url));
@@ -126,6 +127,9 @@ function spawnNoShell(file, args, options) {
     shell: false,
     windowsVerbatimArguments: invocation.windowsVerbatimArguments,
   });
+  if (options.secrets?.some((secret) => result.stdout?.includes(secret) || result.stderr?.includes(secret))) {
+    throw new CaptureCredentialLeakError();
+  }
   if (result.error) throw result.error;
   return {
     status: result.status ?? 1,
@@ -133,6 +137,12 @@ function spawnNoShell(file, args, options) {
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
+}
+
+class CaptureCredentialLeakError extends Error {
+  constructor() {
+    super("Error: provider output contained an evaluation credential. Capture discarded.");
+  }
 }
 
 function seedInlineProbeRepo(taskDir, arm, driver, toolEnv) {
@@ -305,6 +315,8 @@ async function main() {
   let sandbox;
   try {
     assertNoAncestorInstructions(resolvedRoot);
+    const { file } = driver.buildCommand("");
+    const executable = resolveProviderExecutable(file, buildToolEnv());
     const tgz = opts.arm === "none" ? undefined : await packArm(opts.commit, cacheDir);
     const runId = `capture-${opts.arm}-${Date.now()}`;
     sandbox = await createSandbox({
@@ -312,6 +324,7 @@ async function main() {
       runId,
       root: resolvedRoot,
       provider: driver.id,
+      providerExecutable: executable,
       tgz,
       auth,
     });
@@ -324,18 +337,12 @@ async function main() {
     );
 
     const envKeys = ENV_REPORT_KEYS.map((key) => key === "CLAUDE_CONFIG_DIR" ? driver.configEnvName : key);
-    const { file, args } = driver.buildCommand(capturePrompt(envKeys), driver.defaultModel, { taskDir: sandbox.taskDir });
-    const executable = resolveExecutableOnPath(
-      process.platform === "win32" ? [`${file}.exe`, `${file}.cmd`, file] : [file],
-      sandbox.env.PATH ?? "",
-    );
-    if (!executable) {
-      throw new Error(`${file} executable not found on sandbox PATH`);
-    }
+    const { args } = driver.buildCommand(capturePrompt(envKeys), driver.defaultModel, { taskDir: sandbox.taskDir });
 
     const versionResult = spawnNoShell(executable, ["--version"], {
       cwd: sandbox.taskDir,
       env: sandbox.env,
+      secrets,
       timeout: 30_000,
     });
 
@@ -347,6 +354,7 @@ async function main() {
     const runResult = spawnNoShell(executable, args, {
       cwd: sandbox.taskDir,
       env: sandbox.env,
+      secrets,
       timeout: 300_000,
     });
 
@@ -414,7 +422,9 @@ async function main() {
 
     process.stdout.write(`${redact(reportLines.join("\n"))}\n`);
   } catch (error) {
-    const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    const message = error instanceof CaptureCredentialLeakError
+      ? error.message
+      : error instanceof Error ? (error.stack ?? error.message) : String(error);
     process.stderr.write(`${redact(message)}\n`);
     process.exitCode = 1;
   } finally {

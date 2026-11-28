@@ -11,7 +11,7 @@ import {
   signFlipP,
   verdict,
 } from "../analyze.mjs";
-import { RUN_BOUNDARY_RULE, generateReport } from "../report.mjs";
+import { RUN_BOUNDARY_RULE, generateReport, renderReport } from "../report.mjs";
 
 const testDir = resolve(dirname(fileURLToPath(import.meta.url)));
 const evalDir = resolve(testDir, "..");
@@ -266,6 +266,50 @@ describe("verdict", () => {
     const okRes = verdict({ runs: okRuns, seed: 11, resamples: 200 });
     assert.equal(okRes.veto.medianTurnRise, 2);
     assert.equal(okRes.veto.vetoed, false);
+  });
+
+  test("Codex reports unavailable turn harm and still applies the solved-drop veto", () => {
+    const runs = [
+      makeRun({ taskId: "C01", arm: "none", numTurns: 1 }),
+      makeRun({ taskId: "C01", arm: "after", numTurns: 9 }),
+    ];
+    const completedAt = "2026-11-28T03:00:00.000Z";
+    const provenance = {
+      provider: "codex", lanes: ["lane1", "mcp"], cliVersion: "codex-cli fixture",
+      flags: ["--json"], instructionsSha256: { after: "fixture-codex-hash" }, completedAt,
+    };
+    const computed = verdict({ runs, provenance, resamples: 10 });
+    assert.equal(computed.batchValid, true);
+    assert.equal(computed.veto.medianTurnRise, "unavailable");
+    assert.equal(computed.veto.turnVetoed, false);
+    assert.equal(computed.veto.vetoed, false);
+    const unsolved = [runs[0], { ...runs[1], solved: false }];
+    assert.equal(verdict({ runs: unsolved, provenance, resamples: 10 }).veto.vetoed, true);
+
+    const render = (record, computedVerdict) => renderReport({
+      label: "dev", provenance: record, metrics: runs,
+      manifest: { tasks: [{ id: "C01", kind: "control" }] }, verdict: computedVerdict,
+      seed: 11, resamples: 10, level: 0.9,
+    });
+    const codexMd = render(provenance, computed);
+    assert.ok(codexMd.includes("| Provider | codex |"));
+    assert.ok(codexMd.includes("| Lanes | lane1, mcp |"));
+    assert.ok(codexMd.includes("| CLI version | codex-cli fixture |"));
+    assert.ok(codexMd.includes("| CLI flags | `--json` |"));
+    assert.ok(codexMd.includes("| Instructions sha256 | after=`fixture-codex-hash` |"));
+    assert.ok(codexMd.includes("| medianTurnRise (after - none, numTurns) | unavailable | n/a | n/a |"));
+
+    const legacy = {
+      completedAt, claudeVersion: "Claude fixture", claudeFlags: ["--print"],
+      claudeMdSha256: { after: "fixture-claude-hash" },
+    };
+    const legacyVerdict = verdict({ runs, provenance: legacy, resamples: 10 });
+    assert.equal(legacyVerdict.veto.vetoed, true);
+    const legacyMd = render(legacy, legacyVerdict);
+    assert.ok(legacyMd.includes("| Provider | claude-code |"));
+    assert.ok(legacyMd.includes("| CLI version | Claude fixture |"));
+    assert.ok(legacyMd.includes("| CLI flags | `--print` |"));
+    assert.ok(legacyMd.includes("| Instructions sha256 | after=`fixture-claude-hash` |"));
   });
 
   test("stale tasks report the staleRepeat rate per arm", () => {

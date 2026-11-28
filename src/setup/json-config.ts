@@ -346,7 +346,17 @@ export async function editJsoncPathAtomic(
   const {
     modify, applyEdits, format, parse, parseTree, findNodeAtLocation, findNodeAtOffset, createScanner, SyntaxKind,
   } = await import("jsonc-parser");
-  const snapshot = readConfigBytes(path);
+  let snapshot: ReturnType<typeof readConfigBytes>;
+  for (;;) {
+    if (!mutationGuardUnchanged(mutationGuard)) return { status: "recovery-required" };
+    const recovery = recoverJsonTransaction(path, mutationGuard);
+    if (recovery.status === "manual") return { ...recovery, status: "recovery-required" };
+    if (recovery.status === "recovered") continue;
+    snapshot = readConfigBytes(path);
+    // Another writer can displace the file between recovery and the read.
+    if (snapshot.status !== "missing" || inspectJsonTransaction(path).status === "clear") break;
+  }
+  if (!mutationGuardUnchanged(mutationGuard)) return { status: "recovery-required" };
   if (snapshot.status === "invalid") throw new Error(snapshot.error);
 
   const original = snapshot.status === "valid" ? snapshot.bytes.toString("utf8") : "{}\n";
@@ -375,20 +385,23 @@ export async function editJsoncPathAtomic(
     const parent = findNodeAtLocation(root, segments.slice(0, -1));
     const siblings = parent?.children ?? [];
     const scanner = createScanner(text, true);
+    const sibling = parent?.type === "object" ? node.parent : node;
     if (parent?.type === "object" && siblings.length === 1) {
       // jsonc-parser leaves a dangling comma when removing the sole property.
       scanner.setPosition(node.offset + node.length);
       if (scanner.scan() === SyntaxKind.CommaToken) {
         text = applyEdits(text, [{ offset: scanner.getTokenOffset(), length: 1, content: "" }]);
       }
-    } else if (parent?.type === "array" && siblings.length > 1 && siblings.at(-1) === node) {
-      // The separator and value can straddle a comment on the previous item.
-      const previous = siblings[siblings.length - 2];
-      scanner.setPosition(previous.offset + previous.length);
+    } else if (sibling && siblings.length > 1
+      && (parent?.type === "object" || siblings.at(-1) === sibling)) {
+      // A comment can sit between the separator and the neighboring item.
+      const last = siblings.at(-1) === sibling;
+      const beforeComma = last ? siblings[siblings.length - 2] : sibling;
+      scanner.setPosition(beforeComma.offset + beforeComma.length);
       if (scanner.scan() !== SyntaxKind.CommaToken) throw new Error("Unable to write JSON config");
       edits = [
         { offset: scanner.getTokenOffset(), length: scanner.getTokenLength(), content: "" },
-        { offset: node.offset, length: node.length, content: "" },
+        { offset: sibling.offset, length: sibling.length, content: "" },
       ];
     }
   }

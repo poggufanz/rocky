@@ -5,7 +5,7 @@ import fs, {
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { removeManagedPluginFile, writeManagedPluginFile } from "../../harnesses/shared/plugin-file-store.js";
 import { codexNotifySnippet, detectCodexInlineHooksConflict } from "../../harnesses/shared/toml-snippet.js";
@@ -44,6 +44,44 @@ test("a plugin installed through a linked parent can be removed through the same
   assert.equal(removeManagedPluginFile(path, installed.digest).status, "removed");
   assert.equal(lstatSync(linkedParent).isSymbolicLink(), true);
   assert.deepEqual(readdirSync(realParent), []);
+});
+
+test("plugin installation refuses a supplied parent retargeted during the write transaction", (t) => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rocky-plugin-write-retarget-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = join(dir, "original");
+  const replacement = join(dir, "replacement");
+  const linked = join(dir, "linked");
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  mkdirSync(original);
+  mkdirSync(replacement);
+  symlinkSync(original, linked, linkType);
+  const path = join(linked, "hook.js");
+  const installed = writeManagedPluginFile(path, "original content");
+  assert.equal(installed.status, "written");
+  writeFileSync(join(replacement, "hook.js"), "user content");
+  const mkdir = fs.mkdirSync;
+  let retargeted = false;
+  fs.mkdirSync = ((target, options) => {
+    const result = mkdir(target, options);
+    if (basename(String(target)).startsWith(".hook.js.transaction-")) {
+      fs.renameSync(linked, join(dir, "old-link"));
+      symlinkSync(replacement, linked, linkType);
+      retargeted = true;
+    }
+    return result;
+  }) as typeof fs.mkdirSync;
+  syncBuiltinESMExports();
+  try {
+    const result = writeManagedPluginFile(path, "updated content", installed.digest);
+    assert.equal(retargeted, true);
+    assert.equal(result.status, "recovery-required");
+    assert.equal(readFileSync(join(original, "hook.js"), "utf8"), "original content");
+    assert.equal(readFileSync(join(replacement, "hook.js"), "utf8"), "user content");
+  } finally {
+    fs.mkdirSync = mkdir;
+    syncBuiltinESMExports();
+  }
 });
 
 test("plugin removal restores the quarantined file if its supplied parent is retargeted", (t) => {

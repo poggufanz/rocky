@@ -1243,13 +1243,13 @@ export function recoverFileTransaction(
         },
       };
     } else {
-      // Both target and displaced backup are absent: `resolveUndisplacedTransaction`
-      // applies the same artifact-driven proof used above — safe to discard
-      // only when `path` is live (it is not, here) or the staged artifact
-      // does not exist; otherwise the directory is retained and named
-      // rather than guessed away (the same reasoning extended to this
-      // fallback, not just the state-gated fast path above it).
-      return resolveUndisplacedTransaction(transactionDirectory, path, guard);
+      // The displaced phase proves a prior target existed. Keep the journal
+      // when neither its original pathname nor its backup survives.
+      return {
+        status: "manual",
+        recoveryPath: transactionDirectory,
+        outcome: ambiguousOutcome(transactionDirectory, path, displacedPath, false),
+      };
     }
   }
   return { status: "clear" };

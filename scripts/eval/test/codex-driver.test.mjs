@@ -41,7 +41,7 @@ test("Codex reduces the captured tool pairs and prompt-level turns", () => {
   assert.equal(classifyOutcome({ provider: "codex", rawStdout: JSON.stringify(failure), timedOut: false }), "api_error");
 });
 
-test("evaluation uses batch provider and saved task cwd while preserving Claude fixture metrics", (t) => {
+test("evaluation checks the batch provider and uses the saved task cwd", (t) => {
   const out = mkdtempSync(join(tmpdir(), "rocky-codex-evaluate-"));
   t.after(() => rmSync(out, { recursive: true, force: true }));
   const runDir = join(out, "runs", "test");
@@ -57,18 +57,25 @@ test("evaluation uses batch provider and saved task cwd while preserving Claude 
   };
   // The absolute edit can only match the relative fixture overlay with the saved cwd.
   const codex = transcript("codex-after").replaceAll("/sbx/task/probe-marker.txt", "/sbx/task/src/probe.js");
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ taskId: task.id, taskDir: "/sbx/task", arm: "none", wallMs: 174 }));
+  const runMeta = { taskId: task.id, taskDir: "/sbx/task", arm: "none", wallMs: 174 };
   writeFileSync(join(runDir, "transcript.jsonl"), codex);
+  for (const provider of [undefined, "claude-code"]) {
+    writeFileSync(join(runDir, "run.json"), JSON.stringify({ ...runMeta, provider }));
+    assert.throws(() => evaluateBatch(out), /Run provider mismatch.*expected codex/);
+    assert.equal(existsSync(join(out, "metrics.json")), false);
+  }
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ ...runMeta, provider: "codex" }));
   const metrics = evaluateBatch(out, { manifest: { tasks: [task] } }).metrics.test;
   assert.equal(metrics.staleRepeat, true);
   assert.equal(metrics.repeatFailures, 1);
   assert.equal(metrics.numTurns, 1);
   assert.equal(metrics.wallMs, 174);
   assert.deepEqual(metrics.leak, ["none-arm-rocky"]);
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ arm: "none" }));
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ arm: "none", provider: "codex" }));
   assert.equal(runMetrics(parseJsonl(codex), task, runDir, "codex").staleRepeat, false);
 
-  // Explicit run provenance wins over batch provenance.
+  // Missing provider fields are valid for legacy Claude Code data.
+  writeFileSync(join(out, "batch.json"), "{}");
   const expected = [
     ["after-lane2-no-transcript-note", "after", '{"repeatFailures":0,"turnsToPass":3,"numTurns":3,"wallMs":5400,"noteBytes":0,"noteDelivered":false,"staleRepeat":null,"leak":[]}'],
     ["four-turn-pass", "none", '{"repeatFailures":0,"turnsToPass":3,"numTurns":4,"wallMs":4200,"noteBytes":0,"noteDelivered":null,"staleRepeat":null,"leak":[]}'],
@@ -76,8 +83,26 @@ test("evaluation uses batch provider and saved task cwd while preserving Claude 
     ["none-arm-mcp-leak", "none", '{"repeatFailures":0,"turnsToPass":3,"numTurns":3,"wallMs":3100,"noteBytes":0,"noteDelivered":null,"staleRepeat":null,"leak":["none-arm-rocky"]}'],
   ];
   for (const [name, arm, bytes] of expected) {
-    writeFileSync(join(runDir, "run.json"), JSON.stringify({ arm, provider: "claude-code" }));
+    writeFileSync(join(runDir, "run.json"), JSON.stringify({ arm }));
     assert.equal(JSON.stringify(runMetrics(parseJsonl(transcript(name)), manifest.tasks[0], runDir)), bytes, name);
+  }
+  assert.ok(evaluateBatch(out).metrics.test);
+});
+
+test("a Codex lane-2 advisory cannot satisfy the positive control", (t) => {
+  const runDir = mkdtempSync(join(tmpdir(), "rocky-codex-lanes-"));
+  t.after(() => rmSync(runDir, { recursive: true, force: true }));
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ arm: "after", provider: "codex" }));
+  const rockyHome = join(runDir, "rocky-home");
+  mkdirSync(rockyHome);
+  const events = [{ type: "turn.started" }, { type: "turn.completed" }];
+  for (const lane of ["tool-result", "run", "mcp"]) {
+    writeFileSync(join(rockyHome, "advisories.jsonl"), JSON.stringify({
+      kind: "note", arm: "shown", delivered: true, bytes: 123, lane,
+    }));
+    const metrics = runMetrics(events, manifest.tasks[0], runDir);
+    assert.equal(metrics.noteDelivered, lane !== "tool-result", lane);
+    assert.equal(metrics.noteBytes, 0, lane);
   }
 });
 
@@ -237,6 +262,20 @@ function cacheFixtureRocky(root, env) {
     const path = require("node:path");
     assert.deepEqual(process.argv.slice(2), ["setup", "--harness", "codex", "--yes"]);
     assert.equal(process.env.CODEX_API_KEY, undefined);
+    const entries = process.env.PATH.split(path.delimiter);
+    assert.ok(!entries.includes(process.env.EVAL_OWNER_BIN));
+    const bin = entries.find((entry) => path.basename(entry) === "provider-bin");
+    assert.ok(bin);
+    const win = process.platform === "win32";
+    const launcher = path.join(bin, win ? "codex.cmd" : "codex");
+    assert.deepEqual(fs.readdirSync(bin), [path.basename(launcher)]);
+    const result = require("node:child_process").spawnSync(
+      win ? process.env.ComSpec : launcher,
+      win ? ["/d", "/s", "/c", '""' + launcher + '" --version"'] : ["--version"],
+      { encoding: "utf8", windowsVerbatimArguments: win },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "codex-cli 0.171.0");
     fs.writeFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "# fixture Rocky registered\\n");
     fs.writeFileSync(path.join(process.env.ROCKY_HOME, "memory.jsonl"), '{}\\n');
     if (process.env.ROCKY_ATTEMPT_ARM === "shown") {
@@ -276,9 +315,11 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
   if (!root) throw new AggregateError(errors, "Could not create an isolated smoke test directory");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, "bin");
+  const decoyBin = join(root, "decoy-bin");
   const owner = join(root, "owner");
   const ownerConfig = join(owner, ".codex");
   mkdirSync(bin);
+  mkdirSync(decoyBin);
   mkdirSync(ownerConfig, { recursive: true });
   const codexOwnerFile = join(ownerConfig, "config.toml");
   writeFileSync(codexOwnerFile, "# untouched owner fixture\n");
@@ -306,6 +347,9 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
       if (fs.existsSync("src")) fs.writeFileSync("src/probe.js", 'export function runProbe() { return "ok"; }\\n');
       const fixture = arm === "after" || process.env.EVAL_LEAK === "1" ? "codex-after.jsonl" : "codex-none.jsonl";
       process.stdout.write(fs.readFileSync(path.join(process.env.EVAL_FIXTURES, fixture)));
+      if (process.env.EVAL_CAPTURE_LEAK) {
+        process[process.env.EVAL_CAPTURE_LEAK].write(process.env.CODEX_API_KEY);
+      }
       if (process.env.EVAL_LEAK === "1") {
         const token = process.env.CODEX_API_KEY;
         process.stderr.write(token.slice(0, 8));
@@ -315,8 +359,12 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
   `);
   if (process.platform === "win32") {
     writeFileSync(join(bin, "codex.cmd"), `@"${process.execPath}" "${fakeCodex}" %*\r\n`);
+    writeFileSync(join(bin, "rocky.cmd"), "@exit /b 90\r\n");
+    writeFileSync(join(decoyBin, "codex.cmd"), "@exit /b 91\r\n");
   } else {
     writeFileSync(join(bin, "codex"), `#!/bin/sh\nexec "${process.execPath}" "${fakeCodex}" "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, "rocky"), "#!/bin/sh\nexit 90\n", { mode: 0o755 });
+    writeFileSync(join(decoyBin, "codex"), "#!/bin/sh\nexit 91\n", { mode: 0o755 });
   }
 
   const token = "offline-fixture-secret";
@@ -328,13 +376,14 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
     }
   }
   Object.assign(env, {
-    PATH: [bin, parentPath].join(delimiter),
+    PATH: [bin, decoyBin, parentPath].join(delimiter),
     HOME: owner,
     USERPROFILE: owner,
     CODEX_HOME: ownerConfig,
     ROCKY_HOME: join(owner, ".rocky"),
     ROCKY_EVAL_CODEX_API_KEY: token,
     EVAL_FIXTURES: fileURLToPath(fixtures),
+    EVAL_OWNER_BIN: bin,
     NPM_CONFIG_OFFLINE: "true",
   });
   const cache = cacheFixtureRocky(root, env);
@@ -394,13 +443,25 @@ test("offline Codex SMOKE runs through the runner and evaluator with isolated ow
     }
   }
   const captureOut = join(root, "capture");
-  const captured = spawnSync(process.execPath, [
+  const captureArgs = [
     fileURLToPath(new URL("../capture.mjs", import.meta.url)),
     "--provider", "codex", "--arm", "none", "--auth", "token", "--out", captureOut, "--root", join(root, "sbx"),
-  ], { encoding: "utf8", env: { ...env, EVAL_LEAK: "0" } });
+  ];
+  const captured = spawnSync(process.execPath, captureArgs, { encoding: "utf8", env: { ...env, EVAL_LEAK: "0" } });
   assert.equal(captured.status, 0, captured.stderr);
   assert.match(captured.stdout, /tools used: command_execution/);
   assert.equal(readFileSync(join(captureOut, "transcript.jsonl"), "utf8"), transcript("codex-none"));
+  for (const stream of ["stdout", "stderr"]) {
+    const leakOut = join(root, `capture-${stream}-leak`);
+    const leaking = spawnSync(process.execPath, captureArgs.map((arg) => arg === captureOut ? leakOut : arg), {
+      encoding: "utf8", env: { ...env, EVAL_CAPTURE_LEAK: stream },
+    });
+    assert.equal(leaking.status, 1);
+    assert.match(leaking.stderr, /provider output contained an evaluation credential/);
+    assert.equal(leaking.stdout, "");
+    assert.equal(leaking.stderr.includes(token), false);
+    assert.equal(existsSync(leakOut), false);
+  }
   assert.equal(readFileSync(codexOwnerFile, "utf8"), "# untouched owner fixture\n");
 });
 

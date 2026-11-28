@@ -1,11 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  constants as fsConstants,
   copyFileSync,
   createWriteStream,
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -16,11 +18,11 @@ import {
 } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { accept as defaultAccept } from "./accept.mjs";
-import { getEvalDriver, getEvalToken } from "./drivers/index.mjs";
+import { getEvalDriver, getEvalToken, savedEvalProvider } from "./drivers/index.mjs";
 import { materializeTask as defaultMaterializeTask, renderInstructions } from "./history.mjs";
 import {
   ownerBaseline as defaultOwnerBaseline,
@@ -36,6 +38,7 @@ import {
   packArm as defaultPackArm,
   redactText,
   resolveExecutableOnPath,
+  resolveProviderExecutable,
 } from "./sandbox.mjs";
 
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
@@ -666,7 +669,7 @@ export function diffBatchProvenance(existing, current) {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
     return ["batch.json"];
   }
-  if (savedBatchProvider(existing) !== savedBatchProvider(current)) return ["provider"];
+  if (savedEvalProvider(existing) !== savedEvalProvider(current)) return ["provider"];
 
   const normalize = (data) => data.provider === undefined ? {
     ...data,
@@ -718,10 +721,6 @@ export function diffBatchProvenance(existing, current) {
   return diffs;
 }
 
-function savedBatchProvider(batch) {
-  return batch.provider === undefined ? "claude-code" : batch.provider;
-}
-
 function readBatchProvenance(batchPath) {
   let data;
   try {
@@ -743,7 +742,7 @@ function readBatchProvenance(batchPath) {
 }
 
 function assertSavedProvider(existing, provider, batchPath) {
-  if (existing && savedBatchProvider(existing) !== provider) {
+  if (existing && savedEvalProvider(existing) !== provider) {
     throw new ProvenanceMismatchError(
       `Batch provenance mismatch (${batchPath}); differing fields: provider`,
       ["provider"],
@@ -762,13 +761,6 @@ function resolveGitExecutable(env, platform = process.platform) {
   const names = platform === "win32" ? ["git.exe", "git.cmd", "git"] : ["git"];
   const found = resolveExecutableOnPath(names, getPathValue(env), platform);
   if (!found) throw new Error("git executable is unavailable");
-  return found;
-}
-
-function resolveProviderExecutable(file, env, platform = process.platform) {
-  const names = platform === "win32" ? [`${file}.exe`, `${file}.cmd`, file] : [file];
-  const found = resolveExecutableOnPath(names, getPathValue(env), platform);
-  if (!found) throw new Error(`${file} executable not found on PATH`);
   return found;
 }
 
@@ -1234,7 +1226,7 @@ function pickUniqueQuarantineTarget(filePath, relPath, lstatFn = lstatSync) {
   throw new Error(`unable to allocate unique quarantine target for ${relPath}`);
 }
 
-async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile, onMatch = null) {
+async function fileContainsAnySecret(filePath, secretBuffers, openFn, onMatch, stage) {
   if (secretBuffers.length === 0) return false;
   const maxSecretLen = secretBuffers.reduce((max, buf) => Math.max(max, buf.length), 0);
   const holdback = maxSecretLen > 1 ? maxSecretLen - 1 : 0;
@@ -1242,11 +1234,24 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile,
   const readBuf = Buffer.allocUnsafe(chunkSize);
   let tail = Buffer.alloc(0);
 
-  const fh = await openFn(filePath, "r");
+  const flags = stage
+    ? fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)
+    : "r";
+  const fh = await openFn(filePath, flags);
   try {
-    while (true) {
-      const { bytesRead } = await fh.read(readBuf, 0, chunkSize, null);
+    let opened;
+    if (stage) {
+      opened = await fh.stat();
+      if (!opened.isFile() || opened.dev !== stage.stat.dev || opened.ino !== stage.stat.ino) {
+        throw new Error("artifact source changed before it could be read");
+      }
+    }
+    let scannedBytes = 0;
+    while (!opened || scannedBytes < opened.size) {
+      const limit = opened ? Math.min(chunkSize, opened.size - scannedBytes) : chunkSize;
+      const { bytesRead } = await fh.read(readBuf, 0, limit, null);
       if (bytesRead === 0) break;
+      scannedBytes += bytesRead;
       const chunk = readBuf.subarray(0, bytesRead);
       const combined = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
       if (containsAnySecretBuffer(combined, secretBuffers)) {
@@ -1255,9 +1260,17 @@ async function fileContainsAnySecret(filePath, secretBuffers, openFn = openFile,
         }
         return true;
       }
+      if (stage) await stage.file.writeFile(chunk);
       if (holdback > 0) {
         const keep = Math.min(holdback, combined.length);
         tail = Buffer.from(combined.subarray(combined.length - keep));
+      }
+    }
+    if (opened) {
+      const after = await fh.stat();
+      if (scannedBytes !== opened.size || after.size !== opened.size
+        || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+        throw new Error("artifact source changed during the scan");
       }
     }
     return false;
@@ -1457,7 +1470,8 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
       }
     }
   } catch {
-    // Still scan canonical top-level stream files even if listing workRunDir fails.
+    scanErrors.push(".");
+    // Still scan canonical top-level stream files if listing workRunDir fails.
   }
   for (const name of [
     ...Array.from(topLevelTranscripts).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
@@ -1472,105 +1486,82 @@ export async function scanRunArtifactsForSecrets(workRunDir, arm, secrets, io = 
 }
 
 /**
- * Copy `srcDir` into `destDir` excluding `.git`, using `lstat` only.
- * Checks `srcDir` itself before descending; never follows symlinks or junctions.
- * Copies regular files plainly with `copyFileSync` (preserving source mode).
- * @param {string} srcDir
- * @param {string} destDir
- * @param {typeof copyFileSync} [copyFile]
- * @returns {string[]}
+ * Publish only checked artifacts. Stage the bytes being scanned outside the
+ * output tree so a source edit between the scan and copy cannot leak.
  */
-function copyFinalWithoutGit(srcDir, destDir, copyFile = copyFileSync) {
-  mkdirSync(destDir, { recursive: true });
-  /** @type {string[]} */
-  const skippedLinks = [];
-  let rootStat;
-  try {
-    rootStat = lstatSync(srcDir);
-  } catch (error) {
-    const code = error && typeof error === "object" ? error.code : undefined;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      skippedLinks.push("final");
-      return skippedLinks;
-    }
-    throw error;
-  }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    skippedLinks.push("final");
-    return skippedLinks;
-  }
-  function walk(currentSrc, currentDest, relPrefix) {
-    const entries = readdirSync(currentSrc).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    for (const name of entries) {
-      if (name === ".git") continue;
-      const srcPath = join(currentSrc, name);
-      const destPath = join(currentDest, name);
-      const rel = relPrefix ? `${relPrefix}/${name}` : name;
-      const lstat = lstatSync(srcPath);
-      if (lstat.isSymbolicLink()) {
-        skippedLinks.push(`final/${rel}`);
-        continue;
-      }
-      if (lstat.isDirectory()) {
-        mkdirSync(destPath, { recursive: true });
-        walk(srcPath, destPath, rel);
-      } else if (lstat.isFile()) {
-        copyFile(srcPath, destPath);
-      }
-    }
-  }
-  walk(srcDir, destDir, "");
-  return skippedLinks;
-}
+async function publishSandboxArtifacts(sandbox, workRunDir, arm, secrets, deps, handlers) {
+  const needles = secrets.map((secret) => Buffer.from(secret, "utf8"));
+  let scratch;
 
-/**
- * Copy allowlisted files from `srcRockyHome` into `destRockyHome` using `lstat` only.
- * Checks `srcRockyHome` itself before reading children; never follows symlinks or junctions.
- * Copies regular files plainly with `copyFileSync` (preserving source mode).
- * @param {string} srcRockyHome
- * @param {string} destRockyHome
- * @param {string} arm
- * @param {typeof copyFileSync} [copyFile]
- * @returns {string[]}
- */
-function copyRockyHomeFiles(srcRockyHome, destRockyHome, arm, copyFile = copyFileSync) {
-  if (arm === "none") return [];
-  mkdirSync(destRockyHome, { recursive: true });
-  /** @type {string[]} */
-  const skippedLinks = [];
-  let rootStat;
-  try {
-    rootStat = lstatSync(srcRockyHome);
-  } catch (error) {
-    const code = error && typeof error === "object" ? error.code : undefined;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      skippedLinks.push("rocky-home");
-      return skippedLinks;
+  async function publishFile(source, target, relPath, stat) {
+    if (needles.length === 0) {
+      deps.copyFileSync(source, target);
+      return;
     }
-    throw error;
-  }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    skippedLinks.push("rocky-home");
-    return skippedLinks;
-  }
-  for (const name of ROCKY_HOME_ALLOWED_FILES) {
-    const srcPath = join(srcRockyHome, name);
-    let lstat;
+    scratch ??= mkdtempSync(join(tmpdir(), "rocky-eval-artifact-"));
+    const staged = join(scratch, basename(target));
     try {
-      lstat = lstatSync(srcPath);
-    } catch (error) {
-      const code = error && typeof error === "object" ? error.code : undefined;
-      if (code === "ENOENT" || code === "ENOTDIR") continue;
-      throw error;
+      const file = await openFile(staged, "wx", 0o600);
+      try {
+        if (await fileContainsAnySecret(source, needles, deps.openFile, () => handlers.onLeak(relPath), { file, stat })) {
+          return;
+        }
+        if (process.platform !== "win32") await file.chmod(stat.mode & 0o777);
+      } finally {
+        await file.close();
+      }
+      deps.copyFileSync(staged, target);
+    } finally {
+      rmSync(staged, { force: true });
     }
-    if (lstat.isSymbolicLink()) {
-      skippedLinks.push(`rocky-home/${name}`);
-      continue;
-    }
-    if (!lstat.isFile()) continue;
-    copyFile(srcPath, join(destRockyHome, name));
   }
-  return skippedLinks;
+
+  async function walk(source, relPath, allowedFiles) {
+    try {
+      const target = join(workRunDir, relPath);
+      mkdirSync(target, { recursive: true });
+      const rootStat = lstatOrNull(source, deps.lstatSync);
+      if (!rootStat?.isDirectory()) {
+        handlers.skippedLinks.push(relPath);
+        handlers.onError(relPath);
+        return;
+      }
+      const names = allowedFiles ?? deps.readdirSync(source).sort();
+      for (const name of names) {
+        if (name === ".git") continue;
+        const child = `${relPath}/${name}`;
+        if (!allowedFiles && containsAnySecret(child, secrets)) {
+          handlers.onLeak(child);
+          continue;
+        }
+        const src = join(source, name);
+        try {
+          const stat = allowedFiles ? lstatOrNull(src, deps.lstatSync) : deps.lstatSync(src);
+          if (!stat) continue;
+          if (containsAnySecret(child, secrets)) {
+            handlers.onLeak(child);
+          } else if (stat.isSymbolicLink()) {
+            handlers.skippedLinks.push(child);
+          } else if (stat.isDirectory() && !allowedFiles) {
+            await walk(src, child);
+          } else if (stat.isFile()) {
+            await publishFile(src, join(target, name), child, stat);
+          }
+        } catch (error) {
+          handlers.onError(child, error);
+        }
+      }
+    } catch (error) {
+      handlers.onError(relPath, error);
+    }
+  }
+
+  try {
+    await walk(sandbox.taskDir, "final");
+    if (arm !== "none") await walk(sandbox.rockyHome, "rocky-home", ROCKY_HOME_ALLOWED_FILES);
+  } finally {
+    if (scratch) removeTreeWithRetry(scratch);
+  }
 }
 
 function listNoneRockyHomeEntries(srcRockyHome, lstatFn = lstatSync) {
@@ -1653,7 +1644,7 @@ export function isValidRunJson(parsed) {
   return true;
 }
 
-function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
+function decideRunAction(runDir, provider, retryInvalid, lstatFn = lstatSync) {
   try {
     recoverInterruptedSwap(runDir, lstatFn);
 
@@ -1683,6 +1674,9 @@ function decideRunAction(runDir, retryInvalid, lstatFn = lstatSync) {
     }
     if (!isValidRunJson(existing)) {
       return { action: "malformed", reason: "malformed run.json structure" };
+    }
+    if (savedEvalProvider(existing) !== provider) {
+      return { action: "malformed", reason: `run.json provider mismatch (expected ${provider})` };
     }
 
     if (!retryInvalid) {
@@ -1716,7 +1710,7 @@ function hasRunArtifacts(workRunDir, arm, lstatFn = lstatSync, quarantinedSet = 
   return transcriptOk && stderrOk && finalOk && rockyOk;
 }
 
-function countMissingPublishedRuns(runsDir, planned, lstatFn = lstatSync) {
+function countMissingPublishedRuns(runsDir, planned, provider, lstatFn = lstatSync) {
   let missing = 0;
   for (const item of planned) {
     const runDir = join(runsDir, item.runId);
@@ -1747,6 +1741,7 @@ function countMissingPublishedRuns(runsDir, planned, lstatFn = lstatSync) {
       const parsed = JSON.parse(readFileSync(runJsonPath, "utf8"));
       if (
         !isValidRunJson(parsed)
+        || savedEvalProvider(parsed) !== provider
         || parsed.runId !== item.runId
         || parsed.taskId !== item.taskId
         || parsed.arm !== item.arm
@@ -1836,10 +1831,8 @@ function defaultGetHeadCommit() {
   return res.stdout.trim();
 }
 
-function defaultGetCliVersion(driver, platform) {
+function defaultGetCliVersion(executable, platform) {
   const toolEnv = buildToolEnv(process.env, platform);
-  const { file } = driver.buildCommand("");
-  const executable = resolveProviderExecutable(file, toolEnv, platform);
   const res = runSyncNoShell(executable, ["--version"], {
     cwd: REPO_ROOT,
     env: toolEnv,
@@ -1847,15 +1840,15 @@ function defaultGetCliVersion(driver, platform) {
     timeout: 30_000,
   });
   if (res.status !== 0) {
-    throw new Error(`${file} --version failed (exit ${res.status}): ${res.stderr.trim() || res.stdout.trim()}`);
+    throw new Error(`${executable} --version failed (exit ${res.status}): ${res.stderr.trim() || res.stdout.trim()}`);
   }
   return (res.stdout.trim() || res.stderr.trim() || "(unavailable)");
 }
 
-async function defaultRunProvider({ driver, platform, task, sandbox, timeoutMs, stdoutPath, stderrPath, secrets, onLeak }) {
-  const { file, args } = driver.buildCommand(task.prompt, driver.defaultModel, { taskDir: sandbox.taskDir, platform });
+async function defaultRunProvider({ driver, executable, platform, task, sandbox, timeoutMs, stdoutPath, stderrPath, secrets, onLeak }) {
+  const { args } = driver.buildCommand(task.prompt, driver.defaultModel, { taskDir: sandbox.taskDir, platform });
   return spawnProcess({
-    file: resolveProviderExecutable(file, sandbox.env, platform),
+    file: executable,
     args,
     cwd: sandbox.taskDir,
     env: sandbox.env,
@@ -1944,12 +1937,11 @@ async function runWithConcurrency(items, concurrency, worker, shouldStop = () =>
 export async function runBatch(options, overrides = {}) {
   const driver = getEvalDriver(options.provider);
   const platform = options.platform ?? process.platform;
+  const getVersionOverride = driver.id === "claude-code" ? overrides.getClaudeVersion : undefined;
   const deps = {
     manifest: overrides.manifest ?? JSON.parse(readFileSync(MANIFEST_PATH, "utf8")),
     resolveCommit: overrides.resolveCommit ?? defaultResolveCommit,
     getHeadCommit: overrides.getHeadCommit ?? defaultGetHeadCommit,
-    getCliVersion: (driver.id === "claude-code" ? overrides.getClaudeVersion : undefined)
-      ?? (() => defaultGetCliVersion(driver, platform)),
     packArm: overrides.packArm ?? defaultPackArm,
     createSandbox: overrides.createSandbox ?? defaultCreateSandbox,
     materializeTask: overrides.materializeTask ?? defaultMaterializeTask,
@@ -2049,8 +2041,13 @@ export async function runBatch(options, overrides = {}) {
     taskIds,
   };
 
+  let providerExecutable;
   function recordCliVersion() {
-    const cliVersion = redact(deps.getCliVersion());
+    if (!getVersionOverride || deps.runProvider === defaultRunProvider) {
+      const { file } = driver.buildCommand("");
+      providerExecutable = resolveProviderExecutable(file, buildToolEnv(process.env, platform), platform);
+    }
+    const cliVersion = redact(getVersionOverride ? getVersionOverride() : defaultGetCliVersion(providerExecutable, platform));
     currentProvenance.cliVersion = cliVersion;
     if (driver.id === "claude-code") {
       // Existing readers use these Claude-specific names.
@@ -2302,7 +2299,7 @@ export async function runBatch(options, overrides = {}) {
     if (stopBatch || batchData.halted) {
       return summary;
     }
-    const missing = countMissingPublishedRuns(runsDir, planned, deps.lstatSync);
+    const missing = countMissingPublishedRuns(runsDir, planned, driver.id, deps.lstatSync);
     if (summary.malformed === 0 && summary.publishFailed === 0 && missing === 0) {
       delete batchData.incomplete;
       batchData.completedAt = new Date().toISOString();
@@ -2331,7 +2328,7 @@ export async function runBatch(options, overrides = {}) {
   let malformed = 0;
   for (const item of planned) {
     const runDir = join(runsDir, item.runId);
-    const decision = decideRunAction(runDir, retryInvalid, deps.lstatSync);
+    const decision = decideRunAction(runDir, driver.id, retryInvalid, deps.lstatSync);
     if (decision.action === "run") {
       pending.push({ item, retries: decision.retries, isRetry: decision.isRetry });
     } else if (decision.action === "malformed") {
@@ -2420,7 +2417,7 @@ export async function runBatch(options, overrides = {}) {
         if (tokenLeaked) return;
         tokenLeaked = true;
         setBatchHalt("token_leak", item.runId);
-        // A stream hit can be redacted before this worker publishes run.json.
+        // A hit may be withheld or redacted before this worker publishes run.json.
         persistTokenLeakHalt();
       };
 
@@ -2456,6 +2453,7 @@ export async function runBatch(options, overrides = {}) {
 
       const recordQuarantined = (entry) => {
         if (typeof entry === "string") {
+          entry = redact(entry);
           const existingIdx = quarantined.findIndex(
             (itemEntry) => typeof itemEntry === "object" && itemEntry !== null && itemEntry.path === entry,
           );
@@ -2470,6 +2468,7 @@ export async function runBatch(options, overrides = {}) {
           return;
         }
         if (entry && typeof entry === "object" && typeof entry.path === "string") {
+          entry = { ...entry, path: redact(entry.path) };
           if (!quarantinedSet.has(entry.path)) {
             quarantinedSet.add(entry.path);
             const quarantineSuffixMatch = /^(.*)\.quarantined-\d+-[0-9a-f]+$/.exec(entry.path);
@@ -2490,6 +2489,7 @@ export async function runBatch(options, overrides = {}) {
         }
       };
       const recordScanError = (relPath) => {
+        relPath = redact(relPath);
         if (!scanErrorsSet.has(relPath)) {
           scanErrorsSet.add(relPath);
           scanErrors.push(relPath);
@@ -2539,6 +2539,7 @@ export async function runBatch(options, overrides = {}) {
           runId: sandboxRunId,
           root: rootDir,
           provider: driver.id,
+          providerExecutable,
           tgz: tarballs[item.arm],
           auth: options.auth,
           platform,
@@ -2549,6 +2550,7 @@ export async function runBatch(options, overrides = {}) {
         const providerStartedAt = Date.now();
         const result = await deps.runProvider({
           driver,
+          executable: providerExecutable,
           platform,
           runId: item.runId,
           task,
@@ -2586,17 +2588,24 @@ export async function runBatch(options, overrides = {}) {
           transcriptSummary = parser.end();
         }
 
-        const finalDir = join(workRunDir, "final");
-        skippedLinks.push(...copyFinalWithoutGit(sandbox.taskDir, finalDir, deps.copyFileSync));
-        if (item.arm === "none") {
-          noneRockyHomeEntries = listNoneRockyHomeEntries(sandbox.rockyHome, deps.lstatSync);
-        }
-        skippedLinks.push(
-          ...copyRockyHomeFiles(sandbox.rockyHome, join(workRunDir, "rocky-home"), item.arm, deps.copyFileSync),
-        );
-
-        // Scan and quarantine copied artifacts BEFORE grading can alter or delete them.
         await runArtifactScan();
+        await publishSandboxArtifacts(sandbox, workRunDir, item.arm, secrets, deps, {
+          skippedLinks,
+          onLeak(relPath) {
+            latchTokenLeak();
+            recordQuarantined(relPath);
+          },
+          onError(relPath, error) {
+            recordScanError(relPath);
+            if (error) runError ??= redact(error instanceof Error ? error.message : String(error));
+          },
+        });
+        if (item.arm === "none") {
+          noneRockyHomeEntries = listNoneRockyHomeEntries(sandbox.rockyHome, deps.lstatSync).map((name) => {
+            if (containsAnySecret(name, secrets)) latchTokenLeak();
+            return redact(name);
+          });
+        }
 
         invalid = classifyOutcome({
           transcript: transcriptSummary,
@@ -2604,7 +2613,9 @@ export async function runBatch(options, overrides = {}) {
           timedOut,
         });
 
-        acceptResult = await deps.accept(task, finalDir, { manifest: deps.manifest });
+        if (scanErrors.length === 0) {
+          acceptResult = await deps.accept(task, join(workRunDir, "final"), { manifest: deps.manifest });
+        }
       } catch (error) {
         if (sandbox && !swept) {
           swept = true;
@@ -2625,6 +2636,9 @@ export async function runBatch(options, overrides = {}) {
         await runArtifactScan();
         if (tokenLeaked) {
           invalid = "token_leak";
+        } else if (scanErrors.length > 0) {
+          invalid = "harness_crash";
+          runError ??= "artifact scan incomplete";
         }
 
         // Always clean up the sandbox BEFORE publishing run.json.

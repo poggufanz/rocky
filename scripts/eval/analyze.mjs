@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARMS, DEFAULT_K, DEFAULT_SEED, MAX_K, mulberry32 } from "./runner.mjs";
+import { savedEvalProvider } from "./drivers/index.mjs";
 
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(EVAL_DIR, "tasks", "manifest.json");
@@ -491,6 +492,7 @@ function meanPairedDiff(sampledTasks) {
  *   metrics?: readonly any[] | Record<string, any>,
  *   tasks?: readonly any[] | Record<string, any> | Map<string, any>,
  *   provenance?: any,
+ *   provider?: import("./drivers/index.mjs").EvalProvider,
  *   label?: string,
  *   k?: number,
  *   halted?: any,
@@ -834,13 +836,15 @@ export function verdict(batch) {
   const afterTurns = vetoRuns
     .filter((run) => run.arm === "after" && typeof run.numTurns === "number" && Number.isFinite(run.numTurns))
     .map((run) => run.numTurns);
-  const noneMedianTurns = median(noneTurns);
-  const afterMedianTurns = median(afterTurns);
-  const medianTurnRise =
-    noneMedianTurns !== null && afterMedianTurns !== null
+  const turnVetoAvailable = (batch.provider ?? savedEvalProvider(batch.provenance)) !== "codex";
+  const noneMedianTurns = turnVetoAvailable ? median(noneTurns) : null;
+  const afterMedianTurns = turnVetoAvailable ? median(afterTurns) : null;
+  const medianTurnRise = !turnVetoAvailable
+    ? "unavailable"
+    : noneMedianTurns !== null && afterMedianTurns !== null
       ? afterMedianTurns - noneMedianTurns
       : null;
-  const turnVetoed = medianTurnRise !== null && medianTurnRise >= VETO_MEDIAN_TURN_RISE;
+  const turnVetoed = typeof medianTurnRise === "number" && medianTurnRise >= VETO_MEDIAN_TURN_RISE;
 
   const rawVetoed = Boolean(solvedVetoed || turnVetoed);
   const veto = {

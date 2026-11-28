@@ -54,20 +54,41 @@ function snapshot(path: string): Snapshot {
 export function writeManagedPluginFile(
   path: string, content: string | Buffer, managedDigest?: string,
 ): ManagedPluginWriteResult {
-  const prior = snapshot(path);
+  if (/[\\/]$/u.test(path)) return { status: "changed" };
+  const suppliedParent = dirname(path);
+  let directory: BigIntStats;
+  let parent: string;
+  try {
+    directory = statSync(suppliedParent, { bigint: true });
+    parent = realpathSync.native(suppliedParent);
+    if (!directory.isDirectory() || !sameDirectory(parent, directory)) return { status: "changed" };
+  } catch {
+    return { status: "changed" };
+  }
+  const guard = {
+    unchanged: () => {
+      try {
+        return sameDirectory(parent, directory) && realpathSync.native(suppliedParent) === parent;
+      } catch {
+        return false;
+      }
+    },
+  };
+  const target = join(parent, basename(path));
+  const prior = snapshot(target);
   const bytes = Buffer.from(content);
   const digest = digestOf(bytes);
   if (prior.status === "missing") {
-    const result = atomicWriteBytesIfUnchanged(path, bytes, { status: "missing" });
+    const result = atomicWriteBytesIfUnchanged(target, bytes, { status: "missing" }, guard);
     return result.status === "written" ? { ...result, digest } : result;
   }
   if (prior.status !== "valid" || digestOf(prior.bytes) !== managedDigest) return { status: "changed" };
-  if (prior.bytes.equals(bytes)) return { status: "written", digest };
+  if (prior.bytes.equals(bytes)) return guard.unchanged() ? { status: "written", digest } : { status: "changed" };
   const { dev, ino, mode } = prior.metadata;
-  const result = atomicWriteBytesIfUnchanged(path, bytes, {
+  const result = atomicWriteBytesIfUnchanged(target, bytes, {
     status: "valid", bytes: prior.bytes, mode: Number(mode & 0o777n),
     identity: { dev: Number(dev), ino: Number(ino) },
-  });
+  }, guard);
   return result.status === "written" ? { ...result, digest } : result;
 }
 

@@ -13,7 +13,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeLine, unwrapRockyRun } from "../../dist/core/fingerprint.js";
-import { getEvalDriver } from "./drivers/index.mjs";
+import { getEvalDriver, savedEvalProvider } from "./drivers/index.mjs";
 
 const EVAL_DIR = resolve(dirname(fileURLToPath(import.meta.url)));
 const TASKS_DIR = join(EVAL_DIR, "tasks");
@@ -1043,7 +1043,15 @@ function commandTouchesOverlay(command, toolName, taskDir, overlayMatcher) {
  */
 export function runMetrics(events, task, runDir, batchProvider) {
   const runMeta = runDir ? readJsonOrNull(join(runDir, "run.json")) : null;
-  const provider = runMeta?.provider ?? batchProvider ?? "claude-code";
+  const provider = runMeta ? savedEvalProvider(runMeta) : (batchProvider ?? "claude-code");
+  if (batchProvider !== undefined && provider !== batchProvider) {
+    throw new Error(`Run provider mismatch in ${runDir}: expected ${batchProvider}`);
+  }
+  return scoreRun(events, task, runDir, runMeta, provider);
+}
+
+function scoreRun(events, task, runDir, runMeta, provider) {
+  const enabledLanes = getEvalDriver(provider).lanes;
   const { toolCalls: calls, fileEdits, mcpCalls, numTurns, wallMs, shellUses, toolOutputs } =
     reduceTranscript(events, provider);
   const classified = classifyTargetCalls(calls, task);
@@ -1108,6 +1116,8 @@ export function runMetrics(events, task, runDir, batchProvider) {
   let hasAdvisoryNote = false;
   for (const row of advisories) {
     if (row?.kind === "note" && row?.arm === "shown" && row?.delivered === true) {
+      const lane = row.lane === "tool-result" ? "lane2" : row.lane === "run" ? "lane1" : row.lane;
+      if (!enabledLanes.includes(lane)) continue;
       hasAdvisoryNote = true;
       if (row.lane === "tool-result" && typeof row.bytes === "number" && Number.isFinite(row.bytes) && row.bytes > 0) {
         noteBytes += row.bytes;
@@ -1210,7 +1220,10 @@ export function formatArmSummary(metricsByRunId) {
  */
 export function evaluateBatch(outDir, options = {}) {
   const resolvedOut = resolve(outDir);
-  const batchProvider = readJsonOrNull(join(resolvedOut, "batch.json"))?.provider;
+  const batchPath = join(resolvedOut, "batch.json");
+  const batch = readJsonOrNull(batchPath);
+  if (!batch && existsSync(batchPath)) throw new Error(`Invalid batch provenance in ${batchPath}`);
+  const batchProvider = getEvalDriver(savedEvalProvider(batch)).id;
   const runsDir = join(resolvedOut, "runs");
   if (!existsSync(runsDir) || !lstatSync(runsDir).isDirectory()) {
     throw new Error(`Runs directory not found: ${runsDir}`);
@@ -1238,6 +1251,9 @@ export function evaluateBatch(outDir, options = {}) {
 
     const runMeta = readJsonOrNull(join(runDir, "run.json"));
     if (!runMeta) continue;
+    if (savedEvalProvider(runMeta) !== batchProvider) {
+      throw new Error(`Run provider mismatch in ${runDir}: expected ${batchProvider}`);
+    }
 
     const runId = typeof runMeta.runId === "string" && runMeta.runId.length > 0 ? runMeta.runId : dirName;
     const task = taskById.get(runMeta.taskId) ?? null;
@@ -1246,7 +1262,7 @@ export function evaluateBatch(outDir, options = {}) {
       ? parseJsonl(readFileSync(transcriptPath, "utf8"))
       : [];
 
-    const scored = runMetrics(events, task, runDir, batchProvider);
+    const scored = scoreRun(events, task, runDir, runMeta, batchProvider);
     metrics[runId] = {
       taskId: runMeta.taskId ?? null,
       arm: runMeta.arm ?? null,

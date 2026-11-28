@@ -1,9 +1,48 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { loadHarnessDecoder } from "../../harnesses/index.js";
 import { projectToAgent } from "../../harnesses/projections/to-agent.js";
 import type { NormalizedToolOutcome } from "../../harnesses/types.js";
+
+test("the Claude Code and Codex decoder entry modules stay below 200 lines", () => {
+  for (const name of ["claude-code", "codex"]) {
+    const source = readFileSync(new URL(`../../../src/harnesses/decoders/${name}.ts`, import.meta.url), "utf8");
+    assert.ok(source.trimEnd().split("\n").length < 200, name);
+  }
+});
+
+test("Codex resolves hook and rollout tool cwd against the session before applying workdir", async () => {
+  const decoder = await loadHarnessDecoder("codex");
+  assert.ok(decoder);
+  const windows = process.platform === "win32";
+  const cwd = windows ? "C:\\repo" : "/repo";
+  const reducer = decoder.createTranscriptReducer();
+  const consume = (row: unknown) => reducer.consume(JSON.stringify(row));
+  consume({ type: "session_meta", payload: { id: "session-a", cwd } });
+  const cases = [
+    [{ cwd: "tools" }, join(cwd, "tools")],
+    [{ cwd: "tools", workdir: "test" }, join(cwd, "tools", "test")],
+    [{ cwd: windows ? "\\tools" : "/tools" }, windows ? "C:\\tools" : "/tools"],
+  ] as const;
+  for (const [input, expected] of cases) {
+    const toolInput = { ...input, command: "npm test" };
+    const hook = decoder.decodeHook({
+      hook_event_name: "PostToolUse", session_id: "session-a", cwd,
+      tool_name: "exec_command", tool_input: toolInput, tool_response: { exit_code: 1 },
+    });
+    assert.equal(hook?.outcome?.cwd, expected);
+    consume({ type: "response_item", payload: {
+      type: "function_call", call_id: "call", name: "exec_command", arguments: JSON.stringify(toolInput),
+    } });
+    const [rollout] = consume({ type: "response_item", payload: {
+      type: "function_call_output", call_id: "call", exit_code: 1, output: "build failed",
+    } });
+    assert.equal(rollout?.kind, "tool-outcome");
+    assert.equal(rollout.outcome.cwd, expected);
+  }
+});
 
 test("Claude hook decoder retains structured exit evidence", async () => {
   const decoder = await loadHarnessDecoder("claude-code");

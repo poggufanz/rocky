@@ -13,6 +13,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -358,6 +359,35 @@ export function resolveExecutableOnPath(
   return null;
 }
 
+export function resolveProviderExecutable(file, env, platform = process.platform) {
+  const names = platform === "win32" ? [`${file}.exe`, `${file}.cmd`, file] : [file];
+  const found = resolveExecutableOnPath(names, getPathValue(env), platform);
+  if (!found) throw new Error(`${file} executable not found on PATH`);
+  return found;
+}
+
+function exposeProviderLauncher(dir, file, executable, platform) {
+  const bin = join(dir, "provider-bin");
+  mkdirSync(bin);
+  if (platform === "win32") {
+    if (win32.extname(executable).toLowerCase() === ".exe") {
+      const launcher = join(bin, `${file}.exe`);
+      try {
+        linkSync(executable, launcher);
+      } catch {
+        copyFileSync(executable, launcher, fsConstants.COPYFILE_EXCL);
+      }
+    } else {
+      const target = executable.replaceAll("%", "%%");
+      writeFileSync(join(bin, `${file}.cmd`), `@setlocal DisableDelayedExpansion\r\n@"${target}" %*\r\n`);
+    }
+  } else {
+    const target = executable.replaceAll("'", "'\\''");
+    writeFileSync(join(bin, file), `#!/bin/sh\nexec '${target}' "$@"\n`, { mode: 0o700 });
+  }
+  return bin;
+}
+
 function quoteWinCmdToken(value) {
   if (typeof value !== "string" || UNSAFE_WIN_TOKEN_RE.test(value)) {
     throw new Error("Unsafe Windows command token");
@@ -589,6 +619,7 @@ export async function packArm(commit, cacheDir) {
  *   runId: string,
  *   root: string,
  *   provider?: import("./drivers/index.mjs").EvalProvider,
+ *   providerExecutable?: string,
  *   tgz?: string,
  *   auth?: SandboxAuth,
  *   platform?: NodeJS.Platform,
@@ -603,6 +634,7 @@ export async function createSandbox({
   runId,
   root,
   provider = "claude-code",
+  providerExecutable,
   tgz,
   auth,
   platform = process.platform,
@@ -654,9 +686,12 @@ export async function createSandbox({
     const sandboxEnv = scrubEnv(env, platform);
     const cleanedPath = stripRockyFromPath(getPathValue(env), platform);
     const sep = platform === "win32" ? ";" : ":";
-    const nextPath = prefixBin === null
-      ? cleanedPath
-      : [prefixBin, cleanedPath].filter(Boolean).join(sep);
+    // Rocky setup discovers the provider on PATH. Forward only the selected
+    // launcher, including when its original bin was removed for containing Rocky.
+    const providerBin = prefixBin && providerExecutable
+      ? exposeProviderLauncher(dir, driver.buildCommand("").file, providerExecutable, platform)
+      : null;
+    const nextPath = [prefixBin, providerBin, cleanedPath].filter(Boolean).join(sep);
     setSinglePath(sandboxEnv, nextPath);
 
     sandboxEnv.HOME = home;

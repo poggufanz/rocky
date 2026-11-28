@@ -67,3 +67,8 @@ export function getEvalDriver(provider = "claude-code") {
 export function getEvalToken(driver, env = process.env) {
   return driver.tokenEnvNames.map((name) => env[name]).find((value) => Boolean(value));
 }
+
+export function savedEvalProvider(record) {
+  // Only Claude Code produced records before the provider field existed.
+  return record?.provider === undefined ? "claude-code" : record.provider;
+}

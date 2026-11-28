@@ -36,7 +36,11 @@ function hook(
   env: NodeJS.ProcessEnv = {},
 ): string {
   const result = spawnSync(process.execPath, [entry, "hook", ...args], {
-    cwd, env: { ...process.env, ROCKY_HOME: home, ...env, NODE_OPTIONS: undefined, NODE_TEST_CONTEXT: undefined },
+    cwd,
+    env: {
+      ...process.env, ROCKY_HOME: home, ROCKY_ATTEMPT_ADVISORY: undefined, ...env,
+      NODE_OPTIONS: undefined, NODE_TEST_CONTEXT: undefined,
+    },
     input, encoding: "utf8", timeout: 30_000, windowsHide: true,
   });
   assert.ifError(result.error);
@@ -87,6 +91,12 @@ test("golden tool-result failure and pass keep their stdout and persisted record
 });
 
 test("golden tool-result renders the prior-attempt advisory byte for byte", (t) => {
+  const inheritedAdvisory = process.env.ROCKY_ATTEMPT_ADVISORY;
+  process.env.ROCKY_ATTEMPT_ADVISORY = "off";
+  t.after(() => {
+    if (inheritedAdvisory === undefined) delete process.env.ROCKY_ATTEMPT_ADVISORY;
+    else process.env.ROCKY_ATTEMPT_ADVISORY = inheritedAdvisory;
+  });
   const box = sandbox(t);
   const args = ["tool-result", "claude-code"];
   const input = failurePayload({ cwd: box.cwd });
