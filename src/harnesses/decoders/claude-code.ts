@@ -1,5 +1,7 @@
 import { parseClaudeHookPayload } from "../../agent/adapters/claude-code.js";
-import { claudeTranscriptRationales } from "../../agent/logs/claude-code.js";
+import type { CanonicalRationaleEvent } from "../../agent/logs/types.js";
+import { isSafeSessionId } from "../../core/agent-session.js";
+import { TOOL_RESULT_STDIN_CAP_BYTES } from "../../core/tool-result.js";
 import { capSyncResponse } from "../projections/to-tool-result.js";
 import {
   asFields, field, parseFields, readListeningFields, rememberPending, textField, transcriptTimestamp, type Fields,
@@ -14,8 +16,8 @@ function readShellOutcome(raw: Fields, eventName: "PostToolUse" | "PostToolUseFa
   const rawError = field(raw, "error");
   const error = resultText(rawError);
   const outcome = withExitEvidence({
-    command: textField(input, 1024 * 1024, "command"),
-    cwd: textField(raw, 4096, "cwd"),
+    command: textField(input, TOOL_RESULT_STDIN_CAP_BYTES, "command"),
+    cwd: textField(raw, TOOL_RESULT_STDIN_CAP_BYTES, "cwd"),
     exitCodeSource: "unknown",
     output: error ?? resultText(field(response, "stderr")),
     isError: failure,
@@ -25,7 +27,7 @@ function readShellOutcome(raw: Fields, eventName: "PostToolUse" | "PostToolUseFa
     background: field(input, "run_in_background") === true,
     edits: [],
     // Claude's own Bash/PowerShell success hook is an explicit success signal.
-  }, exitCodeField(response) ?? (failure ? undefined : 0), failure ? error : undefined);
+  }, failure ? undefined : 0, failure ? error : undefined);
   const classified = withShellSkip(outcome);
   if (failure && rawError !== undefined && error === undefined && classified.skipReason === "no-exit-header") {
     return undefined;
@@ -47,7 +49,16 @@ function decodeHook(raw: unknown, now = Date.now()): DecodedHookInput | undefine
     get agent() { return readAgent(); },
     get outcome() {
       if (eventName !== "PostToolUse" && eventName !== "PostToolUseFailure") return undefined;
-      if (shellTool) return readShellOutcome(record, eventName);
+      if (shellTool) {
+        // The installed Claude shell hook uses the native field names and
+        // treats PostToolUse itself as success. Failures need an error header.
+        const event = field(record, "hook_event_name");
+        const tool = field(record, "tool_name");
+        if ((event !== "PostToolUse" && event !== "PostToolUseFailure")
+          || (tool !== "Bash" && tool !== "PowerShell")
+          || !isSafeSessionId(field(record, "session_id"))) return undefined;
+        return readShellOutcome(record, event);
+      }
       return eventName === "PostToolUse" ? editOutcome(readAgent()) : undefined;
     },
   };
@@ -70,58 +81,113 @@ function transcriptOutput(content: unknown): string | undefined {
   return text.length ? text.join("\n") : undefined;
 }
 
-function createTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer {
+/** Tool names whose `input.file_path` counts as a structural file touch. */
+const FILE_TOOL_NAMES: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
+
+/**
+ * Files touched by Edit/Write/MultiEdit tool_use entries in one turn's
+ * content array, for structural correlation downstream. Returns undefined
+ * (not empty) when the turn touched no files, matching the canonical
+ * event's optional field.
+ */
+function touchedFilesIn(content: readonly Record<string, unknown>[]): string[] | undefined {
+  const files: string[] = [];
+  for (const entry of content) {
+    if (entry.type !== "tool_use") continue;
+    if (typeof entry.name !== "string" || !FILE_TOOL_NAMES.has(entry.name)) continue;
+    const filePath = field(asFields(entry.input), "file_path");
+    if (typeof filePath === "string" && filePath.length > 0) files.push(filePath);
+  }
+  return files.length > 0 ? files : undefined;
+}
+
+function claudeTranscriptRationales(
+  obj: Record<string, unknown>, logPath: string, cwd?: string,
+): CanonicalRationaleEvent[] {
+  if (obj.type !== "assistant") return [];
+  const parts = field(asFields(obj.message), "content");
+  if (!Array.isArray(parts)) return [];
+  const content = parts.map(asFields).filter((entry) => entry !== undefined);
+  const hasThinking = content.some((entry) =>
+    entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0);
+  const parsedTs = typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : Number.NaN;
+  const touchedFiles = touchedFilesIn(content);
+  const common = {
+    agent: "claude-code" as const,
+    sessionId: typeof obj.sessionId === "string" ? obj.sessionId : "",
+    turnRef: typeof obj.uuid === "string" ? obj.uuid : "",
+    ts: Number.isNaN(parsedTs) ? 0 : parsedTs,
+    cwd,
+    logPath,
+    ...(touchedFiles === undefined ? {} : { touchedFiles }),
+  };
+  const events: CanonicalRationaleEvent[] = [];
+  for (const entry of content) {
+    if (entry.type === "thinking" && typeof entry.thinking === "string" && entry.thinking.length > 0) {
+      events.push({ ...common, text: entry.thinking, fidelity: "raw", source: "log-thinking" });
+    } else if (!hasThinking && entry.type === "text" && typeof entry.text === "string" && entry.text.length > 0) {
+      events.push({ ...common, text: entry.text, fidelity: "summary", source: "log-response" });
+    }
+  }
+  return events;
+}
+
+export function createClaudeTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer & {
+  consumeRecord(value: unknown): TranscriptEvent[];
+} {
   const pending = new Map<string, PendingCall>();
-  return {
-    consume(line) {
-      const row = parseFields(line);
-      if (!row || (row.type !== "assistant" && row.type !== "user")) return [];
-      const sessionId = textField(row, 256, "sessionId") ?? ctx.sessionId;
-      const cwd = textField(row, 4096, "cwd");
-      const turnRef = textField(row, 256, "uuid");
-      const content = field(asFields(row.message), "content");
-      if (!Array.isArray(content)) return [];
-      const events: TranscriptEvent[] = claudeTranscriptRationales(row, ctx.logPath ?? "", cwd)
-        .map((event) => ({ kind: "rationale", ...event }));
-      for (const value of content) {
-        const part = asFields(value);
-        if (!part) continue;
-        if (row.type === "assistant" && part.type === "tool_use") {
-          const id = textField(part, 256, "id");
-          const toolName = textField(part, 256, "name");
-          if (id && toolName) {
-            rememberPending(pending, JSON.stringify([sessionId, id]), {
-              toolName, input: asFields(part.input), cwd, turnRef,
-            });
-          }
+  function consumeRecord(value: unknown): TranscriptEvent[] {
+    const row = asFields(value);
+    if (!row || (row.type !== "assistant" && row.type !== "user")) return [];
+    const sessionId = textField(row, 256, "sessionId") ?? ctx.sessionId;
+    const cwd = textField(row, 4096, "cwd");
+    const turnRef = textField(row, 256, "uuid");
+    const content = field(asFields(row.message), "content");
+    if (!Array.isArray(content)) return [];
+    const events: TranscriptEvent[] = claudeTranscriptRationales(row, ctx.logPath ?? "", cwd)
+      .map((event) => ({ kind: "rationale", ...event }));
+    for (const value of content) {
+      const part = asFields(value);
+      if (!part) continue;
+      if (row.type === "assistant" && part.type === "tool_use") {
+        const id = textField(part, 256, "id");
+        const toolName = textField(part, 256, "name");
+        if (id && toolName) {
+          rememberPending(pending, JSON.stringify([sessionId, id]), {
+            toolName, input: asFields(part.input), cwd, turnRef,
+          });
         }
-        if (row.type !== "user" || part.type !== "tool_result") continue;
-        const id = textField(part, 256, "tool_use_id");
-        if (!id) continue;
-        const key = JSON.stringify([sessionId, id]);
-        const call = pending.get(key);
-        if (!call) continue;
-        pending.delete(key);
-        const resultCwd = call.cwd ?? cwd;
-        const output = transcriptOutput(part.content);
-        const isError = typeof part.is_error === "boolean" ? part.is_error : undefined;
-        const ts = transcriptTimestamp(row.timestamp);
-        const edit = isError === false ? editOutcome(parseClaudeHookPayload({
-          hook_event_name: "PostToolUse", session_id: sessionId, prompt_id: call.turnRef,
-          cwd: resultCwd, tool_name: call.toolName, tool_input: call.input,
-        }, ts)) : undefined;
-        events.push({
-          kind: "tool-outcome", agent: "claude-code", toolName: call.toolName,
-          sessionId, turnRef: call.turnRef, ts, cwd: resultCwd, logPath: ctx.logPath,
-          outcome: withExitEvidence({
-            ...edit, edits: edit?.edits ?? [], cwd: resultCwd, toolUseId: id,
-            command: textField(call.input, 1024 * 1024, "command"),
-            exitCodeSource: "unknown", output, isError,
-          }, exitCodeField(part), isError === true ? output : undefined),
-        });
       }
-      return events;
-    },
+      if (row.type !== "user" || part.type !== "tool_result") continue;
+      const id = textField(part, 256, "tool_use_id");
+      if (!id) continue;
+      const key = JSON.stringify([sessionId, id]);
+      const call = pending.get(key);
+      if (!call) continue;
+      pending.delete(key);
+      const resultCwd = call.cwd ?? cwd;
+      const output = transcriptOutput(part.content);
+      const isError = typeof part.is_error === "boolean" ? part.is_error : undefined;
+      const ts = transcriptTimestamp(row.timestamp);
+      const edit = isError === false ? editOutcome(parseClaudeHookPayload({
+        hook_event_name: "PostToolUse", session_id: sessionId, prompt_id: call.turnRef,
+        cwd: resultCwd, tool_name: call.toolName, tool_input: call.input,
+      }, ts)) : undefined;
+      events.push({
+        kind: "tool-outcome", agent: "claude-code", toolName: call.toolName,
+        sessionId, turnRef: call.turnRef, ts, cwd: resultCwd, logPath: ctx.logPath,
+        outcome: withExitEvidence({
+          ...edit, edits: edit?.edits ?? [], cwd: resultCwd, toolUseId: id,
+          command: textField(call.input, 1024 * 1024, "command"),
+          exitCodeSource: "unknown", output, isError,
+        }, exitCodeField(part), isError === true ? output : undefined),
+      });
+    }
+    return events;
+  }
+  return {
+    consume: (line) => consumeRecord(parseFields(line)),
+    consumeRecord,
     finish() {
       pending.clear();
       return [];
@@ -132,7 +198,7 @@ function createTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer
 export const claudeCodeDecoder: HarnessDecoder = {
   id: "claude-code",
   decodeHook,
-  createTranscriptReducer,
+  createTranscriptReducer: createClaudeTranscriptReducer,
   renderSyncResponse(noteText) {
     return capSyncResponse(JSON.stringify({
       hookSpecificOutput: { hookEventName: "PostToolUseFailure", additionalContext: noteText },

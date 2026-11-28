@@ -4,13 +4,15 @@
  * size/deadline cap through an allowlist parser. No shell interpolation,
  * no PATH launcher lookup, fail-open with empty stdout, never throws.
  */
-import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import type { EventEnvelope, HarnessId } from "./types.js";
+import type { EventEnvelope } from "./types.js";
 import { isHarnessId } from "./types.js";
 import { appendHostEvent, appendListeningEvent } from "./event-log.js";
 import { isRepoCaptureAllowed } from "./repo-consent-read.js";
 import { canonicalPath } from "../core/memory-read.js";
+import { loadHarnessDecoder } from "../harnesses/index.js";
+import { projectToListening } from "../harnesses/projections/to-listening.js";
+import { asFields, readListeningFields } from "../harnesses/shared/field-extract.js";
 
 /** PROPOSAL-adjacent stdin cap; fixed so oversized payloads fail closed. */
 export const LISTEN_INGRESS_MAX_BYTES = 64 * 1024;
@@ -22,44 +24,6 @@ export interface IngressResult {
   stdout: "";
   appended: boolean;
   reason: string;
-}
-
-/** Fields the allowlist parser keeps. Everything else is dropped. */
-interface IngressPayload {
-  nativeId?: string;
-  sessionId?: string;
-  toolName?: string;
-  episode?: string;
-  fileRel?: string;
-  summaryRef?: string;
-  repoRoot?: string;
-  ts?: number;
-}
-
-function pickPayload(value: unknown): IngressPayload {
-  if (typeof value !== "object" || value === null) return {};
-  const raw = value as Record<string, unknown>;
-  const out: IngressPayload = {};
-  if (typeof raw["nativeId"] === "string" && raw["nativeId"].length > 0) out.nativeId = raw["nativeId"].slice(0, 256);
-  if (typeof raw["sessionId"] === "string" && raw["sessionId"].length > 0) out.sessionId = raw["sessionId"].slice(0, 256);
-  if (typeof raw["toolName"] === "string" && raw["toolName"].length > 0) out.toolName = raw["toolName"].slice(0, 256);
-  if (typeof raw["episode"] === "string" && raw["episode"].length > 0) out.episode = raw["episode"].slice(0, 256);
-  if (typeof raw["summaryRef"] === "string" && raw["summaryRef"].length > 0) out.summaryRef = raw["summaryRef"].slice(0, 256);
-  if (typeof raw["fileRel"] === "string" && raw["fileRel"].length > 0) {
-    const rel = canonicalPath(raw["fileRel"]);
-    if (rel.length > 0 && !rel.startsWith("..")) out.fileRel = rel.slice(0, 1024);
-  }
-  if (typeof raw["repoRoot"] === "string" && raw["repoRoot"].length > 0) {
-    out.repoRoot = raw["repoRoot"].slice(0, 4096);
-  }
-  if (typeof raw["ts"] === "number" && Number.isSafeInteger(raw["ts"]) && raw["ts"] > 0) {
-    out.ts = raw["ts"];
-  }
-  // NOTE: generic `reason`, `prompt`, `args`, `response`, `transcript`,
-  // and `thinking` fields are deliberately never read here. Hook policy
-  // reasons land in hookPolicyReason only when the host provides a
-  // dedicated, verified field; they are never agent-stated why.
-  return out;
 }
 
 /**
@@ -90,41 +54,24 @@ export async function handleListenEvent(
     } catch {
       return { exit: 0, stdout: "", appended: false, reason: "stdin-malformed" };
     }
-    const payload = pickPayload(parsed);
-    const harnessId: HarnessId = harnessRaw;
-    const surface = surfaceRaw as "cli" | "ide" | "local" | "profile";
-    const envelope: EventEnvelope = {
-      v: 1,
-      eventId: randomUUID(),
-      source: "hook",
-      harnessId,
-      surface,
-      ts: payload.ts ?? Date.now(),
-      adapterVersion: "listening-hook-ingress/1",
-      ...(payload.nativeId !== undefined ? { nativeId: payload.nativeId } : {}),
-      ...(payload.sessionId !== undefined ? { node: "agent_session" as const, nodeId: payload.sessionId } : {}),
-      consent: { host: true, repo: false, rawTrace: false },
-      redaction: { applied: false, truncated: false },
-      coverage: "partial",
-      refs: {
-        ...(payload.sessionId !== undefined ? { session: payload.sessionId } : {}),
-        ...(payload.episode !== undefined ? { episode: payload.episode } : {}),
-        ...(payload.fileRel !== undefined ? { fileRel: payload.fileRel } : {}),
-        ...(payload.summaryRef !== undefined ? { summaryRef: payload.summaryRef } : {}),
-      },
+    const decoder = await loadHarnessDecoder(harnessRaw);
+    // Registered harnesses without a native hook decoder still accept the
+    // original allowlisted envelope fields.
+    const decoded = decoder?.decodeHook(parsed) ?? {
+      harnessId: harnessRaw, listening: readListeningFields(asFields(parsed)),
     };
-    // Repo-scoped payloads join the repo log only under repo consent;
-    // otherwise the evidence lands in the host log, never forced in.
-    if (payload.repoRoot !== undefined) {
-      const root = canonicalPath(payload.repoRoot);
-      if (root.length > 0 && isRepoCaptureAllowed(root, home)) {
-        const result = appendListeningEvent(root, { ...envelope, repoRoot: root, consent: { host: true, repo: true, rawTrace: false } }, undefined, home);
-        return { exit: 0, stdout: "", appended: result.ok, reason: result.ok ? "appended-repo" : result.reason };
-      }
-      const result = appendHostEvent(harnessId, envelope, home, true);
-      return { exit: 0, stdout: "", appended: result.ok, reason: result.ok ? "appended-host" : result.reason };
+    const root = canonicalPath(decoded.listening.repoRoot ?? "");
+    const envelope = projectToListening(decoded, {
+      hostConsent: ctx.hostConsent,
+      repoConsent: root.length > 0 && isRepoCaptureAllowed(root, home),
+      surface: surfaceRaw as NonNullable<EventEnvelope["surface"]>,
+    });
+    if (!envelope) return { exit: 0, stdout: "", appended: false, reason: "host-consent-required" };
+    if (envelope.repoRoot !== undefined) {
+      const result = appendListeningEvent(envelope.repoRoot, envelope, undefined, home);
+      return { exit: 0, stdout: "", appended: result.ok, reason: result.ok ? "appended-repo" : result.reason };
     }
-    const result = appendHostEvent(harnessId, envelope, home, true);
+    const result = appendHostEvent(harnessRaw, envelope, home, ctx.hostConsent);
     return { exit: 0, stdout: "", appended: result.ok, reason: result.ok ? "appended-host" : result.reason };
   } catch {
     return { exit: 0, stdout: "", appended: false, reason: "ingress-failed" };

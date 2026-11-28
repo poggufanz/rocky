@@ -1,6 +1,8 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { MAX_LOG_OFFSETS, readState, writeState } from "../../core/brief-state.js";
+import type { TranscriptEvent, TranscriptReducer } from "../../harnesses/types.js";
+import type { CanonicalRationaleEvent } from "./types.js";
 
 /** Per-call byte budget for one adapter scan; never reads more than this. */
 export const SCAN_MAX_BYTES = 4 * 1024 * 1024;
@@ -114,6 +116,33 @@ export function scanJsonlLines(
     }
     return fromOffset;
   }
+}
+
+export function appendTranscriptRationales(events: CanonicalRationaleEvent[], batch: readonly TranscriptEvent[]): void {
+  for (const event of batch) {
+    if (event.kind !== "rationale") continue;
+    const { kind, ...rationale } = event;
+    events.push(rationale);
+  }
+}
+
+/** Adapt a transcript reducer to the existing byte-offset rationale scanner. */
+export function scanJsonlRationales(
+  logPath: string,
+  fromOffset: number,
+  maxBytes: number,
+  reducer: Pick<TranscriptReducer, "finish"> & { consumeRecord(value: unknown): TranscriptEvent[] },
+  inScope: (value: unknown) => boolean,
+): { events: CanonicalRationaleEvent[]; nextOffset: number } {
+  const events: CanonicalRationaleEvent[] = [];
+  const nextOffset = scanJsonlLines(logPath, fromOffset, maxBytes, (row) => {
+    if (inScope(row)) appendTranscriptRationales(events, reducer.consumeRecord(row));
+  });
+  appendTranscriptRationales(events, reducer.finish());
+  // The scanner returns the original offset if an I/O error interrupted
+  // the read. Drop the batch so a retry doesn't emit it twice.
+  if (nextOffset === fromOffset && fromOffset > 0) return { events: [], nextOffset };
+  return { events, nextOffset };
 }
 
 /** Stored per-log byte offsets from state.json key `logOffsets`. */

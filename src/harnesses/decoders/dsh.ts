@@ -1,25 +1,64 @@
 import { basename, dirname } from "node:path";
-import { dshRationaleEvent, looksLikeDshHeader } from "../../agent/logs/dsh.js";
-import { parseFields, textField } from "../shared/field-extract.js";
-import type { HarnessDecoder, TranscriptContext, TranscriptReducer } from "../types.js";
+import type { CanonicalRationaleEvent } from "../../agent/logs/types.js";
+import { asFields, parseFields } from "../shared/field-extract.js";
+import type { HarnessDecoder, TranscriptContext, TranscriptEvent, TranscriptReducer } from "../types.js";
 
-function createTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer {
+/**
+ * A first line is a SessionHeader only when it looks like one: it carries
+ * `session`/`header`/`version` fields, or neither `type` nor `seq`. Anything
+ * else is a real event and must not be swallowed by header handling.
+ */
+function looksLikeDshHeader(obj: Record<string, unknown>): boolean {
+  if ("session" in obj || "header" in obj || "version" in obj) return true;
+  return obj.type === undefined && obj.seq === undefined;
+}
+
+function dshRationaleEvent(
+  obj: Record<string, unknown>, seq: number, sessionId: string, logPath: string,
+): CanonicalRationaleEvent | undefined {
+  const data = asFields(obj.data);
+  const text = data && typeof data.text === "string" && data.text.length > 0 ? data.text
+    : data && typeof data.reasoning === "string" ? data.reasoning
+    : undefined;
+  const isReasoning = obj.type === "reasoning" || (data !== undefined && typeof data.reasoning === "string");
+  if (!isReasoning || text === undefined || text.length === 0) return undefined;
+  return {
+    agent: "dsh",
+    sessionId,
+    turnRef: String(seq),
+    ts: typeof obj.time === "number" && Number.isFinite(obj.time) ? obj.time : 0,
+    text,
+    fidelity: "raw",
+    source: "log-thinking",
+    logPath,
+  };
+}
+
+export function createDshTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer & {
+  consumeRecord(value: unknown, afterSeq?: number): { events: TranscriptEvent[]; seq?: number };
+} {
   const logPath = ctx.logPath ?? "";
   let sessionId = ctx.sessionId ?? (logPath ? basename(dirname(logPath)) : "");
   let firstLine = true;
+  function consumeRecord(value: unknown, afterSeq = -Infinity): { events: TranscriptEvent[]; seq?: number } {
+    const row = asFields(value);
+    const header = firstLine && row !== undefined && looksLikeDshHeader(row);
+    firstLine = false;
+    if (header) {
+      if (typeof row.session === "string" && row.session.length > 0) sessionId = row.session;
+      return { events: [] };
+    }
+    const seq = row?.seq;
+    if (row === undefined || typeof seq !== "number" || !Number.isFinite(seq)) return { events: [] };
+    const event = seq > afterSeq ? dshRationaleEvent(row, seq, sessionId, logPath) : undefined;
+    return { seq, events: event ? [{ kind: "rationale", ...event }] : [] };
+  }
   return {
     consume(line) {
       const row = parseFields(line);
-      if (!row) return [];
-      const header = firstLine && looksLikeDshHeader(row);
-      firstLine = false;
-      if (header) {
-        sessionId = textField(row, 256, "session") ?? sessionId;
-        return [];
-      }
-      const event = dshRationaleEvent(row, sessionId, logPath);
-      return event ? [{ kind: "rationale", ...event }] : [];
+      return row === undefined ? [] : consumeRecord(row).events;
     },
+    consumeRecord,
     finish() { return []; },
   };
 }
@@ -27,5 +66,5 @@ function createTranscriptReducer(ctx: TranscriptContext = {}): TranscriptReducer
 export const dshDecoder: HarnessDecoder = {
   id: "dsh",
   decodeHook: () => undefined,
-  createTranscriptReducer,
+  createTranscriptReducer: createDshTranscriptReducer,
 };

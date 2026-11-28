@@ -5,6 +5,9 @@ import { SCAN_MAX_BYTES, readAdapterOffsets, writeAdapterOffsets } from "./scan.
 import { loadMemory, canonicalPath, sameCwd } from "../../core/memory-read.js";
 import type { FailureRecord, FixRecord, MemoryRecord, RationaleLinks, TripleRecord } from "../../core/memory-read.js";
 import { recordRationale } from "../../core/memory.js";
+import { weakLinkFor } from "../weak-link.js";
+
+export { weakLinkFor, WEAK_LINK_WINDOW_MS } from "../weak-link.js";
 
 export interface CaptureResult { written: number; unlinked: number; skipped: string[] }
 
@@ -19,15 +22,6 @@ export interface CaptureResult { written: number; unlinked: number; skipped: str
  * `captureRationales` checks on every call.
  */
 export const LEGACY_RATIONALE_PULL_FROZEN_FOR_LISTENING = false;
-
-
-/**
- * Weak-link window: an event weak-links to the nearest failure/fix in the
- * same cwd within this many ms of the event's timestamp. Exported so other
- * lanes (e.g. the notify capture path) reuse this exact rule instead of
- * re-deriving it.
- */
-export const WEAK_LINK_WINDOW_MS = 10 * 60 * 1000;
 
 /** Structural-link window: a touched file matching a recorded triple's file within this many ms. */
 const STRUCTURAL_LINK_WINDOW_MS = 30 * 60 * 1000;
@@ -86,30 +80,6 @@ function structuralLinkFor(
     if (best === undefined || distance < best.distance) best = { tripleId: record.id, distance };
   }
   return best === undefined ? undefined : { tripleId: best.tripleId };
-}
-
-/**
- * Nearest failure/fix in `cwd`, within `WEAK_LINK_WINDOW_MS` of `ts`, using
- * only evidence at or before `now`. Exported so the notify lane
- * reuses this exact window rule instead of re-deriving it.
- */
-export function weakLinkFor(
-  records: readonly MemoryRecord[],
-  ts: number,
-  cwd: string,
-  now: number = Date.now(),
-): RationaleLinks | undefined {
-  let best: { link: RationaleLinks; distance: number } | undefined;
-  for (const record of records) {
-    if (record.kind !== "failure" && record.kind !== "fix") continue;
-    if (!sameCwd(record.cwd, cwd, process.platform) || record.ts > now) continue;
-    const distance = Math.abs(record.ts - ts);
-    if (distance > WEAK_LINK_WINDOW_MS) continue;
-    if (best === undefined || distance < best.distance) {
-      best = { link: record.kind === "failure" ? { failureId: record.id } : { fixId: record.id }, distance };
-    }
-  }
-  return best?.link;
 }
 
 /** Fixed, conservative correlation order: structural, then weak, else unlinked. Never guesses. */

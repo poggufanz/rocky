@@ -32,7 +32,7 @@ export function textField(raw: Fields | undefined, maxLength: number, ...keys: s
   return undefined;
 }
 
-export function readListeningFields(raw: Fields, sessionId?: string): ListeningHookFields {
+export function readListeningFields(raw: Fields | undefined, sessionId?: string): ListeningHookFields {
   const bounded = (key: string, limit = 256): string | undefined => {
     const value = field(raw, key);
     return typeof value === "string" && value.length > 0 ? value.slice(0, limit) : undefined;
